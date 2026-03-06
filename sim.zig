@@ -329,8 +329,16 @@ pub const SimIO = struct {
         self.enqueue(completion);
     }
 
-    pub fn close(_: *SimIO, _: fd_t) void {
-        // No-op in simulation.
+    pub fn close(self: *SimIO, fd: fd_t) void {
+        // Cancel any pending completions for this fd.
+        // Mirrors real IO: closing an fd cancels all pending operations on it.
+        for (&self.pending) |*p| {
+            if (p.active and p.completion.fd == fd) {
+                p.completion.operation = .none;
+                p.active = false;
+                self.pending_count -= 1;
+            }
+        }
     }
 
     /// Process all pending completions. This is the simulation's equivalent
@@ -1320,3 +1328,4 @@ test "mark: accept failure logs warning" {
     run_ticks(&server, &sim_io, 10);
     try mark.expect_hit();
 }
+
