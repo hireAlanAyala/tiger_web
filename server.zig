@@ -33,7 +33,6 @@ pub fn ServerType(comptime IO: type) type {
         connections_busy: [max_connections]bool,
 
         tick_count: u32,
-        shutting_down: bool,
 
         /// 30 seconds at 10ms/tick.
         pub const request_timeout_ticks = 3000;
@@ -49,7 +48,6 @@ pub fn ServerType(comptime IO: type) type {
                 .connections = undefined,
                 .connections_busy = [_]bool{false} ** max_connections,
                 .tick_count = 0,
-                .shutting_down = false,
             };
 
             for (&server.connections) |*conn| {
@@ -81,7 +79,6 @@ pub fn ServerType(comptime IO: type) type {
         // --- Accept ---
 
         fn maybe_accept(server: *Server) void {
-            if (server.shutting_down) return;
             if (server.accepting) return;
 
             // All slots may be busy under load.
@@ -204,33 +201,6 @@ pub fn ServerType(comptime IO: type) type {
                     conn.state = .closing;
                 }
             }
-        }
-
-        // --- Shutdown ---
-
-        pub fn shutdown(server: *Server) void {
-            assert(!server.shutting_down);
-            server.shutting_down = true;
-            var active: u32 = 0;
-            for (server.connections_busy) |busy| {
-                if (busy) active += 1;
-            }
-            log.info("shutdown: {d} active connections", .{active});
-            // Close connections still waiting for data (partial requests).
-            for (&server.connections, &server.connections_busy) |*conn, busy| {
-                if (!busy) continue;
-                if (conn.state == .receiving) {
-                    conn.state = .closing;
-                }
-            }
-        }
-
-        pub fn has_active_connections(server: *Server) bool {
-            for (&server.connections, server.connections_busy) |*conn, busy| {
-                if (!busy) continue;
-                if (conn.state != .free and conn.state != .closing) return true;
-            }
-            return false;
         }
 
         // --- Slot management ---

@@ -10,15 +10,6 @@ const log = marks.wrap_log(std.log.scoped(.main));
 /// Tick interval in nanoseconds (10ms).
 const tick_ns: u64 = 10 * std.time.ns_per_ms;
 
-/// Shutdown timeout: 5 seconds = 500 ticks at 10ms/tick.
-const shutdown_timeout_ticks: u32 = 500;
-
-var shutdown_requested: bool = false;
-
-fn signal_handler(_: c_int) callconv(.c) void {
-    shutdown_requested = true;
-}
-
 pub fn main() !void {
     // Parse port from args, default to 3000.
     const port = parsePort();
@@ -35,43 +26,13 @@ pub fn main() !void {
 
     var server = Server.init(&io, &state_machine, listen_fd);
 
-    // Install signal handlers for graceful shutdown.
-    const act = std.posix.Sigaction{
-        .handler = .{ .handler = signal_handler },
-        .mask = std.posix.empty_sigset,
-        .flags = 0,
-    };
-    try std.posix.sigaction(std.posix.SIG.INT, &act, null);
-    try std.posix.sigaction(std.posix.SIG.TERM, &act, null);
-
     log.info("listening on port {d}", .{port});
 
-    // Main event loop — the heart of Tiger Style.
-    // 1. Tick: process inbox, execute state machine, flush outbox.
-    // 2. IO: poll for network events, fire callbacks.
-    var shutdown_tick: ?u32 = null;
-
+    // Main event loop. No signal handling — let the OS kill the process.
+    // The store is in-memory; all state is lost on any exit. Clients retry.
     while (true) {
         server.tick();
         io.run_for_ns(tick_ns);
-
-        if (shutdown_requested and shutdown_tick == null) {
-            log.info("shutdown initiated", .{});
-            server.shutdown();
-            shutdown_tick = server.tick_count;
-        }
-
-        if (shutdown_tick) |start_tick| {
-            if (!server.has_active_connections()) {
-                log.info("shutdown complete", .{});
-                break;
-            }
-            // Force exit after timeout.
-            if (server.tick_count -% start_tick >= shutdown_timeout_ticks) {
-                log.warn("shutdown timeout, forcing exit", .{});
-                break;
-            }
-        }
     }
 }
 

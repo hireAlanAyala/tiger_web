@@ -34,6 +34,12 @@ TigerBeetle's state machine uses fixed-capacity data structures sized at comptim
 
 Our `StateMachine` takes an allocator at `init` to allocate the hash map backing storage, then never allocates again. This is a pragmatic choice — Zig's `HashMap` needs an allocator for its backing array. The hot path (get/put/delete) is still allocation-free.
 
+## No Graceful Shutdown
+
+TigerBeetle intentionally installs no signal handlers. The replica runs `while (true) { tick(); io.run_for_ns(); }` and lets the OS kill the process. This is safe because the consensus protocol recovers from peer replicas.
+
+We follow the same pattern. Our store is in-memory — all state is lost on any exit regardless of how gracefully it happens. Draining in-flight responses on SIGTERM doesn't save data. The client sees a connection reset and retries, same as any network failure. No signal handlers, no drain logic, no shutdown timeout.
+
 ## Single-Threaded, No IO Batching
 
 TigerBeetle batches IO submissions and completions through io_uring, processing multiple operations per syscall. The IO layer is designed for high-throughput concurrent replication traffic.
