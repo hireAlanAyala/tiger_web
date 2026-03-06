@@ -3,6 +3,7 @@ const assert = std.debug.assert;
 const maybe = @import("message.zig").maybe;
 const message = @import("message.zig");
 const http = @import("http.zig");
+const schema = @import("schema.zig");
 const marks = @import("marks.zig");
 const log = marks.wrap_log(std.log.scoped(.connection));
 
@@ -44,9 +45,6 @@ pub fn ConnectionType(comptime IO: type) type {
         send_pos: u32,
         send_completion: IO.Completion,
 
-        // Scratch space for URL-decoded path (becomes Request.key).
-        path_buf: [message.key_max]u8,
-
         // How many bytes the parsed HTTP request consumed from recv_buf.
         // Used to shift leftover bytes for keep-alive pipelining.
         request_consumed: u32,
@@ -61,20 +59,8 @@ pub fn ConnectionType(comptime IO: type) type {
         keep_alive: bool,
 
         // Inbox: filled by recv callback when a complete request is parsed.
-        request: ?message.Request,
+        typed_message: ?message.Message,
 
-        // Outbox: filled by server tick after execute, consumed by send.
-        response_status: ?message.Status,
-        response_value_len: u32,
-
-        comptime {
-            // recv_buf must hold the largest possible HTTP request (headers + body).
-            assert(http.recv_buf_max >= http.max_header_size + message.value_max);
-            // send_buf must hold the largest possible HTTP response (headers + body).
-            assert(http.send_buf_max > message.value_max);
-            // path_buf must hold the largest possible key.
-            assert(message.key_max > 0);
-        }
 
         pub fn init_free() Connection {
             return .{
@@ -87,15 +73,12 @@ pub fn ConnectionType(comptime IO: type) type {
                 .send_len = 0,
                 .send_pos = 0,
                 .send_completion = .{},
-                .path_buf = undefined,
                 .request_consumed = 0,
                 .last_activity_tick = 0,
                 .recv_activity = false,
                 .send_activity = false,
                 .keep_alive = true,
-                .request = null,
-                .response_status = null,
-                .response_value_len = 0,
+                .typed_message = null,
             };
         }
 
@@ -142,28 +125,28 @@ pub fn ConnectionType(comptime IO: type) type {
             switch (conn.state) {
                 .free => {
                     assert(conn.fd == 0);
-                    assert(conn.request == null);
+                    assert(conn.typed_message == null);
                     assert(conn.recv_completion.operation == .none);
                     assert(conn.send_completion.operation == .none);
                 },
                 .accepting => {
                     assert(conn.fd == 0);
-                    assert(conn.request == null);
+                    assert(conn.typed_message == null);
                 },
                 .receiving => {
                     assert(conn.fd > 0);
-                    assert(conn.request == null);
+                    assert(conn.typed_message == null);
                     assert(conn.recv_pos <= conn.recv_buf.len);
                 },
                 .ready => {
                     assert(conn.fd > 0);
-                    assert(conn.request != null);
+                    assert(conn.typed_message != null);
                     assert(conn.request_consumed > 0);
                     assert(conn.request_consumed <= conn.recv_pos);
                 },
                 .sending => {
                     assert(conn.fd > 0);
-                    assert(conn.request == null);
+                    assert(conn.typed_message == null);
                     assert(conn.send_len > 0);
                     assert(conn.send_len <= conn.send_buf.len);
                     assert(conn.send_pos <= conn.send_len);
@@ -203,24 +186,28 @@ pub fn ConnectionType(comptime IO: type) type {
                     assert(parsed.total_len > 0);
                     assert(parsed.total_len <= conn.recv_pos);
                     conn.keep_alive = parsed.keep_alive;
-                    if (http.translate(parsed.method, parsed.path, parsed.body, &conn.path_buf)) |req| {
-                        conn.request = req;
+
+                    // Route through schema layer.
+                    if (schema.translate(parsed.method, parsed.path, parsed.body)) |msg| {
+                        conn.typed_message = msg;
                         conn.request_consumed = parsed.total_len;
                         conn.state = .ready;
-                    } else if (parsed.method == .options) {
-                        // OPTIONS preflight — respond with CORS headers directly.
+                        return;
+                    }
+
+                    // OPTIONS preflight — respond with CORS headers directly.
+                    if (parsed.method == .options) {
                         const encoded = http.encode_options_response(&conn.send_buf);
                         conn.send_len = @intCast(encoded.len);
                         conn.send_pos = 0;
                         conn.request_consumed = parsed.total_len;
-                        conn.request = null;
-                        conn.response_status = null;
-                        conn.response_value_len = 0;
+                        conn.typed_message = null;
                         conn.state = .sending;
-                    } else {
-                        log.mark.warn("unmapped request fd={d}", .{conn.fd});
-                        conn.state = .closing;
+                        return;
                     }
+
+                    log.mark.warn("unmapped request fd={d}", .{conn.fd});
+                    conn.state = .closing;
                 },
                 .incomplete => {
                     // Need more bytes — stay in receiving state.
@@ -245,17 +232,15 @@ pub fn ConnectionType(comptime IO: type) type {
             conn.submit_recv(io);
         }
 
-        /// Called by the server tick after execute. Places response in outbox.
-        pub fn set_response(conn: *Connection, status: message.Status, value: []const u8) void {
+        /// Called by the server tick after execute. Encodes the JSON response into the send buffer.
+        pub fn set_json_response(conn: *Connection, json_body: []const u8, status: message.Status) void {
             assert(conn.state == .ready);
-            assert(conn.request != null);
+            assert(conn.typed_message != null);
             defer conn.invariants();
-            const encoded = http.encode_response(&conn.send_buf, status, value);
+            const encoded = http.encode_json_response(&conn.send_buf, status, json_body);
             conn.send_len = @intCast(encoded.len);
             conn.send_pos = 0;
-            conn.response_status = status;
-            conn.response_value_len = @intCast(value.len);
-            conn.request = null;
+            conn.typed_message = null;
             conn.state = .sending;
         }
 
@@ -313,8 +298,6 @@ pub fn ConnectionType(comptime IO: type) type {
                 assert(conn.recv_pos <= conn.recv_buf.len);
                 conn.request_consumed = 0;
                 conn.state = .receiving;
-                conn.response_status = null;
-                conn.response_value_len = 0;
 
                 // Try to parse pipelined data immediately. If a complete
                 // request is already buffered, go to .ready without waiting

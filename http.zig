@@ -5,12 +5,18 @@ const message = @import("message.zig");
 /// Maximum HTTP header size. Requests with headers exceeding this are rejected.
 pub const max_header_size = 8192;
 
+/// Maximum incoming request body size. Enough for any product JSON.
+pub const body_max = 4096;
+
+/// Maximum outgoing response body size. Enough for a product list as JSON.
+pub const response_body_max = 64 * 1024;
+
 /// Maximum total recv buffer: HTTP headers + body.
-pub const recv_buf_max = max_header_size + message.value_max;
+pub const recv_buf_max = max_header_size + body_max;
 
 /// Maximum send buffer: HTTP response headers + body.
-/// Accounts for CORS headers (~100 bytes) and X-Checksum header (~22 bytes).
-pub const send_buf_max = 400 + message.value_max;
+/// Accounts for CORS headers (~100 bytes) and other headers (~200 bytes).
+pub const send_buf_max = 400 + response_body_max;
 
 pub const ParseResult = union(enum) {
     /// Not enough bytes to parse a complete request.
@@ -38,12 +44,6 @@ pub const Method = enum {
     post,
     delete,
     options,
-
-    // HEAD is identical to GET but the response body is suppressed. The
-    // server runs a normal get, encodes headers with the real Content-Length,
-    // but skips the body. Useful for health checks, CDN cache validation,
-    // and load-balancer probes. Not necessary for this server — the ecommerce
-    // frontend only uses GET/PUT/POST/DELETE, and health checks can use GET.
 };
 
 /// Parse an HTTP/1.1 request from a buffer. The buffer may contain a partial
@@ -102,7 +102,7 @@ pub fn parse_request(buf: []const u8) ParseResult {
         },
         .put, .post => {
             if (content_length == 0) return .invalid;
-            if (content_length > message.value_max) return .invalid;
+            if (content_length > body_max) return .invalid;
         },
     }
 
@@ -122,53 +122,8 @@ pub fn parse_request(buf: []const u8) ParseResult {
     } };
 }
 
-/// Translate a parsed HTTP request into a binary message.Request.
-/// URL-decodes the path into path_buf. Returns null if the request
-/// doesn't map to a valid KV operation.
-pub fn translate(
-    method: Method,
-    raw_path: []const u8,
-    body: []const u8,
-    path_buf: *[message.key_max]u8,
-) ?message.Request {
-    // Strip leading /.
-    const path = if (raw_path.len > 0 and raw_path[0] == '/') raw_path[1..] else raw_path;
-
-    // Strip query string — everything after ? is ignored for the key.
-    const path_without_query = if (std.mem.indexOf(u8, path, "?")) |q| path[0..q] else path;
-
-    // URL-decode.
-    const key = url_decode(path_buf, path_without_query) orelse return null;
-    if (key.len == 0 or key.len > message.key_max) return null;
-
-    const operation: message.Operation = switch (method) {
-        .get => .get,
-        .put, .post => .put,
-        .delete => .delete,
-        .options => return null, // Handled as preflight in connection layer.
-    };
-
-    // Validate operation/value constraints.
-    switch (operation) {
-        .put => if (body.len == 0 or body.len > message.value_max) return null,
-        .get, .delete => if (body.len != 0) return null,
-    }
-
-    return .{
-        .header = .{
-            .operation = operation,
-            .key_len = @intCast(key.len),
-            .value_len = @intCast(body.len),
-        },
-        .key = key,
-        .value = body,
-    };
-}
-
-/// Encode a binary message.Response as an HTTP response into buf.
-/// Returns the slice of buf that was written.
-pub fn encode_response(buf: []u8, status: message.Status, value: []const u8) []const u8 {
-    assert(value.len <= message.value_max);
+/// Encode an HTTP response with JSON content type.
+pub fn encode_json_response(buf: []u8, status: message.Status, json_body: []const u8) []const u8 {
     assert(buf.len >= send_buf_max);
 
     const status_line = switch (status) {
@@ -179,42 +134,28 @@ pub fn encode_response(buf: []u8, status: message.Status, value: []const u8) []c
 
     var pos: usize = 0;
 
-    // Status line.
     @memcpy(buf[pos..][0..status_line.len], status_line);
     pos += status_line.len;
 
-    // Content-Length header.
     const cl_prefix = "Content-Length: ";
     @memcpy(buf[pos..][0..cl_prefix.len], cl_prefix);
     pos += cl_prefix.len;
 
-    // Write content length as decimal.
     var cl_buf: [10]u8 = undefined;
-    const cl_str = format_u32(&cl_buf, @intCast(value.len));
+    const cl_str = format_u32(&cl_buf, @intCast(json_body.len));
     @memcpy(buf[pos..][0..cl_str.len], cl_str);
     pos += cl_str.len;
 
-    // X-Checksum: CRC32 of body for corruption detection.
-    const checksum_header = "\r\nX-Checksum: ";
-    @memcpy(buf[pos..][0..checksum_header.len], checksum_header);
-    pos += checksum_header.len;
-
-    var hex_buf: [8]u8 = undefined;
-    crc32_hex(&hex_buf, checksum(value));
-    @memcpy(buf[pos..][0..8], &hex_buf);
-    pos += 8;
-
-    const headers_end = "\r\nContent-Type: application/octet-stream" ++
+    const headers_end = "\r\nContent-Type: application/json" ++
         "\r\nConnection: keep-alive" ++
         cors_headers ++
         "\r\n\r\n";
     @memcpy(buf[pos..][0..headers_end.len], headers_end);
     pos += headers_end.len;
 
-    // Body.
-    if (value.len > 0) {
-        @memcpy(buf[pos..][0..value.len], value);
-        pos += value.len;
+    if (json_body.len > 0) {
+        @memcpy(buf[pos..][0..json_body.len], json_body);
+        pos += json_body.len;
     }
 
     assert(pos <= buf.len);
@@ -231,44 +172,6 @@ pub fn encode_options_response(buf: []u8) []const u8 {
     assert(buf.len >= response.len);
     @memcpy(buf[0..response.len], response);
     return buf[0..response.len];
-}
-
-/// Compute CRC32 checksum of data.
-pub fn checksum(data: []const u8) u32 {
-    return std.hash.crc.Crc32.hash(data);
-}
-
-/// Format a u32 as 8-char lowercase hex into buf.
-fn crc32_hex(buf: *[8]u8, value: u32) void {
-    const hex_chars = "0123456789abcdef";
-    inline for (0..8) |i| {
-        buf[7 - i] = hex_chars[@intCast((value >> @intCast(i * 4)) & 0xf)];
-    }
-}
-
-/// Decode a percent-encoded URL path. Returns the decoded slice of dest,
-/// or null if the encoding is invalid or dest is too small.
-pub fn url_decode(dest: []u8, src: []const u8) ?[]const u8 {
-    var di: usize = 0;
-    var si: usize = 0;
-    while (si < src.len) {
-        if (di >= dest.len) return null;
-        if (src[si] == '%') {
-            if (si + 2 >= src.len) return null;
-            const hi = hex_digit(src[si + 1]) orelse return null;
-            const lo = hex_digit(src[si + 2]) orelse return null;
-            dest[di] = (@as(u8, hi) << 4) | lo;
-            si += 3;
-        } else if (src[si] == '+') {
-            dest[di] = ' ';
-            si += 1;
-        } else {
-            dest[di] = src[si];
-            si += 1;
-        }
-        di += 1;
-    }
-    return dest[0..di];
 }
 
 const cors_headers = "\r\nAccess-Control-Allow-Origin: *" ++
@@ -326,13 +229,6 @@ fn find_content_length(headers: []const u8) ?u32 {
 
 fn ascii_eql_ignore_case(a: []const u8, b: []const u8) bool {
     return std.ascii.eqlIgnoreCase(a, b);
-}
-
-fn hex_digit(c: u8) ?u4 {
-    if (c >= '0' and c <= '9') return @intCast(c - '0');
-    if (c >= 'a' and c <= 'f') return @intCast(c - 'a' + 10);
-    if (c >= 'A' and c <= 'F') return @intCast(c - 'A' + 10);
-    return null;
 }
 
 /// Format a u32 as a decimal string into buf. Returns the written slice.
@@ -437,78 +333,6 @@ test "case-insensitive Content-Length" {
     try std.testing.expectEqualSlices(u8, result.complete.body, "abc");
 }
 
-test "translate GET to message" {
-    var path_buf: [message.key_max]u8 = undefined;
-    const req = translate(.get, "/hello", "", &path_buf);
-    try std.testing.expect(req != null);
-    try std.testing.expectEqual(req.?.header.operation, .get);
-    try std.testing.expectEqualSlices(u8, req.?.key, "hello");
-    try std.testing.expectEqual(req.?.value.len, 0);
-}
-
-test "translate PUT to message" {
-    var path_buf: [message.key_max]u8 = undefined;
-    const req = translate(.put, "/key", "value", &path_buf);
-    try std.testing.expect(req != null);
-    try std.testing.expectEqual(req.?.header.operation, .put);
-    try std.testing.expectEqualSlices(u8, req.?.key, "key");
-    try std.testing.expectEqualSlices(u8, req.?.value, "value");
-}
-
-test "translate strips query string" {
-    var path_buf: [message.key_max]u8 = undefined;
-    const req = translate(.get, "/products?category=shoes&page=2", "", &path_buf);
-    try std.testing.expect(req != null);
-    try std.testing.expectEqualSlices(u8, req.?.key, "products");
-}
-
-test "translate rejects empty path" {
-    var path_buf: [message.key_max]u8 = undefined;
-    const req = translate(.get, "/", "", &path_buf);
-    try std.testing.expect(req == null);
-}
-
-test "url_decode basic" {
-    var buf: [256]u8 = undefined;
-    const decoded = url_decode(&buf, "hello%20world").?;
-    try std.testing.expectEqualSlices(u8, decoded, "hello world");
-}
-
-test "url_decode plus as space" {
-    var buf: [256]u8 = undefined;
-    const decoded = url_decode(&buf, "hello+world").?;
-    try std.testing.expectEqualSlices(u8, decoded, "hello world");
-}
-
-test "url_decode hex" {
-    var buf: [256]u8 = undefined;
-    const decoded = url_decode(&buf, "%2Fpath%2Fto%2Fkey").?;
-    try std.testing.expectEqualSlices(u8, decoded, "/path/to/key");
-}
-
-test "url_decode invalid hex" {
-    var buf: [256]u8 = undefined;
-    try std.testing.expect(url_decode(&buf, "%ZZ") == null);
-}
-
-test "encode_response 200 with body" {
-    var buf: [send_buf_max]u8 = undefined;
-    const resp = encode_response(&buf, .ok, "hello");
-    // Should start with HTTP/1.1 200 OK
-    try std.testing.expect(std.mem.startsWith(u8, resp, "HTTP/1.1 200 OK\r\n"));
-    // Should contain Content-Length: 5
-    try std.testing.expect(std.mem.indexOf(u8, resp, "Content-Length: 5\r\n") != null);
-    // Should end with the body
-    try std.testing.expect(std.mem.endsWith(u8, resp, "hello"));
-}
-
-test "encode_response 404 empty body" {
-    var buf: [send_buf_max]u8 = undefined;
-    const resp = encode_response(&buf, .not_found, "");
-    try std.testing.expect(std.mem.startsWith(u8, resp, "HTTP/1.1 404 Not Found\r\n"));
-    try std.testing.expect(std.mem.indexOf(u8, resp, "Content-Length: 0\r\n") != null);
-}
-
 test "format_u32" {
     var buf: [10]u8 = undefined;
     try std.testing.expectEqualSlices(u8, format_u32(&buf, 0), "0");
@@ -581,27 +405,21 @@ fn splitmix64(state: *u64) u64 {
 }
 
 test "fuzz — parse_request never crashes on random bytes" {
-    // Feed pure random bytes into parse_request. It must always return
-    // .incomplete, .invalid, or a valid .complete — never panic or
-    // access out-of-bounds memory.
     const iterations = 10_000;
 
     var prng: u64 = 0xdeadbeef;
 
     for (0..iterations) |_| {
-        var buf: [max_header_size + message.value_max]u8 = undefined;
+        var buf: [recv_buf_max]u8 = undefined;
         const len: usize = @intCast(splitmix64(&prng) % buf.len);
         for (0..len) |i| {
             buf[i] = @intCast(splitmix64(&prng) & 0xff);
         }
 
         const result = parse_request(buf[0..len]);
-        // Must be one of the three variants — if we get here without
-        // panic/segfault, the parser handled it safely.
         switch (result) {
             .incomplete, .invalid => {},
             .complete => |c| {
-                // Sanity: total_len must not exceed input length.
                 try std.testing.expect(c.total_len <= len);
             },
         }
@@ -609,8 +427,6 @@ test "fuzz — parse_request never crashes on random bytes" {
 }
 
 test "fuzz — parse_request with structured mutations" {
-    // Generate valid-ish HTTP requests and then mutate random bytes.
-    // Exercises parser edge cases around almost-valid input.
     const methods = [_][]const u8{ "GET", "PUT", "POST", "DELETE", "OPTIONS" };
     const versions = [_][]const u8{ "HTTP/1.0", "HTTP/1.1" };
     const iterations = 5_000;
@@ -697,8 +513,6 @@ test "fuzz — parse_request with structured mutations" {
 }
 
 test "fuzz — parse_request at every truncation point" {
-    // Take valid requests and parse every prefix. The parser must
-    // return .incomplete for short prefixes and .complete at the end.
     const requests = [_][]const u8{
         "GET /hello HTTP/1.1\r\n\r\n",
         "PUT /key HTTP/1.1\r\nContent-Length: 5\r\n\r\nworld",
@@ -708,12 +522,10 @@ test "fuzz — parse_request at every truncation point" {
     };
 
     for (requests) |req| {
-        // Every proper prefix must be .incomplete.
         for (0..req.len - 1) |len| {
             const result = parse_request(req[0..len]);
             try std.testing.expect(result != .complete);
         }
-        // Full request must be .complete.
         const result = parse_request(req);
         try std.testing.expect(result == .complete);
         try std.testing.expectEqual(result.complete.total_len, @as(u32, @intCast(req.len)));

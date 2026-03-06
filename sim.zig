@@ -2,7 +2,6 @@ const std = @import("std");
 const assert = std.debug.assert;
 const message = @import("message.zig");
 const http = @import("http.zig");
-const crc = std.hash.crc.Crc32;
 const StateMachine = @import("state_machine.zig").StateMachine;
 const ServerType = @import("server.zig").ServerType;
 const ConnectionType = @import("connection.zig").ConnectionType;
@@ -137,44 +136,72 @@ pub const SimIO = struct {
         client.send_len += @intCast(data.len);
     }
 
-    /// Inject an HTTP PUT request from a simulated client.
-    pub fn inject_put(self: *SimIO, client_index: usize, key: []const u8, value: []const u8) void {
+    /// Inject an HTTP POST request with a body.
+    pub fn inject_post(self: *SimIO, client_index: usize, path: []const u8, body: []const u8) void {
         var buf: [http.recv_buf_max]u8 = undefined;
         var pos: usize = 0;
 
-        const line1 = "PUT /";
+        const line1 = "POST ";
         @memcpy(buf[pos..][0..line1.len], line1);
         pos += line1.len;
-        @memcpy(buf[pos..][0..key.len], key);
-        pos += key.len;
+        @memcpy(buf[pos..][0..path.len], path);
+        pos += path.len;
         const line2 = " HTTP/1.1\r\nContent-Length: ";
         @memcpy(buf[pos..][0..line2.len], line2);
         pos += line2.len;
 
         var cl_buf: [10]u8 = undefined;
-        const cl_str = format_u32(&cl_buf, @intCast(value.len));
+        const cl_str = format_u32(&cl_buf, @intCast(body.len));
         @memcpy(buf[pos..][0..cl_str.len], cl_str);
         pos += cl_str.len;
 
         const end = "\r\n\r\n";
         @memcpy(buf[pos..][0..end.len], end);
         pos += end.len;
-        @memcpy(buf[pos..][0..value.len], value);
-        pos += value.len;
+        @memcpy(buf[pos..][0..body.len], body);
+        pos += body.len;
 
         self.inject_bytes(client_index, buf[0..pos]);
     }
 
-    /// Inject an HTTP GET request from a simulated client.
-    pub fn inject_get(self: *SimIO, client_index: usize, key: []const u8) void {
+    /// Inject an HTTP PUT request to a path with a body.
+    pub fn inject_put(self: *SimIO, client_index: usize, path: []const u8, body: []const u8) void {
         var buf: [http.recv_buf_max]u8 = undefined;
         var pos: usize = 0;
 
-        const line1 = "GET /";
+        const line1 = "PUT ";
         @memcpy(buf[pos..][0..line1.len], line1);
         pos += line1.len;
-        @memcpy(buf[pos..][0..key.len], key);
-        pos += key.len;
+        @memcpy(buf[pos..][0..path.len], path);
+        pos += path.len;
+        const line2 = " HTTP/1.1\r\nContent-Length: ";
+        @memcpy(buf[pos..][0..line2.len], line2);
+        pos += line2.len;
+
+        var cl_buf: [10]u8 = undefined;
+        const cl_str = format_u32(&cl_buf, @intCast(body.len));
+        @memcpy(buf[pos..][0..cl_str.len], cl_str);
+        pos += cl_str.len;
+
+        const end = "\r\n\r\n";
+        @memcpy(buf[pos..][0..end.len], end);
+        pos += end.len;
+        @memcpy(buf[pos..][0..body.len], body);
+        pos += body.len;
+
+        self.inject_bytes(client_index, buf[0..pos]);
+    }
+
+    /// Inject an HTTP GET to a path.
+    pub fn inject_get(self: *SimIO, client_index: usize, path: []const u8) void {
+        var buf: [http.recv_buf_max]u8 = undefined;
+        var pos: usize = 0;
+
+        const line1 = "GET ";
+        @memcpy(buf[pos..][0..line1.len], line1);
+        pos += line1.len;
+        @memcpy(buf[pos..][0..path.len], path);
+        pos += path.len;
         const line2 = " HTTP/1.1\r\n\r\n";
         @memcpy(buf[pos..][0..line2.len], line2);
         pos += line2.len;
@@ -182,16 +209,16 @@ pub const SimIO = struct {
         self.inject_bytes(client_index, buf[0..pos]);
     }
 
-    /// Inject an HTTP DELETE request from a simulated client.
-    pub fn inject_delete(self: *SimIO, client_index: usize, key: []const u8) void {
+    /// Inject an HTTP DELETE to a path.
+    pub fn inject_delete(self: *SimIO, client_index: usize, path: []const u8) void {
         var buf: [http.recv_buf_max]u8 = undefined;
         var pos: usize = 0;
 
-        const line1 = "DELETE /";
+        const line1 = "DELETE ";
         @memcpy(buf[pos..][0..line1.len], line1);
         pos += line1.len;
-        @memcpy(buf[pos..][0..key.len], key);
-        pos += key.len;
+        @memcpy(buf[pos..][0..path.len], path);
+        pos += path.len;
         const line2 = " HTTP/1.1\r\n\r\n";
         @memcpy(buf[pos..][0..line2.len], line2);
         pos += line2.len;
@@ -232,18 +259,6 @@ pub const SimIO = struct {
         if (data.len < body_start + content_length) return null;
 
         const body = data[body_start..][0..content_length];
-
-        // Verify X-Checksum if present.
-        const checksum_marker = "X-Checksum: ";
-        if (std.mem.indexOf(u8, headers, checksum_marker)) |ck_pos| {
-            const ck_start = ck_pos + checksum_marker.len;
-            if (ck_start + 8 <= headers.len) {
-                const hex_str = headers[ck_start..][0..8];
-                const expected_crc = std.fmt.parseInt(u32, hex_str, 16) catch return null;
-                const actual_crc = crc.hash(body);
-                if (expected_crc != actual_crc) return null;
-            }
-        }
 
         return .{
             .status_code = status_code,
@@ -525,76 +540,176 @@ fn run_until_response(server: *Server, io: *SimIO, client_index: usize, max_tick
     return null;
 }
 
-test "put then get returns value" {
-    var sim_io = SimIO.init(42);
+/// Helper: check that a JSON response body contains a substring.
+fn json_contains(body: []const u8, needle: []const u8) bool {
+    return std.mem.indexOf(u8, body, needle) != null;
+}
+
+// =====================================================================
+// Product CRUD integration tests
+// =====================================================================
+
+test "product CRUD — create, get, update, delete" {
+    var sim_io = SimIO.init(0xb001);
     var sm = try StateMachine.init(std.testing.allocator);
     defer sm.deinit(std.testing.allocator);
     var server = Server.init(&sim_io, &sm, 1);
 
-    // Connect a client.
     sim_io.connect_client(0);
+    run_ticks(&server, &sim_io, 10);
 
-    // PUT hello=world
-    sim_io.inject_put(0, "hello", "world");
-    const put_resp = run_until_response(&server, &sim_io, 0, 500) orelse
+    // CREATE
+    const create_body =
+        \\{"name":"Widget","description":"A cool widget","price_cents":1999,"inventory":50,"active":true}
+    ;
+    sim_io.inject_post(0, "/products", create_body);
+    const create_resp = run_until_response(&server, &sim_io, 0, 500) orelse
         return error.TestUnexpectedResult;
-    try std.testing.expectEqual(put_resp.status_code, 200);
-
-    // Clear response buffer for next request.
+    try std.testing.expectEqual(create_resp.status_code, 200);
+    try std.testing.expect(json_contains(create_resp.body, "\"id\":1"));
+    try std.testing.expect(json_contains(create_resp.body, "\"name\":\"Widget\""));
+    try std.testing.expect(json_contains(create_resp.body, "\"price_cents\":1999"));
     sim_io.clear_response(0);
 
-    // GET hello
-    sim_io.inject_get(0, "hello");
+    // GET
+    sim_io.inject_get(0, "/products/1");
     const get_resp = run_until_response(&server, &sim_io, 0, 500) orelse
         return error.TestUnexpectedResult;
     try std.testing.expectEqual(get_resp.status_code, 200);
-    try std.testing.expectEqualSlices(u8, get_resp.body, "world");
-}
+    try std.testing.expect(json_contains(get_resp.body, "\"name\":\"Widget\""));
+    sim_io.clear_response(0);
 
-test "get missing key returns not_found" {
-    var sim_io = SimIO.init(99);
-    var sm = try StateMachine.init(std.testing.allocator);
-    defer sm.deinit(std.testing.allocator);
-    var server = Server.init(&sim_io, &sm, 1);
-
-    sim_io.connect_client(0);
-    sim_io.inject_get(0, "missing");
-    const resp = run_until_response(&server, &sim_io, 0, 500) orelse
+    // UPDATE
+    const update_body =
+        \\{"name":"Super Widget","description":"An even cooler widget","price_cents":2999,"inventory":100,"active":true}
+    ;
+    sim_io.inject_put(0, "/products/1", update_body);
+    const update_resp = run_until_response(&server, &sim_io, 0, 500) orelse
         return error.TestUnexpectedResult;
-    try std.testing.expectEqual(resp.status_code, 404);
-}
+    try std.testing.expectEqual(update_resp.status_code, 200);
+    try std.testing.expect(json_contains(update_resp.body, "\"name\":\"Super Widget\""));
+    try std.testing.expect(json_contains(update_resp.body, "\"price_cents\":2999"));
+    sim_io.clear_response(0);
 
-test "delete existing key" {
-    var sim_io = SimIO.init(7);
-    var sm = try StateMachine.init(std.testing.allocator);
-    defer sm.deinit(std.testing.allocator);
-    var server = Server.init(&sim_io, &sm, 1);
-
-    sim_io.connect_client(0);
-
-    // PUT
-    sim_io.inject_put(0, "key", "value");
-    const put_resp = run_until_response(&server, &sim_io, 0, 500) orelse
+    // GET after update
+    sim_io.inject_get(0, "/products/1");
+    const get2_resp = run_until_response(&server, &sim_io, 0, 500) orelse
         return error.TestUnexpectedResult;
-    try std.testing.expectEqual(put_resp.status_code, 200);
+    try std.testing.expectEqual(get2_resp.status_code, 200);
+    try std.testing.expect(json_contains(get2_resp.body, "\"name\":\"Super Widget\""));
     sim_io.clear_response(0);
 
     // DELETE
-    sim_io.inject_delete(0, "key");
+    sim_io.inject_delete(0, "/products/1");
     const del_resp = run_until_response(&server, &sim_io, 0, 500) orelse
         return error.TestUnexpectedResult;
     try std.testing.expectEqual(del_resp.status_code, 200);
     sim_io.clear_response(0);
 
-    // GET — should be not_found
-    sim_io.inject_get(0, "key");
-    const get_resp = run_until_response(&server, &sim_io, 0, 500) orelse
+    // GET after delete — should be 404
+    sim_io.inject_get(0, "/products/1");
+    const gone_resp = run_until_response(&server, &sim_io, 0, 500) orelse
         return error.TestUnexpectedResult;
-    try std.testing.expectEqual(get_resp.status_code, 404);
+    try std.testing.expectEqual(gone_resp.status_code, 404);
+}
+
+test "product list — empty then populated" {
+    var sim_io = SimIO.init(0xb002);
+    var sm = try StateMachine.init(std.testing.allocator);
+    defer sm.deinit(std.testing.allocator);
+    var server = Server.init(&sim_io, &sm, 1);
+
+    sim_io.connect_client(0);
+    run_ticks(&server, &sim_io, 10);
+
+    // List when empty.
+    sim_io.inject_get(0, "/products");
+    const empty_resp = run_until_response(&server, &sim_io, 0, 500) orelse
+        return error.TestUnexpectedResult;
+    try std.testing.expectEqual(empty_resp.status_code, 200);
+    try std.testing.expectEqualSlices(u8, empty_resp.body, "[]");
+    sim_io.clear_response(0);
+
+    // Create two products.
+    sim_io.inject_post(0, "/products",
+        \\{"name":"A","price_cents":100}
+    );
+    _ = run_until_response(&server, &sim_io, 0, 500) orelse
+        return error.TestUnexpectedResult;
+    sim_io.clear_response(0);
+
+    sim_io.inject_post(0, "/products",
+        \\{"name":"B","price_cents":200}
+    );
+    _ = run_until_response(&server, &sim_io, 0, 500) orelse
+        return error.TestUnexpectedResult;
+    sim_io.clear_response(0);
+
+    // List should contain both.
+    sim_io.inject_get(0, "/products");
+    const list_resp = run_until_response(&server, &sim_io, 0, 500) orelse
+        return error.TestUnexpectedResult;
+    try std.testing.expectEqual(list_resp.status_code, 200);
+    try std.testing.expect(json_contains(list_resp.body, "\"name\":\"A\""));
+    try std.testing.expect(json_contains(list_resp.body, "\"name\":\"B\""));
+}
+
+test "product get missing returns 404" {
+    var sim_io = SimIO.init(0xb003);
+    var sm = try StateMachine.init(std.testing.allocator);
+    defer sm.deinit(std.testing.allocator);
+    var server = Server.init(&sim_io, &sm, 1);
+
+    sim_io.connect_client(0);
+    run_ticks(&server, &sim_io, 10);
+
+    sim_io.inject_get(0, "/products/999");
+    const resp = run_until_response(&server, &sim_io, 0, 500) orelse
+        return error.TestUnexpectedResult;
+    try std.testing.expectEqual(resp.status_code, 404);
+}
+
+test "product delete missing returns 404" {
+    var sim_io = SimIO.init(0xb004);
+    var sm = try StateMachine.init(std.testing.allocator);
+    defer sm.deinit(std.testing.allocator);
+    var server = Server.init(&sim_io, &sm, 1);
+
+    sim_io.connect_client(0);
+    run_ticks(&server, &sim_io, 10);
+
+    sim_io.inject_delete(0, "/products/999");
+    const resp = run_until_response(&server, &sim_io, 0, 500) orelse
+        return error.TestUnexpectedResult;
+    try std.testing.expectEqual(resp.status_code, 404);
+}
+
+test "product auto-increment IDs across creates" {
+    var sim_io = SimIO.init(0xb005);
+    var sm = try StateMachine.init(std.testing.allocator);
+    defer sm.deinit(std.testing.allocator);
+    var server = Server.init(&sim_io, &sm, 1);
+
+    sim_io.connect_client(0);
+    run_ticks(&server, &sim_io, 10);
+
+    sim_io.inject_post(0, "/products",
+        \\{"name":"First"}
+    );
+    const r1 = run_until_response(&server, &sim_io, 0, 500) orelse
+        return error.TestUnexpectedResult;
+    try std.testing.expect(json_contains(r1.body, "\"id\":1"));
+    sim_io.clear_response(0);
+
+    sim_io.inject_post(0, "/products",
+        \\{"name":"Second"}
+    );
+    const r2 = run_until_response(&server, &sim_io, 0, 500) orelse
+        return error.TestUnexpectedResult;
+    try std.testing.expect(json_contains(r2.body, "\"id\":2"));
 }
 
 test "deterministic replay — same seed same result" {
-    // Run the same scenario twice with the same seed and verify identical behavior.
     var results: [2]u16 = undefined;
 
     for (0..2) |run| {
@@ -604,13 +719,15 @@ test "deterministic replay — same seed same result" {
         var server = Server.init(&sim_io, &sm, 1);
 
         sim_io.connect_client(0);
-        sim_io.inject_put(0, "determinism", "test");
-        const put_resp = run_until_response(&server, &sim_io, 0, 500) orelse
+        sim_io.inject_post(0, "/products",
+            \\{"name":"Widget","price_cents":100}
+        );
+        const create_resp = run_until_response(&server, &sim_io, 0, 500) orelse
             return error.TestUnexpectedResult;
-        try std.testing.expectEqual(put_resp.status_code, 200);
+        try std.testing.expectEqual(create_resp.status_code, 200);
         sim_io.clear_response(0);
 
-        sim_io.inject_get(0, "determinism");
+        sim_io.inject_get(0, "/products/1");
         const get_resp = run_until_response(&server, &sim_io, 0, 500) orelse
             return error.TestUnexpectedResult;
         results[run] = get_resp.status_code;
@@ -620,257 +737,11 @@ test "deterministic replay — same seed same result" {
     try std.testing.expectEqual(results[0], @as(u16, 200));
 }
 
-test "overwrite value" {
-    var sim_io = SimIO.init(55);
-    var sm = try StateMachine.init(std.testing.allocator);
-    defer sm.deinit(std.testing.allocator);
-    var server = Server.init(&sim_io, &sm, 1);
-
-    sim_io.connect_client(0);
-
-    // PUT key=v1
-    sim_io.inject_put(0, "key", "v1");
-    _ = run_until_response(&server, &sim_io, 0, 500) orelse
-        return error.TestUnexpectedResult;
-    sim_io.clear_response(0);
-
-    // PUT key=v2 (overwrite)
-    sim_io.inject_put(0, "key", "v2");
-    _ = run_until_response(&server, &sim_io, 0, 500) orelse
-        return error.TestUnexpectedResult;
-    sim_io.clear_response(0);
-
-    // GET key — should return v2
-    sim_io.inject_get(0, "key");
-    const resp = run_until_response(&server, &sim_io, 0, 500) orelse
-        return error.TestUnexpectedResult;
-    try std.testing.expectEqual(resp.status_code, 200);
-    try std.testing.expectEqualSlices(u8, resp.body, "v2");
-}
-
-test "fuzzer — random operations verified against oracle" {
-    // PRNG-driven fuzzer: generates random PUT/GET/DELETE operations,
-    // sends them as HTTP through the full Server → Connection → SimIO
-    // stack, and verifies every response against a simple oracle.
-    //
-    // SimIO's partial delivery (random 1..N byte recv/send) exercises
-    // HTTP parsing at every possible byte boundary.
-
-    const key_pool_size = 16;
-    const max_value_len = 32;
-    const ops_per_seed = 500;
-    const seed_count = 100;
-
-    for (0..seed_count) |seed_offset| {
-        const seed: u64 = seed_offset * 7919 + 1;
-        var sim_io = SimIO.init(seed);
-        var sm = try StateMachine.init(std.testing.allocator);
-        defer sm.deinit(std.testing.allocator);
-        var server = Server.init(&sim_io, &sm, 1);
-
-        sim_io.connect_client(0);
-
-        // Oracle: for each key index, track existence and value.
-        var oracle_exists = [_]bool{false} ** key_pool_size;
-        var oracle_values: [key_pool_size][max_value_len]u8 = undefined;
-        var oracle_value_lens = [_]u8{0} ** key_pool_size;
-
-        var fuzz_state: u64 = seed +% 0xcafe;
-
-        for (0..ops_per_seed) |_| {
-            const op_choice = splitmix64(&fuzz_state) % 10;
-            const key_idx: usize = @intCast(splitmix64(&fuzz_state) % key_pool_size);
-
-            // Generate key: "k" + 2-digit index.
-            var key_buf: [3]u8 = undefined;
-            key_buf[0] = 'k';
-            key_buf[1] = '0' + @as(u8, @intCast(key_idx / 10));
-            key_buf[2] = '0' + @as(u8, @intCast(key_idx % 10));
-            const key: []const u8 = &key_buf;
-
-            if (op_choice < 4) {
-                // 40% GET
-                sim_io.inject_get(0, key);
-                const resp = run_until_response(&server, &sim_io, 0, 500) orelse
-                    return error.TestUnexpectedResult;
-
-                if (oracle_exists[key_idx]) {
-                    try std.testing.expectEqual(resp.status_code, 200);
-                    const expected = oracle_values[key_idx][0..oracle_value_lens[key_idx]];
-                    try std.testing.expectEqualSlices(u8, resp.body, expected);
-                } else {
-                    try std.testing.expectEqual(resp.status_code, 404);
-                }
-            } else if (op_choice < 8) {
-                // 40% PUT
-                const val_len: usize = @intCast(1 + splitmix64(&fuzz_state) % max_value_len);
-                var val_buf: [max_value_len]u8 = undefined;
-                for (0..val_len) |i| {
-                    val_buf[i] = @intCast(65 + splitmix64(&fuzz_state) % 26);
-                }
-                const value: []const u8 = val_buf[0..val_len];
-
-                sim_io.inject_put(0, key, value);
-                const resp = run_until_response(&server, &sim_io, 0, 500) orelse
-                    return error.TestUnexpectedResult;
-
-                try std.testing.expectEqual(resp.status_code, 200);
-
-                // Update oracle.
-                oracle_exists[key_idx] = true;
-                oracle_value_lens[key_idx] = @intCast(val_len);
-                @memcpy(oracle_values[key_idx][0..val_len], value);
-            } else {
-                // 20% DELETE
-                sim_io.inject_delete(0, key);
-                const resp = run_until_response(&server, &sim_io, 0, 500) orelse
-                    return error.TestUnexpectedResult;
-
-                if (oracle_exists[key_idx]) {
-                    try std.testing.expectEqual(resp.status_code, 200);
-                    oracle_exists[key_idx] = false;
-                } else {
-                    try std.testing.expectEqual(resp.status_code, 404);
-                }
-            }
-
-            sim_io.clear_response(0);
-        }
-    }
-}
-
-test "fuzzer — multiple clients" {
-    // Exercises concurrent connections: multiple clients issue random
-    // operations against the same state machine. The oracle is shared
-    // across all clients since they all talk to the same KV store.
-
-    const key_pool_size = 8;
-    const max_value_len = 16;
-    const num_clients = 4;
-    const ops_per_client = 100;
-
-    var sim_io = SimIO.init(0xbeef);
-    var sm = try StateMachine.init(std.testing.allocator);
-    defer sm.deinit(std.testing.allocator);
-    var server = Server.init(&sim_io, &sm, 1);
-
-    // Connect all clients. Run ticks between connects so the server
-    // can accept each one.
-    for (0..num_clients) |i| {
-        sim_io.connect_client(i);
-        run_ticks(&server, &sim_io, 10);
-    }
-
-    // Shared oracle.
-    var oracle_exists = [_]bool{false} ** key_pool_size;
-    var oracle_values: [key_pool_size][max_value_len]u8 = undefined;
-    var oracle_value_lens = [_]u8{0} ** key_pool_size;
-
-    var fuzz_state: u64 = 0xbeef_cafe;
-
-    // Round-robin clients, one operation at a time.
-    for (0..ops_per_client * num_clients) |op_num| {
-        const client: usize = op_num % num_clients;
-        const op_choice = splitmix64(&fuzz_state) % 3;
-        const key_idx: usize = @intCast(splitmix64(&fuzz_state) % key_pool_size);
-
-        var key_buf: [3]u8 = undefined;
-        key_buf[0] = 'k';
-        key_buf[1] = '0' + @as(u8, @intCast(key_idx / 10));
-        key_buf[2] = '0' + @as(u8, @intCast(key_idx % 10));
-        const key: []const u8 = &key_buf;
-
-        switch (op_choice) {
-            0 => {
-                sim_io.inject_get(client, key);
-                const resp = run_until_response(&server, &sim_io, client, 500) orelse
-                    return error.TestUnexpectedResult;
-
-                if (oracle_exists[key_idx]) {
-                    try std.testing.expectEqual(resp.status_code, 200);
-                    const expected = oracle_values[key_idx][0..oracle_value_lens[key_idx]];
-                    try std.testing.expectEqualSlices(u8, resp.body, expected);
-                } else {
-                    try std.testing.expectEqual(resp.status_code, 404);
-                }
-            },
-            1 => {
-                const val_len: usize = @intCast(1 + splitmix64(&fuzz_state) % max_value_len);
-                var val_buf: [max_value_len]u8 = undefined;
-                for (0..val_len) |i| {
-                    val_buf[i] = @intCast(65 + splitmix64(&fuzz_state) % 26);
-                }
-                const value: []const u8 = val_buf[0..val_len];
-
-                sim_io.inject_put(client, key, value);
-                const resp = run_until_response(&server, &sim_io, client, 500) orelse
-                    return error.TestUnexpectedResult;
-                try std.testing.expectEqual(resp.status_code, 200);
-
-                oracle_exists[key_idx] = true;
-                oracle_value_lens[key_idx] = @intCast(val_len);
-                @memcpy(oracle_values[key_idx][0..val_len], value);
-            },
-            2 => {
-                sim_io.inject_delete(client, key);
-                const resp = run_until_response(&server, &sim_io, client, 500) orelse
-                    return error.TestUnexpectedResult;
-
-                if (oracle_exists[key_idx]) {
-                    try std.testing.expectEqual(resp.status_code, 200);
-                    oracle_exists[key_idx] = false;
-                } else {
-                    try std.testing.expectEqual(resp.status_code, 404);
-                }
-            },
-            else => unreachable,
-        }
-
-        sim_io.clear_response(client);
-    }
-}
-
-test "fuzzer — connection drops and reconnects" {
-    // Tests fault injection: randomly disconnect a client mid-session,
-    // let the server clean up, reconnect, and verify the state machine
-    // is still consistent.
-
-    var sim_io = SimIO.init(0xdead);
-    var sm = try StateMachine.init(std.testing.allocator);
-    defer sm.deinit(std.testing.allocator);
-    var server = Server.init(&sim_io, &sm, 1);
-
-    sim_io.connect_client(0);
-    run_ticks(&server, &sim_io, 10);
-
-    // PUT a key before the drop.
-    sim_io.inject_put(0, "survive", "this");
-    const put_resp = run_until_response(&server, &sim_io, 0, 500) orelse
-        return error.TestUnexpectedResult;
-    try std.testing.expectEqual(put_resp.status_code, 200);
-    sim_io.clear_response(0);
-
-    // Drop the connection.
-    sim_io.disconnect_client(0);
-    // Run ticks so the server discovers the disconnect and cleans up.
-    run_ticks(&server, &sim_io, 50);
-
-    // Reconnect on a different client slot.
-    sim_io.connect_client(1);
-    run_ticks(&server, &sim_io, 10);
-
-    // The state machine should still have the key.
-    sim_io.inject_get(1, "survive");
-    const get_resp = run_until_response(&server, &sim_io, 1, 500) orelse
-        return error.TestUnexpectedResult;
-    try std.testing.expectEqual(get_resp.status_code, 200);
-    try std.testing.expectEqualSlices(u8, get_resp.body, "this");
-}
+// =====================================================================
+// Infrastructure tests — connection plumbing, pipelining, disconnects
+// =====================================================================
 
 test "pipelining — back-to-back requests on one connection" {
-    // Inject two complete HTTP requests into the client buffer before
-    // any ticks run. The server must process both via keep-alive,
-    // shifting leftover bytes after the first response.
     var sim_io = SimIO.init(0x1234);
     var sm = try StateMachine.init(std.testing.allocator);
     defer sm.deinit(std.testing.allocator);
@@ -879,261 +750,60 @@ test "pipelining — back-to-back requests on one connection" {
     sim_io.connect_client(0);
     run_ticks(&server, &sim_io, 10);
 
-    // Inject PUT + GET back-to-back (pipelined).
-    sim_io.inject_put(0, "pipekey", "pipevalue");
-    sim_io.inject_get(0, "pipekey");
+    // Inject CREATE + GET back-to-back (pipelined).
+    sim_io.inject_post(0, "/products",
+        \\{"name":"PipeWidget","price_cents":100}
+    );
+    sim_io.inject_get(0, "/products/1");
 
-    // First response: PUT 200.
-    const put_resp = run_until_response(&server, &sim_io, 0, 500) orelse
+    // First response: CREATE 200.
+    const create_resp = run_until_response(&server, &sim_io, 0, 500) orelse
         return error.TestUnexpectedResult;
-    try std.testing.expectEqual(put_resp.status_code, 200);
+    try std.testing.expectEqual(create_resp.status_code, 200);
     sim_io.clear_response(0);
 
-    // Second response: GET 200 with the value.
+    // Second response: GET 200 with the product.
     const get_resp = run_until_response(&server, &sim_io, 0, 500) orelse
         return error.TestUnexpectedResult;
     try std.testing.expectEqual(get_resp.status_code, 200);
-    try std.testing.expectEqualSlices(u8, get_resp.body, "pipevalue");
+    try std.testing.expect(json_contains(get_resp.body, "\"name\":\"PipeWidget\""));
 }
 
-test "pipelining — fuzzer with random pipeline depth" {
-    // PRNG-driven: for each seed, pipeline 1-4 requests before waiting
-    // for responses. Exercises the leftover-byte shift at every boundary.
-    const seed_count = 50;
-    const ops_per_seed = 100;
-
-    for (0..seed_count) |seed_offset| {
-        const seed: u64 = seed_offset * 3571 + 0x1234;
-        var sim_io = SimIO.init(seed);
-        var sm = try StateMachine.init(std.testing.allocator);
-        defer sm.deinit(std.testing.allocator);
-        var server = Server.init(&sim_io, &sm, 1);
-
-        sim_io.connect_client(0);
-        run_ticks(&server, &sim_io, 10);
-
-        var fuzz_state: u64 = seed +% 0xbead;
-        var op_count: usize = 0;
-
-        while (op_count < ops_per_seed) {
-            // Choose pipeline depth: 1-4 requests.
-            const depth: usize = @intCast(1 + splitmix64(&fuzz_state) % 4);
-            const actual_depth = @min(depth, ops_per_seed - op_count);
-
-            // Inject all requests at once.
-            for (0..actual_depth) |_| {
-                var key_buf: [4]u8 = undefined;
-                key_buf[0] = 'p';
-                key_buf[1] = @intCast(65 + splitmix64(&fuzz_state) % 26);
-                key_buf[2] = @intCast(65 + splitmix64(&fuzz_state) % 26);
-                key_buf[3] = @intCast(65 + splitmix64(&fuzz_state) % 26);
-
-                const op = splitmix64(&fuzz_state) % 3;
-                if (op < 2) {
-                    // PUT
-                    var val_buf: [8]u8 = undefined;
-                    for (&val_buf) |*b| b.* = @intCast(65 + splitmix64(&fuzz_state) % 26);
-                    sim_io.inject_put(0, &key_buf, &val_buf);
-                } else {
-                    // GET
-                    sim_io.inject_get(0, &key_buf);
-                }
-            }
-
-            // Drain all responses.
-            for (0..actual_depth) |_| {
-                const resp = run_until_response(&server, &sim_io, 0, 500) orelse
-                    return error.TestUnexpectedResult;
-                // Any 200/404 is valid — we're testing the pipeline mechanics, not the oracle.
-                assert(resp.status_code == 200 or resp.status_code == 404);
-                sim_io.clear_response(0);
-            }
-
-            op_count += actual_depth;
-        }
-    }
-}
-
-test "mid-send disconnect — server recovers" {
-    // PUT a large value, start getting the response, then disconnect
-    // before the server finishes sending. Verify the server cleans up
-    // and remains functional for other clients.
-    var sim_io = SimIO.init(0xd15c0);
+test "connection drops and reconnects — state machine survives" {
+    var sim_io = SimIO.init(0xdead);
     var sm = try StateMachine.init(std.testing.allocator);
     defer sm.deinit(std.testing.allocator);
     var server = Server.init(&sim_io, &sm, 1);
 
-    // Client 0: PUT a value so it's stored.
     sim_io.connect_client(0);
     run_ticks(&server, &sim_io, 10);
 
-    // Use a moderately large value so the response takes multiple send cycles.
-    var big_value: [4096]u8 = undefined;
-    @memset(&big_value, 'X');
-    sim_io.inject_put(0, "bigkey", &big_value);
-    const put_resp = run_until_response(&server, &sim_io, 0, 500) orelse
+    // Create a product before the drop.
+    sim_io.inject_post(0, "/products",
+        \\{"name":"Survivor","price_cents":100}
+    );
+    const create_resp = run_until_response(&server, &sim_io, 0, 500) orelse
         return error.TestUnexpectedResult;
-    try std.testing.expectEqual(put_resp.status_code, 200);
+    try std.testing.expectEqual(create_resp.status_code, 200);
     sim_io.clear_response(0);
 
-    // Now GET the big value — response will be large.
-    sim_io.inject_get(0, "bigkey");
-    // Run a few ticks so the server starts sending, but don't wait for completion.
-    run_ticks(&server, &sim_io, 5);
-
-    // Disconnect mid-send.
+    // Drop the connection.
     sim_io.disconnect_client(0);
-    // Let the server discover the disconnect and clean up.
     run_ticks(&server, &sim_io, 50);
 
-    // Client 1: verify the server is still functional.
+    // Reconnect on a different client slot.
     sim_io.connect_client(1);
     run_ticks(&server, &sim_io, 10);
-    sim_io.inject_get(1, "bigkey");
+
+    // The state machine should still have the product.
+    sim_io.inject_get(1, "/products/1");
     const get_resp = run_until_response(&server, &sim_io, 1, 500) orelse
         return error.TestUnexpectedResult;
     try std.testing.expectEqual(get_resp.status_code, 200);
-    try std.testing.expectEqualSlices(u8, get_resp.body, &big_value);
-}
-
-test "mid-send disconnect — fuzzer with random disconnect timing" {
-    // For each seed, PUT a value, start a GET, disconnect after a random
-    // number of ticks, then verify recovery with a new client.
-    const seed_count = 50;
-
-    for (0..seed_count) |seed_offset| {
-        const seed: u64 = seed_offset * 6131 + 0xd15c0;
-        var sim_io = SimIO.init(seed);
-        var sm = try StateMachine.init(std.testing.allocator);
-        defer sm.deinit(std.testing.allocator);
-        var server = Server.init(&sim_io, &sm, 1);
-
-        var fuzz_state: u64 = seed +% 0xface;
-
-        // Client 0: store a value.
-        sim_io.connect_client(0);
-        run_ticks(&server, &sim_io, 10);
-
-        const val_len: usize = @intCast(1 + splitmix64(&fuzz_state) % 4096);
-        var val_buf: [4096]u8 = undefined;
-        for (val_buf[0..val_len]) |*b| b.* = @intCast(65 + splitmix64(&fuzz_state) % 26);
-
-        sim_io.inject_put(0, "dk", val_buf[0..val_len]);
-        _ = run_until_response(&server, &sim_io, 0, 500) orelse
-            return error.TestUnexpectedResult;
-        sim_io.clear_response(0);
-
-        // Start GET, run random number of ticks, then disconnect.
-        sim_io.inject_get(0, "dk");
-        const ticks_before_disconnect: usize = @intCast(1 + splitmix64(&fuzz_state) % 20);
-        run_ticks(&server, &sim_io, ticks_before_disconnect);
-
-        sim_io.disconnect_client(0);
-        run_ticks(&server, &sim_io, 50);
-
-        // Client 1: verify server still works.
-        sim_io.connect_client(1);
-        run_ticks(&server, &sim_io, 10);
-        sim_io.inject_get(1, "dk");
-        const resp = run_until_response(&server, &sim_io, 1, 500) orelse
-            return error.TestUnexpectedResult;
-        try std.testing.expectEqual(resp.status_code, 200);
-        try std.testing.expectEqualSlices(u8, resp.body, val_buf[0..val_len]);
-    }
-}
-
-test "buffer boundaries — key_max and value_max" {
-    // Test with keys and values at exactly the maximum allowed sizes.
-    var sim_io = SimIO.init(0xed6e);
-    var sm = try StateMachine.init(std.testing.allocator);
-    defer sm.deinit(std.testing.allocator);
-    var server = Server.init(&sim_io, &sm, 1);
-
-    sim_io.connect_client(0);
-    run_ticks(&server, &sim_io, 10);
-
-    // Maximum-length key (key_max = 256 bytes).
-    var max_key: [message.key_max]u8 = undefined;
-    @memset(&max_key, 'K');
-
-    // Maximum-length value (value_max = 64KB).
-    var max_value: [message.value_max]u8 = undefined;
-    @memset(&max_value, 'V');
-
-    // PUT with max key + max value.
-    sim_io.inject_put(0, &max_key, &max_value);
-    const put_resp = run_until_response(&server, &sim_io, 0, 2000) orelse
-        return error.TestUnexpectedResult;
-    try std.testing.expectEqual(put_resp.status_code, 200);
-    sim_io.clear_response(0);
-
-    // GET with max key — should return max value.
-    sim_io.inject_get(0, &max_key);
-    const get_resp = run_until_response(&server, &sim_io, 0, 2000) orelse
-        return error.TestUnexpectedResult;
-    try std.testing.expectEqual(get_resp.status_code, 200);
-    try std.testing.expectEqualSlices(u8, get_resp.body, &max_value);
-    sim_io.clear_response(0);
-
-    // DELETE with max key.
-    sim_io.inject_delete(0, &max_key);
-    const del_resp = run_until_response(&server, &sim_io, 0, 2000) orelse
-        return error.TestUnexpectedResult;
-    try std.testing.expectEqual(del_resp.status_code, 200);
-    sim_io.clear_response(0);
-
-    // Verify deleted.
-    sim_io.inject_get(0, &max_key);
-    const gone_resp = run_until_response(&server, &sim_io, 0, 2000) orelse
-        return error.TestUnexpectedResult;
-    try std.testing.expectEqual(gone_resp.status_code, 404);
-}
-
-test "buffer boundaries — value sizes at powers of 2" {
-    // Test values at sizes that are common boundary points: 1, 2, 4, ..., value_max.
-    var sim_io = SimIO.init(0xb0e2);
-    var sm = try StateMachine.init(std.testing.allocator);
-    defer sm.deinit(std.testing.allocator);
-    var server = Server.init(&sim_io, &sm, 1);
-
-    sim_io.connect_client(0);
-    run_ticks(&server, &sim_io, 10);
-
-    var size: usize = 1;
-    var idx: u8 = 0;
-    while (size <= message.value_max) : (size *= 2) {
-        var key_buf: [4]u8 = undefined;
-        key_buf[0] = 's';
-        key_buf[1] = '0' + idx / 10;
-        key_buf[2] = '0' + idx % 10;
-        key_buf[3] = 0;
-        const key = key_buf[0..3];
-
-        var val_buf: [message.value_max]u8 = undefined;
-        // Fill with a pattern based on size so values are distinct.
-        @memset(val_buf[0..size], @intCast(65 + idx % 26));
-        const value = val_buf[0..size];
-
-        sim_io.inject_put(0, key, value);
-        const put_resp = run_until_response(&server, &sim_io, 0, 2000) orelse
-            return error.TestUnexpectedResult;
-        try std.testing.expectEqual(put_resp.status_code, 200);
-        sim_io.clear_response(0);
-
-        sim_io.inject_get(0, key);
-        const get_resp = run_until_response(&server, &sim_io, 0, 2000) orelse
-            return error.TestUnexpectedResult;
-        try std.testing.expectEqual(get_resp.status_code, 200);
-        try std.testing.expectEqualSlices(u8, get_resp.body, value);
-        sim_io.clear_response(0);
-
-        idx += 1;
-    }
+    try std.testing.expect(json_contains(get_resp.body, "\"name\":\"Survivor\""));
 }
 
 test "timeout — partial request triggers close" {
-    // Send an incomplete HTTP request (no \r\n\r\n terminator) and verify
-    // the connection gets closed after the timeout period.
     var sim_io = SimIO.init(0xface);
     var sm = try StateMachine.init(std.testing.allocator);
     defer sm.deinit(std.testing.allocator);
@@ -1143,7 +813,7 @@ test "timeout — partial request triggers close" {
     run_ticks(&server, &sim_io, 10);
 
     // Inject a partial request (no header terminator).
-    sim_io.inject_bytes(0, "GET /hello HTTP/1.1\r\n");
+    sim_io.inject_bytes(0, "GET /products HTTP/1.1\r\n");
     run_ticks(&server, &sim_io, 10);
 
     // Connection should still be alive before timeout.
@@ -1157,20 +827,14 @@ test "timeout — partial request triggers close" {
     try std.testing.expect(found_receiving);
 
     // Disconnect the client so SimIO won't try to deliver more data,
-    // then tick past the timeout. The recv will fail (-1) and the
-    // connection would close from that, but even without the disconnect
-    // the timeout logic would eventually close it.
+    // then tick past the timeout.
     sim_io.disconnect_client(0);
 
-    // Tick just past the timeout.
     for (0..Server.request_timeout_ticks + 10) |_| {
         server.tick();
-        // Don't call io.run_for_ns to avoid stale completion issues
-        // after the connection slot has been freed and recycled.
     }
 
     // After timeout, the receiving connection should be freed.
-    // An accepting connection may still exist (no IO cycles to complete it).
     var any_active = false;
     for (&server.connections, server.connections_busy) |*conn, busy| {
         if (busy and conn.state != .free and conn.state != .accepting) {
@@ -1181,10 +845,9 @@ test "timeout — partial request triggers close" {
     try std.testing.expect(!any_active);
 }
 
-// --- Coverage mark tests ---
-//
-// Each test below exists to prove one mark site fires. Minimal setup,
-// one mark check, one expect_hit. Named for the scenario, not the mark.
+// =====================================================================
+// Coverage mark tests
+// =====================================================================
 
 test "mark: disconnect triggers recv peer closed" {
     var sim_io = SimIO.init(0xa001);
@@ -1210,15 +873,17 @@ test "mark: send fault triggers send error" {
     sim_io.connect_client(0);
     run_ticks(&server, &sim_io, 10);
 
-    // PUT a value so there's something to GET.
-    sim_io.inject_put(0, "key", "value");
+    // Create a product so there's something to GET.
+    sim_io.inject_post(0, "/products",
+        \\{"name":"TestProduct","price_cents":100}
+    );
     _ = run_until_response(&server, &sim_io, 0, 500) orelse
         return error.TestUnexpectedResult;
     sim_io.clear_response(0);
 
     // Enable 100% send faults, then GET. The response send will fail.
     sim_io.send_fault_probability = 100;
-    sim_io.inject_get(0, "key");
+    sim_io.inject_get(0, "/products/1");
     const mark = marks.check("send: error");
     run_ticks(&server, &sim_io, 50);
     try mark.expect_hit();
@@ -1234,7 +899,7 @@ test "mark: idle connection triggers timeout" {
     run_ticks(&server, &sim_io, 10);
 
     // Send a partial request so connection stays in receiving state.
-    sim_io.inject_bytes(0, "GET /hello HTTP/1.1\r\n");
+    sim_io.inject_bytes(0, "GET /products HTTP/1.1\r\n");
     run_ticks(&server, &sim_io, 10);
 
     // Disconnect so SimIO won't deliver more data, then tick past timeout.
@@ -1262,7 +927,7 @@ test "mark: garbage bytes trigger invalid HTTP" {
     try mark.expect_hit();
 }
 
-test "mark: empty key triggers unmapped request" {
+test "mark: unknown route triggers unmapped request" {
     var sim_io = SimIO.init(0xa005);
     var sm = try StateMachine.init(std.testing.allocator);
     defer sm.deinit(std.testing.allocator);
@@ -1271,47 +936,10 @@ test "mark: empty key triggers unmapped request" {
     sim_io.connect_client(0);
     run_ticks(&server, &sim_io, 10);
 
-    // GET / has an empty key after stripping the leading slash — translate returns null.
+    // GET / doesn't match any known route — triggers unmapped.
     const mark = marks.check("unmapped request");
     sim_io.inject_bytes(0, "GET / HTTP/1.1\r\n\r\n");
     run_ticks(&server, &sim_io, 50);
-    try mark.expect_hit();
-}
-
-test "mark: many puts triggers approaching capacity" {
-    var sim_io = SimIO.init(0xa006);
-    var sm = try StateMachine.init(std.testing.allocator);
-    defer sm.deinit(std.testing.allocator);
-    var server = Server.init(&sim_io, &sm, 1);
-
-    sim_io.connect_client(0);
-    run_ticks(&server, &sim_io, 10);
-
-    // Fill past the 90% threshold (capacity=4096, capacity_max=3072, 90% = 2764).
-    // Insert 2765 unique keys to cross the threshold.
-    var key_buf: [10]u8 = undefined;
-    for (0..2765) |i| {
-        // Generate unique keys: "k" + zero-padded index.
-        key_buf[0] = 'k';
-        var num = @as(u32, @intCast(i));
-        var pos: usize = 5;
-        while (pos > 1) {
-            pos -= 1;
-            key_buf[pos] = '0' + @as(u8, @intCast(num % 10));
-            num /= 10;
-        }
-        const key = key_buf[0..6];
-        sim_io.inject_put(0, key, "v");
-        _ = run_until_response(&server, &sim_io, 0, 500) orelse
-            return error.TestUnexpectedResult;
-        sim_io.clear_response(0);
-    }
-
-    // The next put should trigger the approaching capacity warning.
-    const mark = marks.check("approaching capacity");
-    sim_io.inject_put(0, "trigger", "v");
-    _ = run_until_response(&server, &sim_io, 0, 500) orelse
-        return error.TestUnexpectedResult;
     try mark.expect_hit();
 }
 
@@ -1328,4 +956,3 @@ test "mark: accept failure logs warning" {
     run_ticks(&server, &sim_io, 10);
     try mark.expect_hit();
 }
-

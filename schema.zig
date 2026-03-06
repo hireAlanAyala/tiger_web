@@ -1,0 +1,472 @@
+const std = @import("std");
+const assert = std.debug.assert;
+const message = @import("message.zig");
+const http = @import("http.zig");
+
+/// Translate an HTTP method + path + body into a typed Message.
+/// Path format: /collection or /collection/:id
+/// For create/update, parses JSON body into a Product struct.
+/// For get/list/delete, body must be empty.
+/// Returns null if the request doesn't map to a valid operation.
+pub fn translate(method: http.Method, raw_path: []const u8, body: []const u8) ?message.Message {
+    // Strip leading /.
+    const path = if (raw_path.len > 0 and raw_path[0] == '/') raw_path[1..] else raw_path;
+    if (path.len == 0) return null;
+
+    // Strip query string.
+    const path_clean = if (std.mem.indexOf(u8, path, "?")) |q| path[0..q] else path;
+
+    // Split into segments on '/'.
+    const slash_pos = std.mem.indexOf(u8, path_clean, "/");
+    const collection_str = if (slash_pos) |s| path_clean[0..s] else path_clean;
+    const remainder = if (slash_pos) |s| path_clean[s + 1 ..] else "";
+
+    // Match collection.
+    const collection: message.Collection = if (std.mem.eql(u8, collection_str, "products"))
+        .products
+    else
+        return null;
+
+    // Parse optional ID from second segment.
+    const id: u32 = if (remainder.len > 0)
+        parse_u32(remainder) orelse return null
+    else
+        0;
+
+    // Map HTTP method + presence of ID to operation.
+    const operation: message.Operation = switch (method) {
+        .get => if (id != 0) .get else .list,
+        .post => if (id == 0) .create else return null,
+        .put => if (id != 0) .update else return null,
+        .delete => if (id != 0) .delete else return null,
+        .options => return null,
+    };
+
+    // Validate body against operation and build typed message.
+    switch (operation) {
+        .get, .list, .delete => {
+            if (body.len != 0) return null;
+            return .{
+                .operation = operation,
+                .id = id,
+                .body = switch (collection) {
+                    .products => .{ .products = null },
+                },
+            };
+        },
+        .create, .update => {
+            if (body.len == 0) return null;
+            return .{
+                .operation = operation,
+                .id = id,
+                .body = switch (collection) {
+                    .products => .{ .products = parse_product_json(body) orelse return null },
+                },
+            };
+        },
+    }
+}
+
+/// Parse a JSON body into a Product struct.
+/// Hand-rolled parser for known fields. No std.json, no allocations.
+///
+/// Expected format:
+/// {"name":"...","description":"...","price_cents":N,"inventory":N,"active":true/false}
+///
+/// All fields except name are optional for updates. Name is always required.
+fn parse_product_json(body: []const u8) ?message.Product {
+    var product = message.Product{
+        .id = 0, // assigned by state machine on create
+        .name = undefined,
+        .name_len = 0,
+        .description = undefined,
+        .description_len = 0,
+        .price_cents = 0,
+        .inventory = 0,
+        .active = true,
+    };
+
+    // Name is required.
+    const name = json_string_field(body, "name") orelse return null;
+    if (name.len == 0 or name.len > message.product_name_max) return null;
+    @memcpy(product.name[0..name.len], name);
+    product.name_len = @intCast(name.len);
+
+    // Description is optional.
+    if (json_string_field(body, "description")) |desc| {
+        if (desc.len > message.product_description_max) return null;
+        @memcpy(product.description[0..desc.len], desc);
+        product.description_len = @intCast(desc.len);
+    }
+
+    // price_cents is optional (defaults to 0).
+    if (json_u32_field(body, "price_cents")) |price| {
+        product.price_cents = price;
+    }
+
+    // inventory is optional (defaults to 0).
+    if (json_u32_field(body, "inventory")) |inv| {
+        product.inventory = inv;
+    }
+
+    // active is optional (defaults to true).
+    if (json_bool_field(body, "active")) |a| {
+        product.active = a;
+    }
+
+    return product;
+}
+
+/// Encode a MessageResponse as JSON into buf. Returns the written slice.
+/// The response is self-contained — no reference back to the state machine.
+pub fn encode_response_json(buf: []u8, resp: message.MessageResponse) []const u8 {
+    var w = JsonWriter{ .buf = buf, .pos = 0 };
+
+    switch (resp.status) {
+        .not_found => {
+            w.raw("{\"error\":\"not found\"}");
+            return buf[0..w.pos];
+        },
+        .err => {
+            w.raw("{\"error\":\"internal error\"}");
+            return buf[0..w.pos];
+        },
+        .ok => {},
+    }
+
+    switch (resp.body) {
+        .products => |pr| {
+            if (pr.product) |*p| {
+                encode_product(&w, p);
+            } else if (pr.list_len > 0) {
+                w.raw("[");
+                for (pr.list[0..pr.list_len], 0..) |*p, i| {
+                    if (i > 0) w.raw(",");
+                    encode_product(&w, p);
+                }
+                w.raw("]");
+            } else {
+                w.raw("[]");
+            }
+        },
+    }
+
+    return buf[0..w.pos];
+}
+
+fn encode_product(w: *JsonWriter, p: *const message.Product) void {
+    w.raw("{\"id\":");
+    w.write_u32(p.id);
+    w.raw(",\"name\":\"");
+    w.escaped(p.name_slice());
+    w.raw("\",\"description\":\"");
+    w.escaped(p.description_slice());
+    w.raw("\",\"price_cents\":");
+    w.write_u32(p.price_cents);
+    w.raw(",\"inventory\":");
+    w.write_u32(p.inventory);
+    w.raw(",\"active\":");
+    w.raw(if (p.active) "true" else "false");
+    w.raw("}");
+}
+
+// =====================================================================
+// JSON writer — writes directly into a fixed buffer, no allocations
+// =====================================================================
+
+const JsonWriter = struct {
+    buf: []u8,
+    pos: usize,
+
+    fn raw(self: *JsonWriter, s: []const u8) void {
+        assert(self.pos + s.len <= self.buf.len);
+        @memcpy(self.buf[self.pos..][0..s.len], s);
+        self.pos += s.len;
+    }
+
+    fn write_u32(self: *JsonWriter, val: u32) void {
+        var num_buf: [10]u8 = undefined;
+        const s = format_u32(&num_buf, val);
+        self.raw(s);
+    }
+
+    /// Write a string with JSON escaping (quotes and backslashes).
+    fn escaped(self: *JsonWriter, s: []const u8) void {
+        for (s) |c| {
+            switch (c) {
+                '"' => self.raw("\\\""),
+                '\\' => self.raw("\\\\"),
+                '\n' => self.raw("\\n"),
+                '\r' => self.raw("\\r"),
+                '\t' => self.raw("\\t"),
+                else => {
+                    assert(self.pos < self.buf.len);
+                    self.buf[self.pos] = c;
+                    self.pos += 1;
+                },
+            }
+        }
+    }
+};
+
+// =====================================================================
+// JSON field extractors — find known fields in a JSON object
+// =====================================================================
+
+/// Find a string field: "field_name":"value"
+/// Returns the unescaped value or null if not found.
+/// Does NOT handle escaped quotes inside values (sufficient for product names).
+fn json_string_field(json: []const u8, field: []const u8) ?[]const u8 {
+    // Search for "field":
+    var pos: usize = 0;
+    while (pos < json.len) {
+        // Find next quote.
+        const q = std.mem.indexOf(u8, json[pos..], "\"") orelse return null;
+        const abs_q = pos + q;
+
+        // Check if field name matches.
+        if (abs_q + 1 + field.len + 3 > json.len) {
+            pos = abs_q + 1;
+            continue;
+        }
+
+        if (std.mem.eql(u8, json[abs_q + 1 ..][0..field.len], field)) {
+            const after_field = abs_q + 1 + field.len;
+            if (after_field + 3 <= json.len and std.mem.eql(u8, json[after_field..][0..3], "\":\"")) {
+                const val_start = after_field + 3;
+                // Find closing quote (simple — no escape handling).
+                const val_end = std.mem.indexOf(u8, json[val_start..], "\"") orelse return null;
+                return json[val_start..][0..val_end];
+            }
+        }
+        pos = abs_q + 1;
+    }
+    return null;
+}
+
+/// Find a numeric field: "field_name":12345
+fn json_u32_field(json: []const u8, field: []const u8) ?u32 {
+    // Search for "field":
+    var pos: usize = 0;
+    while (pos < json.len) {
+        const q = std.mem.indexOf(u8, json[pos..], "\"") orelse return null;
+        const abs_q = pos + q;
+
+        if (abs_q + 1 + field.len + 2 > json.len) {
+            pos = abs_q + 1;
+            continue;
+        }
+
+        if (std.mem.eql(u8, json[abs_q + 1 ..][0..field.len], field)) {
+            const after_field = abs_q + 1 + field.len;
+            if (after_field + 2 <= json.len and std.mem.eql(u8, json[after_field..][0..2], "\":")) {
+                const val_start = after_field + 2;
+                // Find end of number (next non-digit).
+                var end = val_start;
+                while (end < json.len and json[end] >= '0' and json[end] <= '9') {
+                    end += 1;
+                }
+                if (end == val_start) return null;
+                return std.fmt.parseInt(u32, json[val_start..end], 10) catch return null;
+            }
+        }
+        pos = abs_q + 1;
+    }
+    return null;
+}
+
+/// Find a boolean field: "field_name":true or "field_name":false
+fn json_bool_field(json: []const u8, field: []const u8) ?bool {
+    var pos: usize = 0;
+    while (pos < json.len) {
+        const q = std.mem.indexOf(u8, json[pos..], "\"") orelse return null;
+        const abs_q = pos + q;
+
+        if (abs_q + 1 + field.len + 2 > json.len) {
+            pos = abs_q + 1;
+            continue;
+        }
+
+        if (std.mem.eql(u8, json[abs_q + 1 ..][0..field.len], field)) {
+            const after_field = abs_q + 1 + field.len;
+            if (after_field + 2 <= json.len and std.mem.eql(u8, json[after_field..][0..2], "\":")) {
+                const val_start = after_field + 2;
+                if (val_start + 4 <= json.len and std.mem.eql(u8, json[val_start..][0..4], "true")) return true;
+                if (val_start + 5 <= json.len and std.mem.eql(u8, json[val_start..][0..5], "false")) return false;
+                return null;
+            }
+        }
+        pos = abs_q + 1;
+    }
+    return null;
+}
+
+/// Parse a decimal u32 from a string. Returns null on invalid input.
+fn parse_u32(s: []const u8) ?u32 {
+    if (s.len == 0) return null;
+    return std.fmt.parseInt(u32, s, 10) catch return null;
+}
+
+/// Format a u32 as a decimal string.
+fn format_u32(buf: *[10]u8, val: u32) []const u8 {
+    if (val == 0) {
+        buf[0] = '0';
+        return buf[0..1];
+    }
+    var v = val;
+    var pos: usize = 10;
+    while (v > 0) {
+        pos -= 1;
+        buf[pos] = '0' + @as(u8, @intCast(v % 10));
+        v /= 10;
+    }
+    return buf[pos..10];
+}
+
+// =====================================================================
+// Tests
+// =====================================================================
+
+test "GET /products (list)" {
+    const msg = translate(.get, "/products", "").?;
+    try std.testing.expectEqual(msg.operation, .list);
+    try std.testing.expectEqual(msg.id, 0);
+    try std.testing.expectEqual(msg.body.products, null);
+}
+
+test "GET /products/123 (get)" {
+    const msg = translate(.get, "/products/123", "").?;
+    try std.testing.expectEqual(msg.operation, .get);
+    try std.testing.expectEqual(msg.id, 123);
+}
+
+test "POST /products (create)" {
+    const body =
+        \\{"name":"Widget","description":"A small widget","price_cents":999,"inventory":50,"active":true}
+    ;
+    const msg = translate(.post, "/products", body).?;
+    try std.testing.expectEqual(msg.operation, .create);
+    try std.testing.expectEqual(msg.id, 0);
+    const p = msg.body.products.?;
+    try std.testing.expectEqualSlices(u8, p.name_slice(), "Widget");
+    try std.testing.expectEqualSlices(u8, p.description_slice(), "A small widget");
+    try std.testing.expectEqual(p.price_cents, 999);
+    try std.testing.expectEqual(p.inventory, 50);
+    try std.testing.expect(p.active);
+}
+
+test "PUT /products/42 (update)" {
+    const msg = translate(.put, "/products/42",
+        \\{"name":"Updated"}
+    ).?;
+    try std.testing.expectEqual(msg.operation, .update);
+    try std.testing.expectEqual(msg.id, 42);
+    try std.testing.expect(msg.body.products != null);
+}
+
+test "DELETE /products/7 (delete)" {
+    const msg = translate(.delete, "/products/7", "").?;
+    try std.testing.expectEqual(msg.operation, .delete);
+    try std.testing.expectEqual(msg.id, 7);
+}
+
+test "rejects unknown collection" {
+    try std.testing.expect(translate(.get, "/orders", "") == null);
+    try std.testing.expect(translate(.get, "/", "") == null);
+    try std.testing.expect(translate(.get, "", "") == null);
+}
+
+test "rejects invalid method/path combos" {
+    // POST with ID.
+    try std.testing.expect(translate(.post, "/products/1",
+        \\{"name":"X"}
+    ) == null);
+    // PUT without ID.
+    try std.testing.expect(translate(.put, "/products",
+        \\{"name":"X"}
+    ) == null);
+    // DELETE without ID.
+    try std.testing.expect(translate(.delete, "/products", "") == null);
+}
+
+test "strips query string" {
+    const msg = translate(.get, "/products?page=1", "").?;
+    try std.testing.expectEqual(msg.operation, .list);
+}
+
+test "GET rejects non-empty body" {
+    try std.testing.expect(translate(.get, "/products/1", "data") == null);
+}
+
+test "POST rejects empty body" {
+    try std.testing.expect(translate(.post, "/products", "") == null);
+}
+
+test "POST rejects missing name" {
+    try std.testing.expect(translate(.post, "/products", "{\"price_cents\":100}") == null);
+}
+
+test "json_string_field extracts value" {
+    const json =
+        \\{"name":"hello","other":"world"}
+    ;
+    const val = json_string_field(json, "name").?;
+    try std.testing.expectEqualSlices(u8, val, "hello");
+    const other = json_string_field(json, "other").?;
+    try std.testing.expectEqualSlices(u8, other, "world");
+}
+
+test "json_u32_field extracts number" {
+    const json =
+        \\{"price_cents":1999,"inventory":42}
+    ;
+    try std.testing.expectEqual(json_u32_field(json, "price_cents").?, 1999);
+    try std.testing.expectEqual(json_u32_field(json, "inventory").?, 42);
+}
+
+test "json_bool_field extracts boolean" {
+    try std.testing.expectEqual(json_bool_field(
+        \\{"active":true}
+    , "active").?, true);
+    try std.testing.expectEqual(json_bool_field(
+        \\{"active":false}
+    , "active").?, false);
+}
+
+test "encode_response_json — single product" {
+    var p = message.Product{
+        .id = 1,
+        .name = undefined,
+        .name_len = 6,
+        .description = undefined,
+        .description_len = 4,
+        .price_cents = 999,
+        .inventory = 10,
+        .active = true,
+    };
+    @memcpy(p.name[0..6], "Widget");
+    @memcpy(p.description[0..4], "Cool");
+
+    const resp = message.MessageResponse{
+        .status = .ok,
+        .body = .{ .products = .{ .product = p, .list = undefined, .list_len = 0 } },
+    };
+
+    var buf: [4096]u8 = undefined;
+    const json = encode_response_json(&buf, resp);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"id\":1") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"name\":\"Widget\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"price_cents\":999") != null);
+}
+
+test "encode_response_json — not found" {
+    var buf: [4096]u8 = undefined;
+    const json = encode_response_json(&buf, message.MessageResponse.product_not_found);
+    try std.testing.expectEqualSlices(u8, json, "{\"error\":\"not found\"}");
+}
+
+test "encode_response_json — empty list" {
+    var buf: [4096]u8 = undefined;
+    const json = encode_response_json(&buf, message.MessageResponse.product_empty_ok);
+    try std.testing.expectEqualSlices(u8, json, "[]");
+}

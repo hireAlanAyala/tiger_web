@@ -2,6 +2,8 @@ const std = @import("std");
 const assert = std.debug.assert;
 const maybe = @import("message.zig").maybe;
 const message = @import("message.zig");
+const schema = @import("schema.zig");
+const http = @import("http.zig");
 const StateMachine = @import("state_machine.zig").StateMachine;
 const ConnectionType = @import("connection.zig").ConnectionType;
 const marks = @import("marks.zig");
@@ -60,7 +62,7 @@ pub fn ServerType(comptime IO: type) type {
         /// One tick of the server. Called from the main event loop.
         ///
         /// 1. Accept new connections if slots available
-        /// 2. Process inbox: run prefetch/execute for ready requests
+        /// 2. Process inbox: execute ready requests
         /// 3. Flush outbox: start sending responses
         /// 4. Continue receiving on connections that need more bytes
         /// 5. Close dead connections
@@ -118,23 +120,17 @@ pub fn ServerType(comptime IO: type) type {
         // --- Inbox: process ready requests ---
 
         fn process_inbox(server: *Server) void {
+            // Scratch buffer for encoding JSON responses.
+            var json_buf: [http.response_body_max]u8 = undefined;
+
             for (&server.connections, &server.connections_busy) |*conn, busy| {
                 if (!busy) continue;
                 if (conn.state != .ready) continue;
 
-                const req = conn.request orelse unreachable;
-
-                // Two-phase: prefetch then execute.
-                const prefetched = server.state_machine.prefetch(req.key);
-                const resp = server.state_machine.execute(
-                    req.header.operation,
-                    req.key,
-                    req.value,
-                    prefetched,
-                );
-
-                // Place response in outbox.
-                conn.set_response(resp.header.status, resp.value);
+                const msg = conn.typed_message orelse unreachable;
+                const resp = server.state_machine.execute(msg);
+                const json = schema.encode_response_json(&json_buf, resp);
+                conn.set_json_response(json, resp.status);
             }
         }
 

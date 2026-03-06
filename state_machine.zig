@@ -5,331 +5,318 @@ const message = @import("message.zig");
 const marks = @import("marks.zig");
 const log = marks.wrap_log(std.log.scoped(.state_machine));
 
-/// Maximum number of entries in the KV store.
-/// Power of 2 for efficient open-addressing.
-const capacity = 4096;
-
-/// Load factor threshold — rehashing not needed since capacity is fixed.
-/// We assert on insert that we don't exceed this.
-const capacity_max = capacity * 3 / 4;
-
 pub const StateMachine = struct {
-    const Entry = struct {
-        key_buf: [message.key_max]u8,
-        key_len: u16,
-        value_buf: [message.value_max]u8,
-        value_len: u32,
+    /// Maximum number of products.
+    pub const product_capacity = 1024;
+
+    pub const ProductEntry = struct {
+        product: message.Product,
         occupied: bool,
     };
 
-    pub const PrefetchResult = struct {
-        found: bool,
-        slot: u32,
-    };
-
-    entries: *[capacity]Entry,
-    count: u32,
-    phase: Phase,
-
-    comptime {
-        // capacity must be power of 2 for open-addressing wrap.
-        assert(capacity > 0);
-        assert(capacity & (capacity - 1) == 0);
-        // Load factor limit must be below capacity.
-        assert(capacity_max < capacity);
-        assert(capacity_max > 0);
-        // key_max must fit in u16 (RequestHeader.key_len).
-        assert(message.key_max <= std.math.maxInt(u16));
-        // value_max must fit in u32 (RequestHeader.value_len).
-        assert(message.value_max <= std.math.maxInt(u32));
-    }
-
-    const empty_entry = Entry{
-        .key_buf = undefined,
-        .key_len = 0,
-        .value_buf = undefined,
-        .value_len = 0,
+    const empty_product_entry = ProductEntry{
+        .product = undefined,
         .occupied = false,
     };
 
+    products: *[product_capacity]ProductEntry,
+    product_count: u32,
+    product_next_id: u32,
+
+    comptime {
+        assert(product_capacity > 0);
+    }
+
     /// Allocate all storage upfront. No allocation after init.
     pub fn init(allocator: std.mem.Allocator) !StateMachine {
-        const entries = try allocator.create([capacity]Entry);
-        @memset(entries, empty_entry);
+        const products = try allocator.create([product_capacity]ProductEntry);
+        @memset(products, empty_product_entry);
         return .{
-            .entries = entries,
-            .count = 0,
-            .phase = .idle,
+            .products = products,
+            .product_count = 0,
+            .product_next_id = 1,
         };
     }
 
     pub fn deinit(self: *StateMachine, allocator: std.mem.Allocator) void {
-        allocator.destroy(self.entries);
-    }
-
-    const Phase = enum {
-        idle,
-        prefetched,
-    };
-
-    /// Phase 1: Look up a key. Returns whether it was found and the slot
-    /// (either the existing entry's slot or the first free slot for insertion).
-    /// This is a pure read — no mutation.
-    pub fn prefetch(self: *StateMachine, key: []const u8) PrefetchResult {
-        assert(self.phase == .idle);
-        assert(key.len > 0);
-        assert(key.len <= message.key_max);
-
-        self.phase = .prefetched;
-
-        var slot = hash(key);
-        var probes: u32 = 0;
-        while (probes < capacity) : (probes += 1) {
-            const entry = &self.entries[slot];
-            if (!entry.occupied) {
-                return .{ .found = false, .slot = slot };
-            }
-            if (entry.key_len == key.len and
-                std.mem.eql(u8, entry.key_buf[0..entry.key_len], key))
-            {
-                return .{ .found = true, .slot = slot };
-            }
-            slot = (slot + 1) % capacity;
-        }
-
-        // Table is full — should never happen due to capacity_max check on insert.
-        unreachable;
-    }
-
-    /// Phase 2: Execute the operation using the prefetched result.
-    /// This is where mutation happens for put/delete.
-    /// Returns a Response (status + optional value).
-    pub fn execute(
-        self: *StateMachine,
-        operation: message.Operation,
-        key: []const u8,
-        value: []const u8,
-        prefetched: PrefetchResult,
-    ) message.Response {
-        assert(self.phase == .prefetched);
-        self.phase = .idle;
-
-        // Validate operation/value consistency.
-        switch (operation) {
-            .put => assert(value.len > 0),
-            .get, .delete => assert(value.len == 0),
-        }
-        assert(key.len > 0);
-        assert(key.len <= message.key_max);
-        assert(value.len <= message.value_max);
-        assert(prefetched.slot < capacity);
-
-        switch (operation) {
-            .get => return self.execute_get(prefetched),
-            .put => return self.execute_put(key, value, prefetched),
-            .delete => return self.execute_delete(prefetched),
-        }
-    }
-
-    fn execute_get(self: *const StateMachine, prefetched: PrefetchResult) message.Response {
-        // Key may or may not exist.
-        maybe(prefetched.found);
-        if (!prefetched.found) {
-            return .{ .header = .{ .status = .not_found, .value_len = 0 }, .value = "" };
-        }
-
-        const entry = &self.entries[prefetched.slot];
-        assert(entry.occupied);
-        assert(entry.key_len > 0);
-        assert(entry.key_len <= message.key_max);
-        assert(entry.value_len > 0);
-        assert(entry.value_len <= message.value_max);
-
-        return .{
-            .header = .{ .status = .ok, .value_len = entry.value_len },
-            .value = entry.value_buf[0..entry.value_len],
-        };
-    }
-
-    fn execute_put(self: *StateMachine, key: []const u8, value: []const u8, prefetched: PrefetchResult) message.Response {
-        const entry = &self.entries[prefetched.slot];
-
-        // Key may or may not already exist (insert vs overwrite).
-        maybe(prefetched.found);
-        if (!prefetched.found) {
-            // New entry — check we haven't exceeded load factor.
-            assert(!entry.occupied);
-            assert(self.count < capacity_max);
-            self.count += 1;
-            if (self.count > capacity_max * 9 / 10) {
-                log.mark.warn("approaching capacity: {d}/{d}", .{ self.count, capacity_max });
-            }
-            entry.occupied = true;
-            entry.key_len = @intCast(key.len);
-            @memcpy(entry.key_buf[0..key.len], key);
-        } else {
-            // Overwrite — existing key must match.
-            assert(entry.occupied);
-            assert(entry.key_len == key.len);
-            assert(std.mem.eql(u8, entry.key_buf[0..entry.key_len], key));
-        }
-
-        assert(entry.occupied);
-        entry.value_len = @intCast(value.len);
-        @memcpy(entry.value_buf[0..value.len], value);
-
-        return .{ .header = .{ .status = .ok, .value_len = 0 }, .value = "" };
-    }
-
-    fn execute_delete(self: *StateMachine, prefetched: PrefetchResult) message.Response {
-        // Key may or may not exist.
-        maybe(prefetched.found);
-        if (!prefetched.found) {
-            return .{ .header = .{ .status = .not_found, .value_len = 0 }, .value = "" };
-        }
-
-        // Tombstone deletion with re-probe of subsequent entries.
-        // Mark slot as free and re-insert any entries that may have
-        // been displaced by this slot.
-        self.remove_and_reinsert(prefetched.slot);
-
-        return .{ .header = .{ .status = .ok, .value_len = 0 }, .value = "" };
-    }
-
-    fn remove_and_reinsert(self: *StateMachine, removed_slot: u32) void {
-        assert(removed_slot < capacity);
-        assert(self.entries[removed_slot].occupied);
-        assert(self.count > 0);
-        const count_before = self.count;
-
-        self.entries[removed_slot].occupied = false;
-        self.count -= 1;
-
-        // Re-probe subsequent entries to fill the gap.
-        var slot = (removed_slot + 1) % capacity;
-        while (self.entries[slot].occupied) {
-            const entry = self.entries[slot];
-            self.entries[slot].occupied = false;
-            self.count -= 1;
-
-            // Re-insert using the normal probe sequence.
-            assert(entry.key_len > 0);
-            assert(entry.key_len <= message.key_max);
-            const key = entry.key_buf[0..entry.key_len];
-            var target = hash(key);
-            while (self.entries[target].occupied) {
-                target = (target + 1) % capacity;
-            }
-            self.entries[target] = entry;
-            self.count += 1;
-
-            slot = (slot + 1) % capacity;
-        }
-
-        // Exactly one entry was removed.
-        assert(self.count == count_before - 1);
-    }
-
-    fn hash(key: []const u8) u32 {
-        // FNV-1a hash, masked to table size.
-        var h: u32 = 2166136261;
-        for (key) |byte| {
-            h ^= byte;
-            h *%= 16777619;
-        }
-        return h % capacity;
+        allocator.destroy(self.products);
     }
 
     pub fn reset(self: *StateMachine) void {
-        @memset(self.entries, empty_entry);
-        self.count = 0;
-        self.phase = .idle;
+        @memset(self.products, empty_product_entry);
+        self.product_count = 0;
+        self.product_next_id = 1;
     }
+
+    /// Execute an operation. Dispatches on the collection tag, then the operation.
+    pub fn execute(self: *StateMachine, msg: message.Message) message.MessageResponse {
+        switch (msg.body) {
+            .products => |product| {
+                switch (msg.operation) {
+                    .get => return self.product_get(msg.id),
+                    .list => return self.product_list(),
+                    .create => return self.product_create(product.?),
+                    .update => return self.product_update(msg.id, product.?),
+                    .delete => return self.product_delete(msg.id),
+                }
+            },
+        }
+    }
+
+    fn product_get(self: *const StateMachine, id: u32) message.MessageResponse {
+        assert(id > 0);
+        const slot = self.find_product(id);
+        maybe(slot != null);
+        if (slot) |s| {
+            assert(self.products[s].occupied);
+            return .{
+                .status = .ok,
+                .body = .{ .products = .{
+                    .product = self.products[s].product,
+                    .list = undefined,
+                    .list_len = 0,
+                } },
+            };
+        }
+        return message.MessageResponse.product_not_found;
+    }
+
+    fn product_list(self: *const StateMachine) message.MessageResponse {
+        var result = message.MessageResponse{
+            .status = .ok,
+            .body = .{ .products = .{
+                .product = null,
+                .list = undefined,
+                .list_len = 0,
+            } },
+        };
+        var pr = &result.body.products;
+        for (self.products) |*entry| {
+            if (!entry.occupied) continue;
+            assert(pr.list_len < message.MessageResponse.list_max);
+            pr.list[pr.list_len] = entry.product;
+            pr.list_len += 1;
+        }
+        assert(pr.list_len == self.product_count);
+        return result;
+    }
+
+    fn product_create(self: *StateMachine, product: message.Product) message.MessageResponse {
+        assert(product.name_len > 0);
+        assert(self.product_count < product_capacity);
+
+        const slot = self.find_free_product_slot() orelse unreachable;
+        assert(!self.products[slot].occupied);
+
+        var new_product = product;
+        new_product.id = self.product_next_id;
+        self.product_next_id += 1;
+
+        self.products[slot] = .{
+            .product = new_product,
+            .occupied = true,
+        };
+        self.product_count += 1;
+
+        return .{
+            .status = .ok,
+            .body = .{ .products = .{
+                .product = new_product,
+                .list = undefined,
+                .list_len = 0,
+            } },
+        };
+    }
+
+    fn product_update(self: *StateMachine, id: u32, product: message.Product) message.MessageResponse {
+        assert(id > 0);
+        assert(product.name_len > 0);
+        const slot = self.find_product(id) orelse return message.MessageResponse.product_not_found;
+        assert(self.products[slot].occupied);
+
+        var updated = product;
+        updated.id = id;
+        self.products[slot].product = updated;
+
+        return .{
+            .status = .ok,
+            .body = .{ .products = .{
+                .product = updated,
+                .list = undefined,
+                .list_len = 0,
+            } },
+        };
+    }
+
+    fn product_delete(self: *StateMachine, id: u32) message.MessageResponse {
+        assert(id > 0);
+        const slot = self.find_product(id);
+        maybe(slot != null);
+        if (slot) |s| {
+            assert(self.products[s].occupied);
+            assert(self.product_count > 0);
+            self.products[s].occupied = false;
+            self.product_count -= 1;
+            return message.MessageResponse.product_empty_ok;
+        }
+        return message.MessageResponse.product_not_found;
+    }
+
+    fn find_product(self: *const StateMachine, id: u32) ?usize {
+        for (self.products, 0..) |*entry, i| {
+            if (entry.occupied and entry.product.id == id) return i;
+        }
+        return null;
+    }
+
+    fn find_free_product_slot(self: *const StateMachine) ?usize {
+        for (self.products, 0..) |*entry, i| {
+            if (!entry.occupied) return i;
+        }
+        return null;
+    }
+
 };
 
-test "put and get" {
-    var sm = try StateMachine.init(std.testing.allocator);
-    defer sm.deinit(std.testing.allocator);
+// =====================================================================
+// Tests
+// =====================================================================
 
-    const prefetch_put = sm.prefetch("hello");
-    const resp_put = sm.execute(.put, "hello", "world", prefetch_put);
-    try std.testing.expectEqual(resp_put.header.status, .ok);
-
-    const prefetch_get = sm.prefetch("hello");
-    const resp_get = sm.execute(.get, "hello", "", prefetch_get);
-    try std.testing.expectEqual(resp_get.header.status, .ok);
-    try std.testing.expectEqualSlices(u8, resp_get.value, "world");
+fn make_test_product(name: []const u8, price: u32) message.Product {
+    var p = message.Product{
+        .id = 0,
+        .name = undefined,
+        .name_len = @intCast(name.len),
+        .description = undefined,
+        .description_len = 0,
+        .price_cents = price,
+        .inventory = 0,
+        .active = true,
+    };
+    @memcpy(p.name[0..name.len], name);
+    return p;
 }
 
-test "get missing key" {
+test "create and get" {
     var sm = try StateMachine.init(std.testing.allocator);
     defer sm.deinit(std.testing.allocator);
 
-    const prefetched = sm.prefetch("missing");
-    const resp = sm.execute(.get, "missing", "", prefetched);
-    try std.testing.expectEqual(resp.header.status, .not_found);
+    const create_resp = sm.execute(.{
+        .operation = .create,
+        .id = 0,
+        .body = .{ .products = make_test_product("Widget", 999) },
+    });
+    try std.testing.expectEqual(create_resp.status, .ok);
+    const created = create_resp.body.products.product.?;
+    try std.testing.expectEqual(created.id, 1);
+    try std.testing.expectEqualSlices(u8, created.name_slice(), "Widget");
+    try std.testing.expectEqual(created.price_cents, 999);
+
+    const get_resp = sm.execute(.{
+        .operation = .get,
+        .id = 1,
+        .body = .{ .products = null },
+    });
+    try std.testing.expectEqual(get_resp.status, .ok);
+    try std.testing.expectEqualSlices(u8, get_resp.body.products.product.?.name_slice(), "Widget");
 }
 
-test "put overwrite" {
+test "get missing" {
     var sm = try StateMachine.init(std.testing.allocator);
     defer sm.deinit(std.testing.allocator);
 
-    const p1 = sm.prefetch("key");
-    _ = sm.execute(.put, "key", "value1", p1);
+    const resp = sm.execute(.{
+        .operation = .get,
+        .id = 99,
+        .body = .{ .products = null },
+    });
+    try std.testing.expectEqual(resp.status, .not_found);
+}
 
-    const p2 = sm.prefetch("key");
-    _ = sm.execute(.put, "key", "value2", p2);
+test "update" {
+    var sm = try StateMachine.init(std.testing.allocator);
+    defer sm.deinit(std.testing.allocator);
 
-    const p3 = sm.prefetch("key");
-    const resp = sm.execute(.get, "key", "", p3);
-    try std.testing.expectEqualSlices(u8, resp.value, "value2");
+    const create_resp = sm.execute(.{
+        .operation = .create,
+        .id = 0,
+        .body = .{ .products = make_test_product("Old Name", 100) },
+    });
+    const id = create_resp.body.products.product.?.id;
+
+    const update_resp = sm.execute(.{
+        .operation = .update,
+        .id = id,
+        .body = .{ .products = make_test_product("New Name", 200) },
+    });
+    try std.testing.expectEqual(update_resp.status, .ok);
+    try std.testing.expectEqualSlices(u8, update_resp.body.products.product.?.name_slice(), "New Name");
+    try std.testing.expectEqual(update_resp.body.products.product.?.price_cents, 200);
+    try std.testing.expectEqual(update_resp.body.products.product.?.id, id);
 }
 
 test "delete" {
     var sm = try StateMachine.init(std.testing.allocator);
     defer sm.deinit(std.testing.allocator);
 
-    const p1 = sm.prefetch("key");
-    _ = sm.execute(.put, "key", "value", p1);
+    const create_resp = sm.execute(.{
+        .operation = .create,
+        .id = 0,
+        .body = .{ .products = make_test_product("Doomed", 100) },
+    });
+    const id = create_resp.body.products.product.?.id;
 
-    const p2 = sm.prefetch("key");
-    const resp_del = sm.execute(.delete, "key", "", p2);
-    try std.testing.expectEqual(resp_del.header.status, .ok);
+    const del_resp = sm.execute(.{
+        .operation = .delete,
+        .id = id,
+        .body = .{ .products = null },
+    });
+    try std.testing.expectEqual(del_resp.status, .ok);
 
-    const p3 = sm.prefetch("key");
-    const resp_get = sm.execute(.get, "key", "", p3);
-    try std.testing.expectEqual(resp_get.header.status, .not_found);
+    const get_resp = sm.execute(.{
+        .operation = .get,
+        .id = id,
+        .body = .{ .products = null },
+    });
+    try std.testing.expectEqual(get_resp.status, .not_found);
 }
 
 test "delete missing" {
     var sm = try StateMachine.init(std.testing.allocator);
     defer sm.deinit(std.testing.allocator);
 
-    const p = sm.prefetch("missing");
-    const resp = sm.execute(.delete, "missing", "", p);
-    try std.testing.expectEqual(resp.header.status, .not_found);
+    const resp = sm.execute(.{
+        .operation = .delete,
+        .id = 99,
+        .body = .{ .products = null },
+    });
+    try std.testing.expectEqual(resp.status, .not_found);
 }
 
-test "delete does not break probe chains" {
+test "list" {
     var sm = try StateMachine.init(std.testing.allocator);
     defer sm.deinit(std.testing.allocator);
 
-    // Insert multiple keys that may collide.
-    const keys = [_][]const u8{ "alpha", "bravo", "charlie", "delta", "echo" };
-    for (keys) |key| {
-        const p = sm.prefetch(key);
-        _ = sm.execute(.put, key, "v", p);
-    }
+    _ = sm.execute(.{ .operation = .create, .id = 0, .body = .{ .products = make_test_product("A", 100) } });
+    _ = sm.execute(.{ .operation = .create, .id = 0, .body = .{ .products = make_test_product("B", 200) } });
 
-    // Delete one from the middle.
-    const pd = sm.prefetch("charlie");
-    _ = sm.execute(.delete, "charlie", "", pd);
+    const resp = sm.execute(.{
+        .operation = .list,
+        .id = 0,
+        .body = .{ .products = null },
+    });
+    try std.testing.expectEqual(resp.status, .ok);
+    try std.testing.expectEqual(resp.body.products.list_len, 2);
+    try std.testing.expectEqualSlices(u8, resp.body.products.list[0].name_slice(), "A");
+    try std.testing.expectEqualSlices(u8, resp.body.products.list[1].name_slice(), "B");
+}
 
-    // All others should still be findable.
-    for (keys) |key| {
-        if (std.mem.eql(u8, key, "charlie")) continue;
-        const p = sm.prefetch(key);
-        const resp = sm.execute(.get, key, "", p);
-        try std.testing.expectEqual(resp.header.status, .ok);
-    }
+test "auto-increment IDs" {
+    var sm = try StateMachine.init(std.testing.allocator);
+    defer sm.deinit(std.testing.allocator);
+
+    const r1 = sm.execute(.{ .operation = .create, .id = 0, .body = .{ .products = make_test_product("A", 1) } });
+    const r2 = sm.execute(.{ .operation = .create, .id = 0, .body = .{ .products = make_test_product("B", 2) } });
+    try std.testing.expectEqual(r1.body.products.product.?.id, 1);
+    try std.testing.expectEqual(r2.body.products.product.?.id, 2);
 }
