@@ -22,11 +22,18 @@ TigerBeetle's IO layer, tick loop, and message pipeline are all designed around 
 
 We have one process, one state machine. The tick loop drives a single accept → recv → execute → send pipeline. No prepare/commit distinction, no view changes, no repair protocol.
 
-## HTTP Instead of Binary Protocol
+## HTTP/JSON Instead of Binary Protocol
 
-TigerBeetle uses a fixed-size binary message protocol with checksums, operation codes, and header/body separation designed for zero-copy processing.
+TigerBeetle uses a custom binary protocol where the struct layout *is* the wire format. Clients are compiled-language libraries (Go, Rust, C, Java) that share the same struct layout as the server — an `Account` struct in Go is byte-identical to the Zig `Account` struct. No serialization on either side. The client passes `unsafe.Pointer(&accounts[0])` directly into the packet, and the server reinterprets the bytes as typed structs. Replies work the same way: the state machine writes result structs into an `output_buffer`, and the client casts the bytes back.
 
-We parse HTTP/1.1 text — variable-length headers, Content-Length framing, URL-decoded keys. The HTTP parser (`http.zig`) is a pure function with no allocations, which keeps it close to TigerBeetle's style, but the format itself is fundamentally different.
+This only works because TigerBeetle controls the client libraries and targets languages with deterministic struct layout. Our clients are browsers. JavaScript has no fixed-layout structs — even with `ArrayBuffer` and `DataView`, constructing and parsing binary structs is manual serialization with extra steps. Every browser API (fetch, WebSocket, WebTransport) has the same limitation: the JS side must encode/decode regardless of the transport.
+
+This is why we have `schema.zig` — a layer that doesn't exist in TigerBeetle. It translates between HTTP/JSON at the edge and typed structs internally:
+
+- **Inbound:** `schema.translate()` parses HTTP method + path + JSON body into a typed `Message`
+- **Outbound:** `schema.encode_response_json()` serializes a `MessageResponse` back to JSON
+
+The state machine never sees HTTP or JSON, same as TigerBeetle's never sees wire bytes. The boundary separation is identical — we just have an extra translation step at the edges that TigerBeetle avoids by controlling both sides of the protocol.
 
 ## Allocator at Init
 

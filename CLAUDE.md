@@ -1,28 +1,34 @@
 # Tiger Web
 
-HTTP key-value server built in Zig, following TigerBeetle conventions.
+Ecommerce HTTP server built in Zig, following TigerBeetle conventions.
 
 ## Quick Reference
 
 ```bash
 sh zig/download.sh          # one-time: download Zig 0.14.1
 ./zig/zig build run          # run the server (default port 3000)
-./zig/zig build unit-test    # unit tests (message, state_machine, http, marks)
+./zig/zig build unit-test    # unit tests (message, state_machine, http, marks, schema)
 ./zig/zig build test         # simulation tests (PRNG-driven, full stack)
 ```
 
 ## Architecture
 
-Single-threaded event loop using epoll. No allocations after startup.
+Single-threaded event loop using epoll. No allocations after startup. 4-layer request pipeline:
+
+```
+http.zig → schema.zig → message.zig → state_machine.zig
+(parse HTTP)  (route + JSON → typed)  (types)  (execute on typed structs)
+```
 
 | File | Role |
 |---|---|
-| `main.zig` | Entry point, signal handling, tick loop |
+| `main.zig` | Entry point, tick loop |
 | `server.zig` | Accepts connections, drives tick-based state machine |
 | `connection.zig` | Per-connection state machine (accepting → receiving → ready → sending) |
 | `http.zig` | HTTP/1.0+1.1 parser and response encoder |
-| `message.zig` | Binary request/response types, key/value size limits |
-| `state_machine.zig` | In-memory KV store (get/put/delete) |
+| `schema.zig` | Route parsing, JSON ↔ typed struct translation |
+| `message.zig` | Types: KV ops, Product, Collection, Message, MessageResponse |
+| `state_machine.zig` | In-memory KV store + product CRUD |
 | `io.zig` | epoll IO layer (real syscalls) |
 | `marks.zig` | Coverage marks — links log sites to test assertions |
 | `sim.zig` | Simulated IO + PRNG-driven fuzz/integration tests |

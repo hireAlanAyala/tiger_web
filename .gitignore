@@ -1,8 +1,4 @@
-zig-out/
-zig-cache/
+.claude/
 .zig-cache/
-zig/zig
-zig/lib/
-zig/doc/
-zig/LICENSE
-zig/README.md
+zig-out/
+zig/

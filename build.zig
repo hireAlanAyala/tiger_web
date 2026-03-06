@@ -6,7 +6,7 @@ pub fn build(b: *std.Build) void {
 
     // --- Main executable ---
     const exe = b.addExecutable(.{
-        .name = "kv-server",
+        .name = "tiger-web",
         .root_source_file = b.path("main.zig"),
         .target = target,
         .optimize = optimize,
@@ -16,7 +16,7 @@ pub fn build(b: *std.Build) void {
     const run_cmd = b.addRunArtifact(exe);
     run_cmd.step.dependOn(b.getInstallStep());
     if (b.args) |args| run_cmd.addArgs(args);
-    const run_step = b.step("run", "Run the KV server");
+    const run_step = b.step("run", "Run the server");
     run_step.dependOn(&run_cmd.step);
 
     // --- Simulation tests ---
@@ -35,6 +35,7 @@ pub fn build(b: *std.Build) void {
         "state_machine.zig",
         "http.zig",
         "marks.zig",
+        "schema.zig",
     };
     const unit_test_step = b.step("unit-test", "Run unit tests");
     for (modules) |mod| {
