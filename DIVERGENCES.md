@@ -39,7 +39,7 @@ The state machine never sees HTTP or JSON, same as TigerBeetle's never sees wire
 
 TigerBeetle's state machine uses fixed-capacity data structures sized at comptime. No allocator touches the hot path.
 
-Our `StateMachine` takes an allocator at `init` to allocate the hash map backing storage, then never allocates again. This is a pragmatic choice — Zig's `HashMap` needs an allocator for its backing array. The hot path (get/put/delete) is still allocation-free.
+Our `MemoryStorage` takes an allocator at `init` to allocate fixed-size backing arrays, then never allocates again. The hot path (get/put/delete) is allocation-free.
 
 ## No Graceful Shutdown
 
