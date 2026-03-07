@@ -1,9 +1,11 @@
 const std = @import("std");
 const IO = @import("io.zig").IO;
+const state_machine = @import("state_machine.zig");
+const SqliteStorage = @import("storage.zig").SqliteStorage;
+const StateMachine = state_machine.StateMachineType(SqliteStorage);
 const ServerType = @import("server.zig").ServerType;
-const StateMachine = @import("state_machine.zig").StateMachine;
 
-const Server = ServerType(IO);
+const Server = ServerType(IO, SqliteStorage);
 const marks = @import("marks.zig");
 const log = marks.wrap_log(std.log.scoped(.main));
 
@@ -19,17 +21,17 @@ pub fn main() !void {
     var io = try IO.init();
     defer io.deinit();
 
-    var state_machine = try StateMachine.init(std.heap.page_allocator);
-    defer state_machine.deinit(std.heap.page_allocator);
+    var storage = try SqliteStorage.init("tiger_web.db");
+    defer storage.deinit();
+    var sm = StateMachine.init(&storage);
 
     const listen_fd = try IO.open_listener(address);
 
-    var server = Server.init(&io, &state_machine, listen_fd);
+    var server = Server.init(&io, &sm, listen_fd);
 
     log.info("listening on port {d}", .{port});
 
     // Main event loop. No signal handling — let the OS kill the process.
-    // The store is in-memory; all state is lost on any exit. Clients retry.
     while (true) {
         server.tick();
         io.run_for_ns(tick_ns);
