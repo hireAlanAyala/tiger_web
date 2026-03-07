@@ -2,7 +2,9 @@ const std = @import("std");
 const assert = std.debug.assert;
 const message = @import("message.zig");
 const http = @import("http.zig");
-const StateMachine = @import("state_machine.zig").StateMachine;
+const state_machine = @import("state_machine.zig");
+const MemoryStorage = state_machine.MemoryStorage;
+const StateMachine = state_machine.StateMachineType(MemoryStorage);
 const ServerType = @import("server.zig").ServerType;
 const ConnectionType = @import("connection.zig").ConnectionType;
 const marks = @import("marks.zig");
@@ -519,7 +521,7 @@ fn format_u32(buf: *[10]u8, val: u32) []const u8 {
     return buf[pos..10];
 }
 
-const Server = ServerType(SimIO);
+const Server = ServerType(SimIO, MemoryStorage);
 
 /// Run ticks until the server processes pending work.
 fn run_ticks(server: *Server, io: *SimIO, n: usize) void {
@@ -549,30 +551,32 @@ fn json_contains(body: []const u8, needle: []const u8) bool {
 // Product CRUD integration tests
 // =====================================================================
 
+const test_uuid1 = "aabbccdd11223344aabbccdd11223344";
+const test_uuid2 = "aabbccdd11223344aabbccdd11223345";
+
 test "product CRUD — create, get, update, delete" {
     var sim_io = SimIO.init(0xb001);
-    var sm = try StateMachine.init(std.testing.allocator);
-    defer sm.deinit(std.testing.allocator);
+    var storage = try MemoryStorage.init(std.testing.allocator);
+    defer storage.deinit(std.testing.allocator);
+    var sm = StateMachine.init(&storage);
     var server = Server.init(&sim_io, &sm, 1);
 
     sim_io.connect_client(0);
     run_ticks(&server, &sim_io, 10);
 
     // CREATE
-    const create_body =
-        \\{"name":"Widget","description":"A cool widget","price_cents":1999,"inventory":50,"active":true}
-    ;
+    const create_body = "{\"id\":\"" ++ test_uuid1 ++ "\",\"name\":\"Widget\",\"description\":\"A cool widget\",\"price_cents\":1999,\"inventory\":50,\"active\":true}";
     sim_io.inject_post(0, "/products", create_body);
     const create_resp = run_until_response(&server, &sim_io, 0, 500) orelse
         return error.TestUnexpectedResult;
     try std.testing.expectEqual(create_resp.status_code, 200);
-    try std.testing.expect(json_contains(create_resp.body, "\"id\":1"));
+    try std.testing.expect(json_contains(create_resp.body, "\"id\":\"" ++ test_uuid1 ++ "\""));
     try std.testing.expect(json_contains(create_resp.body, "\"name\":\"Widget\""));
     try std.testing.expect(json_contains(create_resp.body, "\"price_cents\":1999"));
     sim_io.clear_response(0);
 
     // GET
-    sim_io.inject_get(0, "/products/1");
+    sim_io.inject_get(0, "/products/" ++ test_uuid1);
     const get_resp = run_until_response(&server, &sim_io, 0, 500) orelse
         return error.TestUnexpectedResult;
     try std.testing.expectEqual(get_resp.status_code, 200);
@@ -583,7 +587,7 @@ test "product CRUD — create, get, update, delete" {
     const update_body =
         \\{"name":"Super Widget","description":"An even cooler widget","price_cents":2999,"inventory":100,"active":true}
     ;
-    sim_io.inject_put(0, "/products/1", update_body);
+    sim_io.inject_put(0, "/products/" ++ test_uuid1, update_body);
     const update_resp = run_until_response(&server, &sim_io, 0, 500) orelse
         return error.TestUnexpectedResult;
     try std.testing.expectEqual(update_resp.status_code, 200);
@@ -592,7 +596,7 @@ test "product CRUD — create, get, update, delete" {
     sim_io.clear_response(0);
 
     // GET after update
-    sim_io.inject_get(0, "/products/1");
+    sim_io.inject_get(0, "/products/" ++ test_uuid1);
     const get2_resp = run_until_response(&server, &sim_io, 0, 500) orelse
         return error.TestUnexpectedResult;
     try std.testing.expectEqual(get2_resp.status_code, 200);
@@ -600,14 +604,14 @@ test "product CRUD — create, get, update, delete" {
     sim_io.clear_response(0);
 
     // DELETE
-    sim_io.inject_delete(0, "/products/1");
+    sim_io.inject_delete(0, "/products/" ++ test_uuid1);
     const del_resp = run_until_response(&server, &sim_io, 0, 500) orelse
         return error.TestUnexpectedResult;
     try std.testing.expectEqual(del_resp.status_code, 200);
     sim_io.clear_response(0);
 
     // GET after delete — should be 404
-    sim_io.inject_get(0, "/products/1");
+    sim_io.inject_get(0, "/products/" ++ test_uuid1);
     const gone_resp = run_until_response(&server, &sim_io, 0, 500) orelse
         return error.TestUnexpectedResult;
     try std.testing.expectEqual(gone_resp.status_code, 404);
@@ -615,8 +619,9 @@ test "product CRUD — create, get, update, delete" {
 
 test "product list — empty then populated" {
     var sim_io = SimIO.init(0xb002);
-    var sm = try StateMachine.init(std.testing.allocator);
-    defer sm.deinit(std.testing.allocator);
+    var storage = try MemoryStorage.init(std.testing.allocator);
+    defer storage.deinit(std.testing.allocator);
+    var sm = StateMachine.init(&storage);
     var server = Server.init(&sim_io, &sm, 1);
 
     sim_io.connect_client(0);
@@ -632,14 +637,14 @@ test "product list — empty then populated" {
 
     // Create two products.
     sim_io.inject_post(0, "/products",
-        \\{"name":"A","price_cents":100}
+        \\{"id":"00000000000000000000000000000001","name":"A","price_cents":100}
     );
     _ = run_until_response(&server, &sim_io, 0, 500) orelse
         return error.TestUnexpectedResult;
     sim_io.clear_response(0);
 
     sim_io.inject_post(0, "/products",
-        \\{"name":"B","price_cents":200}
+        \\{"id":"00000000000000000000000000000002","name":"B","price_cents":200}
     );
     _ = run_until_response(&server, &sim_io, 0, 500) orelse
         return error.TestUnexpectedResult;
@@ -656,14 +661,15 @@ test "product list — empty then populated" {
 
 test "product get missing returns 404" {
     var sim_io = SimIO.init(0xb003);
-    var sm = try StateMachine.init(std.testing.allocator);
-    defer sm.deinit(std.testing.allocator);
+    var storage = try MemoryStorage.init(std.testing.allocator);
+    defer storage.deinit(std.testing.allocator);
+    var sm = StateMachine.init(&storage);
     var server = Server.init(&sim_io, &sm, 1);
 
     sim_io.connect_client(0);
     run_ticks(&server, &sim_io, 10);
 
-    sim_io.inject_get(0, "/products/999");
+    sim_io.inject_get(0, "/products/00000000000000000000000000000999");
     const resp = run_until_response(&server, &sim_io, 0, 500) orelse
         return error.TestUnexpectedResult;
     try std.testing.expectEqual(resp.status_code, 404);
@@ -671,42 +677,44 @@ test "product get missing returns 404" {
 
 test "product delete missing returns 404" {
     var sim_io = SimIO.init(0xb004);
-    var sm = try StateMachine.init(std.testing.allocator);
-    defer sm.deinit(std.testing.allocator);
+    var storage = try MemoryStorage.init(std.testing.allocator);
+    defer storage.deinit(std.testing.allocator);
+    var sm = StateMachine.init(&storage);
     var server = Server.init(&sim_io, &sm, 1);
 
     sim_io.connect_client(0);
     run_ticks(&server, &sim_io, 10);
 
-    sim_io.inject_delete(0, "/products/999");
+    sim_io.inject_delete(0, "/products/00000000000000000000000000000999");
     const resp = run_until_response(&server, &sim_io, 0, 500) orelse
         return error.TestUnexpectedResult;
     try std.testing.expectEqual(resp.status_code, 404);
 }
 
-test "product auto-increment IDs across creates" {
+test "product client-provided IDs across creates" {
     var sim_io = SimIO.init(0xb005);
-    var sm = try StateMachine.init(std.testing.allocator);
-    defer sm.deinit(std.testing.allocator);
+    var storage = try MemoryStorage.init(std.testing.allocator);
+    defer storage.deinit(std.testing.allocator);
+    var sm = StateMachine.init(&storage);
     var server = Server.init(&sim_io, &sm, 1);
 
     sim_io.connect_client(0);
     run_ticks(&server, &sim_io, 10);
 
     sim_io.inject_post(0, "/products",
-        \\{"name":"First"}
+        "{\"id\":\"" ++ test_uuid1 ++ "\",\"name\":\"First\"}"
     );
     const r1 = run_until_response(&server, &sim_io, 0, 500) orelse
         return error.TestUnexpectedResult;
-    try std.testing.expect(json_contains(r1.body, "\"id\":1"));
+    try std.testing.expect(json_contains(r1.body, "\"id\":\"" ++ test_uuid1 ++ "\""));
     sim_io.clear_response(0);
 
     sim_io.inject_post(0, "/products",
-        \\{"name":"Second"}
+        "{\"id\":\"" ++ test_uuid2 ++ "\",\"name\":\"Second\"}"
     );
     const r2 = run_until_response(&server, &sim_io, 0, 500) orelse
         return error.TestUnexpectedResult;
-    try std.testing.expect(json_contains(r2.body, "\"id\":2"));
+    try std.testing.expect(json_contains(r2.body, "\"id\":\"" ++ test_uuid2 ++ "\""));
 }
 
 test "deterministic replay — same seed same result" {
@@ -714,20 +722,21 @@ test "deterministic replay — same seed same result" {
 
     for (0..2) |run| {
         var sim_io = SimIO.init(12345);
-        var sm = try StateMachine.init(std.testing.allocator);
-        defer sm.deinit(std.testing.allocator);
+        var storage = try MemoryStorage.init(std.testing.allocator);
+        defer storage.deinit(std.testing.allocator);
+        var sm = StateMachine.init(&storage);
         var server = Server.init(&sim_io, &sm, 1);
 
         sim_io.connect_client(0);
         sim_io.inject_post(0, "/products",
-            \\{"name":"Widget","price_cents":100}
+            "{\"id\":\"" ++ test_uuid1 ++ "\",\"name\":\"Widget\",\"price_cents\":100}"
         );
         const create_resp = run_until_response(&server, &sim_io, 0, 500) orelse
             return error.TestUnexpectedResult;
         try std.testing.expectEqual(create_resp.status_code, 200);
         sim_io.clear_response(0);
 
-        sim_io.inject_get(0, "/products/1");
+        sim_io.inject_get(0, "/products/" ++ test_uuid1);
         const get_resp = run_until_response(&server, &sim_io, 0, 500) orelse
             return error.TestUnexpectedResult;
         results[run] = get_resp.status_code;
@@ -743,8 +752,9 @@ test "deterministic replay — same seed same result" {
 
 test "pipelining — back-to-back requests on one connection" {
     var sim_io = SimIO.init(0x1234);
-    var sm = try StateMachine.init(std.testing.allocator);
-    defer sm.deinit(std.testing.allocator);
+    var storage = try MemoryStorage.init(std.testing.allocator);
+    defer storage.deinit(std.testing.allocator);
+    var sm = StateMachine.init(&storage);
     var server = Server.init(&sim_io, &sm, 1);
 
     sim_io.connect_client(0);
@@ -752,9 +762,9 @@ test "pipelining — back-to-back requests on one connection" {
 
     // Inject CREATE + GET back-to-back (pipelined).
     sim_io.inject_post(0, "/products",
-        \\{"name":"PipeWidget","price_cents":100}
+        "{\"id\":\"" ++ test_uuid1 ++ "\",\"name\":\"PipeWidget\",\"price_cents\":100}"
     );
-    sim_io.inject_get(0, "/products/1");
+    sim_io.inject_get(0, "/products/" ++ test_uuid1);
 
     // First response: CREATE 200.
     const create_resp = run_until_response(&server, &sim_io, 0, 500) orelse
@@ -771,8 +781,9 @@ test "pipelining — back-to-back requests on one connection" {
 
 test "connection drops and reconnects — state machine survives" {
     var sim_io = SimIO.init(0xdead);
-    var sm = try StateMachine.init(std.testing.allocator);
-    defer sm.deinit(std.testing.allocator);
+    var storage = try MemoryStorage.init(std.testing.allocator);
+    defer storage.deinit(std.testing.allocator);
+    var sm = StateMachine.init(&storage);
     var server = Server.init(&sim_io, &sm, 1);
 
     sim_io.connect_client(0);
@@ -780,7 +791,7 @@ test "connection drops and reconnects — state machine survives" {
 
     // Create a product before the drop.
     sim_io.inject_post(0, "/products",
-        \\{"name":"Survivor","price_cents":100}
+        "{\"id\":\"" ++ test_uuid1 ++ "\",\"name\":\"Survivor\",\"price_cents\":100}"
     );
     const create_resp = run_until_response(&server, &sim_io, 0, 500) orelse
         return error.TestUnexpectedResult;
@@ -796,7 +807,7 @@ test "connection drops and reconnects — state machine survives" {
     run_ticks(&server, &sim_io, 10);
 
     // The state machine should still have the product.
-    sim_io.inject_get(1, "/products/1");
+    sim_io.inject_get(1, "/products/" ++ test_uuid1);
     const get_resp = run_until_response(&server, &sim_io, 1, 500) orelse
         return error.TestUnexpectedResult;
     try std.testing.expectEqual(get_resp.status_code, 200);
@@ -805,8 +816,9 @@ test "connection drops and reconnects — state machine survives" {
 
 test "timeout — partial request triggers close" {
     var sim_io = SimIO.init(0xface);
-    var sm = try StateMachine.init(std.testing.allocator);
-    defer sm.deinit(std.testing.allocator);
+    var storage = try MemoryStorage.init(std.testing.allocator);
+    defer storage.deinit(std.testing.allocator);
+    var sm = StateMachine.init(&storage);
     var server = Server.init(&sim_io, &sm, 1);
 
     sim_io.connect_client(0);
@@ -851,8 +863,9 @@ test "timeout — partial request triggers close" {
 
 test "mark: disconnect triggers recv peer closed" {
     var sim_io = SimIO.init(0xa001);
-    var sm = try StateMachine.init(std.testing.allocator);
-    defer sm.deinit(std.testing.allocator);
+    var storage = try MemoryStorage.init(std.testing.allocator);
+    defer storage.deinit(std.testing.allocator);
+    var sm = StateMachine.init(&storage);
     var server = Server.init(&sim_io, &sm, 1);
 
     sim_io.connect_client(0);
@@ -866,8 +879,9 @@ test "mark: disconnect triggers recv peer closed" {
 
 test "mark: send fault triggers send error" {
     var sim_io = SimIO.init(0xa002);
-    var sm = try StateMachine.init(std.testing.allocator);
-    defer sm.deinit(std.testing.allocator);
+    var storage = try MemoryStorage.init(std.testing.allocator);
+    defer storage.deinit(std.testing.allocator);
+    var sm = StateMachine.init(&storage);
     var server = Server.init(&sim_io, &sm, 1);
 
     sim_io.connect_client(0);
@@ -875,7 +889,7 @@ test "mark: send fault triggers send error" {
 
     // Create a product so there's something to GET.
     sim_io.inject_post(0, "/products",
-        \\{"name":"TestProduct","price_cents":100}
+        "{\"id\":\"" ++ test_uuid1 ++ "\",\"name\":\"TestProduct\",\"price_cents\":100}"
     );
     _ = run_until_response(&server, &sim_io, 0, 500) orelse
         return error.TestUnexpectedResult;
@@ -883,7 +897,7 @@ test "mark: send fault triggers send error" {
 
     // Enable 100% send faults, then GET. The response send will fail.
     sim_io.send_fault_probability = 100;
-    sim_io.inject_get(0, "/products/1");
+    sim_io.inject_get(0, "/products/" ++ test_uuid1);
     const mark = marks.check("send: error");
     run_ticks(&server, &sim_io, 50);
     try mark.expect_hit();
@@ -891,8 +905,9 @@ test "mark: send fault triggers send error" {
 
 test "mark: idle connection triggers timeout" {
     var sim_io = SimIO.init(0xa003);
-    var sm = try StateMachine.init(std.testing.allocator);
-    defer sm.deinit(std.testing.allocator);
+    var storage = try MemoryStorage.init(std.testing.allocator);
+    defer storage.deinit(std.testing.allocator);
+    var sm = StateMachine.init(&storage);
     var server = Server.init(&sim_io, &sm, 1);
 
     sim_io.connect_client(0);
@@ -914,8 +929,9 @@ test "mark: idle connection triggers timeout" {
 
 test "mark: garbage bytes trigger invalid HTTP" {
     var sim_io = SimIO.init(0xa004);
-    var sm = try StateMachine.init(std.testing.allocator);
-    defer sm.deinit(std.testing.allocator);
+    var storage = try MemoryStorage.init(std.testing.allocator);
+    defer storage.deinit(std.testing.allocator);
+    var sm = StateMachine.init(&storage);
     var server = Server.init(&sim_io, &sm, 1);
 
     sim_io.connect_client(0);
@@ -929,8 +945,9 @@ test "mark: garbage bytes trigger invalid HTTP" {
 
 test "mark: unknown route triggers unmapped request" {
     var sim_io = SimIO.init(0xa005);
-    var sm = try StateMachine.init(std.testing.allocator);
-    defer sm.deinit(std.testing.allocator);
+    var storage = try MemoryStorage.init(std.testing.allocator);
+    defer storage.deinit(std.testing.allocator);
+    var sm = StateMachine.init(&storage);
     var server = Server.init(&sim_io, &sm, 1);
 
     sim_io.connect_client(0);
@@ -945,8 +962,9 @@ test "mark: unknown route triggers unmapped request" {
 
 test "mark: accept failure logs warning" {
     var sim_io = SimIO.init(0xa007);
-    var sm = try StateMachine.init(std.testing.allocator);
-    defer sm.deinit(std.testing.allocator);
+    var storage = try MemoryStorage.init(std.testing.allocator);
+    defer storage.deinit(std.testing.allocator);
+    var sm = StateMachine.init(&storage);
     var server = Server.init(&sim_io, &sm, 1);
 
     // 100% accept fault — every accept attempt fails.
@@ -955,4 +973,70 @@ test "mark: accept failure logs warning" {
     const mark = marks.check("accept failed");
     run_ticks(&server, &sim_io, 10);
     try mark.expect_hit();
+}
+
+// =====================================================================
+// Storage fault injection tests
+// =====================================================================
+
+test "storage busy fault — prefetch retries next tick then succeeds" {
+    var sim_io = SimIO.init(0xc001);
+    var storage = try MemoryStorage.init(std.testing.allocator);
+    defer storage.deinit(std.testing.allocator);
+    var sm = StateMachine.init(&storage);
+    var server = Server.init(&sim_io, &sm, 1);
+
+    // Create a product first (no faults).
+    sim_io.connect_client(0);
+    run_ticks(&server, &sim_io, 10);
+
+    sim_io.inject_post(0, "/products",
+        "{\"id\":\"" ++ test_uuid1 ++ "\",\"name\":\"Widget\",\"price_cents\":100}"
+    );
+    _ = run_until_response(&server, &sim_io, 0, 500) orelse
+        return error.TestUnexpectedResult;
+    sim_io.clear_response(0);
+
+    // Enable 100% busy faults. GET will be retried each tick.
+    storage.busy_fault_probability = 100;
+    storage.prng_state = 0xc001;
+    sim_io.inject_get(0, "/products/" ++ test_uuid1);
+
+    // Tick a few times with busy faults — connection stays .ready.
+    const mark = marks.check("storage: busy fault injected");
+    run_ticks(&server, &sim_io, 20);
+    try mark.expect_hit();
+
+    // Verify no response yet (still busy-looping).
+    try std.testing.expect(sim_io.read_response(0) == null);
+
+    // Disable busy faults — next tick should succeed.
+    storage.busy_fault_probability = 0;
+    const resp = run_until_response(&server, &sim_io, 0, 500) orelse
+        return error.TestUnexpectedResult;
+    try std.testing.expectEqual(resp.status_code, 200);
+    try std.testing.expect(json_contains(resp.body, "\"name\":\"Widget\""));
+}
+
+test "storage err fault — returns 503" {
+    var sim_io = SimIO.init(0xc002);
+    var storage = try MemoryStorage.init(std.testing.allocator);
+    defer storage.deinit(std.testing.allocator);
+    var sm = StateMachine.init(&storage);
+    var server = Server.init(&sim_io, &sm, 1);
+
+    sim_io.connect_client(0);
+    run_ticks(&server, &sim_io, 10);
+
+    // 100% err faults on storage.
+    storage.err_fault_probability = 100;
+    storage.prng_state = 0xc002;
+
+    const mark = marks.check("storage: err fault injected");
+    sim_io.inject_get(0, "/products/" ++ test_uuid1);
+    const resp = run_until_response(&server, &sim_io, 0, 500) orelse
+        return error.TestUnexpectedResult;
+    try mark.expect_hit();
+    try std.testing.expectEqual(resp.status_code, 503);
+    try std.testing.expect(json_contains(resp.body, "\"error\":\"service unavailable\""));
 }
