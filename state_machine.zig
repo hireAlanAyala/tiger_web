@@ -149,6 +149,11 @@ pub fn StateMachineType(comptime Storage: type) type {
         }
 
         // --- Per-pattern execute handlers ---
+        //
+        // Operations are grouped by shared control flow, NOT by verb name.
+        // If a future operation has different error handling (e.g., returns
+        // a default instead of 404), it gets its own handler — don't force
+        // it into an existing group just because it's a "get" or "delete."
 
         /// Get-by-ID pattern: check not_found, return cached entity.
         /// Shared by get_product, get_product_inventory, get_collection.
