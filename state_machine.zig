@@ -22,16 +22,14 @@ pub fn StateMachineType(comptime Storage: type) type {
 
         // Prefetch cache — populated by prefetch(), consumed by execute().
         prefetch_product: ?message.Product,
-        prefetch_list: [message.MessageResponse.list_max]message.Product,
-        prefetch_list_len: u32,
+        prefetch_list: message.MessageResponse.ProductList,
         prefetch_result: ?StorageResult,
 
         pub fn init(storage: *Storage) StateMachine {
             return .{
                 .storage = storage,
                 .prefetch_product = null,
-                .prefetch_list = undefined,
-                .prefetch_list_len = 0,
+                .prefetch_list = .{ .items = undefined, .len = 0 },
                 .prefetch_result = null,
             };
         }
@@ -43,12 +41,12 @@ pub fn StateMachineType(comptime Storage: type) type {
             assert(self.prefetch_result == null);
 
             self.prefetch_product = null;
-            self.prefetch_list_len = 0;
+            self.prefetch_list.len = 0;
 
             switch (msg.body) {
                 .products => |product| {
                     const result: StorageResult = switch (msg.operation) {
-                        .get => self.prefetch_read(msg.id),
+                        .get, .get_inventory => self.prefetch_read(msg.id),
                         .list => self.prefetch_list_products(),
                         .create => blk: {
                             const p = product.?;
@@ -92,14 +90,22 @@ pub fn StateMachineType(comptime Storage: type) type {
                     assert(result == .ok);
                     return .{
                         .status = .ok,
-                        .body = .{ .products = .{ .product = self.prefetch_product.?, .list = undefined, .list_len = 0 } },
+                        .body = .{ .products = .{ .single = self.prefetch_product.? } },
+                    };
+                },
+                .get_inventory => {
+                    if (result == .not_found) return message.MessageResponse.product_not_found;
+                    assert(result == .ok);
+                    return .{
+                        .status = .ok,
+                        .body = .{ .products = .{ .inventory = self.prefetch_product.?.inventory } },
                     };
                 },
                 .list => {
                     assert(result == .ok);
                     return .{
                         .status = .ok,
-                        .body = .{ .products = .{ .product = null, .list = self.prefetch_list, .list_len = self.prefetch_list_len } },
+                        .body = .{ .products = .{ .list = self.prefetch_list } },
                     };
                 },
                 .create => {
@@ -137,7 +143,7 @@ pub fn StateMachineType(comptime Storage: type) type {
             return switch (write_result) {
                 .ok => .{
                     .status = .ok,
-                    .body = .{ .products = .{ .product = product, .list = undefined, .list_len = 0 } },
+                    .body = .{ .products = .{ .single = product } },
                 },
                 .busy, .err => storage_error_response,
                 .not_found => unreachable,
@@ -147,12 +153,12 @@ pub fn StateMachineType(comptime Storage: type) type {
 
         const storage_error_response = message.MessageResponse{
             .status = .storage_error,
-            .body = .{ .products = .{ .product = null, .list = undefined, .list_len = 0 } },
+            .body = .{ .products = .{ .empty = {} } },
         };
 
         fn reset_prefetch(self: *StateMachine) void {
             self.prefetch_product = null;
-            self.prefetch_list_len = 0;
+            self.prefetch_list.len = 0;
             self.prefetch_result = null;
         }
 
@@ -167,7 +173,7 @@ pub fn StateMachineType(comptime Storage: type) type {
         }
 
         fn prefetch_list_products(self: *StateMachine) StorageResult {
-            return self.storage.list(&self.prefetch_list, &self.prefetch_list_len);
+            return self.storage.list(&self.prefetch_list.items, &self.prefetch_list.len);
         }
     };
 }
@@ -349,7 +355,7 @@ test "create and get" {
         .body = .{ .products = make_test_product(test_id, "Widget", 999) },
     });
     try std.testing.expectEqual(create_resp.status, .ok);
-    const created = create_resp.body.products.product.?;
+    const created = create_resp.body.products.single;
     try std.testing.expectEqual(created.id, test_id);
     try std.testing.expectEqualSlices(u8, created.name_slice(), "Widget");
     try std.testing.expectEqual(created.price_cents, 999);
@@ -360,7 +366,7 @@ test "create and get" {
         .body = .{ .products = null },
     });
     try std.testing.expectEqual(get_resp.status, .ok);
-    try std.testing.expectEqualSlices(u8, get_resp.body.products.product.?.name_slice(), "Widget");
+    try std.testing.expectEqualSlices(u8, get_resp.body.products.single.name_slice(), "Widget");
 }
 
 test "get missing" {
@@ -387,7 +393,7 @@ test "update" {
         .id = 0,
         .body = .{ .products = make_test_product(test_id, "Old Name", 100) },
     });
-    const id = create_resp.body.products.product.?.id;
+    const id = create_resp.body.products.single.id;
 
     const update_resp = test_execute(&sm, .{
         .operation = .update,
@@ -395,9 +401,9 @@ test "update" {
         .body = .{ .products = make_test_product(0, "New Name", 200) },
     });
     try std.testing.expectEqual(update_resp.status, .ok);
-    try std.testing.expectEqualSlices(u8, update_resp.body.products.product.?.name_slice(), "New Name");
-    try std.testing.expectEqual(update_resp.body.products.product.?.price_cents, 200);
-    try std.testing.expectEqual(update_resp.body.products.product.?.id, id);
+    try std.testing.expectEqualSlices(u8, update_resp.body.products.single.name_slice(), "New Name");
+    try std.testing.expectEqual(update_resp.body.products.single.price_cents, 200);
+    try std.testing.expectEqual(update_resp.body.products.single.id, id);
 }
 
 test "delete" {
@@ -411,7 +417,7 @@ test "delete" {
         .id = 0,
         .body = .{ .products = make_test_product(test_id, "Doomed", 100) },
     });
-    const id = create_resp.body.products.product.?.id;
+    const id = create_resp.body.products.single.id;
 
     const del_resp = test_execute(&sm, .{
         .operation = .delete,
@@ -455,9 +461,9 @@ test "list" {
         .body = .{ .products = null },
     });
     try std.testing.expectEqual(resp.status, .ok);
-    try std.testing.expectEqual(resp.body.products.list_len, 2);
-    try std.testing.expectEqualSlices(u8, resp.body.products.list[0].name_slice(), "A");
-    try std.testing.expectEqualSlices(u8, resp.body.products.list[1].name_slice(), "B");
+    try std.testing.expectEqual(resp.body.products.list.len, 2);
+    try std.testing.expectEqualSlices(u8, resp.body.products.list.items[0].name_slice(), "A");
+    try std.testing.expectEqualSlices(u8, resp.body.products.list.items[1].name_slice(), "B");
 }
 
 test "client-provided IDs" {
@@ -469,8 +475,8 @@ test "client-provided IDs" {
     const id2: u128 = 0xaabbccddaabbccddaabbccddaabbccd2;
     const r1 = test_execute(&sm, .{ .operation = .create, .id = 0, .body = .{ .products = make_test_product(id1, "A", 1) } });
     const r2 = test_execute(&sm, .{ .operation = .create, .id = 0, .body = .{ .products = make_test_product(id2, "B", 2) } });
-    try std.testing.expectEqual(r1.body.products.product.?.id, id1);
-    try std.testing.expectEqual(r2.body.products.product.?.id, id2);
+    try std.testing.expectEqual(r1.body.products.single.id, id1);
+    try std.testing.expectEqual(r2.body.products.single.id, id2);
 }
 
 test "duplicate ID rejected" {

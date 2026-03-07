@@ -1018,6 +1018,40 @@ test "storage busy fault — prefetch retries next tick then succeeds" {
     try std.testing.expect(json_contains(resp.body, "\"name\":\"Widget\""));
 }
 
+test "product get_inventory — returns inventory count" {
+    var sim_io = SimIO.init(0xb006);
+    var storage = try MemoryStorage.init(std.testing.allocator);
+    defer storage.deinit(std.testing.allocator);
+    var sm = StateMachine.init(&storage);
+    var server = Server.init(&sim_io, &sm, 1);
+
+    sim_io.connect_client(0);
+    run_ticks(&server, &sim_io, 10);
+
+    // Create a product with inventory.
+    sim_io.inject_post(0, "/products",
+        "{\"id\":\"" ++ test_uuid1 ++ "\",\"name\":\"Widget\",\"price_cents\":100,\"inventory\":42}"
+    );
+    const create_resp = run_until_response(&server, &sim_io, 0, 500) orelse
+        return error.TestUnexpectedResult;
+    try std.testing.expectEqual(create_resp.status_code, 200);
+    sim_io.clear_response(0);
+
+    // GET inventory sub-resource.
+    sim_io.inject_get(0, "/products/" ++ test_uuid1 ++ "/inventory");
+    const inv_resp = run_until_response(&server, &sim_io, 0, 500) orelse
+        return error.TestUnexpectedResult;
+    try std.testing.expectEqual(inv_resp.status_code, 200);
+    try std.testing.expectEqualSlices(u8, inv_resp.body, "{\"inventory\":42}");
+    sim_io.clear_response(0);
+
+    // GET inventory for missing product — 404.
+    sim_io.inject_get(0, "/products/00000000000000000000000000000999/inventory");
+    const missing_resp = run_until_response(&server, &sim_io, 0, 500) orelse
+        return error.TestUnexpectedResult;
+    try std.testing.expectEqual(missing_resp.status_code, 404);
+}
+
 test "storage err fault — returns 503" {
     var sim_io = SimIO.init(0xc002);
     var storage = try MemoryStorage.init(std.testing.allocator);

@@ -25,6 +25,7 @@ pub const Operation = enum(u8) {
     create = 3,
     update = 4,
     delete = 5,
+    get_inventory = 6,
 };
 
 pub const product_name_max = 128;
@@ -85,10 +86,16 @@ pub const MessageResponse = struct {
     /// Maximum number of items returned in a single list response.
     pub const list_max = 50;
 
-    pub const ProductResult = struct {
-        product: ?Product, // for get, create, update
-        list: [list_max]Product, // for list responses
-        list_len: u32,
+    pub const ProductResult = union(enum) {
+        single: Product,
+        list: ProductList,
+        inventory: u32,
+        empty: void,
+    };
+
+    pub const ProductList = struct {
+        items: [list_max]Product,
+        len: u32,
     };
 
     comptime {
@@ -98,12 +105,12 @@ pub const MessageResponse = struct {
 
     pub const product_empty_ok = MessageResponse{
         .status = .ok,
-        .body = .{ .products = .{ .product = null, .list = undefined, .list_len = 0 } },
+        .body = .{ .products = .{ .empty = {} } },
     };
 
     pub const product_not_found = MessageResponse{
         .status = .not_found,
-        .body = .{ .products = .{ .product = null, .list = undefined, .list_len = 0 } },
+        .body = .{ .products = .{ .empty = {} } },
     };
 
 };
@@ -138,11 +145,9 @@ test "Product fixed size constraints" {
 test "MessageResponse convenience constructors" {
     const ok = MessageResponse.product_empty_ok;
     try std.testing.expectEqual(ok.status, .ok);
-    try std.testing.expectEqual(ok.body.products.product, null);
-    try std.testing.expectEqual(ok.body.products.list_len, 0);
+    try std.testing.expectEqual(ok.body.products, .empty);
 
     const nf = MessageResponse.product_not_found;
     try std.testing.expectEqual(nf.status, .not_found);
-    try std.testing.expectEqual(nf.body.products.product, null);
-    try std.testing.expectEqual(nf.body.products.list_len, 0);
+    try std.testing.expectEqual(nf.body.products, .empty);
 }

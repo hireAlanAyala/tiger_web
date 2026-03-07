@@ -27,15 +27,26 @@ pub fn translate(method: http.Method, raw_path: []const u8, body: []const u8) ?m
     else
         return null;
 
+    // Split remainder into ID segment and optional sub-resource.
+    const second_slash = if (remainder.len > 0) std.mem.indexOf(u8, remainder, "/") else null;
+    const id_str = if (second_slash) |s| remainder[0..s] else remainder;
+    const sub_resource = if (second_slash) |s| remainder[s + 1 ..] else "";
+
     // Parse optional ID from second segment (hex UUID, 32 hex chars).
-    const id: u128 = if (remainder.len > 0)
-        parse_uuid(remainder) orelse return null
+    const id: u128 = if (id_str.len > 0)
+        parse_uuid(id_str) orelse return null
     else
         0;
 
-    // Map HTTP method + presence of ID to operation.
+    // Map HTTP method + presence of ID + sub-resource to operation.
     const operation: message.Operation = switch (method) {
-        .get => if (id != 0) .get else .list,
+        .get => blk: {
+            if (id != 0 and sub_resource.len > 0) {
+                if (std.mem.eql(u8, sub_resource, "inventory")) break :blk .get_inventory;
+                return null;
+            }
+            break :blk if (id != 0) .get else .list;
+        },
         .post => if (id == 0) .create else return null,
         .put => if (id != 0) .update else return null,
         .delete => if (id != 0) .delete else return null,
@@ -44,7 +55,7 @@ pub fn translate(method: http.Method, raw_path: []const u8, body: []const u8) ?m
 
     // Validate body against operation and build typed message.
     switch (operation) {
-        .get, .list, .delete => {
+        .get, .list, .delete, .get_inventory => {
             if (body.len != 0) return null;
             return .{
                 .operation = operation,
@@ -123,7 +134,7 @@ fn parse_product_json(body: []const u8) ?message.Product {
 }
 
 /// Encode a MessageResponse as JSON into buf. Returns the written slice.
-/// The response is self-contained — no reference back to the state machine.
+/// The response is self-describing — the encoder switches on the body variant.
 pub fn encode_response_json(buf: []u8, resp: message.MessageResponse) []const u8 {
     var w = JsonWriter{ .buf = buf, .pos = 0 };
 
@@ -144,19 +155,22 @@ pub fn encode_response_json(buf: []u8, resp: message.MessageResponse) []const u8
     }
 
     switch (resp.body) {
-        .products => |pr| {
-            if (pr.product) |*p| {
-                encode_product(&w, p);
-            } else if (pr.list_len > 0) {
+        .products => |pr| switch (pr) {
+            .single => |*p| encode_product(&w, p),
+            .list => |*l| {
                 w.raw("[");
-                for (pr.list[0..pr.list_len], 0..) |*p, i| {
+                for (l.items[0..l.len], 0..) |*p, i| {
                     if (i > 0) w.raw(",");
                     encode_product(&w, p);
                 }
                 w.raw("]");
-            } else {
-                w.raw("[]");
-            }
+            },
+            .inventory => |inv| {
+                w.raw("{\"inventory\":");
+                w.write_u32(inv);
+                w.raw("}");
+            },
+            .empty => w.raw("[]"),
         },
     }
 
@@ -501,7 +515,7 @@ test "encode_response_json — single product" {
 
     const resp = message.MessageResponse{
         .status = .ok,
-        .body = .{ .products = .{ .product = p, .list = undefined, .list_len = 0 } },
+        .body = .{ .products = .{ .single = p } },
     };
 
     var buf: [4096]u8 = undefined;
@@ -534,4 +548,26 @@ test "encode_response_json — empty list" {
     var buf: [4096]u8 = undefined;
     const json = encode_response_json(&buf, message.MessageResponse.product_empty_ok);
     try std.testing.expectEqualSlices(u8, json, "[]");
+}
+
+test "GET /products/:id/inventory (get_inventory)" {
+    const msg = translate(.get, "/products/" ++ test_uuid_str ++ "/inventory", "").?;
+    try std.testing.expectEqual(msg.operation, .get_inventory);
+    try std.testing.expectEqual(msg.id, test_uuid);
+    try std.testing.expectEqual(msg.body.products, null);
+}
+
+test "rejects unknown sub-resource" {
+    try std.testing.expect(translate(.get, "/products/" ++ test_uuid_str ++ "/unknown", "") == null);
+}
+
+test "encode_response_json — inventory" {
+    const resp = message.MessageResponse{
+        .status = .ok,
+        .body = .{ .products = .{ .inventory = 42 } },
+    };
+
+    var buf: [4096]u8 = undefined;
+    const json = encode_response_json(&buf, resp);
+    try std.testing.expectEqualSlices(u8, json, "{\"inventory\":42}");
 }
