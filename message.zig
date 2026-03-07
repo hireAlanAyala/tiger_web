@@ -128,6 +128,22 @@ pub const Event = union(enum) {
     collection: ProductCollection,
     member_id: u128, // product_id for add/remove member
     none: void,
+
+    /// Extract the typed event value matching an operation's EventType.
+    /// Comptime T selects the union field; the tagged union panics at
+    /// runtime if the active field doesn't match. This is the analog of
+    /// TigerBeetle's `bytes_as_slice(EventType, raw_bytes)` — type-safe
+    /// extraction driven by comptime operation dispatch.
+    pub fn unwrap(self: Event, comptime T: type) T {
+        const field_name = comptime switch (T) {
+            Product => "product",
+            ProductCollection => "collection",
+            u128 => "member_id",
+            void => "none",
+            else => @compileError("Event.unwrap: unhandled type"),
+        };
+        return @field(self, field_name);
+    }
 };
 
 /// Typed message from the schema layer to the state machine.

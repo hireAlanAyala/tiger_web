@@ -93,7 +93,11 @@ pub fn StateMachineType(comptime Storage: type) type {
         }
 
         /// Phase 2: make decisions from cache slots, apply writes to storage.
-        /// Flat switch on operation — each variant is self-contained.
+        /// Uses inline dispatch to route operations to per-pattern handlers,
+        /// following TigerBeetle's commit() pattern. The inline keyword makes
+        /// each operation comptime-known inside the handler, enabling:
+        /// - EventType(op) to extract typed events from the Event union
+        /// - Comptime switches inside handlers that prune dead branches
         /// Must only be called after prefetch() returned true.
         pub fn execute(self: *StateMachine, msg: message.Message) message.MessageResponse {
             const result = self.prefetch_result.?;
@@ -103,96 +107,150 @@ pub fn StateMachineType(comptime Storage: type) type {
             if (result == .err) return message.MessageResponse.storage_error;
 
             return switch (msg.operation) {
-                .get_product => {
-                    if (result == .not_found) return message.MessageResponse.not_found;
-                    assert(result == .ok);
-                    return .{
-                        .status = .ok,
-                        .result = .{ .product = self.prefetch_product.? },
-                    };
+                inline .get_product,
+                .get_product_inventory,
+                .get_collection,
+                => |comptime_op| self.execute_get(comptime_op, result),
+
+                inline .list_products,
+                .list_collections,
+                => |comptime_op| self.execute_list(comptime_op, result),
+
+                inline .create_product,
+                .create_collection,
+                => |comptime_op| self.execute_create(
+                    comptime_op,
+                    msg.event.unwrap(comptime_op.EventType()),
+                    result,
+                ),
+
+                inline .delete_product,
+                .delete_collection,
+                => |comptime_op| self.execute_delete(comptime_op, msg.id, result),
+
+                .update_product => self.execute_update_product(
+                    msg.id,
+                    msg.event.unwrap(message.Product),
+                    result,
+                ),
+
+                .add_collection_member => self.execute_add_member(
+                    msg.id,
+                    msg.event.unwrap(u128),
+                    result,
+                ),
+
+                .remove_collection_member => self.execute_remove_member(
+                    msg.id,
+                    msg.event.unwrap(u128),
+                    result,
+                ),
+            };
+        }
+
+        // --- Per-pattern execute handlers ---
+
+        /// Get-by-ID pattern: check not_found, return cached entity.
+        /// Shared by get_product, get_product_inventory, get_collection.
+        fn execute_get(self: *StateMachine, comptime op: message.Operation, result: StorageResult) message.MessageResponse {
+            if (result == .not_found) return message.MessageResponse.not_found;
+            assert(result == .ok);
+            return .{
+                .status = .ok,
+                .result = switch (op) {
+                    .get_product => .{ .product = self.prefetch_product.? },
+                    .get_product_inventory => .{ .inventory = self.prefetch_product.?.inventory },
+                    .get_collection => .{ .collection = .{
+                        .collection = self.prefetch_collection.?,
+                        .products = self.prefetch_product_list,
+                    } },
+                    else => unreachable,
                 },
-                .get_product_inventory => {
-                    if (result == .not_found) return message.MessageResponse.not_found;
-                    assert(result == .ok);
-                    return .{
-                        .status = .ok,
-                        .result = .{ .inventory = self.prefetch_product.?.inventory },
-                    };
+            };
+        }
+
+        /// List pattern: return cached list.
+        /// Shared by list_products, list_collections.
+        fn execute_list(self: *StateMachine, comptime op: message.Operation, result: StorageResult) message.MessageResponse {
+            assert(result == .ok);
+            return .{
+                .status = .ok,
+                .result = switch (op) {
+                    .list_products => .{ .product_list = self.prefetch_product_list },
+                    .list_collections => .{ .collection_list = self.prefetch_collection_list },
+                    else => unreachable,
                 },
-                .list_products => {
-                    assert(result == .ok);
-                    return .{
-                        .status = .ok,
-                        .result = .{ .product_list = self.prefetch_product_list },
-                    };
-                },
-                .create_product => {
-                    if (result == .ok) return message.MessageResponse.storage_error;
-                    assert(result == .not_found);
-                    const product = msg.event.product;
-                    return self.commit_write(self.storage.put(&product), .{ .product = product });
-                },
-                .update_product => {
-                    if (result == .not_found) return message.MessageResponse.not_found;
-                    assert(result == .ok);
-                    var updated = msg.event.product;
-                    updated.id = msg.id;
-                    return self.commit_write(self.storage.update(msg.id, &updated), .{ .product = updated });
-                },
-                .delete_product => {
-                    if (result == .not_found) return message.MessageResponse.not_found;
-                    assert(result == .ok);
-                    return self.commit_write(self.storage.delete(msg.id), .{ .empty = {} });
-                },
-                .get_collection => {
-                    if (result == .not_found) return message.MessageResponse.not_found;
-                    assert(result == .ok);
-                    return .{
-                        .status = .ok,
-                        .result = .{ .collection = .{
-                            .collection = self.prefetch_collection.?,
-                            .products = self.prefetch_product_list,
-                        } },
-                    };
-                },
-                .list_collections => {
-                    assert(result == .ok);
-                    return .{
-                        .status = .ok,
-                        .result = .{ .collection_list = self.prefetch_collection_list },
-                    };
-                },
-                .create_collection => {
-                    if (result == .ok) return message.MessageResponse.storage_error;
-                    assert(result == .not_found);
-                    const col = msg.event.collection;
-                    return self.commit_write(self.storage.put_collection(&col), .{ .collection = .{
-                        .collection = col,
-                        .products = .{ .items = undefined, .len = 0 },
-                    } });
-                },
-                .delete_collection => {
-                    if (result == .not_found) return message.MessageResponse.not_found;
-                    assert(result == .ok);
-                    return self.commit_write(self.storage.delete_collection(msg.id), .{ .empty = {} });
-                },
-                .add_collection_member => {
-                    if (result == .not_found) return message.MessageResponse.not_found;
-                    assert(result == .ok);
-                    const product_id = msg.event.member_id;
-                    return self.commit_write(self.storage.add_to_collection(msg.id, product_id), .{ .empty = {} });
-                },
-                .remove_collection_member => {
-                    if (result == .not_found) return message.MessageResponse.not_found;
-                    assert(result == .ok);
-                    const product_id = msg.event.member_id;
-                    return switch (self.storage.remove_from_collection(msg.id, product_id)) {
-                        .ok => message.MessageResponse.empty_ok,
-                        .busy, .err => message.MessageResponse.storage_error,
-                        .not_found => message.MessageResponse.not_found,
-                        .corruption => @panic("storage corruption in execute"),
-                    };
-                },
+            };
+        }
+
+        /// Create pattern: check doesn't exist, write, return entity.
+        /// Shared by create_product, create_collection. The event parameter
+        /// type is resolved at comptime via op.EventType() — Product for
+        /// create_product, ProductCollection for create_collection.
+        fn execute_create(
+            self: *StateMachine,
+            comptime op: message.Operation,
+            event: op.EventType(),
+            result: StorageResult,
+        ) message.MessageResponse {
+            if (result == .ok) return message.MessageResponse.storage_error;
+            assert(result == .not_found);
+
+            const write_result = switch (op) {
+                .create_product => self.storage.put(&event),
+                .create_collection => self.storage.put_collection(&event),
+                else => unreachable,
+            };
+
+            const ok_result: message.Result = switch (op) {
+                .create_product => .{ .product = event },
+                .create_collection => .{ .collection = .{
+                    .collection = event,
+                    .products = .{ .items = undefined, .len = 0 },
+                } },
+                else => unreachable,
+            };
+
+            return self.commit_write(write_result, ok_result);
+        }
+
+        /// Delete pattern: check exists, delete, return empty.
+        /// Shared by delete_product, delete_collection.
+        fn execute_delete(self: *StateMachine, comptime op: message.Operation, id: u128, result: StorageResult) message.MessageResponse {
+            if (result == .not_found) return message.MessageResponse.not_found;
+            assert(result == .ok);
+
+            const write_result = switch (op) {
+                .delete_product => self.storage.delete(id),
+                .delete_collection => self.storage.delete_collection(id),
+                else => unreachable,
+            };
+
+            return self.commit_write(write_result, .{ .empty = {} });
+        }
+
+        fn execute_update_product(self: *StateMachine, id: u128, event: message.Product, result: StorageResult) message.MessageResponse {
+            if (result == .not_found) return message.MessageResponse.not_found;
+            assert(result == .ok);
+            var updated = event;
+            updated.id = id;
+            return self.commit_write(self.storage.update(id, &updated), .{ .product = updated });
+        }
+
+        fn execute_add_member(self: *StateMachine, id: u128, product_id: u128, result: StorageResult) message.MessageResponse {
+            if (result == .not_found) return message.MessageResponse.not_found;
+            assert(result == .ok);
+            return self.commit_write(self.storage.add_to_collection(id, product_id), .{ .empty = {} });
+        }
+
+        fn execute_remove_member(self: *StateMachine, id: u128, product_id: u128, result: StorageResult) message.MessageResponse {
+            if (result == .not_found) return message.MessageResponse.not_found;
+            assert(result == .ok);
+            return switch (self.storage.remove_from_collection(id, product_id)) {
+                .ok => message.MessageResponse.empty_ok,
+                .busy, .err => message.MessageResponse.storage_error,
+                .not_found => message.MessageResponse.not_found,
+                .corruption => @panic("storage corruption in execute"),
             };
         }
 
