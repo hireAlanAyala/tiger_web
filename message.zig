@@ -17,6 +17,7 @@ pub const Status = enum(u8) {
 
 pub const Collection = enum(u8) {
     products = 1,
+    collections = 2,
 };
 
 pub const Operation = enum(u8) {
@@ -26,6 +27,26 @@ pub const Operation = enum(u8) {
     update = 4,
     delete = 5,
     get_inventory = 6,
+    add_member = 7,
+    remove_member = 8,
+};
+
+pub const collection_name_max = 128;
+
+/// Fixed-size collection record. A named group of products.
+pub const ProductCollection = struct {
+    id: u128,
+    name: [collection_name_max]u8,
+    name_len: u8,
+
+    comptime {
+        assert(collection_name_max > 0);
+        assert(collection_name_max <= std.math.maxInt(u8));
+    }
+
+    pub fn name_slice(self: *const ProductCollection) []const u8 {
+        return self.name[0..self.name_len];
+    }
 };
 
 pub const product_name_max = 128;
@@ -71,6 +92,15 @@ pub const Message = struct {
 
     pub const Body = union(Collection) {
         products: ?Product, // populated for create/update, null for get/list/delete
+        collections: ?CollectionPayload,
+    };
+
+    /// Payload for collection operations.
+    /// .create carries the collection struct, .member carries a product_id
+    /// (for add_member/remove_member — the collection_id is in msg.id).
+    pub const CollectionPayload = union(enum) {
+        create: ProductCollection,
+        member: u128, // product_id
     };
 };
 
@@ -81,6 +111,7 @@ pub const MessageResponse = struct {
 
     pub const Body = union(Collection) {
         products: ProductResult,
+        collections: CollectionResult,
     };
 
     /// Maximum number of items returned in a single list response.
@@ -95,6 +126,23 @@ pub const MessageResponse = struct {
 
     pub const ProductList = struct {
         items: [list_max]Product,
+        len: u32,
+    };
+
+    pub const CollectionResult = union(enum) {
+        single: CollectionWithProducts,
+        list: CollectionList,
+        empty: void,
+    };
+
+    /// GET /collections/:id returns the collection and its member products.
+    pub const CollectionWithProducts = struct {
+        collection: ProductCollection,
+        products: ProductList,
+    };
+
+    pub const CollectionList = struct {
+        items: [list_max]ProductCollection,
         len: u32,
     };
 
@@ -113,6 +161,15 @@ pub const MessageResponse = struct {
         .body = .{ .products = .{ .empty = {} } },
     };
 
+    pub const collection_empty_ok = MessageResponse{
+        .status = .ok,
+        .body = .{ .collections = .{ .empty = {} } },
+    };
+
+    pub const collection_not_found = MessageResponse{
+        .status = .not_found,
+        .body = .{ .collections = .{ .empty = {} } },
+    };
 };
 
 // =====================================================================

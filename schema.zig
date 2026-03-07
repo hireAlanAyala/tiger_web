@@ -16,65 +16,143 @@ pub fn translate(method: http.Method, raw_path: []const u8, body: []const u8) ?m
     // Strip query string.
     const path_clean = if (std.mem.indexOf(u8, path, "?")) |q| path[0..q] else path;
 
-    // Split into segments on '/'.
-    const slash_pos = std.mem.indexOf(u8, path_clean, "/");
-    const collection_str = if (slash_pos) |s| path_clean[0..s] else path_clean;
-    const remainder = if (slash_pos) |s| path_clean[s + 1 ..] else "";
+    // Split path into up to 4 segments: /collection/:id/sub/:sub_id
+    const segments = split_path(path_clean) orelse return null;
 
     // Match collection.
-    const collection: message.Collection = if (std.mem.eql(u8, collection_str, "products"))
+    const collection: message.Collection = if (std.mem.eql(u8, segments.collection, "products"))
         .products
+    else if (std.mem.eql(u8, segments.collection, "collections"))
+        .collections
     else
         return null;
 
-    // Split remainder into ID segment and optional sub-resource.
-    const second_slash = if (remainder.len > 0) std.mem.indexOf(u8, remainder, "/") else null;
-    const id_str = if (second_slash) |s| remainder[0..s] else remainder;
-    const sub_resource = if (second_slash) |s| remainder[s + 1 ..] else "";
+    if (method == .options) return null;
 
-    // Parse optional ID from second segment (hex UUID, 32 hex chars).
-    const id: u128 = if (id_str.len > 0)
-        parse_uuid(id_str) orelse return null
-    else
-        0;
+    // Dispatch per collection — each has its own method/path → operation mapping.
+    return switch (collection) {
+        .products => translate_products(method, segments, body),
+        .collections => translate_collections(method, segments, body),
+    };
+}
 
-    // Map HTTP method + presence of ID + sub-resource to operation.
+const PathSegments = struct {
+    collection: []const u8,
+    id: u128,
+    has_id: bool,
+    sub_resource: []const u8,
+    sub_id: u128,
+    has_sub_id: bool,
+};
+
+/// Split a path into up to 4 segments. Returns null if any UUID segment
+/// is present but fails to parse.
+fn split_path(path: []const u8) ?PathSegments {
+    // Segment 1: collection name.
+    const s1 = std.mem.indexOf(u8, path, "/");
+    const collection = if (s1) |s| path[0..s] else path;
+    const rest1 = if (s1) |s| path[s + 1 ..] else "";
+
+    // Segment 2: primary ID.
+    const s2 = if (rest1.len > 0) std.mem.indexOf(u8, rest1, "/") else null;
+    const id_str = if (s2) |s| rest1[0..s] else rest1;
+    const rest2 = if (s2) |s| rest1[s + 1 ..] else "";
+
+    // Segment 3: sub-resource name.
+    const s3 = if (rest2.len > 0) std.mem.indexOf(u8, rest2, "/") else null;
+    const sub_resource = if (s3) |s| rest2[0..s] else rest2;
+    const rest3 = if (s3) |s| rest2[s + 1 ..] else "";
+
+    // Segment 4: sub-resource ID.
+    const sub_id_str = rest3;
+
+    // Parse UUIDs — return null on malformed.
+    const id: u128 = if (id_str.len > 0) parse_uuid(id_str) orelse return null else 0;
+    const sub_id: u128 = if (sub_id_str.len > 0) parse_uuid(sub_id_str) orelse return null else 0;
+
+    return .{
+        .collection = collection,
+        .id = id,
+        .has_id = id_str.len > 0,
+        .sub_resource = sub_resource,
+        .sub_id = sub_id,
+        .has_sub_id = sub_id_str.len > 0,
+    };
+}
+
+fn translate_products(method: http.Method, seg: PathSegments, body: []const u8) ?message.Message {
     const operation: message.Operation = switch (method) {
         .get => blk: {
-            if (id != 0 and sub_resource.len > 0) {
-                if (std.mem.eql(u8, sub_resource, "inventory")) break :blk .get_inventory;
+            if (seg.has_id and seg.sub_resource.len > 0) {
+                if (std.mem.eql(u8, seg.sub_resource, "inventory")) break :blk .get_inventory;
                 return null;
             }
-            break :blk if (id != 0) .get else .list;
+            break :blk if (seg.has_id) .get else .list;
         },
-        .post => if (id == 0) .create else return null,
-        .put => if (id != 0) .update else return null,
-        .delete => if (id != 0) .delete else return null,
+        .post => if (!seg.has_id) .create else return null,
+        .put => if (seg.has_id) .update else return null,
+        .delete => if (seg.has_id) .delete else return null,
         .options => return null,
     };
 
-    // Validate body against operation and build typed message.
     switch (operation) {
         .get, .list, .delete, .get_inventory => {
             if (body.len != 0) return null;
-            return .{
-                .operation = operation,
-                .id = id,
-                .body = switch (collection) {
-                    .products => .{ .products = null },
-                },
-            };
+            return .{ .operation = operation, .id = seg.id, .body = .{ .products = null } };
         },
         .create, .update => {
             if (body.len == 0) return null;
             return .{
                 .operation = operation,
-                .id = id,
-                .body = switch (collection) {
-                    .products => .{ .products = parse_product_json(body) orelse return null },
-                },
+                .id = seg.id,
+                .body = .{ .products = parse_product_json(body) orelse return null },
             };
         },
+        .add_member, .remove_member => return null,
+    }
+}
+
+fn translate_collections(method: http.Method, seg: PathSegments, body: []const u8) ?message.Message {
+    // /collections/:id/products/:product_id — membership operations.
+    if (seg.has_id and seg.sub_resource.len > 0) {
+        if (!std.mem.eql(u8, seg.sub_resource, "products")) return null;
+        if (!seg.has_sub_id) return null;
+
+        const operation: message.Operation = switch (method) {
+            .post => .add_member,
+            .delete => .remove_member,
+            else => return null,
+        };
+
+        if (body.len != 0) return null;
+        return .{
+            .operation = operation,
+            .id = seg.id,
+            .body = .{ .collections = .{ .member = seg.sub_id } },
+        };
+    }
+
+    const operation: message.Operation = switch (method) {
+        .get => if (seg.has_id) .get else .list,
+        .post => if (!seg.has_id) .create else return null,
+        .delete => if (seg.has_id) .delete else return null,
+        else => return null,
+    };
+
+    switch (operation) {
+        .get, .list, .delete => {
+            if (body.len != 0) return null;
+            return .{ .operation = operation, .id = seg.id, .body = .{ .collections = null } };
+        },
+        .create => {
+            if (body.len == 0) return null;
+            return .{
+                .operation = operation,
+                .id = seg.id,
+                .body = .{ .collections = .{ .create = parse_collection_json(body) orelse return null } },
+            };
+        },
+        .update, .get_inventory, .add_member, .remove_member => return null,
     }
 }
 
@@ -133,6 +211,28 @@ fn parse_product_json(body: []const u8) ?message.Product {
     return product;
 }
 
+/// Parse a JSON body into a ProductCollection struct.
+/// Expected: {"id":"...","name":"..."}
+/// ID is required (client-provided). Name is required.
+fn parse_collection_json(body: []const u8) ?message.ProductCollection {
+    var col = message.ProductCollection{
+        .id = 0,
+        .name = undefined,
+        .name_len = 0,
+    };
+
+    if (json_string_field(body, "id")) |id_str| {
+        col.id = parse_uuid(id_str) orelse return null;
+    }
+
+    const name = json_string_field(body, "name") orelse return null;
+    if (name.len == 0 or name.len > message.collection_name_max) return null;
+    @memcpy(col.name[0..name.len], name);
+    col.name_len = @intCast(name.len);
+
+    return col;
+}
+
 /// Encode a MessageResponse as JSON into buf. Returns the written slice.
 /// The response is self-describing — the encoder switches on the body variant.
 pub fn encode_response_json(buf: []u8, resp: message.MessageResponse) []const u8 {
@@ -169,6 +269,33 @@ pub fn encode_response_json(buf: []u8, resp: message.MessageResponse) []const u8
                 w.raw("{\"inventory\":");
                 w.write_u32(inv);
                 w.raw("}");
+            },
+            .empty => w.raw("[]"),
+        },
+        .collections => |cr| switch (cr) {
+            .single => |*cwp| {
+                w.raw("{\"id\":\"");
+                w.write_uuid(cwp.collection.id);
+                w.raw("\",\"name\":\"");
+                w.escaped(cwp.collection.name_slice());
+                w.raw("\",\"products\":[");
+                for (cwp.products.items[0..cwp.products.len], 0..) |*p, i| {
+                    if (i > 0) w.raw(",");
+                    encode_product(&w, p);
+                }
+                w.raw("]}");
+            },
+            .list => |*l| {
+                w.raw("[");
+                for (l.items[0..l.len], 0..) |*col, i| {
+                    if (i > 0) w.raw(",");
+                    w.raw("{\"id\":\"");
+                    w.write_uuid(col.id);
+                    w.raw("\",\"name\":\"");
+                    w.escaped(col.name_slice());
+                    w.raw("\"}");
+                }
+                w.raw("]");
             },
             .empty => w.raw("[]"),
         },

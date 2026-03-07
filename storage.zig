@@ -19,6 +19,14 @@ pub const SqliteStorage = struct {
     stmt_update: *c.sqlite3_stmt,
     stmt_delete: *c.sqlite3_stmt,
     stmt_list: *c.sqlite3_stmt,
+    stmt_get_collection: *c.sqlite3_stmt,
+    stmt_put_collection: *c.sqlite3_stmt,
+    stmt_delete_collection: *c.sqlite3_stmt,
+    stmt_list_collections: *c.sqlite3_stmt,
+    stmt_add_member: *c.sqlite3_stmt,
+    stmt_remove_member: *c.sqlite3_stmt,
+    stmt_delete_memberships: *c.sqlite3_stmt,
+    stmt_list_members: *c.sqlite3_stmt,
 
     pub fn init(path: [*:0]const u8) !SqliteStorage {
         var db: ?*c.sqlite3 = null;
@@ -35,7 +43,7 @@ pub const SqliteStorage = struct {
         // Busy timeout: 1 second.
         _ = c.sqlite3_busy_timeout(real_db, 1000);
 
-        // Create table.
+        // Create tables.
         exec(real_db, "CREATE TABLE IF NOT EXISTS products (" ++
             "id BLOB(16) PRIMARY KEY," ++
             "name TEXT NOT NULL," ++
@@ -45,7 +53,18 @@ pub const SqliteStorage = struct {
             "active INTEGER NOT NULL DEFAULT 1" ++
             ");");
 
-        // Prepare statements.
+        exec(real_db, "CREATE TABLE IF NOT EXISTS collections (" ++
+            "id BLOB(16) PRIMARY KEY," ++
+            "name TEXT NOT NULL" ++
+            ");");
+
+        exec(real_db, "CREATE TABLE IF NOT EXISTS collection_members (" ++
+            "collection_id BLOB(16) NOT NULL," ++
+            "product_id BLOB(16) NOT NULL," ++
+            "PRIMARY KEY (collection_id, product_id)" ++
+            ");");
+
+        // Prepare product statements.
         const stmt_get = prepare(real_db,
             "SELECT id, name, description, price_cents, inventory, active FROM products WHERE id = ?1;",
         );
@@ -62,6 +81,33 @@ pub const SqliteStorage = struct {
             "SELECT id, name, description, price_cents, inventory, active FROM products LIMIT ?1;",
         );
 
+        // Prepare collection statements.
+        const stmt_get_collection = prepare(real_db,
+            "SELECT id, name FROM collections WHERE id = ?1;",
+        );
+        const stmt_put_collection = prepare(real_db,
+            "INSERT INTO collections (id, name) VALUES (?1, ?2);",
+        );
+        const stmt_delete_collection = prepare(real_db,
+            "DELETE FROM collections WHERE id = ?1;",
+        );
+        const stmt_list_collections = prepare(real_db,
+            "SELECT id, name FROM collections LIMIT ?1;",
+        );
+        const stmt_add_member = prepare(real_db,
+            "INSERT OR IGNORE INTO collection_members (collection_id, product_id) VALUES (?1, ?2);",
+        );
+        const stmt_remove_member = prepare(real_db,
+            "DELETE FROM collection_members WHERE collection_id = ?1 AND product_id = ?2;",
+        );
+        const stmt_delete_memberships = prepare(real_db,
+            "DELETE FROM collection_members WHERE collection_id = ?1;",
+        );
+        const stmt_list_members = prepare(real_db,
+            "SELECT p.id, p.name, p.description, p.price_cents, p.inventory, p.active " ++
+            "FROM collection_members cm JOIN products p ON cm.product_id = p.id WHERE cm.collection_id = ?1 LIMIT ?2;",
+        );
+
         log.info("storage initialized: {s}", .{path});
 
         return .{
@@ -71,6 +117,14 @@ pub const SqliteStorage = struct {
             .stmt_update = stmt_update,
             .stmt_delete = stmt_delete,
             .stmt_list = stmt_list,
+            .stmt_get_collection = stmt_get_collection,
+            .stmt_put_collection = stmt_put_collection,
+            .stmt_delete_collection = stmt_delete_collection,
+            .stmt_list_collections = stmt_list_collections,
+            .stmt_add_member = stmt_add_member,
+            .stmt_remove_member = stmt_remove_member,
+            .stmt_delete_memberships = stmt_delete_memberships,
+            .stmt_list_members = stmt_list_members,
         };
     }
 
@@ -80,6 +134,14 @@ pub const SqliteStorage = struct {
         _ = c.sqlite3_finalize(self.stmt_update);
         _ = c.sqlite3_finalize(self.stmt_delete);
         _ = c.sqlite3_finalize(self.stmt_list);
+        _ = c.sqlite3_finalize(self.stmt_get_collection);
+        _ = c.sqlite3_finalize(self.stmt_put_collection);
+        _ = c.sqlite3_finalize(self.stmt_delete_collection);
+        _ = c.sqlite3_finalize(self.stmt_list_collections);
+        _ = c.sqlite3_finalize(self.stmt_add_member);
+        _ = c.sqlite3_finalize(self.stmt_remove_member);
+        _ = c.sqlite3_finalize(self.stmt_delete_memberships);
+        _ = c.sqlite3_finalize(self.stmt_list_members);
         _ = c.sqlite3_close(self.db);
     }
 
@@ -170,6 +232,142 @@ pub const SqliteStorage = struct {
         }
     }
 
+    // --- Collection operations ---
+
+    pub fn get_collection(self: *SqliteStorage, id: u128, out: *message.ProductCollection) StorageResult {
+        const stmt = self.stmt_get_collection;
+        defer reset_stmt(stmt);
+
+        bind_uuid(stmt, 1, id);
+        return switch (step_result(stmt)) {
+            .row => {
+                read_collection(stmt, out);
+                return .ok;
+            },
+            .done => .not_found,
+            .busy => .busy,
+            .err => .err,
+            .corruption => .corruption,
+        };
+    }
+
+    pub fn put_collection(self: *SqliteStorage, col: *const message.ProductCollection) StorageResult {
+        const stmt = self.stmt_put_collection;
+        defer reset_stmt(stmt);
+
+        bind_uuid(stmt, 1, col.id);
+        _ = c.sqlite3_bind_text(stmt, 2, col.name[0..col.name_len].ptr, @intCast(col.name_len), c.SQLITE_TRANSIENT);
+        return switch (step_result(stmt)) {
+            .done => .ok,
+            .row => unreachable,
+            .busy => .busy,
+            .err => .err,
+            .corruption => .corruption,
+        };
+    }
+
+    pub fn delete_collection(self: *SqliteStorage, id: u128) StorageResult {
+        // Delete memberships first.
+        {
+            const stmt = self.stmt_delete_memberships;
+            defer reset_stmt(stmt);
+            bind_uuid(stmt, 1, id);
+            _ = c.sqlite3_step(stmt);
+        }
+
+        const stmt = self.stmt_delete_collection;
+        defer reset_stmt(stmt);
+        bind_uuid(stmt, 1, id);
+        return switch (step_result(stmt)) {
+            .done => {
+                if (c.sqlite3_changes(self.db) == 0) return .not_found;
+                return .ok;
+            },
+            .row => unreachable,
+            .busy => .busy,
+            .err => .err,
+            .corruption => .corruption,
+        };
+    }
+
+    pub fn list_collections(self: *SqliteStorage, out: *[message.MessageResponse.list_max]message.ProductCollection, out_len: *u32) StorageResult {
+        const stmt = self.stmt_list_collections;
+        defer reset_stmt(stmt);
+
+        _ = c.sqlite3_bind_int(stmt, 1, message.MessageResponse.list_max);
+        out_len.* = 0;
+
+        while (true) {
+            switch (step_result(stmt)) {
+                .row => {
+                    assert(out_len.* < message.MessageResponse.list_max);
+                    read_collection(stmt, &out[out_len.*]);
+                    out_len.* += 1;
+                },
+                .done => return .ok,
+                .busy => return .busy,
+                .err => return .err,
+                .corruption => return .corruption,
+            }
+        }
+    }
+
+    pub fn add_to_collection(self: *SqliteStorage, collection_id: u128, product_id: u128) StorageResult {
+        const stmt = self.stmt_add_member;
+        defer reset_stmt(stmt);
+
+        bind_uuid(stmt, 1, collection_id);
+        bind_uuid(stmt, 2, product_id);
+        return switch (step_result(stmt)) {
+            .done => .ok,
+            .row => unreachable,
+            .busy => .busy,
+            .err => .err,
+            .corruption => .corruption,
+        };
+    }
+
+    pub fn remove_from_collection(self: *SqliteStorage, collection_id: u128, product_id: u128) StorageResult {
+        const stmt = self.stmt_remove_member;
+        defer reset_stmt(stmt);
+
+        bind_uuid(stmt, 1, collection_id);
+        bind_uuid(stmt, 2, product_id);
+        return switch (step_result(stmt)) {
+            .done => {
+                if (c.sqlite3_changes(self.db) == 0) return .not_found;
+                return .ok;
+            },
+            .row => unreachable,
+            .busy => .busy,
+            .err => .err,
+            .corruption => .corruption,
+        };
+    }
+
+    pub fn list_products_in_collection(self: *SqliteStorage, collection_id: u128, out: *[message.MessageResponse.list_max]message.Product, out_len: *u32) StorageResult {
+        const stmt = self.stmt_list_members;
+        defer reset_stmt(stmt);
+
+        bind_uuid(stmt, 1, collection_id);
+        _ = c.sqlite3_bind_int(stmt, 2, message.MessageResponse.list_max);
+        out_len.* = 0;
+
+        while (true) {
+            switch (step_result(stmt)) {
+                .row => {
+                    assert(out_len.* < message.MessageResponse.list_max);
+                    read_product(stmt, &out[out_len.*]);
+                    out_len.* += 1;
+                },
+                .done => return .ok,
+                .busy => return .busy,
+                .err => return .err,
+                .corruption => return .corruption,
+            }
+        }
+    }
+
     // --- Internal helpers ---
 
     const StepResult = enum { row, done, busy, err, corruption };
@@ -235,6 +433,17 @@ pub const SqliteStorage = struct {
         out.price_cents = @intCast(c.sqlite3_column_int(stmt, 3));
         out.inventory = @intCast(c.sqlite3_column_int(stmt, 4));
         out.active = c.sqlite3_column_int(stmt, 5) != 0;
+    }
+
+    fn read_collection(stmt: *c.sqlite3_stmt, out: *message.ProductCollection) void {
+        const id_blob: [*]const u8 = @ptrCast(c.sqlite3_column_blob(stmt, 0));
+        out.id = std.mem.readInt(u128, id_blob[0..16], .big);
+
+        const name_ptr: [*]const u8 = @ptrCast(c.sqlite3_column_text(stmt, 1));
+        const name_len: usize = @intCast(c.sqlite3_column_bytes(stmt, 1));
+        assert(name_len <= message.collection_name_max);
+        @memcpy(out.name[0..name_len], name_ptr[0..name_len]);
+        out.name_len = @intCast(name_len);
     }
 
     fn prepare(db: *c.sqlite3, sql: [*:0]const u8) *c.sqlite3_stmt {

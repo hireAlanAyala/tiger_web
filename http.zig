@@ -100,8 +100,12 @@ pub fn parse_request(buf: []const u8) ParseResult {
         .get, .delete, .options => {
             if (content_length != 0) return .invalid;
         },
-        .put, .post => {
+        .put => {
             if (content_length == 0) return .invalid;
+            if (content_length > body_max) return .invalid;
+        },
+        .post => {
+            // POST may have no body (e.g., action endpoints with IDs in URL).
             if (content_length > body_max) return .invalid;
         },
     }
