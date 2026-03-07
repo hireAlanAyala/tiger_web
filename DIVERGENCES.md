@@ -65,6 +65,8 @@ We follow the same pattern: `create_product`, `get_collection`, `add_collection_
 
 `execute()` uses `inline` switch to group operations by shared control flow pattern (get, list, create, delete), following TigerBeetle's `commit()` pattern. Each handler takes `comptime op: Operation` and uses comptime switches internally — dead branches are pruned by the compiler, so `storage.put(&event)` with the wrong event type never compiles.
 
+`event_tag()` on `Operation` derives the expected `Event` tag from `EventType()` via `inline else` — the type→tag mapping exists in one place. `prefetch()` uses this as a pair assertion: `assert(msg.event == msg.operation.event_tag())`. schema.zig constructs messages, state_machine.zig consumes them — the assertion at the consumption boundary catches any mismatch. This is a runtime check, not a compile-time guarantee (the old nested union made invalid pairings unrepresentable), but it surfaces bugs immediately in tests.
+
 ## Synchronous Prefetch (Divergence from TigerBeetle)
 
 TigerBeetle's prefetch is async with callback chains — it enqueues reads, submits to IO, and chains callbacks when multi-entity prefetches are needed (e.g., prefetch transfers → callback → prefetch accounts → callback → done). This is necessary because TigerBeetle's storage is an LSM tree with disk IO.
