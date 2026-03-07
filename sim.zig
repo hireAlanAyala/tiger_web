@@ -1057,7 +1057,6 @@ test "product get_inventory — returns inventory count" {
 // =====================================================================
 
 const test_col_uuid1 = "cc000000000000000000000000000001";
-const test_col_uuid2 = "cc000000000000000000000000000002";
 
 test "collection CRUD — create, get, list, delete" {
     var sim_io = SimIO.init(0xd001);
@@ -1216,6 +1215,54 @@ test "add member — missing product returns 404" {
     const resp = run_until_response(&server, &sim_io, 0, 500) orelse
         return error.TestUnexpectedResult;
     try std.testing.expectEqual(resp.status_code, 404);
+}
+
+test "remove member — removes product from collection" {
+    var sim_io = SimIO.init(0xd006);
+    var storage = try MemoryStorage.init(std.testing.allocator);
+    defer storage.deinit(std.testing.allocator);
+    var sm = StateMachine.init(&storage);
+    var server = Server.init(&sim_io, &sm, 1);
+
+    sim_io.connect_client(0);
+    run_ticks(&server, &sim_io, 10);
+
+    // Create product + collection + membership.
+    sim_io.inject_post(0, "/products",
+        "{\"id\":\"" ++ test_uuid1 ++ "\",\"name\":\"Widget\"}"
+    );
+    _ = run_until_response(&server, &sim_io, 0, 500) orelse return error.TestUnexpectedResult;
+    sim_io.clear_response(0);
+
+    sim_io.inject_post(0, "/collections",
+        "{\"id\":\"" ++ test_col_uuid1 ++ "\",\"name\":\"Sale\"}"
+    );
+    _ = run_until_response(&server, &sim_io, 0, 500) orelse return error.TestUnexpectedResult;
+    sim_io.clear_response(0);
+
+    sim_io.inject_bytes(0, "POST /collections/" ++ test_col_uuid1 ++ "/products/" ++ test_uuid1 ++ " HTTP/1.1\r\n\r\n");
+    _ = run_until_response(&server, &sim_io, 0, 500) orelse return error.TestUnexpectedResult;
+    sim_io.clear_response(0);
+
+    // Verify product is in collection.
+    sim_io.inject_get(0, "/collections/" ++ test_col_uuid1);
+    const before = run_until_response(&server, &sim_io, 0, 500) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(before.status_code, 200);
+    try std.testing.expect(json_contains(before.body, "\"name\":\"Widget\""));
+    sim_io.clear_response(0);
+
+    // Remove member — exercises remove_collection_member + member_id event tag.
+    sim_io.inject_bytes(0, "DELETE /collections/" ++ test_col_uuid1 ++ "/products/" ++ test_uuid1 ++ " HTTP/1.1\r\n\r\n");
+    const remove_resp = run_until_response(&server, &sim_io, 0, 500) orelse
+        return error.TestUnexpectedResult;
+    try std.testing.expectEqual(remove_resp.status_code, 200);
+    sim_io.clear_response(0);
+
+    // Collection should have no products now.
+    sim_io.inject_get(0, "/collections/" ++ test_col_uuid1);
+    const after = run_until_response(&server, &sim_io, 0, 500) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(after.status_code, 200);
+    try std.testing.expect(json_contains(after.body, "\"products\":[]"));
 }
 
 test "delete collection cascades memberships" {
