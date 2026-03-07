@@ -43,6 +43,10 @@ pub fn StateMachineType(comptime Storage: type) type {
         /// Returns false if storage is busy — connection stays .ready, retried next tick.
         pub fn prefetch(self: *StateMachine, msg: message.Message) bool {
             assert(self.prefetch_result == null);
+            // Pair assertion: event tag must match what EventType prescribes
+            // for this operation. Construction site is schema.zig; this is the
+            // consumption site — catches mismatched event/operation pairing.
+            assert(msg.event == msg.operation.event_tag());
             self.reset_prefetch_cache();
 
             const result: StorageResult = switch (msg.operation) {

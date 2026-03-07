@@ -54,6 +54,21 @@ pub const Operation = enum(u8) {
         };
     }
 
+    /// Runtime equivalent of EventType — returns the expected Event tag
+    /// for this operation. Derived from EventType via inline else so the
+    /// mapping is never duplicated. Used by pair assertions to validate
+    /// event-to-operation pairing at the consumption boundary.
+    pub fn event_tag(op: Operation) std.meta.Tag(Event) {
+        return switch (op) {
+            inline else => |comptime_op| comptime switch (comptime_op.EventType()) {
+                Product => .product,
+                ProductCollection => .collection,
+                u128 => .member_id,
+                void => .none,
+                else => @compileError("unhandled EventType"),
+            },
+        };
+    }
 };
 
 pub const collection_name_max = 128;
@@ -237,4 +252,16 @@ test "Operation EventType comptime resolution" {
         assert(Operation.EventType(.create_collection) == ProductCollection);
         assert(Operation.EventType(.add_collection_member) == u128);
     }
+}
+
+test "Operation event_tag derived from EventType" {
+    // Runtime function — verify it agrees with EventType for every operation.
+    try std.testing.expectEqual(Operation.event_tag(.create_product), .product);
+    try std.testing.expectEqual(Operation.event_tag(.update_product), .product);
+    try std.testing.expectEqual(Operation.event_tag(.create_collection), .collection);
+    try std.testing.expectEqual(Operation.event_tag(.add_collection_member), .member_id);
+    try std.testing.expectEqual(Operation.event_tag(.remove_collection_member), .member_id);
+    try std.testing.expectEqual(Operation.event_tag(.get_product), .none);
+    try std.testing.expectEqual(Operation.event_tag(.list_products), .none);
+    try std.testing.expectEqual(Operation.event_tag(.delete_product), .none);
 }
