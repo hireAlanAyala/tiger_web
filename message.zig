@@ -12,6 +12,7 @@ pub const Status = enum(u8) {
     ok = 1,
     not_found = 2,
     err = 3,
+    storage_error = 4,
 };
 
 pub const Collection = enum(u8) {
@@ -32,7 +33,7 @@ pub const product_description_max = 512;
 /// Fixed-size product record. All fields are value types — no pointers,
 /// no allocations. Stored directly in pre-allocated arrays.
 pub const Product = struct {
-    id: u32,
+    id: u128,
     name: [product_name_max]u8,
     name_len: u8,
     description: [product_description_max]u8,
@@ -64,7 +65,7 @@ pub const Product = struct {
 /// to handle it.
 pub const Message = struct {
     operation: Operation,
-    id: u32, // 0 for list/create
+    id: u128, // 0 for list/create
     body: Body,
 
     pub const Body = union(Collection) {
@@ -104,6 +105,7 @@ pub const MessageResponse = struct {
         .status = .not_found,
         .body = .{ .products = .{ .product = null, .list = undefined, .list_len = 0 } },
     };
+
 };
 
 // =====================================================================
@@ -112,7 +114,7 @@ pub const MessageResponse = struct {
 
 test "Product name and description slices" {
     var p = Product{
-        .id = 1,
+        .id = 0x0102030405060708090a0b0c0d0e0f10,
         .name = undefined,
         .name_len = 5,
         .description = undefined,

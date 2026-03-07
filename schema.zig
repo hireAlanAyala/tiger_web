@@ -27,9 +27,9 @@ pub fn translate(method: http.Method, raw_path: []const u8, body: []const u8) ?m
     else
         return null;
 
-    // Parse optional ID from second segment.
-    const id: u32 = if (remainder.len > 0)
-        parse_u32(remainder) orelse return null
+    // Parse optional ID from second segment (hex UUID, 32 hex chars).
+    const id: u128 = if (remainder.len > 0)
+        parse_uuid(remainder) orelse return null
     else
         0;
 
@@ -76,7 +76,7 @@ pub fn translate(method: http.Method, raw_path: []const u8, body: []const u8) ?m
 /// All fields except name are optional for updates. Name is always required.
 fn parse_product_json(body: []const u8) ?message.Product {
     var product = message.Product{
-        .id = 0, // assigned by state machine on create
+        .id = 0,
         .name = undefined,
         .name_len = 0,
         .description = undefined,
@@ -85,6 +85,11 @@ fn parse_product_json(body: []const u8) ?message.Product {
         .inventory = 0,
         .active = true,
     };
+
+    // ID is optional in the body (used for create).
+    if (json_string_field(body, "id")) |id_str| {
+        product.id = parse_uuid(id_str) orelse return null;
+    }
 
     // Name is required.
     const name = json_string_field(body, "name") orelse return null;
@@ -131,6 +136,10 @@ pub fn encode_response_json(buf: []u8, resp: message.MessageResponse) []const u8
             w.raw("{\"error\":\"internal error\"}");
             return buf[0..w.pos];
         },
+        .storage_error => {
+            w.raw("{\"error\":\"service unavailable\"}");
+            return buf[0..w.pos];
+        },
         .ok => {},
     }
 
@@ -155,9 +164,9 @@ pub fn encode_response_json(buf: []u8, resp: message.MessageResponse) []const u8
 }
 
 fn encode_product(w: *JsonWriter, p: *const message.Product) void {
-    w.raw("{\"id\":");
-    w.write_u32(p.id);
-    w.raw(",\"name\":\"");
+    w.raw("{\"id\":\"");
+    w.write_uuid(p.id);
+    w.raw("\",\"name\":\"");
     w.escaped(p.name_slice());
     w.raw("\",\"description\":\"");
     w.escaped(p.description_slice());
@@ -188,6 +197,12 @@ const JsonWriter = struct {
         var num_buf: [10]u8 = undefined;
         const s = format_u32(&num_buf, val);
         self.raw(s);
+    }
+
+    fn write_uuid(self: *JsonWriter, val: u128) void {
+        var uuid_buf: [32]u8 = undefined;
+        write_uuid_to_buf(&uuid_buf, val);
+        self.raw(&uuid_buf);
     }
 
     /// Write a string with JSON escaping (quotes and backslashes).
@@ -301,10 +316,32 @@ fn json_bool_field(json: []const u8, field: []const u8) ?bool {
     return null;
 }
 
-/// Parse a decimal u32 from a string. Returns null on invalid input.
-fn parse_u32(s: []const u8) ?u32 {
-    if (s.len == 0) return null;
-    return std.fmt.parseInt(u32, s, 10) catch return null;
+/// Parse a 32-character hex string as a u128 UUID. Returns null on invalid input.
+/// Accepts exactly 32 lowercase hex characters (no dashes).
+fn parse_uuid(s: []const u8) ?u128 {
+    if (s.len != 32) return null;
+    var result: u128 = 0;
+    for (s) |c| {
+        const digit: u128 = switch (c) {
+            '0'...'9' => c - '0',
+            'a'...'f' => c - 'a' + 10,
+            else => return null,
+        };
+        result = (result << 4) | digit;
+    }
+    return result;
+}
+
+/// Format a u128 as a 32-character lowercase hex string.
+fn write_uuid_to_buf(buf: *[32]u8, val: u128) void {
+    const hex = "0123456789abcdef";
+    var v = val;
+    var i: usize = 32;
+    while (i > 0) {
+        i -= 1;
+        buf[i] = hex[@intCast(v & 0xf)];
+        v >>= 4;
+    }
 }
 
 /// Format a u32 as a decimal string.
@@ -327,6 +364,9 @@ fn format_u32(buf: *[10]u8, val: u32) []const u8 {
 // Tests
 // =====================================================================
 
+const test_uuid_str = "aabbccdd11223344aabbccdd11223344";
+const test_uuid: u128 = 0xaabbccdd11223344aabbccdd11223344;
+
 test "GET /products (list)" {
     const msg = translate(.get, "/products", "").?;
     try std.testing.expectEqual(msg.operation, .list);
@@ -334,20 +374,21 @@ test "GET /products (list)" {
     try std.testing.expectEqual(msg.body.products, null);
 }
 
-test "GET /products/123 (get)" {
-    const msg = translate(.get, "/products/123", "").?;
+test "GET /products/:id (get)" {
+    const msg = translate(.get, "/products/" ++ test_uuid_str, "").?;
     try std.testing.expectEqual(msg.operation, .get);
-    try std.testing.expectEqual(msg.id, 123);
+    try std.testing.expectEqual(msg.id, test_uuid);
 }
 
 test "POST /products (create)" {
     const body =
-        \\{"name":"Widget","description":"A small widget","price_cents":999,"inventory":50,"active":true}
+        \\{"id":"aabbccdd11223344aabbccdd11223344","name":"Widget","description":"A small widget","price_cents":999,"inventory":50,"active":true}
     ;
     const msg = translate(.post, "/products", body).?;
     try std.testing.expectEqual(msg.operation, .create);
     try std.testing.expectEqual(msg.id, 0);
     const p = msg.body.products.?;
+    try std.testing.expectEqual(p.id, test_uuid);
     try std.testing.expectEqualSlices(u8, p.name_slice(), "Widget");
     try std.testing.expectEqualSlices(u8, p.description_slice(), "A small widget");
     try std.testing.expectEqual(p.price_cents, 999);
@@ -355,19 +396,19 @@ test "POST /products (create)" {
     try std.testing.expect(p.active);
 }
 
-test "PUT /products/42 (update)" {
-    const msg = translate(.put, "/products/42",
+test "PUT /products/:id (update)" {
+    const msg = translate(.put, "/products/" ++ test_uuid_str,
         \\{"name":"Updated"}
     ).?;
     try std.testing.expectEqual(msg.operation, .update);
-    try std.testing.expectEqual(msg.id, 42);
+    try std.testing.expectEqual(msg.id, test_uuid);
     try std.testing.expect(msg.body.products != null);
 }
 
-test "DELETE /products/7 (delete)" {
-    const msg = translate(.delete, "/products/7", "").?;
+test "DELETE /products/:id (delete)" {
+    const msg = translate(.delete, "/products/" ++ test_uuid_str, "").?;
     try std.testing.expectEqual(msg.operation, .delete);
-    try std.testing.expectEqual(msg.id, 7);
+    try std.testing.expectEqual(msg.id, test_uuid);
 }
 
 test "rejects unknown collection" {
@@ -378,7 +419,7 @@ test "rejects unknown collection" {
 
 test "rejects invalid method/path combos" {
     // POST with ID.
-    try std.testing.expect(translate(.post, "/products/1",
+    try std.testing.expect(translate(.post, "/products/" ++ test_uuid_str,
         \\{"name":"X"}
     ) == null);
     // PUT without ID.
@@ -389,13 +430,22 @@ test "rejects invalid method/path combos" {
     try std.testing.expect(translate(.delete, "/products", "") == null);
 }
 
+test "rejects invalid UUID in path" {
+    // Too short.
+    try std.testing.expect(translate(.get, "/products/123", "") == null);
+    // Uppercase not accepted.
+    try std.testing.expect(translate(.get, "/products/AABBCCDD11223344AABBCCDD11223344", "") == null);
+    // Non-hex chars.
+    try std.testing.expect(translate(.get, "/products/zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz", "") == null);
+}
+
 test "strips query string" {
     const msg = translate(.get, "/products?page=1", "").?;
     try std.testing.expectEqual(msg.operation, .list);
 }
 
 test "GET rejects non-empty body" {
-    try std.testing.expect(translate(.get, "/products/1", "data") == null);
+    try std.testing.expect(translate(.get, "/products/" ++ test_uuid_str, "data") == null);
 }
 
 test "POST rejects empty body" {
@@ -403,7 +453,9 @@ test "POST rejects empty body" {
 }
 
 test "POST rejects missing name" {
-    try std.testing.expect(translate(.post, "/products", "{\"price_cents\":100}") == null);
+    try std.testing.expect(translate(.post, "/products",
+        \\{"id":"aabbccdd11223344aabbccdd11223344","price_cents":100}
+    ) == null);
 }
 
 test "json_string_field extracts value" {
@@ -435,7 +487,7 @@ test "json_bool_field extracts boolean" {
 
 test "encode_response_json — single product" {
     var p = message.Product{
-        .id = 1,
+        .id = 0xaabbccdd11223344aabbccdd11223344,
         .name = undefined,
         .name_len = 6,
         .description = undefined,
@@ -454,9 +506,22 @@ test "encode_response_json — single product" {
 
     var buf: [4096]u8 = undefined;
     const json = encode_response_json(&buf, resp);
-    try std.testing.expect(std.mem.indexOf(u8, json, "\"id\":1") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"id\":\"" ++ test_uuid_str ++ "\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, json, "\"name\":\"Widget\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, json, "\"price_cents\":999") != null);
+}
+
+test "parse_uuid and write_uuid roundtrip" {
+    const uuid = parse_uuid("0123456789abcdef0123456789abcdef").?;
+    var buf: [32]u8 = undefined;
+    write_uuid_to_buf(&buf, uuid);
+    try std.testing.expectEqualSlices(u8, &buf, "0123456789abcdef0123456789abcdef");
+}
+
+test "parse_uuid rejects invalid input" {
+    try std.testing.expect(parse_uuid("123") == null); // too short
+    try std.testing.expect(parse_uuid("AABBCCDD11223344AABBCCDD11223344") == null); // uppercase
+    try std.testing.expect(parse_uuid("zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz") == null); // non-hex
 }
 
 test "encode_response_json — not found" {
