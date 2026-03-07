@@ -4,20 +4,20 @@ const maybe = @import("message.zig").maybe;
 const message = @import("message.zig");
 const schema = @import("schema.zig");
 const http = @import("http.zig");
-const StateMachine = @import("state_machine.zig").StateMachine;
+const StateMachineType = @import("state_machine.zig").StateMachineType;
 const ConnectionType = @import("connection.zig").ConnectionType;
 const marks = @import("marks.zig");
 const log = marks.wrap_log(std.log.scoped(.server));
 
-/// The server orchestrator, parameterized on the IO type.
-/// In production, IO is the real epoll-based implementation.
-/// In simulation, IO is SimIO with deterministic behavior.
+/// The server orchestrator, parameterized on the IO and Storage types.
+/// In production, IO is the real epoll-based implementation and Storage is SqliteStorage.
+/// In simulation, IO is SimIO and Storage is MemoryStorage.
 ///
 /// This is the equivalent of TigerBeetle's Replica — it owns all connections,
 /// drives the tick loop, and mediates between network IO and the state machine.
-// Takes IO as an arg so it can be mocked by the sim.
-pub fn ServerType(comptime IO: type) type {
+pub fn ServerType(comptime IO: type, comptime Storage: type) type {
     const Connection = ConnectionType(IO);
+    const StateMachine = StateMachineType(Storage);
 
     return struct {
         const Server = @This();
@@ -128,6 +128,9 @@ pub fn ServerType(comptime IO: type) type {
                 if (conn.state != .ready) continue;
 
                 const msg = conn.typed_message orelse unreachable;
+                // Prefetch: fetch data from storage. If storage is busy
+                // (transient), skip this connection — retry next tick.
+                if (!server.state_machine.prefetch(msg)) continue;
                 const resp = server.state_machine.execute(msg);
                 const json = schema.encode_response_json(&json_buf, resp);
                 conn.set_json_response(json, resp.status);
