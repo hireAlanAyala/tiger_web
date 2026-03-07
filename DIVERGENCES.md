@@ -47,6 +47,16 @@ TigerBeetle intentionally installs no signal handlers. The replica runs `while (
 
 We follow the same pattern. Our store is in-memory — all state is lost on any exit regardless of how gracefully it happens. Draining in-flight responses on SIGTERM doesn't save data. The client sees a connection reset and retries, same as any network failure. No signal handlers, no drain logic, no shutdown timeout.
 
+## Storage Parameterization
+
+TigerBeetle's state machine operates directly on its LSM tree and forest structures. The storage layer is tightly integrated — the state machine prefetches from the grid/forest and executes deterministic logic on the cached data. The storage backend isn't swappable because TigerBeetle always uses the same on-disk format.
+
+We parameterize `StateMachineType(comptime Storage: type)` so the same state machine works with `SqliteStorage` in production and `MemoryStorage` in simulation. This duck-typed comptime interface follows the same pattern as `ServerType(comptime IO)` — the compiler monomorphizes the code, zero runtime dispatch.
+
+The prefetch/execute split mirrors TigerBeetle's two-phase approach: `prefetch()` fetches data from storage into fixed cache slots on the state machine, and `execute()` reads only from those cache slots. If storage returns `.busy` (SQLite's `SQLITE_BUSY`), the connection stays in `.ready` state and is retried on the next tick — no new connection states needed.
+
+`MemoryStorage` supports PRNG-driven fault injection (`busy_fault_probability`, `err_fault_probability`) using the same `splitmix64` pattern as `SimIO`. This lets sim tests verify that busy faults cause retries and storage errors produce 503 responses.
+
 ## Single-Threaded, No IO Batching
 
 TigerBeetle batches IO submissions and completions through io_uring, processing multiple operations per syscall. The IO layer is designed for high-throughput concurrent replication traffic.

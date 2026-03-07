@@ -13,25 +13,26 @@ sh zig/download.sh          # one-time: download Zig 0.14.1
 
 ## Architecture
 
-Single-threaded event loop using epoll. No allocations after startup. 4-layer request pipeline:
+Single-threaded event loop using epoll. No allocations after startup. Request pipeline with prefetch/execute split:
 
 ```
-http.zig → schema.zig → message.zig → state_machine.zig
-(parse HTTP)  (route + JSON → typed)  (types)  (execute on typed structs)
+http.zig → schema.zig → message.zig → state_machine.zig → storage
+(parse HTTP)  (route + JSON → typed)  (types)  (prefetch + execute)  (SQLite or in-memory)
 ```
 
 | File | Role |
 |---|---|
 | `main.zig` | Entry point, tick loop |
-| `server.zig` | Accepts connections, drives tick-based state machine |
+| `server.zig` | `ServerType(IO, Storage)` — accepts connections, drives prefetch→execute |
 | `connection.zig` | Per-connection state machine (accepting → receiving → ready → sending) |
 | `http.zig` | HTTP/1.0+1.1 parser and response encoder |
-| `schema.zig` | Route parsing, JSON ↔ typed struct translation |
-| `message.zig` | Types: KV ops, Product, Collection, Message, MessageResponse |
-| `state_machine.zig` | In-memory KV store + product CRUD |
+| `schema.zig` | Route parsing, JSON ↔ typed struct translation, UUID parsing |
+| `message.zig` | Types: Product (u128 ID), Collection, Message, MessageResponse |
+| `state_machine.zig` | `StateMachineType(Storage)` — prefetch/execute split, `MemoryStorage` |
+| `storage.zig` | `SqliteStorage` — SQLite backend with prepared statements, WAL mode |
 | `io.zig` | epoll IO layer (real syscalls) |
 | `marks.zig` | Coverage marks — links log sites to test assertions |
-| `sim.zig` | Simulated IO + PRNG-driven fuzz/integration tests |
+| `sim.zig` | `SimIO` + `MemoryStorage` with PRNG-driven fault injection |
 
 ## Conventions
 
@@ -98,7 +99,8 @@ Levels: ~70% debug (invisible by default), ~20% warn (recoverable operational is
 | `server.zig` | `.server` | Accept/close/timeout lifecycle |
 | `connection.zig` | `.connection` | State transitions, errors |
 | `io.zig` | `.io` | Listener bind, epoll errors |
-| `state_machine.zig` | `.state_machine` | Capacity warnings |
+| `state_machine.zig` | `.state_machine` | Storage fault marks, capacity warnings |
+| `storage.zig` | `.storage` | SQLite init/errors |
 | `http.zig` | — | No logging (pure parser, no side effects) |
 | `message.zig` | — | No logging (types only) |
 | `marks.zig` | — | No logging (test infrastructure) |
@@ -167,7 +169,8 @@ Use `log.mark.*` for **testable decision boundaries** — code paths the sim fuz
 | `connection.zig` | `try_parse_request` unmapped request | `"unmapped request"` |
 | `server.zig` | `accept_callback` failed | `"accept failed"` |
 | `server.zig` | `timeout_idle` timed out | `"connection timed out"` |
-| `state_machine.zig` | `execute_put` approaching capacity | `"approaching capacity"` |
+| `state_machine.zig` | `MemoryStorage.fault` busy injected | `"storage: busy fault injected"` |
+| `state_machine.zig` | `MemoryStorage.fault` err injected | `"storage: err fault injected"` |
 
 ### When NOT to use `log.mark.*`
 
