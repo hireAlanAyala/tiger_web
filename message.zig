@@ -17,8 +17,7 @@ pub const Status = enum(u8) {
 
 /// Flat operation enum — encodes entity type AND action in a single tag,
 /// following TigerBeetle's pattern. Adding a new entity type means adding
-/// new variants here; comptime EventType/ResultType functions ensure all
-/// switch sites handle them.
+/// new variants here; the compiler forces every switch site to handle them.
 pub const Operation = enum(u8) {
     // Products
     create_product = 1,
@@ -55,21 +54,6 @@ pub const Operation = enum(u8) {
         };
     }
 
-    /// Output result type — what the response carries for this operation.
-    pub fn ResultType(comptime op: Operation) type {
-        return switch (op) {
-            .create_product, .get_product, .update_product => Product,
-            .list_products => ProductList,
-            .delete_product => void,
-            .get_product_inventory => u32,
-            .create_collection, .get_collection => CollectionWithProducts,
-            .list_collections => CollectionList,
-            .delete_collection,
-            .add_collection_member,
-            .remove_collection_member,
-            => void,
-        };
-    }
 };
 
 pub const collection_name_max = 128;
@@ -247,14 +231,10 @@ test "MessageResponse convenience constructors" {
 }
 
 test "Operation EventType comptime resolution" {
-    // Verify comptime type functions resolve correctly.
     comptime {
         assert(Operation.EventType(.create_product) == Product);
         assert(Operation.EventType(.get_product) == void);
         assert(Operation.EventType(.create_collection) == ProductCollection);
         assert(Operation.EventType(.add_collection_member) == u128);
-        assert(Operation.ResultType(.list_products) == ProductList);
-        assert(Operation.ResultType(.get_collection) == CollectionWithProducts);
-        assert(Operation.ResultType(.delete_product) == void);
     }
 }

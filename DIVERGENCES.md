@@ -61,9 +61,9 @@ The prefetch/execute split mirrors TigerBeetle's two-phase approach: `prefetch()
 
 TigerBeetle uses a flat `Operation` enum where each variant encodes both entity type and action (`create_accounts`, `create_transfers`, etc.). Comptime functions `EventType()` and `ResultType()` on the enum resolve the input and output types for each operation at compile time.
 
-We follow the same pattern: `create_product`, `get_collection`, `add_collection_member`, etc. The `EventType`/`ResultType` comptime functions on `Operation` enable compile-time specialization. Adding a new entity type means adding variants to the enum — the compiler forces every switch site to handle them.
+We follow the same pattern: `create_product`, `get_collection`, `add_collection_member`, etc. `EventType()` on `Operation` drives the inline dispatch in `execute()` — it resolves the typed event parameter for each handler at compile time. We don't have `ResultType()` because our results flow through a tagged `Result` union rather than raw byte buffers; the result variant is selected per-operation inside each handler.
 
-TigerBeetle's `commit()` uses `inline` switch to go from a runtime operation value to comptime-specialized code paths. We use a regular flat switch in `execute()` since our result types flow through a tagged union (`Result`) rather than binary byte casting. The structural benefit is the same: one flat dispatch point instead of nested switches on entity type then operation.
+`execute()` uses `inline` switch to group operations by shared control flow pattern (get, list, create, delete), following TigerBeetle's `commit()` pattern. Each handler takes `comptime op: Operation` and uses comptime switches internally — dead branches are pruned by the compiler, so `storage.put(&event)` with the wrong event type never compiles.
 
 ## Synchronous Prefetch (Divergence from TigerBeetle)
 
