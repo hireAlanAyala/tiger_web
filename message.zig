@@ -15,20 +15,61 @@ pub const Status = enum(u8) {
     storage_error = 4,
 };
 
-pub const Collection = enum(u8) {
-    products = 1,
-    collections = 2,
-};
-
+/// Flat operation enum — encodes entity type AND action in a single tag,
+/// following TigerBeetle's pattern. Adding a new entity type means adding
+/// new variants here; comptime EventType/ResultType functions ensure all
+/// switch sites handle them.
 pub const Operation = enum(u8) {
-    get = 1,
-    list = 2,
-    create = 3,
-    update = 4,
-    delete = 5,
-    get_inventory = 6,
-    add_member = 7,
-    remove_member = 8,
+    // Products
+    create_product = 1,
+    get_product = 2,
+    list_products = 3,
+    update_product = 4,
+    delete_product = 5,
+    get_product_inventory = 6,
+
+    // Collections
+    create_collection = 7,
+    get_collection = 8,
+    list_collections = 9,
+    delete_collection = 10,
+    add_collection_member = 11,
+    remove_collection_member = 12,
+
+    /// Input event type — what the message body carries for this operation.
+    /// Called with comptime operation (via inline dispatch) to resolve types
+    /// at compile time, same as TigerBeetle's Operation.EventType().
+    pub fn EventType(comptime op: Operation) type {
+        return switch (op) {
+            .create_product, .update_product => Product,
+            .create_collection => ProductCollection,
+            .add_collection_member, .remove_collection_member => u128,
+            .get_product,
+            .delete_product,
+            .get_product_inventory,
+            .list_products,
+            .get_collection,
+            .delete_collection,
+            .list_collections,
+            => void,
+        };
+    }
+
+    /// Output result type — what the response carries for this operation.
+    pub fn ResultType(comptime op: Operation) type {
+        return switch (op) {
+            .create_product, .get_product, .update_product => Product,
+            .list_products => ProductList,
+            .delete_product => void,
+            .get_product_inventory => u32,
+            .create_collection, .get_collection => CollectionWithProducts,
+            .list_collections => CollectionList,
+            .delete_collection,
+            .add_collection_member,
+            .remove_collection_member,
+            => void,
+        };
+    }
 };
 
 pub const collection_name_max = 128;
@@ -80,95 +121,75 @@ pub const Product = struct {
     }
 };
 
+/// Event payload — tagged union carrying operation-specific input data.
+/// The state machine never sees HTTP or JSON — only Message with this Event.
+pub const Event = union(enum) {
+    product: Product,
+    collection: ProductCollection,
+    member_id: u128, // product_id for add/remove member
+    none: void,
+};
+
 /// Typed message from the schema layer to the state machine.
-/// The state machine never sees HTTP or JSON — only this struct.
-/// The body is a tagged union keyed on Collection — adding a new
-/// collection adds a variant, and the compiler forces every switch
-/// to handle it.
 pub const Message = struct {
     operation: Operation,
-    id: u128, // 0 for list/create
-    body: Body,
+    id: u128, // primary entity ID (0 for list/create)
+    event: Event,
+};
 
-    pub const Body = union(Collection) {
-        products: ?Product, // populated for create/update, null for get/list/delete
-        collections: ?CollectionPayload,
-    };
+/// Maximum number of items returned in a single list response.
+pub const list_max = 50;
 
-    /// Payload for collection operations.
-    /// .create carries the collection struct, .member carries a product_id
-    /// (for add_member/remove_member — the collection_id is in msg.id).
-    pub const CollectionPayload = union(enum) {
-        create: ProductCollection,
-        member: u128, // product_id
-    };
+pub const ProductList = struct {
+    items: [list_max]Product,
+    len: u32,
+};
+
+/// GET /collections/:id returns the collection and its member products.
+pub const CollectionWithProducts = struct {
+    collection: ProductCollection,
+    products: ProductList,
+};
+
+pub const CollectionList = struct {
+    items: [list_max]ProductCollection,
+    len: u32,
+};
+
+comptime {
+    assert(list_max > 0);
+    assert(list_max <= 1024);
+}
+
+/// Result payload — self-describing tagged union for response encoding.
+/// The encoder switches on the variant — no external context needed.
+pub const Result = union(enum) {
+    product: Product,
+    product_list: ProductList,
+    inventory: u32,
+    collection: CollectionWithProducts,
+    collection_list: CollectionList,
+    empty: void,
 };
 
 /// Response from the state machine back through the schema layer.
 pub const MessageResponse = struct {
     status: Status,
-    body: Body,
+    result: Result,
 
-    pub const Body = union(Collection) {
-        products: ProductResult,
-        collections: CollectionResult,
-    };
-
-    /// Maximum number of items returned in a single list response.
-    pub const list_max = 50;
-
-    pub const ProductResult = union(enum) {
-        single: Product,
-        list: ProductList,
-        inventory: u32,
-        empty: void,
-    };
-
-    pub const ProductList = struct {
-        items: [list_max]Product,
-        len: u32,
-    };
-
-    pub const CollectionResult = union(enum) {
-        single: CollectionWithProducts,
-        list: CollectionList,
-        empty: void,
-    };
-
-    /// GET /collections/:id returns the collection and its member products.
-    pub const CollectionWithProducts = struct {
-        collection: ProductCollection,
-        products: ProductList,
-    };
-
-    pub const CollectionList = struct {
-        items: [list_max]ProductCollection,
-        len: u32,
-    };
-
-    comptime {
-        assert(list_max > 0);
-        assert(list_max <= 1024);
-    }
-
-    pub const product_empty_ok = MessageResponse{
+    pub const empty_ok = MessageResponse{
         .status = .ok,
-        .body = .{ .products = .{ .empty = {} } },
+        .result = .{ .empty = {} },
     };
 
-    pub const product_not_found = MessageResponse{
+    pub const not_found = MessageResponse{
         .status = .not_found,
-        .body = .{ .products = .{ .empty = {} } },
+        .result = .{ .empty = {} },
     };
 
-    pub const collection_empty_ok = MessageResponse{
-        .status = .ok,
-        .body = .{ .collections = .{ .empty = {} } },
-    };
-
-    pub const collection_not_found = MessageResponse{
-        .status = .not_found,
-        .body = .{ .collections = .{ .empty = {} } },
+    pub const storage_error = MessageResponse{
+        .status = .storage_error,
+        .result = .{ .empty = {} },
     };
 };
 
@@ -200,11 +221,24 @@ test "Product fixed size constraints" {
 }
 
 test "MessageResponse convenience constructors" {
-    const ok = MessageResponse.product_empty_ok;
+    const ok = MessageResponse.empty_ok;
     try std.testing.expectEqual(ok.status, .ok);
-    try std.testing.expectEqual(ok.body.products, .empty);
+    try std.testing.expectEqual(ok.result, .empty);
 
-    const nf = MessageResponse.product_not_found;
+    const nf = MessageResponse.not_found;
     try std.testing.expectEqual(nf.status, .not_found);
-    try std.testing.expectEqual(nf.body.products, .empty);
+    try std.testing.expectEqual(nf.result, .empty);
+}
+
+test "Operation EventType comptime resolution" {
+    // Verify comptime type functions resolve correctly.
+    comptime {
+        assert(Operation.EventType(.create_product) == Product);
+        assert(Operation.EventType(.get_product) == void);
+        assert(Operation.EventType(.create_collection) == ProductCollection);
+        assert(Operation.EventType(.add_collection_member) == u128);
+        assert(Operation.ResultType(.list_products) == ProductList);
+        assert(Operation.ResultType(.get_collection) == CollectionWithProducts);
+        assert(Operation.ResultType(.delete_product) == void);
+    }
 }

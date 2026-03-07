@@ -210,17 +210,17 @@ pub const SqliteStorage = struct {
         };
     }
 
-    pub fn list(self: *SqliteStorage, out: *[message.MessageResponse.list_max]message.Product, out_len: *u32) StorageResult {
+    pub fn list(self: *SqliteStorage, out: *[message.list_max]message.Product, out_len: *u32) StorageResult {
         const stmt = self.stmt_list;
         defer reset_stmt(stmt);
 
-        _ = c.sqlite3_bind_int(stmt, 1, message.MessageResponse.list_max);
+        _ = c.sqlite3_bind_int(stmt, 1, message.list_max);
         out_len.* = 0;
 
         while (true) {
             switch (step_result(stmt)) {
                 .row => {
-                    assert(out_len.* < message.MessageResponse.list_max);
+                    assert(out_len.* < message.list_max);
                     read_product(stmt, &out[out_len.*]);
                     out_len.* += 1;
                 },
@@ -290,17 +290,17 @@ pub const SqliteStorage = struct {
         };
     }
 
-    pub fn list_collections(self: *SqliteStorage, out: *[message.MessageResponse.list_max]message.ProductCollection, out_len: *u32) StorageResult {
+    pub fn list_collections(self: *SqliteStorage, out: *[message.list_max]message.ProductCollection, out_len: *u32) StorageResult {
         const stmt = self.stmt_list_collections;
         defer reset_stmt(stmt);
 
-        _ = c.sqlite3_bind_int(stmt, 1, message.MessageResponse.list_max);
+        _ = c.sqlite3_bind_int(stmt, 1, message.list_max);
         out_len.* = 0;
 
         while (true) {
             switch (step_result(stmt)) {
                 .row => {
-                    assert(out_len.* < message.MessageResponse.list_max);
+                    assert(out_len.* < message.list_max);
                     read_collection(stmt, &out[out_len.*]);
                     out_len.* += 1;
                 },
@@ -345,18 +345,18 @@ pub const SqliteStorage = struct {
         };
     }
 
-    pub fn list_products_in_collection(self: *SqliteStorage, collection_id: u128, out: *[message.MessageResponse.list_max]message.Product, out_len: *u32) StorageResult {
+    pub fn list_products_in_collection(self: *SqliteStorage, collection_id: u128, out: *[message.list_max]message.Product, out_len: *u32) StorageResult {
         const stmt = self.stmt_list_members;
         defer reset_stmt(stmt);
 
         bind_uuid(stmt, 1, collection_id);
-        _ = c.sqlite3_bind_int(stmt, 2, message.MessageResponse.list_max);
+        _ = c.sqlite3_bind_int(stmt, 2, message.list_max);
         out_len.* = 0;
 
         while (true) {
             switch (step_result(stmt)) {
                 .row => {
-                    assert(out_len.* < message.MessageResponse.list_max);
+                    assert(out_len.* < message.list_max);
                     read_product(stmt, &out[out_len.*]);
                     out_len.* += 1;
                 },

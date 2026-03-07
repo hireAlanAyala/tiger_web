@@ -4,9 +4,7 @@ const message = @import("message.zig");
 const http = @import("http.zig");
 
 /// Translate an HTTP method + path + body into a typed Message.
-/// Path format: /collection or /collection/:id
-/// For create/update, parses JSON body into a Product struct.
-/// For get/list/delete, body must be empty.
+/// Path format: /resource or /resource/:id or /resource/:id/sub/:sub_id
 /// Returns null if the request doesn't map to a valid operation.
 pub fn translate(method: http.Method, raw_path: []const u8, body: []const u8) ?message.Message {
     // Strip leading /.
@@ -16,24 +14,19 @@ pub fn translate(method: http.Method, raw_path: []const u8, body: []const u8) ?m
     // Strip query string.
     const path_clean = if (std.mem.indexOf(u8, path, "?")) |q| path[0..q] else path;
 
-    // Split path into up to 4 segments: /collection/:id/sub/:sub_id
+    // Split path into up to 4 segments: /resource/:id/sub/:sub_id
     const segments = split_path(path_clean) orelse return null;
-
-    // Match collection.
-    const collection: message.Collection = if (std.mem.eql(u8, segments.collection, "products"))
-        .products
-    else if (std.mem.eql(u8, segments.collection, "collections"))
-        .collections
-    else
-        return null;
 
     if (method == .options) return null;
 
-    // Dispatch per collection — each has its own method/path → operation mapping.
-    return switch (collection) {
-        .products => translate_products(method, segments, body),
-        .collections => translate_collections(method, segments, body),
-    };
+    // Match resource and resolve to flat operation.
+    if (std.mem.eql(u8, segments.collection, "products")) {
+        return translate_products(method, segments, body);
+    } else if (std.mem.eql(u8, segments.collection, "collections")) {
+        return translate_collections(method, segments, body);
+    } else {
+        return null;
+    }
 }
 
 const PathSegments = struct {
@@ -84,31 +77,31 @@ fn translate_products(method: http.Method, seg: PathSegments, body: []const u8) 
     const operation: message.Operation = switch (method) {
         .get => blk: {
             if (seg.has_id and seg.sub_resource.len > 0) {
-                if (std.mem.eql(u8, seg.sub_resource, "inventory")) break :blk .get_inventory;
+                if (std.mem.eql(u8, seg.sub_resource, "inventory")) break :blk .get_product_inventory;
                 return null;
             }
-            break :blk if (seg.has_id) .get else .list;
+            break :blk if (seg.has_id) .get_product else .list_products;
         },
-        .post => if (!seg.has_id) .create else return null,
-        .put => if (seg.has_id) .update else return null,
-        .delete => if (seg.has_id) .delete else return null,
+        .post => if (!seg.has_id) .create_product else return null,
+        .put => if (seg.has_id) .update_product else return null,
+        .delete => if (seg.has_id) .delete_product else return null,
         .options => return null,
     };
 
     switch (operation) {
-        .get, .list, .delete, .get_inventory => {
+        .get_product, .list_products, .delete_product, .get_product_inventory => {
             if (body.len != 0) return null;
-            return .{ .operation = operation, .id = seg.id, .body = .{ .products = null } };
+            return .{ .operation = operation, .id = seg.id, .event = .{ .none = {} } };
         },
-        .create, .update => {
+        .create_product, .update_product => {
             if (body.len == 0) return null;
             return .{
                 .operation = operation,
                 .id = seg.id,
-                .body = .{ .products = parse_product_json(body) orelse return null },
+                .event = .{ .product = parse_product_json(body) orelse return null },
             };
         },
-        .add_member, .remove_member => return null,
+        else => return null,
     }
 }
 
@@ -119,8 +112,8 @@ fn translate_collections(method: http.Method, seg: PathSegments, body: []const u
         if (!seg.has_sub_id) return null;
 
         const operation: message.Operation = switch (method) {
-            .post => .add_member,
-            .delete => .remove_member,
+            .post => .add_collection_member,
+            .delete => .remove_collection_member,
             else => return null,
         };
 
@@ -128,31 +121,31 @@ fn translate_collections(method: http.Method, seg: PathSegments, body: []const u
         return .{
             .operation = operation,
             .id = seg.id,
-            .body = .{ .collections = .{ .member = seg.sub_id } },
+            .event = .{ .member_id = seg.sub_id },
         };
     }
 
     const operation: message.Operation = switch (method) {
-        .get => if (seg.has_id) .get else .list,
-        .post => if (!seg.has_id) .create else return null,
-        .delete => if (seg.has_id) .delete else return null,
+        .get => if (seg.has_id) .get_collection else .list_collections,
+        .post => if (!seg.has_id) .create_collection else return null,
+        .delete => if (seg.has_id) .delete_collection else return null,
         else => return null,
     };
 
     switch (operation) {
-        .get, .list, .delete => {
+        .get_collection, .list_collections, .delete_collection => {
             if (body.len != 0) return null;
-            return .{ .operation = operation, .id = seg.id, .body = .{ .collections = null } };
+            return .{ .operation = operation, .id = seg.id, .event = .{ .none = {} } };
         },
-        .create => {
+        .create_collection => {
             if (body.len == 0) return null;
             return .{
                 .operation = operation,
                 .id = seg.id,
-                .body = .{ .collections = .{ .create = parse_collection_json(body) orelse return null } },
+                .event = .{ .collection = parse_collection_json(body) orelse return null },
             };
         },
-        .update, .get_inventory, .add_member, .remove_member => return null,
+        else => return null,
     }
 }
 
@@ -234,7 +227,7 @@ fn parse_collection_json(body: []const u8) ?message.ProductCollection {
 }
 
 /// Encode a MessageResponse as JSON into buf. Returns the written slice.
-/// The response is self-describing — the encoder switches on the body variant.
+/// The response is self-describing — the encoder switches on the result variant.
 pub fn encode_response_json(buf: []u8, resp: message.MessageResponse) []const u8 {
     var w = JsonWriter{ .buf = buf, .pos = 0 };
 
@@ -254,51 +247,46 @@ pub fn encode_response_json(buf: []u8, resp: message.MessageResponse) []const u8
         .ok => {},
     }
 
-    switch (resp.body) {
-        .products => |pr| switch (pr) {
-            .single => |*p| encode_product(&w, p),
-            .list => |*l| {
-                w.raw("[");
-                for (l.items[0..l.len], 0..) |*p, i| {
-                    if (i > 0) w.raw(",");
-                    encode_product(&w, p);
-                }
-                w.raw("]");
-            },
-            .inventory => |inv| {
-                w.raw("{\"inventory\":");
-                w.write_u32(inv);
-                w.raw("}");
-            },
-            .empty => w.raw("[]"),
+    switch (resp.result) {
+        .product => |*p| encode_product(&w, p),
+        .product_list => |*l| {
+            w.raw("[");
+            for (l.items[0..l.len], 0..) |*p, i| {
+                if (i > 0) w.raw(",");
+                encode_product(&w, p);
+            }
+            w.raw("]");
         },
-        .collections => |cr| switch (cr) {
-            .single => |*cwp| {
+        .inventory => |inv| {
+            w.raw("{\"inventory\":");
+            w.write_u32(inv);
+            w.raw("}");
+        },
+        .collection => |*cwp| {
+            w.raw("{\"id\":\"");
+            w.write_uuid(cwp.collection.id);
+            w.raw("\",\"name\":\"");
+            w.escaped(cwp.collection.name_slice());
+            w.raw("\",\"products\":[");
+            for (cwp.products.items[0..cwp.products.len], 0..) |*p, i| {
+                if (i > 0) w.raw(",");
+                encode_product(&w, p);
+            }
+            w.raw("]}");
+        },
+        .collection_list => |*l| {
+            w.raw("[");
+            for (l.items[0..l.len], 0..) |*col, i| {
+                if (i > 0) w.raw(",");
                 w.raw("{\"id\":\"");
-                w.write_uuid(cwp.collection.id);
+                w.write_uuid(col.id);
                 w.raw("\",\"name\":\"");
-                w.escaped(cwp.collection.name_slice());
-                w.raw("\",\"products\":[");
-                for (cwp.products.items[0..cwp.products.len], 0..) |*p, i| {
-                    if (i > 0) w.raw(",");
-                    encode_product(&w, p);
-                }
-                w.raw("]}");
-            },
-            .list => |*l| {
-                w.raw("[");
-                for (l.items[0..l.len], 0..) |*col, i| {
-                    if (i > 0) w.raw(",");
-                    w.raw("{\"id\":\"");
-                    w.write_uuid(col.id);
-                    w.raw("\",\"name\":\"");
-                    w.escaped(col.name_slice());
-                    w.raw("\"}");
-                }
-                w.raw("]");
-            },
-            .empty => w.raw("[]"),
+                w.escaped(col.name_slice());
+                w.raw("\"}");
+            }
+            w.raw("]");
         },
+        .empty => w.raw("[]"),
     }
 
     return buf[0..w.pos];
@@ -510,14 +498,14 @@ const test_uuid: u128 = 0xaabbccdd11223344aabbccdd11223344;
 
 test "GET /products (list)" {
     const msg = translate(.get, "/products", "").?;
-    try std.testing.expectEqual(msg.operation, .list);
+    try std.testing.expectEqual(msg.operation, .list_products);
     try std.testing.expectEqual(msg.id, 0);
-    try std.testing.expectEqual(msg.body.products, null);
+    try std.testing.expectEqual(msg.event, .none);
 }
 
 test "GET /products/:id (get)" {
     const msg = translate(.get, "/products/" ++ test_uuid_str, "").?;
-    try std.testing.expectEqual(msg.operation, .get);
+    try std.testing.expectEqual(msg.operation, .get_product);
     try std.testing.expectEqual(msg.id, test_uuid);
 }
 
@@ -526,9 +514,9 @@ test "POST /products (create)" {
         \\{"id":"aabbccdd11223344aabbccdd11223344","name":"Widget","description":"A small widget","price_cents":999,"inventory":50,"active":true}
     ;
     const msg = translate(.post, "/products", body).?;
-    try std.testing.expectEqual(msg.operation, .create);
+    try std.testing.expectEqual(msg.operation, .create_product);
     try std.testing.expectEqual(msg.id, 0);
-    const p = msg.body.products.?;
+    const p = msg.event.product;
     try std.testing.expectEqual(p.id, test_uuid);
     try std.testing.expectEqualSlices(u8, p.name_slice(), "Widget");
     try std.testing.expectEqualSlices(u8, p.description_slice(), "A small widget");
@@ -541,14 +529,14 @@ test "PUT /products/:id (update)" {
     const msg = translate(.put, "/products/" ++ test_uuid_str,
         \\{"name":"Updated"}
     ).?;
-    try std.testing.expectEqual(msg.operation, .update);
+    try std.testing.expectEqual(msg.operation, .update_product);
     try std.testing.expectEqual(msg.id, test_uuid);
-    try std.testing.expect(msg.body.products != null);
+    try std.testing.expect(msg.event == .product);
 }
 
 test "DELETE /products/:id (delete)" {
     const msg = translate(.delete, "/products/" ++ test_uuid_str, "").?;
-    try std.testing.expectEqual(msg.operation, .delete);
+    try std.testing.expectEqual(msg.operation, .delete_product);
     try std.testing.expectEqual(msg.id, test_uuid);
 }
 
@@ -582,7 +570,7 @@ test "rejects invalid UUID in path" {
 
 test "strips query string" {
     const msg = translate(.get, "/products?page=1", "").?;
-    try std.testing.expectEqual(msg.operation, .list);
+    try std.testing.expectEqual(msg.operation, .list_products);
 }
 
 test "GET rejects non-empty body" {
@@ -642,7 +630,7 @@ test "encode_response_json — single product" {
 
     const resp = message.MessageResponse{
         .status = .ok,
-        .body = .{ .products = .{ .single = p } },
+        .result = .{ .product = p },
     };
 
     var buf: [4096]u8 = undefined;
@@ -667,21 +655,21 @@ test "parse_uuid rejects invalid input" {
 
 test "encode_response_json — not found" {
     var buf: [4096]u8 = undefined;
-    const json = encode_response_json(&buf, message.MessageResponse.product_not_found);
+    const json = encode_response_json(&buf, message.MessageResponse.not_found);
     try std.testing.expectEqualSlices(u8, json, "{\"error\":\"not found\"}");
 }
 
 test "encode_response_json — empty list" {
     var buf: [4096]u8 = undefined;
-    const json = encode_response_json(&buf, message.MessageResponse.product_empty_ok);
+    const json = encode_response_json(&buf, message.MessageResponse.empty_ok);
     try std.testing.expectEqualSlices(u8, json, "[]");
 }
 
 test "GET /products/:id/inventory (get_inventory)" {
     const msg = translate(.get, "/products/" ++ test_uuid_str ++ "/inventory", "").?;
-    try std.testing.expectEqual(msg.operation, .get_inventory);
+    try std.testing.expectEqual(msg.operation, .get_product_inventory);
     try std.testing.expectEqual(msg.id, test_uuid);
-    try std.testing.expectEqual(msg.body.products, null);
+    try std.testing.expectEqual(msg.event, .none);
 }
 
 test "rejects unknown sub-resource" {
@@ -691,7 +679,7 @@ test "rejects unknown sub-resource" {
 test "encode_response_json — inventory" {
     const resp = message.MessageResponse{
         .status = .ok,
-        .body = .{ .products = .{ .inventory = 42 } },
+        .result = .{ .inventory = 42 },
     };
 
     var buf: [4096]u8 = undefined;

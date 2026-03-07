@@ -27,8 +27,8 @@ http.zig → schema.zig → message.zig → state_machine.zig → storage
 | `connection.zig` | Per-connection state machine (accepting → receiving → ready → sending) |
 | `http.zig` | HTTP/1.0+1.1 parser and response encoder |
 | `schema.zig` | Route parsing, JSON ↔ typed struct translation, UUID parsing |
-| `message.zig` | Types: Product (u128 ID), Collection, Message, MessageResponse |
-| `state_machine.zig` | `StateMachineType(Storage)` — prefetch/execute split, `MemoryStorage` |
+| `message.zig` | Types: Product, ProductCollection, flat Operation enum with EventType/ResultType, Message, MessageResponse |
+| `state_machine.zig` | `StateMachineType(Storage)` — flat operation dispatch in prefetch/execute, `MemoryStorage` |
 | `storage.zig` | `SqliteStorage` — SQLite backend with prepared statements, WAL mode |
 | `io.zig` | epoll IO layer (real syscalls) |
 | `marks.zig` | Coverage marks — links log sites to test assertions |

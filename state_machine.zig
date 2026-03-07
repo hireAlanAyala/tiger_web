@@ -22,9 +22,9 @@ pub fn StateMachineType(comptime Storage: type) type {
 
         // Prefetch cache — populated by prefetch(), consumed by execute().
         prefetch_product: ?message.Product,
-        prefetch_product_list: message.MessageResponse.ProductList,
+        prefetch_product_list: message.ProductList,
         prefetch_collection: ?message.ProductCollection,
-        prefetch_collection_list: message.MessageResponse.CollectionList,
+        prefetch_collection_list: message.CollectionList,
         prefetch_result: ?StorageResult,
 
         pub fn init(storage: *Storage) StateMachine {
@@ -45,52 +45,42 @@ pub fn StateMachineType(comptime Storage: type) type {
             assert(self.prefetch_result == null);
             self.reset_prefetch_cache();
 
-            const result: StorageResult = switch (msg.body) {
-                .products => |product| switch (msg.operation) {
-                    .get, .get_inventory => self.prefetch_read(msg.id),
-                    .list => self.prefetch_list_products(),
-                    .create => blk: {
-                        const p = product.?;
-                        assert(p.id > 0);
-                        assert(p.name_len > 0);
-                        break :blk self.prefetch_read(p.id);
-                    },
-                    .update => blk: {
-                        assert(msg.id > 0);
-                        assert(product.?.name_len > 0);
-                        break :blk self.prefetch_read(msg.id);
-                    },
-                    .delete => self.prefetch_read(msg.id),
-                    .add_member, .remove_member => unreachable,
+            const result: StorageResult = switch (msg.operation) {
+                .get_product, .get_product_inventory => self.prefetch_read(msg.id),
+                .list_products => self.prefetch_list_products(),
+                .create_product => blk: {
+                    const p = msg.event.product;
+                    assert(p.id > 0);
+                    assert(p.name_len > 0);
+                    break :blk self.prefetch_read(p.id);
                 },
-                .collections => |payload| switch (msg.operation) {
-                    .get => self.prefetch_collection_with_products(msg.id),
-                    .list => self.prefetch_list_all_collections(),
-                    .create => blk: {
-                        const col = payload.?.create;
-                        assert(col.id > 0);
-                        assert(col.name_len > 0);
-                        break :blk self.prefetch_collection_read(col.id);
-                    },
-                    .delete => self.prefetch_collection_read(msg.id),
-                    .add_member => blk: {
-                        const product_id = payload.?.member;
-                        // Read both collection and product to verify existence.
-                        const r1 = self.prefetch_collection_read(msg.id);
-                        if (r1 != .ok and r1 != .not_found) break :blk r1;
-                        const r2 = self.prefetch_read(product_id);
-                        if (r2 != .ok and r2 != .not_found) break :blk r2;
-                        // Both must exist. Encode as: ok if both found,
-                        // not_found if either missing.
-                        if (r1 == .not_found or r2 == .not_found) break :blk .not_found;
-                        break :blk .ok;
-                    },
-                    .remove_member => blk: {
-                        // Just verify the collection exists.
-                        break :blk self.prefetch_collection_read(msg.id);
-                    },
-                    .get_inventory, .update => unreachable,
+                .update_product => blk: {
+                    assert(msg.id > 0);
+                    assert(msg.event.product.name_len > 0);
+                    break :blk self.prefetch_read(msg.id);
                 },
+                .delete_product => self.prefetch_read(msg.id),
+                .get_collection => self.prefetch_collection_with_products(msg.id),
+                .list_collections => self.prefetch_list_all_collections(),
+                .create_collection => blk: {
+                    const col = msg.event.collection;
+                    assert(col.id > 0);
+                    assert(col.name_len > 0);
+                    break :blk self.prefetch_collection_read(col.id);
+                },
+                .delete_collection => self.prefetch_collection_read(msg.id),
+                .add_collection_member => blk: {
+                    const product_id = msg.event.member_id;
+                    // Read both collection and product to verify existence.
+                    const r1 = self.prefetch_collection_read(msg.id);
+                    if (r1 != .ok and r1 != .not_found) break :blk r1;
+                    const r2 = self.prefetch_read(product_id);
+                    if (r2 != .ok and r2 != .not_found) break :blk r2;
+                    // Both must exist.
+                    if (r1 == .not_found or r2 == .not_found) break :blk .not_found;
+                    break :blk .ok;
+                },
+                .remove_collection_member => self.prefetch_collection_read(msg.id),
             };
 
             switch (result) {
@@ -103,180 +93,117 @@ pub fn StateMachineType(comptime Storage: type) type {
         }
 
         /// Phase 2: make decisions from cache slots, apply writes to storage.
-        /// Reads only from prefetch cache for decisions. Writes go to storage here.
-        /// Write failures (busy/err) return 503 — the client retries.
+        /// Flat switch on operation — each variant is self-contained.
         /// Must only be called after prefetch() returned true.
         pub fn execute(self: *StateMachine, msg: message.Message) message.MessageResponse {
             const result = self.prefetch_result.?;
             defer self.reset_prefetch();
 
             // Storage read error — return 503 regardless of operation.
-            if (result == .err) return switch (msg.body) {
-                .products => storage_error_response(.products),
-                .collections => storage_error_response(.collections),
-            };
+            if (result == .err) return message.MessageResponse.storage_error;
 
-            return switch (msg.body) {
-                .products => self.execute_products(msg, result),
-                .collections => self.execute_collections(msg, result),
-            };
-        }
-
-        fn execute_products(self: *StateMachine, msg: message.Message, result: StorageResult) message.MessageResponse {
-            switch (msg.operation) {
-                .get => {
-                    if (result == .not_found) return message.MessageResponse.product_not_found;
+            return switch (msg.operation) {
+                .get_product => {
+                    if (result == .not_found) return message.MessageResponse.not_found;
                     assert(result == .ok);
                     return .{
                         .status = .ok,
-                        .body = .{ .products = .{ .single = self.prefetch_product.? } },
+                        .result = .{ .product = self.prefetch_product.? },
                     };
                 },
-                .get_inventory => {
-                    if (result == .not_found) return message.MessageResponse.product_not_found;
+                .get_product_inventory => {
+                    if (result == .not_found) return message.MessageResponse.not_found;
                     assert(result == .ok);
                     return .{
                         .status = .ok,
-                        .body = .{ .products = .{ .inventory = self.prefetch_product.?.inventory } },
+                        .result = .{ .inventory = self.prefetch_product.?.inventory },
                     };
                 },
-                .list => {
+                .list_products => {
                     assert(result == .ok);
                     return .{
                         .status = .ok,
-                        .body = .{ .products = .{ .list = self.prefetch_product_list } },
+                        .result = .{ .product_list = self.prefetch_product_list },
                     };
                 },
-                .create => {
-                    if (result == .ok) return storage_error_response(.products);
+                .create_product => {
+                    if (result == .ok) return message.MessageResponse.storage_error;
                     assert(result == .not_found);
-
-                    const product = msg.body.products.?;
-                    return self.commit_product_write(self.storage.put(&product), product);
+                    const product = msg.event.product;
+                    return self.commit_write(self.storage.put(&product), .{ .product = product });
                 },
-                .update => {
-                    if (result == .not_found) return message.MessageResponse.product_not_found;
+                .update_product => {
+                    if (result == .not_found) return message.MessageResponse.not_found;
                     assert(result == .ok);
-
-                    var updated = msg.body.products.?;
+                    var updated = msg.event.product;
                     updated.id = msg.id;
-                    return self.commit_product_write(self.storage.update(msg.id, &updated), updated);
+                    return self.commit_write(self.storage.update(msg.id, &updated), .{ .product = updated });
                 },
-                .delete => {
-                    if (result == .not_found) return message.MessageResponse.product_not_found;
+                .delete_product => {
+                    if (result == .not_found) return message.MessageResponse.not_found;
                     assert(result == .ok);
-
-                    return switch (self.storage.delete(msg.id)) {
-                        .ok => message.MessageResponse.product_empty_ok,
-                        .busy, .err => storage_error_response(.products),
-                        .not_found => unreachable,
-                        .corruption => @panic("storage corruption in execute"),
-                    };
+                    return self.commit_write(self.storage.delete(msg.id), .{ .empty = {} });
                 },
-                .add_member, .remove_member => unreachable,
-            }
-        }
-
-        fn execute_collections(self: *StateMachine, msg: message.Message, result: StorageResult) message.MessageResponse {
-            switch (msg.operation) {
-                .get => {
-                    if (result == .not_found) return message.MessageResponse.collection_not_found;
+                .get_collection => {
+                    if (result == .not_found) return message.MessageResponse.not_found;
                     assert(result == .ok);
                     return .{
                         .status = .ok,
-                        .body = .{ .collections = .{ .single = .{
+                        .result = .{ .collection = .{
                             .collection = self.prefetch_collection.?,
                             .products = self.prefetch_product_list,
-                        } } },
+                        } },
                     };
                 },
-                .list => {
+                .list_collections => {
                     assert(result == .ok);
                     return .{
                         .status = .ok,
-                        .body = .{ .collections = .{ .list = self.prefetch_collection_list } },
+                        .result = .{ .collection_list = self.prefetch_collection_list },
                     };
                 },
-                .create => {
-                    if (result == .ok) return storage_error_response(.collections);
+                .create_collection => {
+                    if (result == .ok) return message.MessageResponse.storage_error;
                     assert(result == .not_found);
-
-                    const col = msg.body.collections.?.create;
-                    return self.commit_collection_write(self.storage.put_collection(&col), col);
-                },
-                .delete => {
-                    if (result == .not_found) return message.MessageResponse.collection_not_found;
-                    assert(result == .ok);
-
-                    return switch (self.storage.delete_collection(msg.id)) {
-                        .ok => message.MessageResponse.collection_empty_ok,
-                        .busy, .err => storage_error_response(.collections),
-                        .not_found => unreachable,
-                        .corruption => @panic("storage corruption in execute"),
-                    };
-                },
-                .add_member => {
-                    if (result == .not_found) return message.MessageResponse.collection_not_found;
-                    assert(result == .ok);
-
-                    const product_id = msg.body.collections.?.member;
-                    return switch (self.storage.add_to_collection(msg.id, product_id)) {
-                        .ok => message.MessageResponse.collection_empty_ok,
-                        .busy, .err => storage_error_response(.collections),
-                        .not_found => unreachable,
-                        .corruption => @panic("storage corruption in execute"),
-                    };
-                },
-                .remove_member => {
-                    if (result == .not_found) return message.MessageResponse.collection_not_found;
-                    assert(result == .ok);
-
-                    const product_id = msg.body.collections.?.member;
-                    return switch (self.storage.remove_from_collection(msg.id, product_id)) {
-                        .ok => message.MessageResponse.collection_empty_ok,
-                        .busy, .err => storage_error_response(.collections),
-                        .not_found => message.MessageResponse.collection_not_found,
-                        .corruption => @panic("storage corruption in execute"),
-                    };
-                },
-                .get_inventory, .update => unreachable,
-            }
-        }
-
-        fn commit_product_write(_: *StateMachine, write_result: StorageResult, product: message.Product) message.MessageResponse {
-            return switch (write_result) {
-                .ok => .{
-                    .status = .ok,
-                    .body = .{ .products = .{ .single = product } },
-                },
-                .busy, .err => storage_error_response(.products),
-                .not_found => unreachable,
-                .corruption => @panic("storage corruption in execute"),
-            };
-        }
-
-        fn commit_collection_write(_: *StateMachine, write_result: StorageResult, col: message.ProductCollection) message.MessageResponse {
-            return switch (write_result) {
-                .ok => .{
-                    .status = .ok,
-                    .body = .{ .collections = .{ .single = .{
+                    const col = msg.event.collection;
+                    return self.commit_write(self.storage.put_collection(&col), .{ .collection = .{
                         .collection = col,
                         .products = .{ .items = undefined, .len = 0 },
-                    } } },
+                    } });
                 },
-                .busy, .err => storage_error_response(.collections),
-                .not_found => unreachable,
-                .corruption => @panic("storage corruption in execute"),
+                .delete_collection => {
+                    if (result == .not_found) return message.MessageResponse.not_found;
+                    assert(result == .ok);
+                    return self.commit_write(self.storage.delete_collection(msg.id), .{ .empty = {} });
+                },
+                .add_collection_member => {
+                    if (result == .not_found) return message.MessageResponse.not_found;
+                    assert(result == .ok);
+                    const product_id = msg.event.member_id;
+                    return self.commit_write(self.storage.add_to_collection(msg.id, product_id), .{ .empty = {} });
+                },
+                .remove_collection_member => {
+                    if (result == .not_found) return message.MessageResponse.not_found;
+                    assert(result == .ok);
+                    const product_id = msg.event.member_id;
+                    return switch (self.storage.remove_from_collection(msg.id, product_id)) {
+                        .ok => message.MessageResponse.empty_ok,
+                        .busy, .err => message.MessageResponse.storage_error,
+                        .not_found => message.MessageResponse.not_found,
+                        .corruption => @panic("storage corruption in execute"),
+                    };
+                },
             };
         }
 
-        fn storage_error_response(comptime collection: message.Collection) message.MessageResponse {
-            return .{
-                .status = .storage_error,
-                .body = switch (collection) {
-                    .products => .{ .products = .{ .empty = {} } },
-                    .collections => .{ .collections = .{ .empty = {} } },
-                },
+        /// Commit a storage write and translate the result to a response.
+        /// On success, returns the provided result payload. On failure, returns 503.
+        fn commit_write(_: *StateMachine, write_result: StorageResult, ok_result: message.Result) message.MessageResponse {
+            return switch (write_result) {
+                .ok => .{ .status = .ok, .result = ok_result },
+                .busy, .err => message.MessageResponse.storage_error,
+                .not_found => unreachable,
+                .corruption => @panic("storage corruption in execute"),
             };
         }
 
@@ -462,12 +389,12 @@ pub const MemoryStorage = struct {
         return .not_found;
     }
 
-    pub fn list(self: *MemoryStorage, out: *[message.MessageResponse.list_max]message.Product, out_len: *u32) StorageResult {
+    pub fn list(self: *MemoryStorage, out: *[message.list_max]message.Product, out_len: *u32) StorageResult {
         if (self.fault()) |f| return f;
         out_len.* = 0;
         for (self.products) |*entry| {
             if (!entry.occupied) continue;
-            assert(out_len.* < message.MessageResponse.list_max);
+            assert(out_len.* < message.list_max);
             out[out_len.*] = entry.product;
             out_len.* += 1;
         }
@@ -523,12 +450,12 @@ pub const MemoryStorage = struct {
         return .ok;
     }
 
-    pub fn list_collections(self: *MemoryStorage, out: *[message.MessageResponse.list_max]message.ProductCollection, out_len: *u32) StorageResult {
+    pub fn list_collections(self: *MemoryStorage, out: *[message.list_max]message.ProductCollection, out_len: *u32) StorageResult {
         if (self.fault()) |f| return f;
         out_len.* = 0;
         for (self.collections_store) |*entry| {
             if (!entry.occupied) continue;
-            assert(out_len.* < message.MessageResponse.list_max);
+            assert(out_len.* < message.list_max);
             out[out_len.*] = entry.collection;
             out_len.* += 1;
         }
@@ -563,7 +490,7 @@ pub const MemoryStorage = struct {
         return .not_found;
     }
 
-    pub fn list_products_in_collection(self: *MemoryStorage, collection_id: u128, out: *[message.MessageResponse.list_max]message.Product, out_len: *u32) StorageResult {
+    pub fn list_products_in_collection(self: *MemoryStorage, collection_id: u128, out: *[message.list_max]message.Product, out_len: *u32) StorageResult {
         if (self.fault()) |f| return f;
         out_len.* = 0;
         for (self.memberships) |*m| {
@@ -571,7 +498,7 @@ pub const MemoryStorage = struct {
             // Look up the product.
             for (self.products) |*entry| {
                 if (entry.occupied and entry.product.id == m.product_id) {
-                    assert(out_len.* < message.MessageResponse.list_max);
+                    assert(out_len.* < message.list_max);
                     out[out_len.*] = entry.product;
                     out_len.* += 1;
                     break;
@@ -645,23 +572,23 @@ test "create and get" {
 
     const test_id: u128 = 0xaabbccdd11223344aabbccdd11223344;
     const create_resp = test_execute(&sm, .{
-        .operation = .create,
+        .operation = .create_product,
         .id = 0,
-        .body = .{ .products = make_test_product(test_id, "Widget", 999) },
+        .event = .{ .product = make_test_product(test_id, "Widget", 999) },
     });
     try std.testing.expectEqual(create_resp.status, .ok);
-    const created = create_resp.body.products.single;
+    const created = create_resp.result.product;
     try std.testing.expectEqual(created.id, test_id);
     try std.testing.expectEqualSlices(u8, created.name_slice(), "Widget");
     try std.testing.expectEqual(created.price_cents, 999);
 
     const get_resp = test_execute(&sm, .{
-        .operation = .get,
+        .operation = .get_product,
         .id = test_id,
-        .body = .{ .products = null },
+        .event = .{ .none = {} },
     });
     try std.testing.expectEqual(get_resp.status, .ok);
-    try std.testing.expectEqualSlices(u8, get_resp.body.products.single.name_slice(), "Widget");
+    try std.testing.expectEqualSlices(u8, get_resp.result.product.name_slice(), "Widget");
 }
 
 test "get missing" {
@@ -670,9 +597,9 @@ test "get missing" {
     var sm = TestStateMachine.init(&storage);
 
     const resp = test_execute(&sm, .{
-        .operation = .get,
+        .operation = .get_product,
         .id = 0x00000000000000000000000000000063,
-        .body = .{ .products = null },
+        .event = .{ .none = {} },
     });
     try std.testing.expectEqual(resp.status, .not_found);
 }
@@ -684,21 +611,21 @@ test "update" {
 
     const test_id: u128 = 0x11111111111111111111111111111111;
     const create_resp = test_execute(&sm, .{
-        .operation = .create,
+        .operation = .create_product,
         .id = 0,
-        .body = .{ .products = make_test_product(test_id, "Old Name", 100) },
+        .event = .{ .product = make_test_product(test_id, "Old Name", 100) },
     });
-    const id = create_resp.body.products.single.id;
+    const id = create_resp.result.product.id;
 
     const update_resp = test_execute(&sm, .{
-        .operation = .update,
+        .operation = .update_product,
         .id = id,
-        .body = .{ .products = make_test_product(0, "New Name", 200) },
+        .event = .{ .product = make_test_product(0, "New Name", 200) },
     });
     try std.testing.expectEqual(update_resp.status, .ok);
-    try std.testing.expectEqualSlices(u8, update_resp.body.products.single.name_slice(), "New Name");
-    try std.testing.expectEqual(update_resp.body.products.single.price_cents, 200);
-    try std.testing.expectEqual(update_resp.body.products.single.id, id);
+    try std.testing.expectEqualSlices(u8, update_resp.result.product.name_slice(), "New Name");
+    try std.testing.expectEqual(update_resp.result.product.price_cents, 200);
+    try std.testing.expectEqual(update_resp.result.product.id, id);
 }
 
 test "delete" {
@@ -708,23 +635,23 @@ test "delete" {
 
     const test_id: u128 = 0x22222222222222222222222222222222;
     const create_resp = test_execute(&sm, .{
-        .operation = .create,
+        .operation = .create_product,
         .id = 0,
-        .body = .{ .products = make_test_product(test_id, "Doomed", 100) },
+        .event = .{ .product = make_test_product(test_id, "Doomed", 100) },
     });
-    const id = create_resp.body.products.single.id;
+    const id = create_resp.result.product.id;
 
     const del_resp = test_execute(&sm, .{
-        .operation = .delete,
+        .operation = .delete_product,
         .id = id,
-        .body = .{ .products = null },
+        .event = .{ .none = {} },
     });
     try std.testing.expectEqual(del_resp.status, .ok);
 
     const get_resp = test_execute(&sm, .{
-        .operation = .get,
+        .operation = .get_product,
         .id = id,
-        .body = .{ .products = null },
+        .event = .{ .none = {} },
     });
     try std.testing.expectEqual(get_resp.status, .not_found);
 }
@@ -735,9 +662,9 @@ test "delete missing" {
     var sm = TestStateMachine.init(&storage);
 
     const resp = test_execute(&sm, .{
-        .operation = .delete,
+        .operation = .delete_product,
         .id = 0x00000000000000000000000000000063,
-        .body = .{ .products = null },
+        .event = .{ .none = {} },
     });
     try std.testing.expectEqual(resp.status, .not_found);
 }
@@ -747,18 +674,18 @@ test "list" {
     defer storage.deinit(std.testing.allocator);
     var sm = TestStateMachine.init(&storage);
 
-    _ = test_execute(&sm, .{ .operation = .create, .id = 0, .body = .{ .products = make_test_product(0xaaaa0000000000000000000000000001, "A", 100) } });
-    _ = test_execute(&sm, .{ .operation = .create, .id = 0, .body = .{ .products = make_test_product(0xaaaa0000000000000000000000000002, "B", 200) } });
+    _ = test_execute(&sm, .{ .operation = .create_product, .id = 0, .event = .{ .product = make_test_product(0xaaaa0000000000000000000000000001, "A", 100) } });
+    _ = test_execute(&sm, .{ .operation = .create_product, .id = 0, .event = .{ .product = make_test_product(0xaaaa0000000000000000000000000002, "B", 200) } });
 
     const resp = test_execute(&sm, .{
-        .operation = .list,
+        .operation = .list_products,
         .id = 0,
-        .body = .{ .products = null },
+        .event = .{ .none = {} },
     });
     try std.testing.expectEqual(resp.status, .ok);
-    try std.testing.expectEqual(resp.body.products.list.len, 2);
-    try std.testing.expectEqualSlices(u8, resp.body.products.list.items[0].name_slice(), "A");
-    try std.testing.expectEqualSlices(u8, resp.body.products.list.items[1].name_slice(), "B");
+    try std.testing.expectEqual(resp.result.product_list.len, 2);
+    try std.testing.expectEqualSlices(u8, resp.result.product_list.items[0].name_slice(), "A");
+    try std.testing.expectEqualSlices(u8, resp.result.product_list.items[1].name_slice(), "B");
 }
 
 test "client-provided IDs" {
@@ -768,10 +695,10 @@ test "client-provided IDs" {
 
     const id1: u128 = 0xaabbccddaabbccddaabbccddaabbccd1;
     const id2: u128 = 0xaabbccddaabbccddaabbccddaabbccd2;
-    const r1 = test_execute(&sm, .{ .operation = .create, .id = 0, .body = .{ .products = make_test_product(id1, "A", 1) } });
-    const r2 = test_execute(&sm, .{ .operation = .create, .id = 0, .body = .{ .products = make_test_product(id2, "B", 2) } });
-    try std.testing.expectEqual(r1.body.products.single.id, id1);
-    try std.testing.expectEqual(r2.body.products.single.id, id2);
+    const r1 = test_execute(&sm, .{ .operation = .create_product, .id = 0, .event = .{ .product = make_test_product(id1, "A", 1) } });
+    const r2 = test_execute(&sm, .{ .operation = .create_product, .id = 0, .event = .{ .product = make_test_product(id2, "B", 2) } });
+    try std.testing.expectEqual(r1.result.product.id, id1);
+    try std.testing.expectEqual(r2.result.product.id, id2);
 }
 
 test "duplicate ID rejected" {
@@ -780,8 +707,8 @@ test "duplicate ID rejected" {
     var sm = TestStateMachine.init(&storage);
 
     const test_id: u128 = 0x33333333333333333333333333333333;
-    const r1 = test_execute(&sm, .{ .operation = .create, .id = 0, .body = .{ .products = make_test_product(test_id, "A", 1) } });
+    const r1 = test_execute(&sm, .{ .operation = .create_product, .id = 0, .event = .{ .product = make_test_product(test_id, "A", 1) } });
     try std.testing.expectEqual(r1.status, .ok);
-    const r2 = test_execute(&sm, .{ .operation = .create, .id = 0, .body = .{ .products = make_test_product(test_id, "B", 2) } });
+    const r2 = test_execute(&sm, .{ .operation = .create_product, .id = 0, .event = .{ .product = make_test_product(test_id, "B", 2) } });
     try std.testing.expectEqual(r2.status, .storage_error);
 }

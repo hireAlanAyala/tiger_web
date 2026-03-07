@@ -57,6 +57,20 @@ The prefetch/execute split mirrors TigerBeetle's two-phase approach: `prefetch()
 
 `MemoryStorage` supports PRNG-driven fault injection (`busy_fault_probability`, `err_fault_probability`) using the same `splitmix64` pattern as `SimIO`. This lets sim tests verify that busy faults cause retries and storage errors produce 503 responses.
 
+## Flat Operation Enum (Aligned with TigerBeetle)
+
+TigerBeetle uses a flat `Operation` enum where each variant encodes both entity type and action (`create_accounts`, `create_transfers`, etc.). Comptime functions `EventType()` and `ResultType()` on the enum resolve the input and output types for each operation at compile time.
+
+We follow the same pattern: `create_product`, `get_collection`, `add_collection_member`, etc. The `EventType`/`ResultType` comptime functions on `Operation` enable compile-time specialization. Adding a new entity type means adding variants to the enum — the compiler forces every switch site to handle them.
+
+TigerBeetle's `commit()` uses `inline` switch to go from a runtime operation value to comptime-specialized code paths. We use a regular flat switch in `execute()` since our result types flow through a tagged union (`Result`) rather than binary byte casting. The structural benefit is the same: one flat dispatch point instead of nested switches on entity type then operation.
+
+## Synchronous Prefetch (Divergence from TigerBeetle)
+
+TigerBeetle's prefetch is async with callback chains — it enqueues reads, submits to IO, and chains callbacks when multi-entity prefetches are needed (e.g., prefetch transfers → callback → prefetch accounts → callback → done). This is necessary because TigerBeetle's storage is an LSM tree with disk IO.
+
+Our prefetch is synchronous — both `MemoryStorage` and `SqliteStorage` return immediately. `prefetch_collection_with_products()` does two sequential reads in one call. If either returns `.busy`, the whole prefetch returns false and retries next tick. This is a valid simplification for a single-node HTTP server where storage access doesn't require async IO.
+
 ## Single-Threaded, No IO Batching
 
 TigerBeetle batches IO submissions and completions through io_uring, processing multiple operations per syscall. The IO layer is designed for high-throughput concurrent replication traffic.
