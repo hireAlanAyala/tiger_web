@@ -85,6 +85,20 @@ pub fn StateMachineType(comptime Storage: type) type {
                     break :blk .ok;
                 },
                 .remove_collection_member => self.prefetch_collection_read(msg.id),
+                .transfer_inventory => blk: {
+                    const transfer = msg.event.transfer;
+                    assert(msg.id > 0);
+                    assert(transfer.target_id > 0);
+                    assert(msg.id != transfer.target_id);
+                    // Read both products into list slots — this is the multi-entity
+                    // prefetch that stresses the cache. Slot 0 = source, slot 1 = target.
+                    const r1 = self.storage.get(msg.id, &self.prefetch_product_list.items[0]);
+                    if (r1 != .ok) break :blk r1;
+                    const r2 = self.storage.get(transfer.target_id, &self.prefetch_product_list.items[1]);
+                    if (r2 != .ok) break :blk r2;
+                    self.prefetch_product_list.len = 2;
+                    break :blk .ok;
+                },
             };
 
             switch (result) {
@@ -147,6 +161,11 @@ pub fn StateMachineType(comptime Storage: type) type {
                 .remove_collection_member => self.execute_remove_member(
                     msg.id,
                     msg.event.unwrap(u128),
+                    result,
+                ),
+
+                .transfer_inventory => self.execute_transfer_inventory(
+                    msg.event.unwrap(message.InventoryTransfer),
                     result,
                 ),
             };
@@ -225,25 +244,28 @@ pub fn StateMachineType(comptime Storage: type) type {
 
         /// Delete pattern: check exists, delete, return empty.
         /// Shared by delete_product, delete_collection.
+        /// Prefetch proved the entity exists — delete is infallible.
         fn execute_delete(self: *StateMachine, comptime op: message.Operation, id: u128, result: StorageResult) message.MessageResponse {
             if (result == .not_found) return message.MessageResponse.not_found;
             assert(result == .ok);
 
-            const write_result = switch (op) {
+            assert(switch (op) {
                 .delete_product => self.storage.delete(id),
                 .delete_collection => self.storage.delete_collection(id),
                 else => unreachable,
-            };
+            } == .ok);
 
-            return self.commit_write(write_result, .{ .empty = {} });
+            return .{ .status = .ok, .result = .{ .empty = {} } };
         }
 
+        /// Prefetch proved the product exists — update is infallible.
         fn execute_update_product(self: *StateMachine, id: u128, event: message.Product, result: StorageResult) message.MessageResponse {
             if (result == .not_found) return message.MessageResponse.not_found;
             assert(result == .ok);
             var updated = event;
             updated.id = id;
-            return self.commit_write(self.storage.update(id, &updated), .{ .product = updated });
+            assert(self.storage.update(id, &updated) == .ok);
+            return .{ .status = .ok, .result = .{ .product = updated } };
         }
 
         fn execute_add_member(self: *StateMachine, id: u128, product_id: u128, result: StorageResult) message.MessageResponse {
@@ -255,11 +277,43 @@ pub fn StateMachineType(comptime Storage: type) type {
         fn execute_remove_member(self: *StateMachine, id: u128, product_id: u128, result: StorageResult) message.MessageResponse {
             if (result == .not_found) return message.MessageResponse.not_found;
             assert(result == .ok);
-            return switch (self.storage.remove_from_collection(id, product_id)) {
-                .ok => message.MessageResponse.empty_ok,
-                .busy, .err => message.MessageResponse.storage_error,
-                .not_found => message.MessageResponse.not_found,
-                .corruption => @panic("storage corruption in execute"),
+            const write_result = self.storage.remove_from_collection(id, product_id);
+            // remove_from_collection either finds the membership (.ok) or doesn't (.not_found).
+            // No capacity concern (it's a delete), no fault injection on writes.
+            assert(write_result == .ok or write_result == .not_found);
+            if (write_result == .not_found) return message.MessageResponse.not_found;
+            return message.MessageResponse.empty_ok;
+        }
+
+        /// Transfer inventory: two products in cache, cross-entity validation, two writes.
+        /// Uses list slots for multi-entity prefetch — slot 0 is source, slot 1 is target.
+        /// Writes are infallible after prefetch (TigerBeetle style): prefetch proved both
+        /// products exist, so update() is a memcpy into an occupied slot.
+        fn execute_transfer_inventory(self: *StateMachine, transfer: message.InventoryTransfer, result: StorageResult) message.MessageResponse {
+            if (result == .not_found) return message.MessageResponse.not_found;
+            assert(result == .ok);
+            assert(self.prefetch_product_list.len == 2);
+
+            var source = self.prefetch_product_list.items[0];
+            var target = self.prefetch_product_list.items[1];
+
+            // Business logic: source must have enough inventory.
+            if (source.inventory < transfer.quantity) {
+                return .{ .status = .err, .result = .{ .empty = {} } };
+            }
+
+            source.inventory -= transfer.quantity;
+            target.inventory += transfer.quantity;
+
+            // After this point, the transfer must succeed.
+            assert(self.storage.update(source.id, &source) == .ok);
+            assert(self.storage.update(target.id, &target) == .ok);
+
+            self.prefetch_product_list.items[0] = source;
+            self.prefetch_product_list.items[1] = target;
+            return .{
+                .status = .ok,
+                .result = .{ .product_list = self.prefetch_product_list },
             };
         }
 
@@ -418,7 +472,9 @@ pub const MemoryStorage = struct {
     }
 
     pub fn put(self: *MemoryStorage, product: *const message.Product) StorageResult {
-        if (self.fault()) |f| return f;
+        // No fault injection — writes are infallible (TigerBeetle style).
+        // Prefetch validates; execute commits. If the machine is dying
+        // (disk full, hardware failure), crash — don't try to handle it.
         // Reject duplicates.
         for (self.products) |*entry| {
             if (entry.occupied and entry.product.id == product.id) return .err;
@@ -434,7 +490,6 @@ pub const MemoryStorage = struct {
     }
 
     pub fn update(self: *MemoryStorage, id: u128, product: *const message.Product) StorageResult {
-        if (self.fault()) |f| return f;
         for (self.products) |*entry| {
             if (entry.occupied and entry.product.id == id) {
                 entry.product = product.*;
@@ -445,7 +500,6 @@ pub const MemoryStorage = struct {
     }
 
     pub fn delete(self: *MemoryStorage, id: u128) StorageResult {
-        if (self.fault()) |f| return f;
         for (self.products) |*entry| {
             if (entry.occupied and entry.product.id == id) {
                 entry.occupied = false;
@@ -482,7 +536,6 @@ pub const MemoryStorage = struct {
     }
 
     pub fn put_collection(self: *MemoryStorage, col: *const message.ProductCollection) StorageResult {
-        if (self.fault()) |f| return f;
         for (self.collections_store) |*entry| {
             if (entry.occupied and entry.collection.id == col.id) return .err;
         }
@@ -497,7 +550,6 @@ pub const MemoryStorage = struct {
     }
 
     pub fn delete_collection(self: *MemoryStorage, id: u128) StorageResult {
-        if (self.fault()) |f| return f;
         var found = false;
         for (self.collections_store) |*entry| {
             if (entry.occupied and entry.collection.id == id) {
@@ -532,7 +584,6 @@ pub const MemoryStorage = struct {
     // --- Membership operations ---
 
     pub fn add_to_collection(self: *MemoryStorage, collection_id: u128, product_id: u128) StorageResult {
-        if (self.fault()) |f| return f;
         // Check for duplicate membership.
         for (self.memberships) |*m| {
             if (m.occupied and m.collection_id == collection_id and m.product_id == product_id) return .ok;
@@ -547,7 +598,6 @@ pub const MemoryStorage = struct {
     }
 
     pub fn remove_from_collection(self: *MemoryStorage, collection_id: u128, product_id: u128) StorageResult {
-        if (self.fault()) |f| return f;
         for (self.memberships) |*m| {
             if (m.occupied and m.collection_id == collection_id and m.product_id == product_id) {
                 m.occupied = false;
@@ -766,6 +816,99 @@ test "client-provided IDs" {
     const r2 = test_execute(&sm, .{ .operation = .create_product, .id = 0, .event = .{ .product = make_test_product(id2, "B", 2) } });
     try std.testing.expectEqual(r1.result.product.id, id1);
     try std.testing.expectEqual(r2.result.product.id, id2);
+}
+
+test "transfer inventory — success" {
+    var storage = try MemoryStorage.init(std.testing.allocator);
+    defer storage.deinit(std.testing.allocator);
+    var sm = TestStateMachine.init(&storage);
+
+    const id_a: u128 = 0xaaaa0000000000000000000000000001;
+    const id_b: u128 = 0xaaaa0000000000000000000000000002;
+
+    var prod_a = make_test_product(id_a, "Source", 0);
+    prod_a.inventory = 100;
+    var prod_b = make_test_product(id_b, "Target", 0);
+    prod_b.inventory = 20;
+
+    _ = test_execute(&sm, .{ .operation = .create_product, .id = 0, .event = .{ .product = prod_a } });
+    _ = test_execute(&sm, .{ .operation = .create_product, .id = 0, .event = .{ .product = prod_b } });
+
+    const resp = test_execute(&sm, .{
+        .operation = .transfer_inventory,
+        .id = id_a,
+        .event = .{ .transfer = .{ .target_id = id_b, .quantity = 30 } },
+    });
+    try std.testing.expectEqual(resp.status, .ok);
+    // Response contains both updated products.
+    try std.testing.expectEqual(resp.result.product_list.len, 2);
+    try std.testing.expectEqual(resp.result.product_list.items[0].inventory, 70);
+    try std.testing.expectEqual(resp.result.product_list.items[1].inventory, 50);
+
+    // Verify storage was actually updated.
+    const get_a = test_execute(&sm, .{ .operation = .get_product, .id = id_a, .event = .{ .none = {} } });
+    try std.testing.expectEqual(get_a.result.product.inventory, 70);
+    const get_b = test_execute(&sm, .{ .operation = .get_product, .id = id_b, .event = .{ .none = {} } });
+    try std.testing.expectEqual(get_b.result.product.inventory, 50);
+}
+
+test "transfer inventory — insufficient stock" {
+    var storage = try MemoryStorage.init(std.testing.allocator);
+    defer storage.deinit(std.testing.allocator);
+    var sm = TestStateMachine.init(&storage);
+
+    const id_a: u128 = 0xbbbb0000000000000000000000000001;
+    const id_b: u128 = 0xbbbb0000000000000000000000000002;
+
+    var prod_a = make_test_product(id_a, "Low", 0);
+    prod_a.inventory = 5;
+    _ = test_execute(&sm, .{ .operation = .create_product, .id = 0, .event = .{ .product = prod_a } });
+    _ = test_execute(&sm, .{ .operation = .create_product, .id = 0, .event = .{ .product = make_test_product(id_b, "Other", 0) } });
+
+    const resp = test_execute(&sm, .{
+        .operation = .transfer_inventory,
+        .id = id_a,
+        .event = .{ .transfer = .{ .target_id = id_b, .quantity = 10 } },
+    });
+    try std.testing.expectEqual(resp.status, .err);
+
+    // Verify neither product was modified.
+    const get_a = test_execute(&sm, .{ .operation = .get_product, .id = id_a, .event = .{ .none = {} } });
+    try std.testing.expectEqual(get_a.result.product.inventory, 5);
+}
+
+test "transfer inventory — source not found" {
+    var storage = try MemoryStorage.init(std.testing.allocator);
+    defer storage.deinit(std.testing.allocator);
+    var sm = TestStateMachine.init(&storage);
+
+    const id_b: u128 = 0xcccc0000000000000000000000000002;
+    _ = test_execute(&sm, .{ .operation = .create_product, .id = 0, .event = .{ .product = make_test_product(id_b, "Target", 0) } });
+
+    const resp = test_execute(&sm, .{
+        .operation = .transfer_inventory,
+        .id = 0xcccc0000000000000000000000000001,
+        .event = .{ .transfer = .{ .target_id = id_b, .quantity = 1 } },
+    });
+    try std.testing.expectEqual(resp.status, .not_found);
+}
+
+test "transfer inventory — target not found" {
+    var storage = try MemoryStorage.init(std.testing.allocator);
+    defer storage.deinit(std.testing.allocator);
+    var sm = TestStateMachine.init(&storage);
+
+    const id_a: u128 = 0xdddd0000000000000000000000000001;
+    var prod_a = make_test_product(id_a, "Source", 0);
+    prod_a.inventory = 50;
+    _ = test_execute(&sm, .{ .operation = .create_product, .id = 0, .event = .{ .product = prod_a } });
+
+    const resp = test_execute(&sm, .{
+        .operation = .transfer_inventory,
+        .id = id_a,
+        .event = .{ .transfer = .{ .target_id = 0xdddd0000000000000000000000000002, .quantity = 1 } },
+    });
+    try std.testing.expectEqual(resp.status, .not_found);
 }
 
 test "duplicate ID rejected" {

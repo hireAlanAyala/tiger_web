@@ -27,6 +27,9 @@ pub const Operation = enum(u8) {
     delete_product = 5,
     get_product_inventory = 6,
 
+    // Inventory
+    transfer_inventory = 13,
+
     // Collections
     create_collection = 7,
     get_collection = 8,
@@ -43,6 +46,7 @@ pub const Operation = enum(u8) {
             .create_product, .update_product => Product,
             .create_collection => ProductCollection,
             .add_collection_member, .remove_collection_member => u128,
+            .transfer_inventory => InventoryTransfer,
             .get_product,
             .delete_product,
             .get_product_inventory,
@@ -64,6 +68,7 @@ pub const Operation = enum(u8) {
                 Product => .product,
                 ProductCollection => .collection,
                 u128 => .member_id,
+                InventoryTransfer => .transfer,
                 void => .none,
                 else => @compileError("unhandled EventType"),
             },
@@ -87,6 +92,13 @@ pub const ProductCollection = struct {
     pub fn name_slice(self: *const ProductCollection) []const u8 {
         return self.name[0..self.name_len];
     }
+};
+
+/// Payload for transfer_inventory — move quantity units from source to target.
+/// Source ID is msg.id; this struct carries the target and amount.
+pub const InventoryTransfer = struct {
+    target_id: u128,
+    quantity: u32,
 };
 
 pub const product_name_max = 128;
@@ -126,6 +138,7 @@ pub const Event = union(enum) {
     product: Product,
     collection: ProductCollection,
     member_id: u128, // product_id for add/remove member
+    transfer: InventoryTransfer,
     none: void,
 
     /// Extract the typed event value matching an operation's EventType.
@@ -138,6 +151,7 @@ pub const Event = union(enum) {
             Product => "product",
             ProductCollection => "collection",
             u128 => "member_id",
+            InventoryTransfer => "transfer",
             void => "none",
             else => @compileError("Event.unwrap: unhandled type"),
         };
@@ -251,6 +265,7 @@ test "Operation EventType comptime resolution" {
         assert(Operation.EventType(.get_product) == void);
         assert(Operation.EventType(.create_collection) == ProductCollection);
         assert(Operation.EventType(.add_collection_member) == u128);
+        assert(Operation.EventType(.transfer_inventory) == InventoryTransfer);
     }
 }
 
@@ -261,6 +276,7 @@ test "Operation event_tag derived from EventType" {
     try std.testing.expectEqual(Operation.event_tag(.create_collection), .collection);
     try std.testing.expectEqual(Operation.event_tag(.add_collection_member), .member_id);
     try std.testing.expectEqual(Operation.event_tag(.remove_collection_member), .member_id);
+    try std.testing.expectEqual(Operation.event_tag(.transfer_inventory), .transfer);
     try std.testing.expectEqual(Operation.event_tag(.get_product), .none);
     try std.testing.expectEqual(Operation.event_tag(.list_products), .none);
     try std.testing.expectEqual(Operation.event_tag(.delete_product), .none);

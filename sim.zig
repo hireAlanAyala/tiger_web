@@ -1053,6 +1053,131 @@ test "product get_inventory — returns inventory count" {
 }
 
 // =====================================================================
+// Inventory transfer tests — two-product prefetch, two writes
+// =====================================================================
+
+const test_transfer_src = "ee000000000000000000000000000001";
+const test_transfer_dst = "ee000000000000000000000000000002";
+
+test "transfer inventory — success, both products updated" {
+    var sim_io = SimIO.init(0xe001);
+    var storage = try MemoryStorage.init(std.testing.allocator);
+    defer storage.deinit(std.testing.allocator);
+    var sm = StateMachine.init(&storage);
+    var server = Server.init(&sim_io, &sm, 1);
+
+    sim_io.connect_client(0);
+    run_ticks(&server, &sim_io, 10);
+
+    // Create source with 100 inventory.
+    sim_io.inject_post(0, "/products",
+        "{\"id\":\"" ++ test_transfer_src ++ "\",\"name\":\"Source\",\"inventory\":100}"
+    );
+    const cr1 = run_until_response(&server, &sim_io, 0, 500) orelse
+        return error.TestUnexpectedResult;
+    try std.testing.expectEqual(cr1.status_code, 200);
+    sim_io.clear_response(0);
+
+    // Create target with 20 inventory.
+    sim_io.inject_post(0, "/products",
+        "{\"id\":\"" ++ test_transfer_dst ++ "\",\"name\":\"Target\",\"inventory\":20}"
+    );
+    const cr2 = run_until_response(&server, &sim_io, 0, 500) orelse
+        return error.TestUnexpectedResult;
+    try std.testing.expectEqual(cr2.status_code, 200);
+    sim_io.clear_response(0);
+
+    // Transfer 30 units from source to target.
+    sim_io.inject_post(0,
+        "/products/" ++ test_transfer_src ++ "/transfer-inventory/" ++ test_transfer_dst,
+        \\{"quantity":30}
+    );
+    const tr_resp = run_until_response(&server, &sim_io, 0, 500) orelse
+        return error.TestUnexpectedResult;
+    try std.testing.expectEqual(tr_resp.status_code, 200);
+    // Response contains both products with updated inventory.
+    try std.testing.expect(json_contains(tr_resp.body, "\"inventory\":70"));
+    try std.testing.expect(json_contains(tr_resp.body, "\"inventory\":50"));
+    sim_io.clear_response(0);
+
+    // Verify via GET that storage was actually updated.
+    sim_io.inject_get(0, "/products/" ++ test_transfer_src);
+    const get_src = run_until_response(&server, &sim_io, 0, 500) orelse
+        return error.TestUnexpectedResult;
+    try std.testing.expect(json_contains(get_src.body, "\"inventory\":70"));
+    sim_io.clear_response(0);
+
+    sim_io.inject_get(0, "/products/" ++ test_transfer_dst);
+    const get_dst = run_until_response(&server, &sim_io, 0, 500) orelse
+        return error.TestUnexpectedResult;
+    try std.testing.expect(json_contains(get_dst.body, "\"inventory\":50"));
+}
+
+test "transfer inventory — insufficient stock returns 500" {
+    var sim_io = SimIO.init(0xe002);
+    var storage = try MemoryStorage.init(std.testing.allocator);
+    defer storage.deinit(std.testing.allocator);
+    var sm = StateMachine.init(&storage);
+    var server = Server.init(&sim_io, &sm, 1);
+
+    sim_io.connect_client(0);
+    run_ticks(&server, &sim_io, 10);
+
+    sim_io.inject_post(0, "/products",
+        "{\"id\":\"" ++ test_transfer_src ++ "\",\"name\":\"Low\",\"inventory\":5}"
+    );
+    _ = run_until_response(&server, &sim_io, 0, 500) orelse return error.TestUnexpectedResult;
+    sim_io.clear_response(0);
+
+    sim_io.inject_post(0, "/products",
+        "{\"id\":\"" ++ test_transfer_dst ++ "\",\"name\":\"Other\",\"inventory\":0}"
+    );
+    _ = run_until_response(&server, &sim_io, 0, 500) orelse return error.TestUnexpectedResult;
+    sim_io.clear_response(0);
+
+    // Try to transfer more than source has.
+    sim_io.inject_post(0,
+        "/products/" ++ test_transfer_src ++ "/transfer-inventory/" ++ test_transfer_dst,
+        \\{"quantity":10}
+    );
+    const resp = run_until_response(&server, &sim_io, 0, 500) orelse
+        return error.TestUnexpectedResult;
+    try std.testing.expectEqual(resp.status_code, 500);
+
+    // Verify source wasn't modified.
+    sim_io.clear_response(0);
+    sim_io.inject_get(0, "/products/" ++ test_transfer_src);
+    const get_resp = run_until_response(&server, &sim_io, 0, 500) orelse
+        return error.TestUnexpectedResult;
+    try std.testing.expect(json_contains(get_resp.body, "\"inventory\":5"));
+}
+
+test "transfer inventory — source not found returns 404" {
+    var sim_io = SimIO.init(0xe003);
+    var storage = try MemoryStorage.init(std.testing.allocator);
+    defer storage.deinit(std.testing.allocator);
+    var sm = StateMachine.init(&storage);
+    var server = Server.init(&sim_io, &sm, 1);
+
+    sim_io.connect_client(0);
+    run_ticks(&server, &sim_io, 10);
+
+    sim_io.inject_post(0, "/products",
+        "{\"id\":\"" ++ test_transfer_dst ++ "\",\"name\":\"Target\",\"inventory\":10}"
+    );
+    _ = run_until_response(&server, &sim_io, 0, 500) orelse return error.TestUnexpectedResult;
+    sim_io.clear_response(0);
+
+    sim_io.inject_post(0,
+        "/products/" ++ test_transfer_src ++ "/transfer-inventory/" ++ test_transfer_dst,
+        \\{"quantity":1}
+    );
+    const resp = run_until_response(&server, &sim_io, 0, 500) orelse
+        return error.TestUnexpectedResult;
+    try std.testing.expectEqual(resp.status_code, 404);
+}
+
+// =====================================================================
 // Collection tests — multi-read prefetch stress
 // =====================================================================
 

@@ -74,6 +74,25 @@ fn split_path(path: []const u8) ?PathSegments {
 }
 
 fn translate_products(method: http.Method, seg: PathSegments, body: []const u8) ?message.Message {
+    // POST /products/:id/transfer-inventory/:target_id — uses sub_id for target.
+    if (seg.has_id and seg.sub_resource.len > 0 and method == .post) {
+        if (std.mem.eql(u8, seg.sub_resource, "transfer-inventory") and seg.has_sub_id) {
+            if (body.len == 0) return null;
+            const quantity = json_u32_field(body, "quantity") orelse return null;
+            if (quantity == 0) return null;
+            if (seg.id == seg.sub_id) return null;
+            return .{
+                .operation = .transfer_inventory,
+                .id = seg.id,
+                .event = .{ .transfer = .{
+                    .target_id = seg.sub_id,
+                    .quantity = quantity,
+                } },
+            };
+        }
+        return null;
+    }
+
     const operation: message.Operation = switch (method) {
         .get => blk: {
             if (seg.has_id and seg.sub_resource.len > 0) {
@@ -674,6 +693,41 @@ test "GET /products/:id/inventory (get_inventory)" {
 
 test "rejects unknown sub-resource" {
     try std.testing.expect(translate(.get, "/products/" ++ test_uuid_str ++ "/unknown", "") == null);
+}
+
+const test_uuid2_str = "aabbccdd11223344aabbccdd11223345";
+const test_uuid2: u128 = 0xaabbccdd11223344aabbccdd11223345;
+
+test "POST /products/:id/transfer-inventory/:target_id" {
+    const msg = translate(.post, "/products/" ++ test_uuid_str ++ "/transfer-inventory/" ++ test_uuid2_str,
+        \\{"quantity":10}
+    ).?;
+    try std.testing.expectEqual(msg.operation, .transfer_inventory);
+    try std.testing.expectEqual(msg.id, test_uuid);
+    try std.testing.expectEqual(msg.event.transfer.target_id, test_uuid2);
+    try std.testing.expectEqual(msg.event.transfer.quantity, 10);
+}
+
+test "transfer-inventory rejects zero quantity" {
+    try std.testing.expect(translate(.post, "/products/" ++ test_uuid_str ++ "/transfer-inventory/" ++ test_uuid2_str,
+        \\{"quantity":0}
+    ) == null);
+}
+
+test "transfer-inventory rejects empty body" {
+    try std.testing.expect(translate(.post, "/products/" ++ test_uuid_str ++ "/transfer-inventory/" ++ test_uuid2_str, "") == null);
+}
+
+test "transfer-inventory rejects same source and target" {
+    try std.testing.expect(translate(.post, "/products/" ++ test_uuid_str ++ "/transfer-inventory/" ++ test_uuid_str,
+        \\{"quantity":5}
+    ) == null);
+}
+
+test "transfer-inventory rejects missing target" {
+    try std.testing.expect(translate(.post, "/products/" ++ test_uuid_str ++ "/transfer-inventory",
+        \\{"quantity":5}
+    ) == null);
 }
 
 test "encode_response_json — inventory" {
