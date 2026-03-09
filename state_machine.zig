@@ -326,6 +326,11 @@ pub fn StateMachineType(comptime Storage: type) type {
 
         /// Commit a storage write and translate the result to a response.
         /// On success, returns the provided result payload. On failure, returns 503.
+        // No capacity warnings here. MemoryStorage has fixed-size arrays but
+        // that's a test constraint, not a production one. SqliteStorage grows
+        // until the disk is full. Capacity monitoring belongs in infrastructure
+        // (disk space alerts), not in the state machine.
+
         fn commit_write(_: *StateMachine, write_result: StorageResult, ok_result: message.Result) message.MessageResponse {
             return switch (write_result) {
                 .ok => .{ .status = .ok, .result = ok_result },
@@ -428,6 +433,7 @@ pub const MemoryStorage = struct {
     collections_store: *[collection_capacity]CollectionEntry,
     collection_count: u32,
     memberships: *[membership_capacity]MembershipEntry,
+    membership_count: u32,
 
     // Fault injection — PRNG-driven, same pattern as SimIO.
     prng_state: u64,
@@ -447,6 +453,7 @@ pub const MemoryStorage = struct {
             .collections_store = collections_store,
             .collection_count = 0,
             .memberships = memberships,
+            .membership_count = 0,
             .prng_state = 0,
             .busy_fault_probability = 0,
             .err_fault_probability = 0,
@@ -465,6 +472,7 @@ pub const MemoryStorage = struct {
         @memset(self.collections_store, empty_collection);
         self.collection_count = 0;
         @memset(self.memberships, empty_membership);
+        self.membership_count = 0;
     }
 
     pub fn begin(_: *MemoryStorage) void {}
@@ -574,6 +582,7 @@ pub const MemoryStorage = struct {
         for (self.memberships) |*m| {
             if (m.occupied and m.collection_id == id) {
                 m.occupied = false;
+                self.membership_count -= 1;
             }
         }
         return .ok;
@@ -601,6 +610,7 @@ pub const MemoryStorage = struct {
         for (self.memberships) |*m| {
             if (!m.occupied) {
                 m.* = .{ .collection_id = collection_id, .product_id = product_id, .occupied = true };
+                self.membership_count += 1;
                 return .ok;
             }
         }
@@ -611,6 +621,7 @@ pub const MemoryStorage = struct {
         for (self.memberships) |*m| {
             if (m.occupied and m.collection_id == collection_id and m.product_id == product_id) {
                 m.occupied = false;
+                self.membership_count -= 1;
                 return .ok;
             }
         }
