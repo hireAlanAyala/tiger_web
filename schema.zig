@@ -24,6 +24,8 @@ pub fn translate(method: http.Method, raw_path: []const u8, body: []const u8) ?m
         return translate_products(method, segments, body);
     } else if (std.mem.eql(u8, segments.collection, "collections")) {
         return translate_collections(method, segments, body);
+    } else if (std.mem.eql(u8, segments.collection, "orders")) {
+        return translate_orders(method, segments, body);
     } else {
         return null;
     }
@@ -168,6 +170,72 @@ fn translate_collections(method: http.Method, seg: PathSegments, body: []const u
     }
 }
 
+fn translate_orders(method: http.Method, seg: PathSegments, body: []const u8) ?message.Message {
+    if (method != .post) return null;
+    if (seg.has_id) return null;
+    if (body.len == 0) return null;
+
+    const order = parse_order_json(body) orelse return null;
+    return .{
+        .operation = .create_order,
+        .id = order.id,
+        .event = .{ .order = order },
+    };
+}
+
+/// Parse a JSON body into an OrderRequest.
+/// Expected format:
+/// {"id":"...","items":[{"product_id":"...","quantity":N},...]}
+fn parse_order_json(body: []const u8) ?message.OrderRequest {
+    var order = message.OrderRequest{
+        .id = 0,
+        .items = undefined,
+        .items_len = 0,
+    };
+
+    // ID is required.
+    const id_str = json_string_field(body, "id") orelse return null;
+    order.id = parse_uuid(id_str) orelse return null;
+    if (order.id == 0) return null;
+
+    // Find the items array.
+    const items_start = std.mem.indexOf(u8, body, "\"items\"") orelse return null;
+    const bracket_start = std.mem.indexOfPos(u8, body, items_start, "[") orelse return null;
+    const bracket_end = std.mem.indexOf(u8, body[bracket_start..], "]") orelse return null;
+    const items_body = body[bracket_start + 1 .. bracket_start + bracket_end];
+
+    // Parse each item object.
+    var pos: usize = 0;
+    while (pos < items_body.len) {
+        const obj_start = std.mem.indexOfPos(u8, items_body, pos, "{") orelse break;
+        const obj_end = std.mem.indexOfPos(u8, items_body, obj_start, "}") orelse return null;
+        const obj = items_body[obj_start .. obj_end + 1];
+
+        if (order.items_len >= message.order_items_max) return null;
+
+        const pid_str = json_string_field(obj, "product_id") orelse return null;
+        const pid = parse_uuid(pid_str) orelse return null;
+        if (pid == 0) return null;
+        const qty = json_u32_field(obj, "quantity") orelse return null;
+        if (qty == 0) return null;
+
+        // Reject duplicate product IDs within the same order.
+        for (order.items[0..order.items_len]) |existing| {
+            if (existing.product_id == pid) return null;
+        }
+
+        order.items[order.items_len] = .{
+            .product_id = pid,
+            .quantity = qty,
+        };
+        order.items_len += 1;
+        pos = obj_end + 1;
+    }
+
+    if (order.items_len == 0) return null;
+    return order;
+}
+
 /// Parse a JSON body into a Product struct.
 /// Hand-rolled parser for known fields. No std.json, no allocations.
 ///
@@ -305,6 +373,28 @@ pub fn encode_response_json(buf: []u8, resp: message.MessageResponse) []const u8
             }
             w.raw("]");
         },
+        .order => |*o| {
+            w.raw("{\"id\":\"");
+            w.write_uuid(o.id);
+            w.raw("\",\"items\":[");
+            for (o.items[0..o.items_len], 0..) |*item, i| {
+                if (i > 0) w.raw(",");
+                w.raw("{\"product_id\":\"");
+                w.write_uuid(item.product_id);
+                w.raw("\",\"name\":\"");
+                w.escaped(item.name_slice());
+                w.raw("\",\"quantity\":");
+                w.write_u32(item.quantity);
+                w.raw(",\"price_cents\":");
+                w.write_u32(item.price_cents);
+                w.raw(",\"line_total_cents\":");
+                w.write_u64(item.line_total_cents);
+                w.raw("}");
+            }
+            w.raw("],\"total_cents\":");
+            w.write_u64(o.total_cents);
+            w.raw("}");
+        },
         .empty => w.raw("[]"),
     }
 
@@ -344,6 +434,12 @@ const JsonWriter = struct {
     fn write_u32(self: *JsonWriter, val: u32) void {
         var num_buf: [10]u8 = undefined;
         const s = format_u32(&num_buf, val);
+        self.raw(s);
+    }
+
+    fn write_u64(self: *JsonWriter, val: u64) void {
+        var num_buf: [20]u8 = undefined;
+        const s = format_u64(&num_buf, val);
         self.raw(s);
     }
 
@@ -490,6 +586,22 @@ fn write_uuid_to_buf(buf: *[32]u8, val: u128) void {
         buf[i] = hex[@intCast(v & 0xf)];
         v >>= 4;
     }
+}
+
+/// Format a u64 as a decimal string.
+fn format_u64(buf: *[20]u8, val: u64) []const u8 {
+    if (val == 0) {
+        buf[0] = '0';
+        return buf[0..1];
+    }
+    var v = val;
+    var pos: usize = 20;
+    while (v > 0) {
+        pos -= 1;
+        buf[pos] = '0' + @as(u8, @intCast(v % 10));
+        v /= 10;
+    }
+    return buf[pos..20];
 }
 
 /// Format a u32 as a decimal string.
@@ -728,6 +840,79 @@ test "transfer-inventory rejects missing target" {
     try std.testing.expect(translate(.post, "/products/" ++ test_uuid_str ++ "/transfer-inventory",
         \\{"quantity":5}
     ) == null);
+}
+
+test "POST /orders (create_order)" {
+    const body =
+        \\{"id":"eeee0000000000000000000000000001","items":[{"product_id":"aabbccdd11223344aabbccdd11223344","quantity":2},{"product_id":"aabbccdd11223344aabbccdd11223345","quantity":3}]}
+    ;
+    const msg = translate(.post, "/orders", body).?;
+    try std.testing.expectEqual(msg.operation, .create_order);
+    const order = msg.event.order;
+    try std.testing.expectEqual(order.id, 0xeeee0000000000000000000000000001);
+    try std.testing.expectEqual(order.items_len, 2);
+    try std.testing.expectEqual(order.items[0].product_id, test_uuid);
+    try std.testing.expectEqual(order.items[0].quantity, 2);
+    try std.testing.expectEqual(order.items[1].product_id, test_uuid2);
+    try std.testing.expectEqual(order.items[1].quantity, 3);
+}
+
+test "POST /orders rejects empty items" {
+    try std.testing.expect(translate(.post, "/orders",
+        \\{"id":"eeee0000000000000000000000000001","items":[]}
+    ) == null);
+}
+
+test "POST /orders rejects missing id" {
+    try std.testing.expect(translate(.post, "/orders",
+        \\{"items":[{"product_id":"aabbccdd11223344aabbccdd11223344","quantity":1}]}
+    ) == null);
+}
+
+test "POST /orders rejects zero quantity" {
+    try std.testing.expect(translate(.post, "/orders",
+        \\{"id":"eeee0000000000000000000000000001","items":[{"product_id":"aabbccdd11223344aabbccdd11223344","quantity":0}]}
+    ) == null);
+}
+
+test "POST /orders rejects duplicate product_id" {
+    try std.testing.expect(translate(.post, "/orders",
+        \\{"id":"eeee0000000000000000000000000001","items":[{"product_id":"aabbccdd11223344aabbccdd11223344","quantity":1},{"product_id":"aabbccdd11223344aabbccdd11223344","quantity":2}]}
+    ) == null);
+}
+
+test "GET /orders is not supported" {
+    try std.testing.expect(translate(.get, "/orders", "") == null);
+}
+
+test "encode_response_json — order" {
+    var order_result = message.OrderResult{
+        .id = 0xeeee0000000000000000000000000001,
+        .items = undefined,
+        .items_len = 1,
+        .total_cents = 1998,
+    };
+    order_result.items[0] = .{
+        .product_id = test_uuid,
+        .name = undefined,
+        .name_len = 6,
+        .quantity = 2,
+        .price_cents = 999,
+        .line_total_cents = 1998,
+    };
+    @memcpy(order_result.items[0].name[0..6], "Widget");
+
+    const resp = message.MessageResponse{
+        .status = .ok,
+        .result = .{ .order = order_result },
+    };
+
+    var buf: [4096]u8 = undefined;
+    const json = encode_response_json(&buf, resp);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"total_cents\":1998") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"line_total_cents\":1998") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"name\":\"Widget\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"quantity\":2") != null);
 }
 
 test "encode_response_json — inventory" {

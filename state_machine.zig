@@ -21,8 +21,14 @@ pub fn StateMachineType(comptime Storage: type) type {
         storage: *Storage,
 
         // Prefetch cache — populated by prefetch(), consumed by execute().
+        //
+        // Two product caches for different access patterns:
+        // - prefetch_product: single-entity lookup (get, create, update, delete)
+        // - prefetch_product_list: list results (list_products, collection members)
+        // - prefetch_products: multi-key lookup by ID (transfer_inventory, create_order)
         prefetch_product: ?message.Product,
         prefetch_product_list: message.ProductList,
+        prefetch_products: [message.order_items_max]?message.Product,
         prefetch_collection: ?message.ProductCollection,
         prefetch_collection_list: message.CollectionList,
         prefetch_result: ?StorageResult,
@@ -32,6 +38,7 @@ pub fn StateMachineType(comptime Storage: type) type {
                 .storage = storage,
                 .prefetch_product = null,
                 .prefetch_product_list = .{ .items = undefined, .len = 0 },
+                .prefetch_products = [_]?message.Product{null} ** message.order_items_max,
                 .prefetch_collection = null,
                 .prefetch_collection_list = .{ .items = undefined, .len = 0 },
                 .prefetch_result = null,
@@ -90,14 +97,20 @@ pub fn StateMachineType(comptime Storage: type) type {
                     assert(msg.id > 0);
                     assert(transfer.target_id > 0);
                     assert(msg.id != transfer.target_id);
-                    // Read both products into list slots — this is the multi-entity
-                    // prefetch that stresses the cache. Slot 0 = source, slot 1 = target.
-                    const r1 = self.storage.get(msg.id, &self.prefetch_product_list.items[0]);
-                    if (r1 != .ok) break :blk r1;
-                    const r2 = self.storage.get(transfer.target_id, &self.prefetch_product_list.items[1]);
-                    if (r2 != .ok) break :blk r2;
-                    self.prefetch_product_list.len = 2;
-                    break :blk .ok;
+                    break :blk self.prefetch_multi(&.{ msg.id, transfer.target_id });
+                },
+                .create_order => blk: {
+                    const order = msg.event.order;
+                    assert(order.items_len > 0);
+                    assert(order.items_len <= message.order_items_max);
+                    assert(order.id > 0);
+                    var ids: [message.order_items_max]u128 = undefined;
+                    for (order.items_slice(), 0..) |item, i| {
+                        assert(item.product_id > 0);
+                        assert(item.quantity > 0);
+                        ids[i] = item.product_id;
+                    }
+                    break :blk self.prefetch_multi(ids[0..order.items_len]);
                 },
             };
 
@@ -172,7 +185,13 @@ pub fn StateMachineType(comptime Storage: type) type {
                 ),
 
                 .transfer_inventory => self.execute_transfer_inventory(
+                    msg.id,
                     msg.event.unwrap(message.InventoryTransfer),
+                    result,
+                ),
+
+                .create_order => self.execute_create_order(
+                    msg.event.unwrap(message.OrderRequest),
                     result,
                 ),
             };
@@ -293,16 +312,14 @@ pub fn StateMachineType(comptime Storage: type) type {
         }
 
         /// Transfer inventory: two products in cache, cross-entity validation, two writes.
-        /// Uses list slots for multi-entity prefetch — slot 0 is source, slot 1 is target.
         /// Writes are infallible after prefetch (TigerBeetle style): prefetch proved both
         /// products exist, so update() is a memcpy into an occupied slot.
-        fn execute_transfer_inventory(self: *StateMachine, transfer: message.InventoryTransfer, result: StorageResult) message.MessageResponse {
+        fn execute_transfer_inventory(self: *StateMachine, source_id: u128, transfer: message.InventoryTransfer, result: StorageResult) message.MessageResponse {
             if (result == .not_found) return message.MessageResponse.not_found;
             assert(result == .ok);
-            assert(self.prefetch_product_list.len == 2);
 
-            var source = self.prefetch_product_list.items[0];
-            var target = self.prefetch_product_list.items[1];
+            var source = self.prefetch_find(source_id).?;
+            var target = self.prefetch_find(transfer.target_id).?;
 
             // Business logic: source must have enough inventory.
             if (source.inventory < transfer.quantity) {
@@ -316,12 +333,57 @@ pub fn StateMachineType(comptime Storage: type) type {
             assert(self.storage.update(source.id, &source) == .ok);
             assert(self.storage.update(target.id, &target) == .ok);
 
-            self.prefetch_product_list.items[0] = source;
-            self.prefetch_product_list.items[1] = target;
+            // Return both updated products.
+            var result_list = message.ProductList{ .items = undefined, .len = 2 };
+            result_list.items[0] = source;
+            result_list.items[1] = target;
             return .{
                 .status = .ok,
-                .result = .{ .product_list = self.prefetch_product_list },
+                .result = .{ .product_list = result_list },
             };
+        }
+
+        /// Create order: N products in cache, validate all have sufficient inventory,
+        /// decrement all inventories atomically, return order summary.
+        /// Uses list slots for multi-entity prefetch — one slot per line item.
+        fn execute_create_order(self: *StateMachine, order: message.OrderRequest, result: StorageResult) message.MessageResponse {
+            if (result == .not_found) return message.MessageResponse.not_found;
+            assert(result == .ok);
+
+            // Phase 1: validate all items have sufficient inventory.
+            for (order.items_slice()) |item| {
+                const product = self.prefetch_find(item.product_id).?;
+                if (product.inventory < item.quantity) {
+                    return .{ .status = .insufficient_inventory, .result = .{ .empty = {} } };
+                }
+            }
+
+            // Phase 2: all validated — decrement inventories and build result.
+            var order_result = message.OrderResult{
+                .id = order.id,
+                .items = undefined,
+                .items_len = order.items_len,
+                .total_cents = 0,
+            };
+
+            for (order.items_slice(), 0..) |item, i| {
+                var product = self.prefetch_find(item.product_id).?;
+                product.inventory -= item.quantity;
+                assert(self.storage.update(product.id, &product) == .ok);
+
+                const line_total = @as(u64, product.price_cents) * @as(u64, item.quantity);
+                order_result.items[i] = .{
+                    .product_id = product.id,
+                    .name = product.name,
+                    .name_len = product.name_len,
+                    .quantity = item.quantity,
+                    .price_cents = product.price_cents,
+                    .line_total_cents = line_total,
+                };
+                order_result.total_cents +|= line_total;
+            }
+
+            return .{ .status = .ok, .result = .{ .order = order_result } };
         }
 
         /// Commit a storage write and translate the result to a response.
@@ -343,6 +405,7 @@ pub fn StateMachineType(comptime Storage: type) type {
         fn reset_prefetch(self: *StateMachine) void {
             self.prefetch_product = null;
             self.prefetch_product_list.len = 0;
+            self.prefetch_products = [_]?message.Product{null} ** message.order_items_max;
             self.prefetch_collection = null;
             self.prefetch_collection_list.len = 0;
             self.prefetch_result = null;
@@ -351,6 +414,7 @@ pub fn StateMachineType(comptime Storage: type) type {
         fn reset_prefetch_cache(self: *StateMachine) void {
             self.prefetch_product = null;
             self.prefetch_product_list.len = 0;
+            self.prefetch_products = [_]?message.Product{null} ** message.order_items_max;
             self.prefetch_collection = null;
             self.prefetch_collection_list.len = 0;
         }
@@ -367,6 +431,31 @@ pub fn StateMachineType(comptime Storage: type) type {
 
         fn prefetch_list_products(self: *StateMachine) StorageResult {
             return self.storage.list(&self.prefetch_product_list.items, &self.prefetch_product_list.len);
+        }
+
+        /// Multi-key prefetch: read N products by ID into the keyed cache.
+        /// Execute retrieves them via prefetch_find(id), not by position.
+        fn prefetch_multi(self: *StateMachine, ids: []const u128) StorageResult {
+            assert(ids.len > 0);
+            assert(ids.len <= message.order_items_max);
+            for (ids, 0..) |id, i| {
+                assert(id > 0);
+                var product: message.Product = undefined;
+                const r = self.storage.get(id, &product);
+                if (r != .ok) return r;
+                self.prefetch_products[i] = product;
+            }
+            return .ok;
+        }
+
+        /// Look up a prefetched product by ID. Returns null if not found.
+        /// TB equivalent: grooves.accounts.get(id) — keyed lookup, not positional.
+        fn prefetch_find(self: *StateMachine, id: u128) ?message.Product {
+            for (&self.prefetch_products) |*slot| {
+                const product = slot.* orelse continue;
+                if (product.id == id) return product;
+            }
+            return null;
         }
 
         // --- Collection prefetch helpers (read-only) ---
@@ -923,6 +1012,120 @@ test "transfer inventory — target not found" {
         .id = id_a,
         .event = .{ .transfer = .{ .target_id = 0xdddd0000000000000000000000000002, .quantity = 1 } },
     });
+    try std.testing.expectEqual(resp.status, .not_found);
+}
+
+fn make_order_request(id: u128, items: []const struct { id: u128, qty: u32 }) message.OrderRequest {
+    assert(items.len > 0);
+    assert(items.len <= message.order_items_max);
+    var order = message.OrderRequest{
+        .id = id,
+        .items = undefined,
+        .items_len = @intCast(items.len),
+    };
+    for (items, 0..) |item, i| {
+        order.items[i] = .{ .product_id = item.id, .quantity = item.qty };
+    }
+    return order;
+}
+
+test "create order — success" {
+    var storage = try MemoryStorage.init(std.testing.allocator);
+    defer storage.deinit(std.testing.allocator);
+    var sm = TestStateMachine.init(&storage);
+
+    const id_a: u128 = 0xaaaa0000000000000000000000000001;
+    const id_b: u128 = 0xaaaa0000000000000000000000000002;
+
+    var prod_a = make_test_product(id_a, "Widget", 1000);
+    prod_a.inventory = 50;
+    var prod_b = make_test_product(id_b, "Gadget", 2500);
+    prod_b.inventory = 30;
+
+    _ = test_execute(&sm, .{ .operation = .create_product, .id = 0, .event = .{ .product = prod_a } });
+    _ = test_execute(&sm, .{ .operation = .create_product, .id = 0, .event = .{ .product = prod_b } });
+
+    const order_id: u128 = 0xeeee0000000000000000000000000001;
+    const resp = test_execute(&sm, .{
+        .operation = .create_order,
+        .id = order_id,
+        .event = .{ .order = make_order_request(order_id, &.{
+            .{ .id = id_a, .qty = 2 },
+            .{ .id = id_b, .qty = 3 },
+        }) },
+    });
+
+    try std.testing.expectEqual(resp.status, .ok);
+    const order = resp.result.order;
+    try std.testing.expectEqual(order.id, order_id);
+    try std.testing.expectEqual(order.items_len, 2);
+    try std.testing.expectEqual(order.items[0].quantity, 2);
+    try std.testing.expectEqual(order.items[0].price_cents, 1000);
+    try std.testing.expectEqual(order.items[0].line_total_cents, 2000);
+    try std.testing.expectEqual(order.items[1].quantity, 3);
+    try std.testing.expectEqual(order.items[1].line_total_cents, 7500);
+    try std.testing.expectEqual(order.total_cents, 9500);
+
+    // Verify inventories were decremented.
+    const get_a = test_execute(&sm, .{ .operation = .get_product, .id = id_a, .event = .{ .none = {} } });
+    try std.testing.expectEqual(get_a.result.product.inventory, 48);
+    const get_b = test_execute(&sm, .{ .operation = .get_product, .id = id_b, .event = .{ .none = {} } });
+    try std.testing.expectEqual(get_b.result.product.inventory, 27);
+}
+
+test "create order — insufficient inventory rolls back all" {
+    var storage = try MemoryStorage.init(std.testing.allocator);
+    defer storage.deinit(std.testing.allocator);
+    var sm = TestStateMachine.init(&storage);
+
+    const id_a: u128 = 0xbbbb0000000000000000000000000001;
+    const id_b: u128 = 0xbbbb0000000000000000000000000002;
+
+    var prod_a = make_test_product(id_a, "Plenty", 100);
+    prod_a.inventory = 100;
+    var prod_b = make_test_product(id_b, "Scarce", 200);
+    prod_b.inventory = 2;
+
+    _ = test_execute(&sm, .{ .operation = .create_product, .id = 0, .event = .{ .product = prod_a } });
+    _ = test_execute(&sm, .{ .operation = .create_product, .id = 0, .event = .{ .product = prod_b } });
+
+    const resp = test_execute(&sm, .{
+        .operation = .create_order,
+        .id = 0xeeee0000000000000000000000000002,
+        .event = .{ .order = make_order_request(0xeeee0000000000000000000000000002, &.{
+            .{ .id = id_a, .qty = 5 },
+            .{ .id = id_b, .qty = 10 }, // insufficient
+        }) },
+    });
+
+    try std.testing.expectEqual(resp.status, .insufficient_inventory);
+
+    // Verify neither product was modified.
+    const get_a = test_execute(&sm, .{ .operation = .get_product, .id = id_a, .event = .{ .none = {} } });
+    try std.testing.expectEqual(get_a.result.product.inventory, 100);
+    const get_b = test_execute(&sm, .{ .operation = .get_product, .id = id_b, .event = .{ .none = {} } });
+    try std.testing.expectEqual(get_b.result.product.inventory, 2);
+}
+
+test "create order — product not found" {
+    var storage = try MemoryStorage.init(std.testing.allocator);
+    defer storage.deinit(std.testing.allocator);
+    var sm = TestStateMachine.init(&storage);
+
+    const id_a: u128 = 0xcccc0000000000000000000000000001;
+    var prod_a = make_test_product(id_a, "Exists", 100);
+    prod_a.inventory = 10;
+    _ = test_execute(&sm, .{ .operation = .create_product, .id = 0, .event = .{ .product = prod_a } });
+
+    const resp = test_execute(&sm, .{
+        .operation = .create_order,
+        .id = 0xeeee0000000000000000000000000003,
+        .event = .{ .order = make_order_request(0xeeee0000000000000000000000000003, &.{
+            .{ .id = id_a, .qty = 1 },
+            .{ .id = 0xcccc0000000000000000000000000099, .qty = 1 }, // doesn't exist
+        }) },
+    });
+
     try std.testing.expectEqual(resp.status, .not_found);
 }
 

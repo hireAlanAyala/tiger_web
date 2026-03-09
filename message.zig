@@ -35,6 +35,9 @@ pub const Operation = enum(u8) {
     // Inventory
     transfer_inventory = 13,
 
+    // Orders
+    create_order = 14,
+
     // Collections
     create_collection = 7,
     get_collection = 8,
@@ -52,6 +55,7 @@ pub const Operation = enum(u8) {
             .create_collection => ProductCollection,
             .add_collection_member, .remove_collection_member => u128,
             .transfer_inventory => InventoryTransfer,
+            .create_order => OrderRequest,
             .get_product,
             .delete_product,
             .get_product_inventory,
@@ -74,6 +78,7 @@ pub const Operation = enum(u8) {
                 ProductCollection => .collection,
                 u128 => .member_id,
                 InventoryTransfer => .transfer,
+                OrderRequest => .order,
                 void => .none,
                 else => @compileError("unhandled EventType"),
             },
@@ -104,6 +109,57 @@ pub const ProductCollection = struct {
 pub const InventoryTransfer = struct {
     target_id: u128,
     quantity: u32,
+};
+
+/// Maximum number of line items in a single order.
+pub const order_items_max = 20;
+
+/// A single line item in an order request.
+pub const OrderItem = struct {
+    product_id: u128,
+    quantity: u32,
+};
+
+/// Order creation request — variable-length array of line items in a fixed-size struct.
+pub const OrderRequest = struct {
+    id: u128,
+    items: [order_items_max]OrderItem,
+    items_len: u8,
+
+    comptime {
+        assert(order_items_max > 0);
+        assert(order_items_max <= std.math.maxInt(u8));
+    }
+
+    pub fn items_slice(self: *const OrderRequest) []const OrderItem {
+        return self.items[0..self.items_len];
+    }
+};
+
+/// A single line item in an order response — includes resolved product info.
+pub const OrderResultItem = struct {
+    product_id: u128,
+    name: [product_name_max]u8,
+    name_len: u8,
+    quantity: u32,
+    price_cents: u32,
+    line_total_cents: u64,
+
+    pub fn name_slice(self: *const OrderResultItem) []const u8 {
+        return self.name[0..self.name_len];
+    }
+};
+
+/// Order result — returned after successful checkout.
+pub const OrderResult = struct {
+    id: u128,
+    items: [order_items_max]OrderResultItem,
+    items_len: u8,
+    total_cents: u64,
+
+    pub fn items_slice(self: *const OrderResult) []const OrderResultItem {
+        return self.items[0..self.items_len];
+    }
 };
 
 pub const product_name_max = 128;
@@ -144,6 +200,7 @@ pub const Event = union(enum) {
     collection: ProductCollection,
     member_id: u128, // product_id for add/remove member
     transfer: InventoryTransfer,
+    order: OrderRequest,
     none: void,
 
     /// Extract the typed event value matching an operation's EventType.
@@ -157,6 +214,7 @@ pub const Event = union(enum) {
             ProductCollection => "collection",
             u128 => "member_id",
             InventoryTransfer => "transfer",
+            OrderRequest => "order",
             void => "none",
             else => @compileError("Event.unwrap: unhandled type"),
         };
@@ -203,6 +261,7 @@ pub const Result = union(enum) {
     inventory: u32,
     collection: CollectionWithProducts,
     collection_list: CollectionList,
+    order: OrderResult,
     empty: void,
 };
 
@@ -271,6 +330,7 @@ test "Operation EventType comptime resolution" {
         assert(Operation.EventType(.create_collection) == ProductCollection);
         assert(Operation.EventType(.add_collection_member) == u128);
         assert(Operation.EventType(.transfer_inventory) == InventoryTransfer);
+        assert(Operation.EventType(.create_order) == OrderRequest);
     }
 }
 
@@ -282,6 +342,7 @@ test "Operation event_tag derived from EventType" {
     try std.testing.expectEqual(Operation.event_tag(.add_collection_member), .member_id);
     try std.testing.expectEqual(Operation.event_tag(.remove_collection_member), .member_id);
     try std.testing.expectEqual(Operation.event_tag(.transfer_inventory), .transfer);
+    try std.testing.expectEqual(Operation.event_tag(.create_order), .order);
     try std.testing.expectEqual(Operation.event_tag(.get_product), .none);
     try std.testing.expectEqual(Operation.event_tag(.list_products), .none);
     try std.testing.expectEqual(Operation.event_tag(.delete_product), .none);
