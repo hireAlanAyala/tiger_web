@@ -1503,3 +1503,49 @@ test "concurrent connections — busy client deferred, ready client served" {
     try std.testing.expectEqual(resp1.status_code, 200);
     try std.testing.expect(json_contains(resp1.body, "\"name\":\"Widget\""));
 }
+
+test "interleaved writes — update and delete same entity across connections" {
+    var sim_io = SimIO.init(0xd020);
+    var storage = try MemoryStorage.init(std.testing.allocator);
+    defer storage.deinit(std.testing.allocator);
+    var sm = StateMachine.init(&storage);
+    var server = Server.init(&sim_io, &sm, 2);
+
+    // Connect two clients and let them establish.
+    sim_io.connect_client(0);
+    sim_io.connect_client(1);
+    run_ticks(&server, &sim_io, 10);
+
+    // Create the product first (single client, no race).
+    sim_io.inject_post(0, "/products",
+        "{\"id\":\"" ++ test_uuid1 ++ "\",\"name\":\"Original\",\"price_cents\":100}"
+    );
+    _ = run_until_response(&server, &sim_io, 0, 500) orelse return error.TestUnexpectedResult;
+    sim_io.clear_response(0);
+
+    // Now inject competing writes: client 0 updates, client 1 deletes.
+    // process_inbox iterates by slot index, so connection 0's update
+    // is processed before connection 1's delete.
+    sim_io.inject_put(0, "/products/" ++ test_uuid1,
+        "{\"name\":\"Updated\"}"
+    );
+    sim_io.inject_delete(1, "/products/" ++ test_uuid1);
+
+    // Update should succeed (product exists).
+    const update_resp = run_until_response(&server, &sim_io, 0, 500) orelse
+        return error.TestUnexpectedResult;
+    try std.testing.expectEqual(update_resp.status_code, 200);
+    try std.testing.expect(json_contains(update_resp.body, "\"name\":\"Updated\""));
+
+    // Delete should also succeed (product still exists after update).
+    const delete_resp = run_until_response(&server, &sim_io, 1, 500) orelse
+        return error.TestUnexpectedResult;
+    try std.testing.expectEqual(delete_resp.status_code, 200);
+
+    // Product should be gone.
+    sim_io.clear_response(0);
+    sim_io.inject_get(0, "/products/" ++ test_uuid1);
+    const get_resp = run_until_response(&server, &sim_io, 0, 500) orelse
+        return error.TestUnexpectedResult;
+    try std.testing.expectEqual(get_resp.status_code, 404);
+}
