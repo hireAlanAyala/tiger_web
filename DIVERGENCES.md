@@ -55,7 +55,44 @@ We parameterize `StateMachineType(comptime Storage: type)` so the same state mac
 
 The prefetch/execute split mirrors TigerBeetle's two-phase approach: `prefetch()` fetches data from storage into fixed cache slots on the state machine, and `execute()` reads only from those cache slots. If storage returns `.busy` (SQLite's `SQLITE_BUSY`), the connection stays in `.ready` state and is retried on the next tick — no new connection states needed.
 
-`MemoryStorage` supports PRNG-driven fault injection (`busy_fault_probability`, `err_fault_probability`) using the same `splitmix64` pattern as `SimIO`. This lets sim tests verify that busy faults cause retries and storage errors produce 503 responses.
+`MemoryStorage` supports PRNG-driven fault injection (`busy_fault_probability`, `err_fault_probability`) using the same `splitmix64` pattern as `SimIO`. See "Infallible Execute Writes" below for why faults only apply to reads.
+
+## Infallible Execute Writes (Aligned with TigerBeetle)
+
+TigerBeetle's `create_transfer` (state_machine.zig:3634) has the comment `// After this point, the transfer must succeed.` followed by three writes — insert transfer, update debit account, update credit account. All three write to the LSM tree's in-memory memtable via `grooves.transfers.insert()` and `grooves.accounts.update()`. These functions return `void` — they literally cannot fail. The memtable is pre-allocated at comptime to hold a full batch. Persistence happens later through compaction and the WAL, managed by the replication layer, not the state machine.
+
+We follow the same model: **prefetch can fail, execute cannot.** Read operations (get, list) in `MemoryStorage` call `fault()` which rolls the PRNG against `busy_fault_probability` and `err_fault_probability`. Write operations (put, update, delete, add_to_collection, remove_from_collection) do not call `fault()`. The actual write is a memcpy into a pre-allocated array slot that prefetch already proved exists — it's inherently infallible.
+
+This means `execute_transfer_inventory` can do two sequential writes and assert both succeed:
+
+```zig
+// After this point, the transfer must succeed.
+assert(self.storage.update(source.id, &source) == .ok);
+assert(self.storage.update(target.id, &target) == .ok);
+```
+
+No partial-write concern, no rollback logic, no transaction wrapper.
+
+**Why not simulate write failures?** For `MemoryStorage`, there's nothing to simulate — the write is an array overwrite with no I/O. For `SqliteStorage` on a monolith VPS, write failures (SQLITE_FULL, SQLITE_IOERR) mean the machine is dying — disk full or hardware failure. The correct response is crash-with-a-message (`@panic`), not graceful error handling, because the server can't serve requests without its storage. This matches TigerBeetle's approach to storage corruption.
+
+**One exception:** `put()` can return `.err` for capacity full (all array slots occupied). This is a real resource limit, not a storage failure — it's handled via `commit_write` returning 503 to the client. If this ever needs to be an assert, the fix is to check capacity in prefetch.
+
+## Flat Prefetch Cache (Divergence from TigerBeetle)
+
+TigerBeetle's prefetch uses a forest of grooves (LSM trees), each backed by a page cache. An operation calls `grooves.accounts.prefetch_enqueue(id)` for each account it needs, then `grooves.accounts.prefetch(callback)`. The groove ensures those pages are in memory when the callback fires. Any number of entities of any type can be prefetched — the cache is the page cache itself.
+
+We use a flat struct with named slots:
+
+```
+prefetch_product: ?Product                    — one product
+prefetch_product_list: ProductList             — up to 50 products
+prefetch_collection: ?ProductCollection        — one collection
+prefetch_collection_list: CollectionList       — up to 50 collections
+```
+
+Each operation clears the cache and fills the slots it needs. Simple operations use the singular slots (get_product fills `prefetch_product`). Multi-entity operations use the list slots — `transfer_inventory` reads both source and target products into `prefetch_product_list` items 0 and 1. `get_collection` fills both `prefetch_collection` (the collection entity) and `prefetch_product_list` (its member products).
+
+This is simpler than a groove/page-cache system and works well for our operation set. The limitation is that operations needing two entities of the same type (two products, two collections) must use the list slots rather than dedicated singular slots. This is an acceptable trade — the list slots hold up to 50 entries, which accommodates any foreseeable multi-entity operation. If the flat cache becomes restrictive (e.g., an operation needing both a product list and specific products), a migration path exists toward a prefetch set keyed by (entity_type, id).
 
 ## Flat Operation Enum (Aligned with TigerBeetle)
 
