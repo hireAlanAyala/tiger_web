@@ -1424,7 +1424,14 @@ test "delete collection cascades memberships" {
     try std.testing.expectEqual(del_resp.status_code, 200);
     sim_io.clear_response(0);
 
-    // Product should still exist.
+    // Collection should be gone.
+    sim_io.inject_get(0, "/collections/" ++ test_col_uuid1);
+    const col_resp = run_until_response(&server, &sim_io, 0, 500) orelse
+        return error.TestUnexpectedResult;
+    try std.testing.expectEqual(col_resp.status_code, 404);
+    sim_io.clear_response(0);
+
+    // Product should still exist (cascade deletes memberships, not products).
     sim_io.inject_get(0, "/products/" ++ test_uuid1);
     const product_resp = run_until_response(&server, &sim_io, 0, 500) orelse
         return error.TestUnexpectedResult;
@@ -1453,4 +1460,46 @@ test "storage err fault — returns 503" {
     try mark.expect_hit();
     try std.testing.expectEqual(resp.status_code, 503);
     try std.testing.expect(json_contains(resp.body, "\"error\":\"service unavailable\""));
+}
+
+test "concurrent connections — busy client deferred, ready client served" {
+    var sim_io = SimIO.init(0xd010);
+    var storage = try MemoryStorage.init(std.testing.allocator);
+    defer storage.deinit(std.testing.allocator);
+    var sm = StateMachine.init(&storage);
+    var server = Server.init(&sim_io, &sm, 2);
+
+    // Connect two clients and let them establish.
+    sim_io.connect_client(0);
+    sim_io.connect_client(1);
+    run_ticks(&server, &sim_io, 10);
+
+    // Create a product (no faults).
+    sim_io.inject_post(0, "/products",
+        "{\"id\":\"" ++ test_uuid1 ++ "\",\"name\":\"Widget\",\"price_cents\":100}"
+    );
+    _ = run_until_response(&server, &sim_io, 0, 500) orelse return error.TestUnexpectedResult;
+    sim_io.clear_response(0);
+
+    // Enable 100% busy faults. Both clients send GET.
+    storage.busy_fault_probability = 100;
+    storage.prng_state = 0xd010;
+    sim_io.inject_get(0, "/products/" ++ test_uuid1);
+    sim_io.inject_get(1, "/products/" ++ test_uuid1);
+
+    // Tick with faults — neither should get a response.
+    run_ticks(&server, &sim_io, 20);
+    try std.testing.expect(sim_io.read_response(0) == null);
+    try std.testing.expect(sim_io.read_response(1) == null);
+
+    // Disable faults — both should succeed on next ticks.
+    storage.busy_fault_probability = 0;
+
+    const resp0 = run_until_response(&server, &sim_io, 0, 500) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(resp0.status_code, 200);
+    try std.testing.expect(json_contains(resp0.body, "\"name\":\"Widget\""));
+
+    const resp1 = run_until_response(&server, &sim_io, 1, 500) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(resp1.status_code, 200);
+    try std.testing.expect(json_contains(resp1.body, "\"name\":\"Widget\""));
 }
