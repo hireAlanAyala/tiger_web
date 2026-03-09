@@ -171,16 +171,27 @@ fn translate_collections(method: http.Method, seg: PathSegments, body: []const u
 }
 
 fn translate_orders(method: http.Method, seg: PathSegments, body: []const u8) ?message.Message {
-    if (method != .post) return null;
-    if (seg.has_id) return null;
-    if (body.len == 0) return null;
-
-    const order = parse_order_json(body) orelse return null;
-    return .{
-        .operation = .create_order,
-        .id = order.id,
-        .event = .{ .order = order },
-    };
+    switch (method) {
+        .get => {
+            if (body.len != 0) return null;
+            if (seg.has_id) {
+                return .{ .operation = .get_order, .id = seg.id, .event = .{ .none = {} } };
+            } else {
+                return .{ .operation = .list_orders, .id = 0, .event = .{ .none = {} } };
+            }
+        },
+        .post => {
+            if (seg.has_id) return null;
+            if (body.len == 0) return null;
+            const order = parse_order_json(body) orelse return null;
+            return .{
+                .operation = .create_order,
+                .id = order.id,
+                .event = .{ .order = order },
+            };
+        },
+        else => return null,
+    }
 }
 
 /// Parse a JSON body into an OrderRequest.
@@ -394,6 +405,20 @@ pub fn encode_response_json(buf: []u8, resp: message.MessageResponse) []const u8
             w.raw("],\"total_cents\":");
             w.write_u64(o.total_cents);
             w.raw("}");
+        },
+        .order_list => |*l| {
+            w.raw("[");
+            for (l.items[0..l.len], 0..) |*o, i| {
+                if (i > 0) w.raw(",");
+                w.raw("{\"id\":\"");
+                w.write_uuid(o.id);
+                w.raw("\",\"total_cents\":");
+                w.write_u64(o.total_cents);
+                w.raw(",\"items_count\":");
+                w.write_u32(@intCast(o.items_len));
+                w.raw("}");
+            }
+            w.raw("]");
         },
         .empty => w.raw("[]"),
     }
@@ -672,7 +697,7 @@ test "DELETE /products/:id (delete)" {
 }
 
 test "rejects unknown collection" {
-    try std.testing.expect(translate(.get, "/orders", "") == null);
+    try std.testing.expect(translate(.get, "/widgets", "") == null);
     try std.testing.expect(translate(.get, "/", "") == null);
     try std.testing.expect(translate(.get, "", "") == null);
 }
@@ -881,8 +906,15 @@ test "POST /orders rejects duplicate product_id" {
     ) == null);
 }
 
-test "GET /orders is not supported" {
-    try std.testing.expect(translate(.get, "/orders", "") == null);
+test "GET /orders (list)" {
+    const msg = translate(.get, "/orders", "").?;
+    try std.testing.expectEqual(msg.operation, .list_orders);
+}
+
+test "GET /orders/:id (get)" {
+    const msg = translate(.get, "/orders/" ++ test_uuid_str, "").?;
+    try std.testing.expectEqual(msg.operation, .get_order);
+    try std.testing.expectEqual(msg.id, test_uuid);
 }
 
 test "encode_response_json — order" {

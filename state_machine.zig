@@ -31,6 +31,8 @@ pub fn StateMachineType(comptime Storage: type) type {
         prefetch_products: [message.order_items_max]?message.Product,
         prefetch_collection: ?message.ProductCollection,
         prefetch_collection_list: message.CollectionList,
+        prefetch_order: ?message.OrderResult,
+        prefetch_order_list: message.OrderSummaryList,
         prefetch_result: ?StorageResult,
 
         pub fn init(storage: *Storage) StateMachine {
@@ -41,6 +43,8 @@ pub fn StateMachineType(comptime Storage: type) type {
                 .prefetch_products = [_]?message.Product{null} ** message.order_items_max,
                 .prefetch_collection = null,
                 .prefetch_collection_list = .{ .items = undefined, .len = 0 },
+                .prefetch_order = null,
+                .prefetch_order_list = .{ .items = undefined, .len = 0 },
                 .prefetch_result = null,
             };
         }
@@ -92,6 +96,8 @@ pub fn StateMachineType(comptime Storage: type) type {
                     break :blk .ok;
                 },
                 .remove_collection_member => self.prefetch_collection_read(msg.id),
+                .get_order => self.prefetch_order_read(msg.id),
+                .list_orders => self.prefetch_list_all_orders(),
                 .transfer_inventory => blk: {
                     const transfer = msg.event.transfer;
                     assert(msg.id > 0);
@@ -148,10 +154,12 @@ pub fn StateMachineType(comptime Storage: type) type {
                 inline .get_product,
                 .get_product_inventory,
                 .get_collection,
+                .get_order,
                 => |comptime_op| self.execute_get(comptime_op, result),
 
                 inline .list_products,
                 .list_collections,
+                .list_orders,
                 => |comptime_op| self.execute_list(comptime_op, result),
 
                 inline .create_product,
@@ -205,7 +213,7 @@ pub fn StateMachineType(comptime Storage: type) type {
         // it into an existing group just because it's a "get" or "delete."
 
         /// Get-by-ID pattern: check not_found, return cached entity.
-        /// Shared by get_product, get_product_inventory, get_collection.
+        /// Shared by get_product, get_product_inventory, get_collection, get_order.
         fn execute_get(self: *StateMachine, comptime op: message.Operation, result: StorageResult) message.MessageResponse {
             if (result == .not_found) return message.MessageResponse.not_found;
             assert(result == .ok);
@@ -218,13 +226,14 @@ pub fn StateMachineType(comptime Storage: type) type {
                         .collection = self.prefetch_collection.?,
                         .products = self.prefetch_product_list,
                     } },
+                    .get_order => .{ .order = self.prefetch_order.? },
                     else => unreachable,
                 },
             };
         }
 
         /// List pattern: return cached list.
-        /// Shared by list_products, list_collections.
+        /// Shared by list_products, list_collections, list_orders.
         fn execute_list(self: *StateMachine, comptime op: message.Operation, result: StorageResult) message.MessageResponse {
             assert(result == .ok);
             return .{
@@ -232,6 +241,7 @@ pub fn StateMachineType(comptime Storage: type) type {
                 .result = switch (op) {
                     .list_products => .{ .product_list = self.prefetch_product_list },
                     .list_collections => .{ .collection_list = self.prefetch_collection_list },
+                    .list_orders => .{ .order_list = self.prefetch_order_list },
                     else => unreachable,
                 },
             };
@@ -383,6 +393,9 @@ pub fn StateMachineType(comptime Storage: type) type {
                 order_result.total_cents +|= line_total;
             }
 
+            // Persist the order.
+            assert(self.storage.put_order(&order_result) == .ok);
+
             return .{ .status = .ok, .result = .{ .order = order_result } };
         }
 
@@ -408,6 +421,8 @@ pub fn StateMachineType(comptime Storage: type) type {
             self.prefetch_products = [_]?message.Product{null} ** message.order_items_max;
             self.prefetch_collection = null;
             self.prefetch_collection_list.len = 0;
+            self.prefetch_order = null;
+            self.prefetch_order_list.len = 0;
             self.prefetch_result = null;
         }
 
@@ -417,6 +432,8 @@ pub fn StateMachineType(comptime Storage: type) type {
             self.prefetch_products = [_]?message.Product{null} ** message.order_items_max;
             self.prefetch_collection = null;
             self.prefetch_collection_list.len = 0;
+            self.prefetch_order = null;
+            self.prefetch_order_list.len = 0;
         }
 
         // --- Product prefetch helpers (read-only) ---
@@ -472,6 +489,20 @@ pub fn StateMachineType(comptime Storage: type) type {
             return self.storage.list_collections(&self.prefetch_collection_list.items, &self.prefetch_collection_list.len);
         }
 
+        // --- Order prefetch helpers (read-only) ---
+
+        fn prefetch_order_read(self: *StateMachine, id: u128) StorageResult {
+            assert(id > 0);
+            var order: message.OrderResult = undefined;
+            const result = self.storage.get_order(id, &order);
+            if (result == .ok) self.prefetch_order = order;
+            return result;
+        }
+
+        fn prefetch_list_all_orders(self: *StateMachine) StorageResult {
+            return self.storage.list_orders(&self.prefetch_order_list.items, &self.prefetch_order_list.len);
+        }
+
         /// Prefetch both the collection and its member products.
         /// This is the multi-read that stresses the prefetch cache —
         /// two different entity types fetched in one prefetch phase.
@@ -496,6 +527,7 @@ pub const MemoryStorage = struct {
     pub const product_capacity = 1024;
     pub const collection_capacity = 256;
     pub const membership_capacity = 1024;
+    pub const order_capacity = 256;
 
     const ProductEntry = struct {
         product: message.Product,
@@ -513,15 +545,23 @@ pub const MemoryStorage = struct {
         occupied: bool,
     };
 
+    const OrderEntry = struct {
+        order: message.OrderResult,
+        occupied: bool,
+    };
+
     const empty_product = ProductEntry{ .product = undefined, .occupied = false };
     const empty_collection = CollectionEntry{ .collection = undefined, .occupied = false };
     const empty_membership = MembershipEntry{ .collection_id = 0, .product_id = 0, .occupied = false };
+    const empty_order = OrderEntry{ .order = undefined, .occupied = false };
 
     products: *[product_capacity]ProductEntry,
     product_count: u32,
     collections_store: *[collection_capacity]CollectionEntry,
     collection_count: u32,
     memberships: *[membership_capacity]MembershipEntry,
+    orders: *[order_capacity]OrderEntry,
+    order_count: u32,
 
     // Fault injection — PRNG-driven, same pattern as SimIO.
     prng_state: u64,
@@ -535,12 +575,16 @@ pub const MemoryStorage = struct {
         @memset(collections_store, empty_collection);
         const memberships = try allocator.create([membership_capacity]MembershipEntry);
         @memset(memberships, empty_membership);
+        const orders = try allocator.create([order_capacity]OrderEntry);
+        @memset(orders, empty_order);
         return .{
             .products = products,
             .product_count = 0,
             .collections_store = collections_store,
             .collection_count = 0,
             .memberships = memberships,
+            .orders = orders,
+            .order_count = 0,
             .prng_state = 0,
             .busy_fault_probability = 0,
             .err_fault_probability = 0,
@@ -551,6 +595,7 @@ pub const MemoryStorage = struct {
         allocator.destroy(self.products);
         allocator.destroy(self.collections_store);
         allocator.destroy(self.memberships);
+        allocator.destroy(self.orders);
     }
 
     pub fn reset(self: *MemoryStorage) void {
@@ -559,6 +604,8 @@ pub const MemoryStorage = struct {
         @memset(self.collections_store, empty_collection);
         self.collection_count = 0;
         @memset(self.memberships, empty_membership);
+        @memset(self.orders, empty_order);
+        self.order_count = 0;
     }
 
     pub fn begin(_: *MemoryStorage) void {}
@@ -725,6 +772,49 @@ pub const MemoryStorage = struct {
                     break;
                 }
             }
+        }
+        return .ok;
+    }
+
+    // --- Order operations ---
+
+    pub fn put_order(self: *MemoryStorage, order: *const message.OrderResult) StorageResult {
+        for (self.orders) |*entry| {
+            if (entry.occupied and entry.order.id == order.id) return .err;
+        }
+        for (self.orders) |*entry| {
+            if (!entry.occupied) {
+                entry.* = .{ .order = order.*, .occupied = true };
+                self.order_count += 1;
+                return .ok;
+            }
+        }
+        return .err; // full
+    }
+
+    pub fn get_order(self: *MemoryStorage, id: u128, out: *message.OrderResult) StorageResult {
+        if (self.fault()) |f| return f;
+        for (self.orders) |*entry| {
+            if (entry.occupied and entry.order.id == id) {
+                out.* = entry.order;
+                return .ok;
+            }
+        }
+        return .not_found;
+    }
+
+    pub fn list_orders(self: *MemoryStorage, out: *[message.list_max]message.OrderSummary, out_len: *u32) StorageResult {
+        if (self.fault()) |f| return f;
+        out_len.* = 0;
+        for (self.orders) |*entry| {
+            if (!entry.occupied) continue;
+            assert(out_len.* < message.list_max);
+            out[out_len.*] = .{
+                .id = entry.order.id,
+                .total_cents = entry.order.total_cents,
+                .items_len = entry.order.items_len,
+            };
+            out_len.* += 1;
         }
         return .ok;
     }
@@ -1126,6 +1216,65 @@ test "create order — product not found" {
         }) },
     });
 
+    try std.testing.expectEqual(resp.status, .not_found);
+}
+
+test "create order — persisted and retrievable" {
+    var storage = try MemoryStorage.init(std.testing.allocator);
+    defer storage.deinit(std.testing.allocator);
+    var sm = TestStateMachine.init(&storage);
+
+    const id_a: u128 = 0xaaaa0000000000000000000000000001;
+    var prod_a = make_test_product(id_a, "Widget", 1000);
+    prod_a.inventory = 50;
+    _ = test_execute(&sm, .{ .operation = .create_product, .id = 0, .event = .{ .product = prod_a } });
+
+    const order_id: u128 = 0xeeee0000000000000000000000000010;
+    const create_resp = test_execute(&sm, .{
+        .operation = .create_order,
+        .id = order_id,
+        .event = .{ .order = make_order_request(order_id, &.{
+            .{ .id = id_a, .qty = 3 },
+        }) },
+    });
+    try std.testing.expectEqual(create_resp.status, .ok);
+
+    // Retrieve by ID.
+    const get_resp = test_execute(&sm, .{
+        .operation = .get_order,
+        .id = order_id,
+        .event = .{ .none = {} },
+    });
+    try std.testing.expectEqual(get_resp.status, .ok);
+    const order = get_resp.result.order;
+    try std.testing.expectEqual(order.id, order_id);
+    try std.testing.expectEqual(order.items_len, 1);
+    try std.testing.expectEqual(order.items[0].quantity, 3);
+    try std.testing.expectEqual(order.items[0].price_cents, 1000);
+    try std.testing.expectEqual(order.total_cents, 3000);
+
+    // List orders.
+    const list_resp = test_execute(&sm, .{
+        .operation = .list_orders,
+        .id = 0,
+        .event = .{ .none = {} },
+    });
+    try std.testing.expectEqual(list_resp.status, .ok);
+    try std.testing.expectEqual(list_resp.result.order_list.len, 1);
+    try std.testing.expectEqual(list_resp.result.order_list.items[0].id, order_id);
+    try std.testing.expectEqual(list_resp.result.order_list.items[0].total_cents, 3000);
+}
+
+test "get order — not found" {
+    var storage = try MemoryStorage.init(std.testing.allocator);
+    defer storage.deinit(std.testing.allocator);
+    var sm = TestStateMachine.init(&storage);
+
+    const resp = test_execute(&sm, .{
+        .operation = .get_order,
+        .id = 0x00000000000000000000000000000099,
+        .event = .{ .none = {} },
+    });
     try std.testing.expectEqual(resp.status, .not_found);
 }
 

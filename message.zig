@@ -37,6 +37,8 @@ pub const Operation = enum(u8) {
 
     // Orders
     create_order = 14,
+    get_order = 15,
+    list_orders = 16,
 
     // Collections
     create_collection = 7,
@@ -60,6 +62,8 @@ pub const Operation = enum(u8) {
             .delete_product,
             .get_product_inventory,
             .list_products,
+            .get_order,
+            .list_orders,
             .get_collection,
             .delete_collection,
             .list_collections,
@@ -162,6 +166,18 @@ pub const OrderResult = struct {
     }
 };
 
+/// Order summary for list responses — header only, no line items.
+pub const OrderSummary = struct {
+    id: u128,
+    total_cents: u64,
+    items_len: u8,
+};
+
+pub const OrderSummaryList = struct {
+    items: [list_max]OrderSummary,
+    len: u32,
+};
+
 pub const product_name_max = 128;
 pub const product_description_max = 512;
 
@@ -262,6 +278,7 @@ pub const Result = union(enum) {
     collection: CollectionWithProducts,
     collection_list: CollectionList,
     order: OrderResult,
+    order_list: OrderSummaryList,
     empty: void,
 };
 
@@ -343,6 +360,8 @@ test "Operation event_tag derived from EventType" {
     try std.testing.expectEqual(Operation.event_tag(.remove_collection_member), .member_id);
     try std.testing.expectEqual(Operation.event_tag(.transfer_inventory), .transfer);
     try std.testing.expectEqual(Operation.event_tag(.create_order), .order);
+    try std.testing.expectEqual(Operation.event_tag(.get_order), .none);
+    try std.testing.expectEqual(Operation.event_tag(.list_orders), .none);
     try std.testing.expectEqual(Operation.event_tag(.get_product), .none);
     try std.testing.expectEqual(Operation.event_tag(.list_products), .none);
     try std.testing.expectEqual(Operation.event_tag(.delete_product), .none);

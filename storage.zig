@@ -27,6 +27,11 @@ pub const SqliteStorage = struct {
     stmt_remove_member: *c.sqlite3_stmt,
     stmt_delete_memberships: *c.sqlite3_stmt,
     stmt_list_members: *c.sqlite3_stmt,
+    stmt_put_order: *c.sqlite3_stmt,
+    stmt_put_order_item: *c.sqlite3_stmt,
+    stmt_get_order: *c.sqlite3_stmt,
+    stmt_get_order_items: *c.sqlite3_stmt,
+    stmt_list_orders: *c.sqlite3_stmt,
 
     pub fn init(path: [*:0]const u8) !SqliteStorage {
         var db: ?*c.sqlite3 = null;
@@ -62,6 +67,22 @@ pub const SqliteStorage = struct {
             "collection_id BLOB(16) NOT NULL," ++
             "product_id BLOB(16) NOT NULL," ++
             "PRIMARY KEY (collection_id, product_id)" ++
+            ");");
+
+        exec(real_db, "CREATE TABLE IF NOT EXISTS orders (" ++
+            "id BLOB(16) PRIMARY KEY," ++
+            "total_cents INTEGER NOT NULL," ++
+            "items_len INTEGER NOT NULL" ++
+            ");");
+
+        exec(real_db, "CREATE TABLE IF NOT EXISTS order_items (" ++
+            "order_id BLOB(16) NOT NULL," ++
+            "product_id BLOB(16) NOT NULL," ++
+            "name TEXT NOT NULL," ++
+            "quantity INTEGER NOT NULL," ++
+            "price_cents INTEGER NOT NULL," ++
+            "line_total_cents INTEGER NOT NULL," ++
+            "PRIMARY KEY (order_id, product_id)" ++
             ");");
 
         // Prepare product statements.
@@ -108,6 +129,23 @@ pub const SqliteStorage = struct {
             "FROM collection_members cm JOIN products p ON cm.product_id = p.id WHERE cm.collection_id = ?1 LIMIT ?2;",
         );
 
+        // Prepare order statements.
+        const stmt_put_order = prepare(real_db,
+            "INSERT INTO orders (id, total_cents, items_len) VALUES (?1, ?2, ?3);",
+        );
+        const stmt_put_order_item = prepare(real_db,
+            "INSERT INTO order_items (order_id, product_id, name, quantity, price_cents, line_total_cents) VALUES (?1, ?2, ?3, ?4, ?5, ?6);",
+        );
+        const stmt_get_order = prepare(real_db,
+            "SELECT id, total_cents, items_len FROM orders WHERE id = ?1;",
+        );
+        const stmt_get_order_items = prepare(real_db,
+            "SELECT product_id, name, quantity, price_cents, line_total_cents FROM order_items WHERE order_id = ?1;",
+        );
+        const stmt_list_orders = prepare(real_db,
+            "SELECT id, total_cents, items_len FROM orders LIMIT ?1;",
+        );
+
         log.info("storage initialized: {s}", .{path});
 
         return .{
@@ -125,6 +163,11 @@ pub const SqliteStorage = struct {
             .stmt_remove_member = stmt_remove_member,
             .stmt_delete_memberships = stmt_delete_memberships,
             .stmt_list_members = stmt_list_members,
+            .stmt_put_order = stmt_put_order,
+            .stmt_put_order_item = stmt_put_order_item,
+            .stmt_get_order = stmt_get_order,
+            .stmt_get_order_items = stmt_get_order_items,
+            .stmt_list_orders = stmt_list_orders,
         };
     }
 
@@ -150,6 +193,11 @@ pub const SqliteStorage = struct {
         _ = c.sqlite3_finalize(self.stmt_remove_member);
         _ = c.sqlite3_finalize(self.stmt_delete_memberships);
         _ = c.sqlite3_finalize(self.stmt_list_members);
+        _ = c.sqlite3_finalize(self.stmt_put_order);
+        _ = c.sqlite3_finalize(self.stmt_put_order_item);
+        _ = c.sqlite3_finalize(self.stmt_get_order);
+        _ = c.sqlite3_finalize(self.stmt_get_order_items);
+        _ = c.sqlite3_finalize(self.stmt_list_orders);
         _ = c.sqlite3_close(self.db);
     }
 
@@ -374,6 +422,130 @@ pub const SqliteStorage = struct {
                 .corruption => return .corruption,
             }
         }
+    }
+
+    // --- Order operations ---
+
+    pub fn put_order(self: *SqliteStorage, order: *const message.OrderResult) StorageResult {
+        // Insert order header.
+        {
+            const stmt = self.stmt_put_order;
+            defer reset_stmt(stmt);
+            bind_uuid(stmt, 1, order.id);
+            _ = c.sqlite3_bind_int64(stmt, 2, @intCast(order.total_cents));
+            _ = c.sqlite3_bind_int(stmt, 3, @intCast(order.items_len));
+            switch (step_result(stmt)) {
+                .done => {},
+                .row => unreachable,
+                .busy => return .busy,
+                .err => return .err,
+                .corruption => return .corruption,
+            }
+        }
+        // Insert line items.
+        for (order.items[0..order.items_len]) |*item| {
+            const stmt = self.stmt_put_order_item;
+            defer reset_stmt(stmt);
+            bind_uuid(stmt, 1, order.id);
+            bind_uuid(stmt, 2, item.product_id);
+            _ = c.sqlite3_bind_text(stmt, 3, item.name[0..item.name_len].ptr, @intCast(item.name_len), c.SQLITE_TRANSIENT);
+            _ = c.sqlite3_bind_int(stmt, 4, @intCast(item.quantity));
+            _ = c.sqlite3_bind_int(stmt, 5, @intCast(item.price_cents));
+            _ = c.sqlite3_bind_int64(stmt, 6, @intCast(item.line_total_cents));
+            switch (step_result(stmt)) {
+                .done => {},
+                .row => unreachable,
+                .busy => return .busy,
+                .err => return .err,
+                .corruption => return .corruption,
+            }
+        }
+        return .ok;
+    }
+
+    pub fn get_order(self: *SqliteStorage, id: u128, out: *message.OrderResult) StorageResult {
+        // Read order header.
+        {
+            const stmt = self.stmt_get_order;
+            defer reset_stmt(stmt);
+            bind_uuid(stmt, 1, id);
+            switch (step_result(stmt)) {
+                .row => {
+                    const id_blob: [*]const u8 = @ptrCast(c.sqlite3_column_blob(stmt, 0));
+                    out.id = std.mem.readInt(u128, id_blob[0..16], .big);
+                    out.total_cents = @intCast(c.sqlite3_column_int64(stmt, 1));
+                    out.items_len = @intCast(c.sqlite3_column_int(stmt, 2));
+                },
+                .done => return .not_found,
+                .busy => return .busy,
+                .err => return .err,
+                .corruption => return .corruption,
+            }
+        }
+        // Read line items.
+        {
+            const stmt = self.stmt_get_order_items;
+            defer reset_stmt(stmt);
+            bind_uuid(stmt, 1, id);
+            var i: u8 = 0;
+            while (true) {
+                switch (step_result(stmt)) {
+                    .row => {
+                        assert(i < message.order_items_max);
+                        read_order_item(stmt, &out.items[i]);
+                        i += 1;
+                    },
+                    .done => break,
+                    .busy => return .busy,
+                    .err => return .err,
+                    .corruption => return .corruption,
+                }
+            }
+            assert(i == out.items_len);
+        }
+        return .ok;
+    }
+
+    pub fn list_orders(self: *SqliteStorage, out: *[message.list_max]message.OrderSummary, out_len: *u32) StorageResult {
+        const stmt = self.stmt_list_orders;
+        defer reset_stmt(stmt);
+
+        _ = c.sqlite3_bind_int(stmt, 1, message.list_max);
+        out_len.* = 0;
+
+        while (true) {
+            switch (step_result(stmt)) {
+                .row => {
+                    assert(out_len.* < message.list_max);
+                    const id_blob: [*]const u8 = @ptrCast(c.sqlite3_column_blob(stmt, 0));
+                    out[out_len.*] = .{
+                        .id = std.mem.readInt(u128, id_blob[0..16], .big),
+                        .total_cents = @intCast(c.sqlite3_column_int64(stmt, 1)),
+                        .items_len = @intCast(c.sqlite3_column_int(stmt, 2)),
+                    };
+                    out_len.* += 1;
+                },
+                .done => return .ok,
+                .busy => return .busy,
+                .err => return .err,
+                .corruption => return .corruption,
+            }
+        }
+    }
+
+    fn read_order_item(stmt: *c.sqlite3_stmt, out: *message.OrderResultItem) void {
+        const pid_blob: [*]const u8 = @ptrCast(c.sqlite3_column_blob(stmt, 0));
+        out.product_id = std.mem.readInt(u128, pid_blob[0..16], .big);
+
+        const name_ptr: [*]const u8 = @ptrCast(c.sqlite3_column_text(stmt, 1));
+        const name_len: usize = @intCast(c.sqlite3_column_bytes(stmt, 1));
+        assert(name_len <= message.product_name_max);
+        @memcpy(out.name[0..name_len], name_ptr[0..name_len]);
+        out.name_len = @intCast(name_len);
+
+        out.quantity = @intCast(c.sqlite3_column_int(stmt, 2));
+        out.price_cents = @intCast(c.sqlite3_column_int(stmt, 3));
+        out.line_total_cents = @intCast(c.sqlite3_column_int64(stmt, 4));
     }
 
     // --- Internal helpers ---
