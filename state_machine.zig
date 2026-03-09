@@ -299,7 +299,7 @@ pub fn StateMachineType(comptime Storage: type) type {
 
             // Business logic: source must have enough inventory.
             if (source.inventory < transfer.quantity) {
-                return .{ .status = .err, .result = .{ .empty = {} } };
+                return .{ .status = .insufficient_inventory, .result = .{ .empty = {} } };
             }
 
             source.inventory -= transfer.quantity;
@@ -870,7 +870,7 @@ test "transfer inventory — insufficient stock" {
         .id = id_a,
         .event = .{ .transfer = .{ .target_id = id_b, .quantity = 10 } },
     });
-    try std.testing.expectEqual(resp.status, .err);
+    try std.testing.expectEqual(resp.status, .insufficient_inventory);
 
     // Verify neither product was modified.
     const get_a = test_execute(&sm, .{ .operation = .get_product, .id = id_a, .event = .{ .none = {} } });

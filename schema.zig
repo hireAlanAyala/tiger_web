@@ -255,8 +255,8 @@ pub fn encode_response_json(buf: []u8, resp: message.MessageResponse) []const u8
             w.raw("{\"error\":\"not found\"}");
             return buf[0..w.pos];
         },
-        .err => {
-            w.raw("{\"error\":\"internal error\"}");
+        .insufficient_inventory => {
+            w.raw("{\"error\":\"insufficient_inventory\"}");
             return buf[0..w.pos];
         },
         .storage_error => {

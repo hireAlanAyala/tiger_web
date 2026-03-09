@@ -1113,7 +1113,7 @@ test "transfer inventory — success, both products updated" {
     try std.testing.expect(json_contains(get_dst.body, "\"inventory\":50"));
 }
 
-test "transfer inventory — insufficient stock returns 500" {
+test "transfer inventory — insufficient stock returns 409" {
     var sim_io = SimIO.init(0xe002);
     var storage = try MemoryStorage.init(std.testing.allocator);
     defer storage.deinit(std.testing.allocator);
@@ -1142,7 +1142,7 @@ test "transfer inventory — insufficient stock returns 500" {
     );
     const resp = run_until_response(&server, &sim_io, 0, 500) orelse
         return error.TestUnexpectedResult;
-    try std.testing.expectEqual(resp.status_code, 500);
+    try std.testing.expectEqual(resp.status_code, 409);
 
     // Verify source wasn't modified.
     sim_io.clear_response(0);

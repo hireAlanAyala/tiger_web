@@ -133,8 +133,8 @@ pub fn encode_json_response(buf: []u8, status: message.Status, json_body: []cons
     const status_line = switch (status) {
         .ok => "HTTP/1.1 200 OK\r\n",
         .not_found => "HTTP/1.1 404 Not Found\r\n",
-        .err => "HTTP/1.1 500 Internal Server Error\r\n",
         .storage_error => "HTTP/1.1 503 Service Unavailable\r\n",
+        .insufficient_inventory => "HTTP/1.1 409 Conflict\r\n",
     };
 
     var pos: usize = 0;

@@ -8,11 +8,16 @@ pub fn maybe(ok: bool) void {
     assert(ok or !ok);
 }
 
+/// Response status — named results, not generic error buckets.
+/// Each business logic failure gets its own variant (TigerBeetle style).
+/// schema.zig maps these to HTTP status codes + JSON error strings.
 pub const Status = enum(u8) {
     ok = 1,
     not_found = 2,
-    err = 3,
     storage_error = 4,
+
+    // Business logic errors — one per failure reason.
+    insufficient_inventory = 10,
 };
 
 /// Flat operation enum — encodes entity type AND action in a single tag,
