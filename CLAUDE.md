@@ -119,7 +119,7 @@ Levels: ~70% debug (invisible by default), ~20% warn (recoverable operational is
 - `accept_callback`: new connection accepted (debug), accept failed (mark.warn)
 - `close_dead`: connection closed with fd (debug)
 - `timeout_idle`: connection timed out (mark.debug)
-- `log_metrics`: periodic request count + per-operation min/max/avg latency (info)
+- `log_metrics`: periodic connection pool gauges, request count + per-operation min/max/avg latency (info)
 - `process_inbox`: per-request trace with operation, status, duration, fd (debug, guarded by `log_trace`)
 
 **`connection.zig`** — `log.debug` / `log.warn`:
