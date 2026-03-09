@@ -211,6 +211,33 @@ pub fn ServerType(comptime IO: type, comptime Storage: type) type {
 
         fn log_metrics(server: *Server) void {
             if (server.tick_count % metrics_interval_ticks != 0) return;
+
+            // Gauges: point-in-time connection pool snapshot.
+            // Always emitted on the interval, independent of request traffic.
+            var connections_active: u32 = 0;
+            var connections_receiving: u32 = 0;
+            var connections_ready: u32 = 0;
+            var connections_sending: u32 = 0;
+            for (&server.connections, server.connections_busy) |*conn, busy| {
+                if (!busy) continue;
+                connections_active += 1;
+                switch (conn.state) {
+                    .receiving => connections_receiving += 1,
+                    .ready => connections_ready += 1,
+                    .sending => connections_sending += 1,
+                    .accepting, .closing, .free => {},
+                }
+            }
+
+            log.info("gauge: connections={d}/{d} receiving={d} ready={d} sending={d}", .{
+                connections_active,
+                max_connections,
+                connections_receiving,
+                connections_ready,
+                connections_sending,
+            });
+
+            // Timing aggregates: only if requests were processed.
             if (server.requests_processed == 0) return;
 
             log.info("metrics: requests={d} ticks={d}", .{
