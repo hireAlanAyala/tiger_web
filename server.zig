@@ -35,6 +35,10 @@ pub fn ServerType(comptime IO: type, comptime Storage: type) type {
         connections_busy: [max_connections]bool,
 
         tick_count: u32,
+        requests_processed: u64,
+
+        /// Log metrics every 10,000 ticks (~100s at 10ms/tick).
+        const metrics_interval_ticks = 10_000;
 
         /// 30 seconds at 10ms/tick.
         pub const request_timeout_ticks = 3000;
@@ -50,6 +54,7 @@ pub fn ServerType(comptime IO: type, comptime Storage: type) type {
                 .connections = undefined,
                 .connections_busy = [_]bool{false} ** max_connections,
                 .tick_count = 0,
+                .requests_processed = 0,
             };
 
             for (&server.connections) |*conn| {
@@ -71,6 +76,7 @@ pub fn ServerType(comptime IO: type, comptime Storage: type) type {
             defer server.invariants();
             server.maybe_accept();
             server.process_inbox();
+            server.log_metrics();
             server.flush_outbox();
             server.continue_receives();
             server.update_activity();
@@ -134,7 +140,21 @@ pub fn ServerType(comptime IO: type, comptime Storage: type) type {
                 const resp = server.state_machine.execute(msg);
                 const json = schema.encode_response_json(&json_buf, resp);
                 conn.set_json_response(json, resp.status);
+                server.requests_processed += 1;
             }
+        }
+
+        // --- Metrics ---
+
+        fn log_metrics(server: *Server) void {
+            if (server.tick_count % metrics_interval_ticks != 0) return;
+            if (server.requests_processed == 0) return;
+
+            log.info("requests={d} ticks={d}", .{
+                server.requests_processed,
+                server.tick_count,
+            });
+            server.requests_processed = 0;
         }
 
         // --- Outbox: send pending responses ---
