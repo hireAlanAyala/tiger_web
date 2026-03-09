@@ -37,7 +37,6 @@ pub fn ServerType(comptime IO: type, comptime Storage: type) type {
         connections_busy: [max_connections]bool,
 
         tick_count: u32,
-        requests_processed: u64,
 
         /// Log metrics every 10,000 ticks (~100s at 10ms/tick).
         const metrics_interval_ticks = 10_000;
@@ -57,7 +56,6 @@ pub fn ServerType(comptime IO: type, comptime Storage: type) type {
                 .connections = undefined,
                 .connections_busy = [_]bool{false} ** max_connections,
                 .tick_count = 0,
-                .requests_processed = 0,
             };
 
             for (&server.connections) |*conn| {
@@ -151,18 +149,22 @@ pub fn ServerType(comptime IO: type, comptime Storage: type) type {
                 server.tracer.stop(.execute, msg.operation);
 
                 server.tracer.trace_log(msg.operation, resp.status, conn.fd);
+                server.tracer.count(switch (resp.status) {
+                    .ok => .requests_ok,
+                    .not_found => .requests_not_found,
+                    .storage_error => .requests_storage_error,
+                    .insufficient_inventory => .requests_insufficient_inventory,
+                }, 1);
 
                 const json = schema.encode_response_json(&json_buf, resp);
                 conn.set_json_response(json, resp.status);
-                server.requests_processed += 1;
             }
         }
 
         fn log_metrics(server: *Server) void {
             if (server.tick_count % metrics_interval_ticks != 0) return;
 
-            // Gauges: point-in-time connection pool snapshot.
-            // Always emitted on the interval, independent of request traffic.
+            // Push connection pool gauges into tracer.
             var connections_active: u32 = 0;
             var connections_receiving: u32 = 0;
             var connections_ready: u32 = 0;
@@ -177,25 +179,12 @@ pub fn ServerType(comptime IO: type, comptime Storage: type) type {
                     .accepting, .closing, .free => {},
                 }
             }
-
-            log.info("gauge: connections={d}/{d} receiving={d} ready={d} sending={d}", .{
-                connections_active,
-                max_connections,
-                connections_receiving,
-                connections_ready,
-                connections_sending,
-            });
-
-            // Timing aggregates: only if requests were processed.
-            if (server.requests_processed == 0) return;
-
-            log.info("metrics: requests={d} ticks={d}", .{
-                server.requests_processed,
-                server.tick_count,
-            });
+            server.tracer.gauge(.connections_active, connections_active);
+            server.tracer.gauge(.connections_receiving, connections_receiving);
+            server.tracer.gauge(.connections_ready, connections_ready);
+            server.tracer.gauge(.connections_sending, connections_sending);
 
             _ = server.tracer.emit();
-            server.requests_processed = 0;
         }
 
         // --- Outbox: send pending responses ---

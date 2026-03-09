@@ -45,6 +45,26 @@ const operation_slots = blk: {
     break :blk @as(usize, max) + 1;
 };
 
+/// Gauges — point-in-time values, last-set wins. Pushed by server at emission time.
+pub const Gauge = enum {
+    connections_active,
+    connections_receiving,
+    connections_ready,
+    connections_sending,
+};
+
+const gauge_count = std.meta.fields(Gauge).len;
+
+/// Counters — cumulative per-interval, saturating add. Called per-event.
+pub const Counter = enum {
+    requests_ok,
+    requests_not_found,
+    requests_storage_error,
+    requests_insufficient_inventory,
+};
+
+const counter_count = std.meta.fields(Counter).len;
+
 /// Adaptive time unit threshold — below 5ms show microseconds, above show milliseconds.
 /// Same threshold as TigerBeetle's us_log_threshold_ns.
 const duration_threshold_ns = 5 * std.time.ns_per_ms;
@@ -55,6 +75,8 @@ timings: [span_count][operation_slots]?OperationTiming,
 started: [span_count]?Instant,
 /// Last completed duration per span — for trace logging the current request.
 last_duration_ns: [span_count]u64,
+gauges: [gauge_count]?u64,
+counters: [counter_count]u64,
 log_trace: bool,
 
 pub fn init(log_trace: bool) @This() {
@@ -64,6 +86,8 @@ pub fn init(log_trace: bool) @This() {
         } ** span_count,
         .started = [_]?Instant{null} ** span_count,
         .last_duration_ns = [_]u64{0} ** span_count,
+        .gauges = [_]?u64{null} ** gauge_count,
+        .counters = [_]u64{0} ** counter_count,
         .log_trace = log_trace,
     };
 }
@@ -93,6 +117,18 @@ pub fn stop(self: *@This(), span: Span, op: message.Operation) void {
     const elapsed_ns = (Instant.now() catch unreachable).since(start_time);
     self.last_duration_ns[slot] = elapsed_ns;
     self.record(span, op, elapsed_ns);
+}
+
+/// Set a gauge to a point-in-time value. Last-set wins — only the final value
+/// before emit() is logged. Called by server at emission time, not per-event.
+pub fn gauge(self: *@This(), g: Gauge, value: u64) void {
+    self.gauges[@intFromEnum(g)] = value;
+}
+
+/// Increment a counter. Cumulative within an emission interval, reset on emit.
+/// Saturating add — counters never overflow.
+pub fn count(self: *@This(), c: Counter, value: u64) void {
+    self.counters[@intFromEnum(c)] +|= value;
 }
 
 /// Record a duration directly (for callers that manage their own timestamps).
@@ -136,15 +172,37 @@ pub fn trace_log(self: *@This(), op: message.Operation, status: message.Status, 
     });
 }
 
-/// Emit aggregate timing metrics and reset. Returns true if any timings were emitted.
+/// Emit all metrics (gauges, counters, timings) and reset.
+/// Returns true if any metrics were emitted.
 pub fn emit(self: *@This()) bool {
     var emitted = false;
+
+    // Gauges — point-in-time snapshot, always emitted if set.
+    inline for (std.meta.fields(Gauge)) |gauge_field| {
+        if (self.gauges[gauge_field.value]) |value| {
+            log.info("gauge: {s}={d}", .{ gauge_field.name, value });
+            self.gauges[gauge_field.value] = null;
+            emitted = true;
+        }
+    }
+
+    // Counters — cumulative per interval.
+    inline for (std.meta.fields(Counter)) |counter_field| {
+        const value = self.counters[counter_field.value];
+        if (value > 0) {
+            log.info("counter: {s}={d}", .{ counter_field.name, value });
+            self.counters[counter_field.value] = 0;
+            emitted = true;
+        }
+    }
+
+    // Timings — per-operation aggregates.
     inline for (std.meta.fields(Span)) |span_field| {
         const span_slot = span_field.value;
         for (&self.timings[span_slot], 0..) |*timing_opt, op_slot| {
             const t = timing_opt.* orelse continue;
             const op: message.Operation = @enumFromInt(op_slot);
-            log.info("metrics: span={s} op={s} count={d} min={d}us max={d}us avg={d}us", .{
+            log.info("timing: span={s} op={s} count={d} min={d}us max={d}us avg={d}us", .{
                 span_field.name,
                 @tagName(op),
                 t.count,
@@ -156,6 +214,7 @@ pub fn emit(self: *@This()) bool {
             emitted = true;
         }
     }
+
     return emitted;
 }
 
@@ -212,6 +271,34 @@ test "emit resets timings" {
 test "emit with no data returns false" {
     var tracer = init(false);
     try std.testing.expect(!tracer.emit());
+}
+
+test "gauge last-set wins" {
+    var tracer = init(false);
+    tracer.gauge(.connections_active, 5);
+    tracer.gauge(.connections_active, 3);
+    try std.testing.expectEqual(tracer.gauges[@intFromEnum(Gauge.connections_active)].?, 3);
+}
+
+test "gauge reset after emit" {
+    var tracer = init(false);
+    tracer.gauge(.connections_active, 5);
+    try std.testing.expect(tracer.emit());
+    try std.testing.expect(tracer.gauges[@intFromEnum(Gauge.connections_active)] == null);
+}
+
+test "counter accumulates" {
+    var tracer = init(false);
+    tracer.count(.requests_ok, 1);
+    tracer.count(.requests_ok, 1);
+    try std.testing.expectEqual(tracer.counters[@intFromEnum(Counter.requests_ok)], 2);
+}
+
+test "counter reset after emit" {
+    var tracer = init(false);
+    tracer.count(.requests_ok, 3);
+    try std.testing.expect(tracer.emit());
+    try std.testing.expectEqual(tracer.counters[@intFromEnum(Counter.requests_ok)], 0);
 }
 
 test "separate spans are independent" {

@@ -34,7 +34,7 @@ http.zig → schema.zig → message.zig → state_machine.zig → storage
 | `storage.zig` | `SqliteStorage` — SQLite backend with prepared statements, WAL mode |
 | `io.zig` | epoll IO layer (real syscalls) |
 | `marks.zig` | Coverage marks — links log sites to test assertions |
-| `tracer.zig` | Minimal tracer — `start()`/`stop()`/`cancel()` span timing, periodic `emit()`, trace logging |
+| `tracer.zig` | Minimal tracer — gauges, counters, span timings, trace logging. All metrics flow through `emit()` |
 | `sim.zig` | `SimIO` + `MemoryStorage` with PRNG-driven fault injection |
 
 ## Conventions
@@ -102,7 +102,7 @@ Levels: ~70% debug (invisible by default), ~20% warn (recoverable operational is
 | `server.zig` | `.server` | Accept/close/timeout lifecycle |
 | `connection.zig` | `.connection` | State transitions, errors |
 | `io.zig` | `.io` | Listener bind, epoll errors |
-| `tracer.zig` | `.tracer` | Per-operation timing metrics, per-request trace logs |
+| `tracer.zig` | `.tracer` | Gauges, counters, timing metrics, per-request trace logs |
 | `state_machine.zig` | `.state_machine` | Storage fault marks |
 | `storage.zig` | `.storage` | SQLite init/errors |
 | `http.zig` | — | No logging (pure parser, no side effects) |
@@ -121,10 +121,10 @@ Levels: ~70% debug (invisible by default), ~20% warn (recoverable operational is
 - `accept_callback`: new connection accepted (debug), accept failed (mark.warn)
 - `close_dead`: connection closed with fd (debug)
 - `timeout_idle`: connection timed out (mark.debug)
-- `log_metrics`: periodic connection pool gauges, request count (info); delegates timing to `tracer.emit()`
+- `log_metrics`: pushes connection pool gauges into tracer, calls `tracer.emit()`
 
 **`tracer.zig`** — `log.debug` / `log.info`:
-- `emit`: per-span per-operation min/max/avg latency (info)
+- `emit`: gauges, counters, per-span per-operation timing (info)
 - `trace_log`: per-request prefetch/execute/total duration, status, fd (debug, guarded by `log_trace`)
 
 **`connection.zig`** — `log.debug` / `log.warn`:
