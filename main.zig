@@ -29,6 +29,10 @@ pub fn main() !void {
 
     var server = Server.init(&io, &sm, listen_fd);
 
+    log.info("storage=sqlite tick_interval={d}ms connections={d}", .{
+        tick_ns / std.time.ns_per_ms,
+        Server.max_connections,
+    });
     log.info("listening on port {d}", .{port});
 
     // Main event loop. No signal handling — let the OS kill the process.
