@@ -34,6 +34,7 @@ http.zig → schema.zig → message.zig → state_machine.zig → storage
 | `storage.zig` | `SqliteStorage` — SQLite backend with prepared statements, WAL mode |
 | `io.zig` | epoll IO layer (real syscalls) |
 | `marks.zig` | Coverage marks — links log sites to test assertions |
+| `tracer.zig` | Minimal tracer — `start()`/`stop()`/`cancel()` span timing, periodic `emit()`, trace logging |
 | `sim.zig` | `SimIO` + `MemoryStorage` with PRNG-driven fault injection |
 
 ## Conventions
@@ -101,7 +102,8 @@ Levels: ~70% debug (invisible by default), ~20% warn (recoverable operational is
 | `server.zig` | `.server` | Accept/close/timeout lifecycle |
 | `connection.zig` | `.connection` | State transitions, errors |
 | `io.zig` | `.io` | Listener bind, epoll errors |
-| `state_machine.zig` | `.state_machine` | Storage fault marks, capacity warnings |
+| `tracer.zig` | `.tracer` | Per-operation timing metrics, per-request trace logs |
+| `state_machine.zig` | `.state_machine` | Storage fault marks |
 | `storage.zig` | `.storage` | SQLite init/errors |
 | `http.zig` | — | No logging (pure parser, no side effects) |
 | `message.zig` | — | No logging (types only) |
@@ -119,8 +121,11 @@ Levels: ~70% debug (invisible by default), ~20% warn (recoverable operational is
 - `accept_callback`: new connection accepted (debug), accept failed (mark.warn)
 - `close_dead`: connection closed with fd (debug)
 - `timeout_idle`: connection timed out (mark.debug)
-- `log_metrics`: periodic connection pool gauges, request count + per-operation min/max/avg latency (info)
-- `process_inbox`: per-request trace with operation, status, duration, fd (debug, guarded by `log_trace`)
+- `log_metrics`: periodic connection pool gauges, request count (info); delegates timing to `tracer.emit()`
+
+**`tracer.zig`** — `log.debug` / `log.info`:
+- `emit`: per-span per-operation min/max/avg latency (info)
+- `trace_log`: per-request prefetch/execute/total duration, status, fd (debug, guarded by `log_trace`)
 
 **`connection.zig`** — `log.debug` / `log.warn`:
 - `on_accept`: connection fd assigned (debug)
@@ -139,7 +144,7 @@ Levels: ~70% debug (invisible by default), ~20% warn (recoverable operational is
 
 These run every tick or every byte boundary — no logging:
 - `tick`, `flush_outbox`, `continue_receives`, `update_activity`
-- `process_inbox` (except trace log, guarded by `log_trace` bool)
+- `process_inbox` (delegates trace logging to tracer, guarded by `log_trace` bool)
 - `submit_recv`, `submit_send`, `continue_recv`
 - `try_parse_request` (except the error/closing branches)
 - `invariants` (both server and connection)
