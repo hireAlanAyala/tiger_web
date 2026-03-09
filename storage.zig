@@ -128,6 +128,14 @@ pub const SqliteStorage = struct {
         };
     }
 
+    pub fn begin(self: *SqliteStorage) void {
+        exec(self.db, "BEGIN;");
+    }
+
+    pub fn commit(self: *SqliteStorage) void {
+        exec(self.db, "COMMIT;");
+    }
+
     pub fn deinit(self: *SqliteStorage) void {
         _ = c.sqlite3_finalize(self.stmt_get);
         _ = c.sqlite3_finalize(self.stmt_put);

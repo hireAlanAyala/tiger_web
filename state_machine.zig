@@ -124,6 +124,13 @@ pub fn StateMachineType(comptime Storage: type) type {
             // Storage read error — return 503 regardless of operation.
             if (result == .err) return message.MessageResponse.storage_error;
 
+            // Wrap the entire execute phase in a transaction so multi-write
+            // operations (transfer_inventory, delete_collection) are atomic.
+            // Single-write operations: no-op — SQLite skips the implicit
+            // transaction when an explicit one is active.
+            self.storage.begin();
+            defer self.storage.commit();
+
             return switch (msg.operation) {
                 inline .get_product,
                 .get_product_inventory,
@@ -459,6 +466,9 @@ pub const MemoryStorage = struct {
         self.collection_count = 0;
         @memset(self.memberships, empty_membership);
     }
+
+    pub fn begin(_: *MemoryStorage) void {}
+    pub fn commit(_: *MemoryStorage) void {}
 
     pub fn get(self: *MemoryStorage, id: u128, out: *message.Product) StorageResult {
         if (self.fault()) |f| return f;
@@ -921,4 +931,22 @@ test "duplicate ID rejected" {
     try std.testing.expectEqual(r1.status, .ok);
     const r2 = test_execute(&sm, .{ .operation = .create_product, .id = 0, .event = .{ .product = make_test_product(test_id, "B", 2) } });
     try std.testing.expectEqual(r2.status, .storage_error);
+}
+
+test "capacity exhaustion — returns storage_error" {
+    var storage = try MemoryStorage.init(std.testing.allocator);
+    defer storage.deinit(std.testing.allocator);
+    var sm = TestStateMachine.init(&storage);
+
+    // Fill storage to capacity.
+    for (0..MemoryStorage.product_capacity) |i| {
+        const id: u128 = @intCast(i + 1);
+        const r = test_execute(&sm, .{ .operation = .create_product, .id = 0, .event = .{ .product = make_test_product(id, "P", 1) } });
+        try std.testing.expectEqual(r.status, .ok);
+    }
+
+    // One more should fail with storage_error.
+    const overflow_id: u128 = MemoryStorage.product_capacity + 1;
+    const r = test_execute(&sm, .{ .operation = .create_product, .id = 0, .event = .{ .product = make_test_product(overflow_id, "X", 1) } });
+    try std.testing.expectEqual(r.status, .storage_error);
 }
