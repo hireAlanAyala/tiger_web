@@ -7,6 +7,8 @@ Ecommerce HTTP server built in Zig, following TigerBeetle conventions.
 ```bash
 sh zig/download.sh          # one-time: download Zig 0.14.1
 ./zig/zig build run          # run the server (default port 3000)
+./zig/zig build run -- --log-debug          # enable debug log output
+./zig/zig build run -- --log-debug --log-trace  # per-request trace logs
 ./zig/zig build unit-test    # unit tests (message, state_machine, http, marks, schema)
 ./zig/zig build test         # simulation tests (PRNG-driven, full stack)
 ```
@@ -22,7 +24,7 @@ http.zig → schema.zig → message.zig → state_machine.zig → storage
 
 | File | Role |
 |---|---|
-| `main.zig` | Entry point, tick loop |
+| `main.zig` | Entry point, tick loop, runtime log level filtering, CLI parsing |
 | `server.zig` | `ServerType(IO, Storage)` — accepts connections, drives prefetch→execute |
 | `connection.zig` | Per-connection state machine (accepting → receiving → ready → sending) |
 | `http.zig` | HTTP/1.0+1.1 parser and response encoder |
@@ -85,7 +87,7 @@ Use `std.log.scoped(.module_name)` per file. Log at **boundaries** (init, shutdo
 
 Format: `"{}: context: message"` — prefix with an identifier, then function name, then human-readable detail. Free-form strings, not structured key=value.
 
-Levels: ~70% debug (invisible by default), ~20% warn (recoverable operational issues), ~5% info (state transitions), ~5% err (unrecoverable). Compile with `.debug` so nothing is stripped; filter at runtime.
+Levels: ~70% debug (invisible by default), ~20% warn (recoverable operational issues), ~5% info (state transitions), ~5% err (unrecoverable). Compiled at `.debug` so nothing is stripped; filtered at runtime via `log_level_runtime` + custom `logFn` in `main.zig` (TB pattern). `--log-debug` enables debug output, `--log-trace` enables per-request trace logs (requires `--log-debug`).
 
 **Assertions and logs never overlap.** If something is wrong enough to assert, crash — don't log. If it's expected-but-noteworthy, log — don't assert.
 
@@ -108,34 +110,36 @@ Levels: ~70% debug (invisible by default), ~20% warn (recoverable operational is
 
 ### Where to log
 
-**`main.zig`** — `log.info`:
-- Server listening on address/port (startup)
-- Graceful shutdown initiated (signal received)
-- Shutdown complete
+**`main.zig`** — `log.info` / `log.err`:
+- Server config and listen port (startup)
+- Log level and trace flag when `--log-debug` active (startup)
+- `--log-trace` without `--log-debug` (err, then exit)
 
-**`server.zig`** — `log.debug` / `log.warn`:
-- `accept_callback`: new connection accepted (debug), accept failed (warn)
+**`server.zig`** — `log.debug` / `log.info`:
+- `accept_callback`: new connection accepted (debug), accept failed (mark.warn)
 - `close_dead`: connection closed with fd (debug)
-- `timeout_idle`: connection timed out (debug)
-- `shutdown`: shutdown initiated, N active connections (info)
+- `timeout_idle`: connection timed out (mark.debug)
+- `log_metrics`: periodic request count + per-operation min/max/avg latency (info)
+- `process_inbox`: per-request trace with operation, status, duration, fd (debug, guarded by `log_trace`)
 
 **`connection.zig`** — `log.debug` / `log.warn`:
 - `on_accept`: connection fd assigned (debug)
-- `recv_callback`: peer closed / recv error (debug)
-- `send_callback`: send error (debug)
-- `try_parse_request`: invalid HTTP → closing (warn)
-- `try_parse_request`: unmapped request → closing (warn)
+- `recv_callback`: peer closed / recv error (mark.debug)
+- `send_callback`: send error (mark.debug)
+- `try_parse_request`: invalid HTTP → closing (mark.warn)
+- `try_parse_request`: unmapped request → closing (mark.warn)
 
 **`io.zig`** — `log.info`:
 - `open_listener`: bound to address (info)
 
-**`state_machine.zig`** — `log.warn`:
-- `execute_put`: approaching capacity_max (warn, only when count > capacity_max * 90%)
+**`state_machine.zig`** — marks only (test infrastructure):
+- `MemoryStorage.fault`: busy/err fault injected (mark.debug)
 
 ### Never log (hot paths)
 
 These run every tick or every byte boundary — no logging:
-- `tick`, `process_inbox`, `flush_outbox`, `continue_receives`, `update_activity`
+- `tick`, `flush_outbox`, `continue_receives`, `update_activity`
+- `process_inbox` (except trace log, guarded by `log_trace` bool)
 - `submit_recv`, `submit_send`, `continue_recv`
 - `try_parse_request` (except the error/closing branches)
 - `invariants` (both server and connection)
