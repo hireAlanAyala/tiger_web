@@ -24,6 +24,24 @@ pub fn ServerType(comptime IO: type, comptime Storage: type) type {
 
         pub const max_connections = 32;
 
+        /// Per-operation timing aggregate — min/max/sum/count, same as
+        /// TigerBeetle's EventTimingAggregate. Reset after each emission.
+        const OperationTiming = struct {
+            duration_min_ns: u64,
+            duration_max_ns: u64,
+            duration_sum_ns: u64,
+            count: u64,
+        };
+
+        /// Array size: one slot per possible Operation integer value.
+        const operation_slots = blk: {
+            var max: u8 = 0;
+            for (std.meta.fields(message.Operation)) |f| {
+                if (f.value > max) max = f.value;
+            }
+            break :blk @as(usize, max) + 1;
+        };
+
         io: *IO,
         state_machine: *StateMachine,
 
@@ -36,6 +54,11 @@ pub fn ServerType(comptime IO: type, comptime Storage: type) type {
 
         tick_count: u32,
         requests_processed: u64,
+        operation_timings: [operation_slots]?OperationTiming,
+
+        /// Per-request trace logging — guarded by runtime bool.
+        /// Enabled via --log-trace CLI flag. Zero cost when disabled.
+        log_trace: bool,
 
         /// Log metrics every 10,000 ticks (~100s at 10ms/tick).
         const metrics_interval_ticks = 10_000;
@@ -44,7 +67,7 @@ pub fn ServerType(comptime IO: type, comptime Storage: type) type {
         pub const request_timeout_ticks = 3000;
 
         /// Initialize the server. Binds and listens on the given address.
-        pub fn init(io: *IO, state_machine: *StateMachine, listen_fd: IO.fd_t) Server {
+        pub fn init(io: *IO, state_machine: *StateMachine, listen_fd: IO.fd_t, log_trace: bool) Server {
             var server = Server{
                 .io = io,
                 .state_machine = state_machine,
@@ -55,6 +78,8 @@ pub fn ServerType(comptime IO: type, comptime Storage: type) type {
                 .connections_busy = [_]bool{false} ** max_connections,
                 .tick_count = 0,
                 .requests_processed = 0,
+                .operation_timings = [_]?OperationTiming{null} ** operation_slots,
+                .log_trace = log_trace,
             };
 
             for (&server.connections) |*conn| {
@@ -136,8 +161,27 @@ pub fn ServerType(comptime IO: type, comptime Storage: type) type {
                 const msg = conn.typed_message orelse unreachable;
                 // Prefetch: fetch data from storage. If storage is busy
                 // (transient), skip this connection — retry next tick.
+                const start = std.time.Instant.now() catch unreachable;
                 if (!server.state_machine.prefetch(msg)) continue;
                 const resp = server.state_machine.execute(msg);
+                const elapsed_ns = (std.time.Instant.now() catch unreachable).since(start);
+
+                server.record_timing(msg.operation, elapsed_ns);
+
+                if (server.log_trace) {
+                    const duration_threshold_ns = 5 * std.time.ns_per_ms;
+                    log.debug("execute: {s}: status={s} duration={d}{s} fd={d}", .{
+                        @tagName(msg.operation),
+                        @tagName(resp.status),
+                        if (elapsed_ns < duration_threshold_ns)
+                            elapsed_ns / std.time.ns_per_us
+                        else
+                            elapsed_ns / std.time.ns_per_ms,
+                        if (elapsed_ns < duration_threshold_ns) "us" else "ms",
+                        conn.fd,
+                    });
+                }
+
                 const json = schema.encode_response_json(&json_buf, resp);
                 conn.set_json_response(json, resp.status);
                 server.requests_processed += 1;
@@ -146,14 +190,47 @@ pub fn ServerType(comptime IO: type, comptime Storage: type) type {
 
         // --- Metrics ---
 
+        /// Accumulate per-operation timing — same as TigerBeetle's
+        /// Tracer.timing(): min/max/sum/count with saturating arithmetic.
+        fn record_timing(server: *Server, op: message.Operation, duration_ns: u64) void {
+            const slot = @intFromEnum(op);
+            if (server.operation_timings[slot]) |*t| {
+                t.duration_min_ns = @min(t.duration_min_ns, duration_ns);
+                t.duration_max_ns = @max(t.duration_max_ns, duration_ns);
+                t.duration_sum_ns +|= duration_ns;
+                t.count +|= 1;
+            } else {
+                server.operation_timings[slot] = .{
+                    .duration_min_ns = duration_ns,
+                    .duration_max_ns = duration_ns,
+                    .duration_sum_ns = duration_ns,
+                    .count = 1,
+                };
+            }
+        }
+
         fn log_metrics(server: *Server) void {
             if (server.tick_count % metrics_interval_ticks != 0) return;
             if (server.requests_processed == 0) return;
 
-            log.info("requests={d} ticks={d}", .{
+            log.info("metrics: requests={d} ticks={d}", .{
                 server.requests_processed,
                 server.tick_count,
             });
+
+            for (&server.operation_timings, 0..) |*timing_opt, slot| {
+                const t = timing_opt.* orelse continue;
+                const op: message.Operation = @enumFromInt(slot);
+                log.info("metrics: op={s} count={d} min={d}us max={d}us avg={d}us", .{
+                    @tagName(op),
+                    t.count,
+                    t.duration_min_ns / std.time.ns_per_us,
+                    t.duration_max_ns / std.time.ns_per_us,
+                    t.duration_sum_ns / t.count / std.time.ns_per_us,
+                });
+                timing_opt.* = null;
+            }
+
             server.requests_processed = 0;
         }
 

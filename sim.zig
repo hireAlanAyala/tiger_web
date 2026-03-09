@@ -559,7 +559,7 @@ test "product CRUD — create, get, update, delete" {
     var storage = try MemoryStorage.init(std.testing.allocator);
     defer storage.deinit(std.testing.allocator);
     var sm = StateMachine.init(&storage);
-    var server = Server.init(&sim_io, &sm, 1);
+    var server = Server.init(&sim_io, &sm, 1, false);
 
     sim_io.connect_client(0);
     run_ticks(&server, &sim_io, 10);
@@ -622,7 +622,7 @@ test "product list — empty then populated" {
     var storage = try MemoryStorage.init(std.testing.allocator);
     defer storage.deinit(std.testing.allocator);
     var sm = StateMachine.init(&storage);
-    var server = Server.init(&sim_io, &sm, 1);
+    var server = Server.init(&sim_io, &sm, 1, false);
 
     sim_io.connect_client(0);
     run_ticks(&server, &sim_io, 10);
@@ -664,7 +664,7 @@ test "product get missing returns 404" {
     var storage = try MemoryStorage.init(std.testing.allocator);
     defer storage.deinit(std.testing.allocator);
     var sm = StateMachine.init(&storage);
-    var server = Server.init(&sim_io, &sm, 1);
+    var server = Server.init(&sim_io, &sm, 1, false);
 
     sim_io.connect_client(0);
     run_ticks(&server, &sim_io, 10);
@@ -680,7 +680,7 @@ test "product delete missing returns 404" {
     var storage = try MemoryStorage.init(std.testing.allocator);
     defer storage.deinit(std.testing.allocator);
     var sm = StateMachine.init(&storage);
-    var server = Server.init(&sim_io, &sm, 1);
+    var server = Server.init(&sim_io, &sm, 1, false);
 
     sim_io.connect_client(0);
     run_ticks(&server, &sim_io, 10);
@@ -696,7 +696,7 @@ test "product client-provided IDs across creates" {
     var storage = try MemoryStorage.init(std.testing.allocator);
     defer storage.deinit(std.testing.allocator);
     var sm = StateMachine.init(&storage);
-    var server = Server.init(&sim_io, &sm, 1);
+    var server = Server.init(&sim_io, &sm, 1, false);
 
     sim_io.connect_client(0);
     run_ticks(&server, &sim_io, 10);
@@ -725,7 +725,7 @@ test "deterministic replay — same seed same result" {
         var storage = try MemoryStorage.init(std.testing.allocator);
         defer storage.deinit(std.testing.allocator);
         var sm = StateMachine.init(&storage);
-        var server = Server.init(&sim_io, &sm, 1);
+        var server = Server.init(&sim_io, &sm, 1, false);
 
         sim_io.connect_client(0);
         sim_io.inject_post(0, "/products",
@@ -755,7 +755,7 @@ test "pipelining — back-to-back requests on one connection" {
     var storage = try MemoryStorage.init(std.testing.allocator);
     defer storage.deinit(std.testing.allocator);
     var sm = StateMachine.init(&storage);
-    var server = Server.init(&sim_io, &sm, 1);
+    var server = Server.init(&sim_io, &sm, 1, false);
 
     sim_io.connect_client(0);
     run_ticks(&server, &sim_io, 10);
@@ -784,7 +784,7 @@ test "connection drops and reconnects — state machine survives" {
     var storage = try MemoryStorage.init(std.testing.allocator);
     defer storage.deinit(std.testing.allocator);
     var sm = StateMachine.init(&storage);
-    var server = Server.init(&sim_io, &sm, 1);
+    var server = Server.init(&sim_io, &sm, 1, false);
 
     sim_io.connect_client(0);
     run_ticks(&server, &sim_io, 10);
@@ -819,7 +819,7 @@ test "timeout — partial request triggers close" {
     var storage = try MemoryStorage.init(std.testing.allocator);
     defer storage.deinit(std.testing.allocator);
     var sm = StateMachine.init(&storage);
-    var server = Server.init(&sim_io, &sm, 1);
+    var server = Server.init(&sim_io, &sm, 1, false);
 
     sim_io.connect_client(0);
     run_ticks(&server, &sim_io, 10);
@@ -866,7 +866,7 @@ test "mark: disconnect triggers recv peer closed" {
     var storage = try MemoryStorage.init(std.testing.allocator);
     defer storage.deinit(std.testing.allocator);
     var sm = StateMachine.init(&storage);
-    var server = Server.init(&sim_io, &sm, 1);
+    var server = Server.init(&sim_io, &sm, 1, false);
 
     sim_io.connect_client(0);
     run_ticks(&server, &sim_io, 10);
@@ -882,7 +882,7 @@ test "mark: send fault triggers send error" {
     var storage = try MemoryStorage.init(std.testing.allocator);
     defer storage.deinit(std.testing.allocator);
     var sm = StateMachine.init(&storage);
-    var server = Server.init(&sim_io, &sm, 1);
+    var server = Server.init(&sim_io, &sm, 1, false);
 
     sim_io.connect_client(0);
     run_ticks(&server, &sim_io, 10);
@@ -908,7 +908,7 @@ test "mark: idle connection triggers timeout" {
     var storage = try MemoryStorage.init(std.testing.allocator);
     defer storage.deinit(std.testing.allocator);
     var sm = StateMachine.init(&storage);
-    var server = Server.init(&sim_io, &sm, 1);
+    var server = Server.init(&sim_io, &sm, 1, false);
 
     sim_io.connect_client(0);
     run_ticks(&server, &sim_io, 10);
@@ -932,7 +932,7 @@ test "mark: garbage bytes trigger invalid HTTP" {
     var storage = try MemoryStorage.init(std.testing.allocator);
     defer storage.deinit(std.testing.allocator);
     var sm = StateMachine.init(&storage);
-    var server = Server.init(&sim_io, &sm, 1);
+    var server = Server.init(&sim_io, &sm, 1, false);
 
     sim_io.connect_client(0);
     run_ticks(&server, &sim_io, 10);
@@ -948,7 +948,7 @@ test "mark: unknown route triggers unmapped request" {
     var storage = try MemoryStorage.init(std.testing.allocator);
     defer storage.deinit(std.testing.allocator);
     var sm = StateMachine.init(&storage);
-    var server = Server.init(&sim_io, &sm, 1);
+    var server = Server.init(&sim_io, &sm, 1, false);
 
     sim_io.connect_client(0);
     run_ticks(&server, &sim_io, 10);
@@ -965,7 +965,7 @@ test "mark: accept failure logs warning" {
     var storage = try MemoryStorage.init(std.testing.allocator);
     defer storage.deinit(std.testing.allocator);
     var sm = StateMachine.init(&storage);
-    var server = Server.init(&sim_io, &sm, 1);
+    var server = Server.init(&sim_io, &sm, 1, false);
 
     // 100% accept fault — every accept attempt fails.
     sim_io.accept_fault_probability = 100;
@@ -984,7 +984,7 @@ test "storage busy fault — prefetch retries next tick then succeeds" {
     var storage = try MemoryStorage.init(std.testing.allocator);
     defer storage.deinit(std.testing.allocator);
     var sm = StateMachine.init(&storage);
-    var server = Server.init(&sim_io, &sm, 1);
+    var server = Server.init(&sim_io, &sm, 1, false);
 
     // Create a product first (no faults).
     sim_io.connect_client(0);
@@ -1023,7 +1023,7 @@ test "product get_inventory — returns inventory count" {
     var storage = try MemoryStorage.init(std.testing.allocator);
     defer storage.deinit(std.testing.allocator);
     var sm = StateMachine.init(&storage);
-    var server = Server.init(&sim_io, &sm, 1);
+    var server = Server.init(&sim_io, &sm, 1, false);
 
     sim_io.connect_client(0);
     run_ticks(&server, &sim_io, 10);
@@ -1064,7 +1064,7 @@ test "transfer inventory — success, both products updated" {
     var storage = try MemoryStorage.init(std.testing.allocator);
     defer storage.deinit(std.testing.allocator);
     var sm = StateMachine.init(&storage);
-    var server = Server.init(&sim_io, &sm, 1);
+    var server = Server.init(&sim_io, &sm, 1, false);
 
     sim_io.connect_client(0);
     run_ticks(&server, &sim_io, 10);
@@ -1118,7 +1118,7 @@ test "transfer inventory — insufficient stock returns 409" {
     var storage = try MemoryStorage.init(std.testing.allocator);
     defer storage.deinit(std.testing.allocator);
     var sm = StateMachine.init(&storage);
-    var server = Server.init(&sim_io, &sm, 1);
+    var server = Server.init(&sim_io, &sm, 1, false);
 
     sim_io.connect_client(0);
     run_ticks(&server, &sim_io, 10);
@@ -1157,7 +1157,7 @@ test "transfer inventory — source not found returns 404" {
     var storage = try MemoryStorage.init(std.testing.allocator);
     defer storage.deinit(std.testing.allocator);
     var sm = StateMachine.init(&storage);
-    var server = Server.init(&sim_io, &sm, 1);
+    var server = Server.init(&sim_io, &sm, 1, false);
 
     sim_io.connect_client(0);
     run_ticks(&server, &sim_io, 10);
@@ -1188,7 +1188,7 @@ test "collection CRUD — create, get, list, delete" {
     var storage = try MemoryStorage.init(std.testing.allocator);
     defer storage.deinit(std.testing.allocator);
     var sm = StateMachine.init(&storage);
-    var server = Server.init(&sim_io, &sm, 1);
+    var server = Server.init(&sim_io, &sm, 1, false);
 
     sim_io.connect_client(0);
     run_ticks(&server, &sim_io, 10);
@@ -1240,7 +1240,7 @@ test "collection with products — multi-read prefetch" {
     var storage = try MemoryStorage.init(std.testing.allocator);
     defer storage.deinit(std.testing.allocator);
     var sm = StateMachine.init(&storage);
-    var server = Server.init(&sim_io, &sm, 1);
+    var server = Server.init(&sim_io, &sm, 1, false);
 
     sim_io.connect_client(0);
     run_ticks(&server, &sim_io, 10);
@@ -1297,7 +1297,7 @@ test "add member — missing collection returns 404" {
     var storage = try MemoryStorage.init(std.testing.allocator);
     defer storage.deinit(std.testing.allocator);
     var sm = StateMachine.init(&storage);
-    var server = Server.init(&sim_io, &sm, 1);
+    var server = Server.init(&sim_io, &sm, 1, false);
 
     sim_io.connect_client(0);
     run_ticks(&server, &sim_io, 10);
@@ -1322,7 +1322,7 @@ test "add member — missing product returns 404" {
     var storage = try MemoryStorage.init(std.testing.allocator);
     defer storage.deinit(std.testing.allocator);
     var sm = StateMachine.init(&storage);
-    var server = Server.init(&sim_io, &sm, 1);
+    var server = Server.init(&sim_io, &sm, 1, false);
 
     sim_io.connect_client(0);
     run_ticks(&server, &sim_io, 10);
@@ -1347,7 +1347,7 @@ test "remove member — removes product from collection" {
     var storage = try MemoryStorage.init(std.testing.allocator);
     defer storage.deinit(std.testing.allocator);
     var sm = StateMachine.init(&storage);
-    var server = Server.init(&sim_io, &sm, 1);
+    var server = Server.init(&sim_io, &sm, 1, false);
 
     sim_io.connect_client(0);
     run_ticks(&server, &sim_io, 10);
@@ -1395,7 +1395,7 @@ test "delete collection cascades memberships" {
     var storage = try MemoryStorage.init(std.testing.allocator);
     defer storage.deinit(std.testing.allocator);
     var sm = StateMachine.init(&storage);
-    var server = Server.init(&sim_io, &sm, 1);
+    var server = Server.init(&sim_io, &sm, 1, false);
 
     sim_io.connect_client(0);
     run_ticks(&server, &sim_io, 10);
@@ -1444,7 +1444,7 @@ test "storage err fault — returns 503" {
     var storage = try MemoryStorage.init(std.testing.allocator);
     defer storage.deinit(std.testing.allocator);
     var sm = StateMachine.init(&storage);
-    var server = Server.init(&sim_io, &sm, 1);
+    var server = Server.init(&sim_io, &sm, 1, false);
 
     sim_io.connect_client(0);
     run_ticks(&server, &sim_io, 10);
@@ -1467,7 +1467,7 @@ test "concurrent connections — busy client deferred, ready client served" {
     var storage = try MemoryStorage.init(std.testing.allocator);
     defer storage.deinit(std.testing.allocator);
     var sm = StateMachine.init(&storage);
-    var server = Server.init(&sim_io, &sm, 2);
+    var server = Server.init(&sim_io, &sm, 2, false);
 
     // Connect two clients and let them establish.
     sim_io.connect_client(0);
@@ -1509,7 +1509,7 @@ test "interleaved writes — update and delete same entity across connections" {
     var storage = try MemoryStorage.init(std.testing.allocator);
     defer storage.deinit(std.testing.allocator);
     var sm = StateMachine.init(&storage);
-    var server = Server.init(&sim_io, &sm, 2);
+    var server = Server.init(&sim_io, &sm, 2, false);
 
     // Connect two clients and let them establish.
     sim_io.connect_client(0);
