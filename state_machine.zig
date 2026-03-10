@@ -62,7 +62,7 @@ pub fn StateMachineType(comptime Storage: type) type {
 
             const result: StorageResult = switch (msg.operation) {
                 .get_product, .get_product_inventory => self.prefetch_read(msg.id),
-                .list_products => self.prefetch_list_products(msg.cursor),
+                .list_products => self.prefetch_list_products(msg.event.list.cursor),
                 .create_product => blk: {
                     const p = msg.event.product;
                     assert(p.id > 0);
@@ -76,7 +76,7 @@ pub fn StateMachineType(comptime Storage: type) type {
                 },
                 .delete_product => self.prefetch_read(msg.id),
                 .get_collection => self.prefetch_collection_with_products(msg.id),
-                .list_collections => self.prefetch_list_all_collections(msg.cursor),
+                .list_collections => self.prefetch_list_all_collections(msg.event.list.cursor),
                 .create_collection => blk: {
                     const col = msg.event.collection;
                     assert(col.id > 0);
@@ -97,7 +97,7 @@ pub fn StateMachineType(comptime Storage: type) type {
                 },
                 .remove_collection_member => self.prefetch_collection_read(msg.id),
                 .get_order => self.prefetch_order_read(msg.id),
-                .list_orders => self.prefetch_list_all_orders(msg.cursor),
+                .list_orders => self.prefetch_list_all_orders(msg.event.list.cursor),
                 .transfer_inventory => blk: {
                     const transfer = msg.event.transfer;
                     assert(msg.id > 0);
@@ -1012,7 +1012,7 @@ test "list" {
     const resp = test_execute(&sm, .{
         .operation = .list_products,
         .id = 0,
-        .event = .{ .none = {} },
+        .event = .{ .list = .{} },
     });
     try std.testing.expectEqual(resp.status, .ok);
     try std.testing.expectEqual(resp.result.product_list.len, 2);
@@ -1037,8 +1037,7 @@ test "list with cursor skips earlier items" {
     const resp = test_execute(&sm, .{
         .operation = .list_products,
         .id = 0,
-        .cursor = id1,
-        .event = .{ .none = {} },
+        .event = .{ .list = .{ .cursor = id1 } },
     });
     try std.testing.expectEqual(resp.status, .ok);
     try std.testing.expectEqual(resp.result.product_list.len, 2);
@@ -1049,8 +1048,7 @@ test "list with cursor skips earlier items" {
     const resp2 = test_execute(&sm, .{
         .operation = .list_products,
         .id = 0,
-        .cursor = id2,
-        .event = .{ .none = {} },
+        .event = .{ .list = .{ .cursor = id2 } },
     });
     try std.testing.expectEqual(resp2.result.product_list.len, 1);
     try std.testing.expectEqual(resp2.result.product_list.items[0].id, id3);
@@ -1059,8 +1057,7 @@ test "list with cursor skips earlier items" {
     const resp3 = test_execute(&sm, .{
         .operation = .list_products,
         .id = 0,
-        .cursor = id3,
-        .event = .{ .none = {} },
+        .event = .{ .list = .{ .cursor = id3 } },
     });
     try std.testing.expectEqual(resp3.result.product_list.len, 0);
 }
@@ -1323,7 +1320,7 @@ test "create order — persisted and retrievable" {
     const list_resp = test_execute(&sm, .{
         .operation = .list_orders,
         .id = 0,
-        .event = .{ .none = {} },
+        .event = .{ .list = .{} },
     });
     try std.testing.expectEqual(list_resp.status, .ok);
     try std.testing.expectEqual(list_resp.result.order_list.len, 1);

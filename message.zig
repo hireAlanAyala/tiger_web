@@ -59,15 +59,16 @@ pub const Operation = enum(u8) {
             .add_collection_member, .remove_collection_member => u128,
             .transfer_inventory => InventoryTransfer,
             .create_order => OrderRequest,
+            .list_products,
+            .list_collections,
+            .list_orders,
+            => ListParams,
             .get_product,
             .delete_product,
             .get_product_inventory,
-            .list_products,
             .get_order,
-            .list_orders,
             .get_collection,
             .delete_collection,
-            .list_collections,
             => void,
         };
     }
@@ -84,6 +85,7 @@ pub const Operation = enum(u8) {
                 u128 => .member_id,
                 InventoryTransfer => .transfer,
                 OrderRequest => .order,
+                ListParams => .list,
                 void => .none,
                 else => @compileError("unhandled EventType"),
             },
@@ -211,6 +213,11 @@ pub const Product = struct {
     }
 };
 
+/// Parameters for list operations — cursor-based pagination.
+pub const ListParams = struct {
+    cursor: u128 = 0, // 0 = first page
+};
+
 /// Event payload — tagged union carrying operation-specific input data.
 /// The state machine never sees HTTP or JSON — only Message with this Event.
 pub const Event = union(enum) {
@@ -219,6 +226,7 @@ pub const Event = union(enum) {
     member_id: u128, // product_id for add/remove member
     transfer: InventoryTransfer,
     order: OrderRequest,
+    list: ListParams,
     none: void,
 
     /// Extract the typed event value matching an operation's EventType.
@@ -233,6 +241,7 @@ pub const Event = union(enum) {
             u128 => "member_id",
             InventoryTransfer => "transfer",
             OrderRequest => "order",
+            ListParams => "list",
             void => "none",
             else => @compileError("Event.unwrap: unhandled type"),
         };
@@ -244,7 +253,6 @@ pub const Event = union(enum) {
 pub const Message = struct {
     operation: Operation,
     id: u128, // primary entity ID (0 for list/create)
-    cursor: u128 = 0, // pagination cursor (0 = first page)
     event: Event,
 };
 
@@ -348,6 +356,7 @@ test "Operation EventType comptime resolution" {
     comptime {
         assert(Operation.EventType(.create_product) == Product);
         assert(Operation.EventType(.get_product) == void);
+        assert(Operation.EventType(.list_products) == ListParams);
         assert(Operation.EventType(.create_collection) == ProductCollection);
         assert(Operation.EventType(.add_collection_member) == u128);
         assert(Operation.EventType(.transfer_inventory) == InventoryTransfer);
@@ -364,9 +373,10 @@ test "Operation event_tag derived from EventType" {
     try std.testing.expectEqual(Operation.event_tag(.remove_collection_member), .member_id);
     try std.testing.expectEqual(Operation.event_tag(.transfer_inventory), .transfer);
     try std.testing.expectEqual(Operation.event_tag(.create_order), .order);
+    try std.testing.expectEqual(Operation.event_tag(.list_products), .list);
+    try std.testing.expectEqual(Operation.event_tag(.list_collections), .list);
+    try std.testing.expectEqual(Operation.event_tag(.list_orders), .list);
     try std.testing.expectEqual(Operation.event_tag(.get_order), .none);
-    try std.testing.expectEqual(Operation.event_tag(.list_orders), .none);
     try std.testing.expectEqual(Operation.event_tag(.get_product), .none);
-    try std.testing.expectEqual(Operation.event_tag(.list_products), .none);
     try std.testing.expectEqual(Operation.event_tag(.delete_product), .none);
 }

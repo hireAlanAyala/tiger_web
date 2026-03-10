@@ -25,17 +25,14 @@ pub fn translate(method: http.Method, raw_path: []const u8, body: []const u8) ?m
     if (method == .options) return null;
 
     // Match resource and resolve to flat operation.
-    var msg: ?message.Message = if (std.mem.eql(u8, segments.collection, "products"))
-        translate_products(method, segments, body)
+    return if (std.mem.eql(u8, segments.collection, "products"))
+        translate_products(method, segments, body, cursor)
     else if (std.mem.eql(u8, segments.collection, "collections"))
-        translate_collections(method, segments, body)
+        translate_collections(method, segments, body, cursor)
     else if (std.mem.eql(u8, segments.collection, "orders"))
-        translate_orders(method, segments, body)
+        translate_orders(method, segments, body, cursor)
     else
         null;
-
-    if (msg) |*m| m.cursor = cursor;
-    return msg;
 }
 
 const PathSegments = struct {
@@ -82,7 +79,7 @@ fn split_path(path: []const u8) ?PathSegments {
     };
 }
 
-fn translate_products(method: http.Method, seg: PathSegments, body: []const u8) ?message.Message {
+fn translate_products(method: http.Method, seg: PathSegments, body: []const u8, cursor: u128) ?message.Message {
     // POST /products/:id/transfer-inventory/:target_id — uses sub_id for target.
     if (seg.has_id and seg.sub_resource.len > 0 and method == .post) {
         if (std.mem.eql(u8, seg.sub_resource, "transfer-inventory") and seg.has_sub_id) {
@@ -117,7 +114,11 @@ fn translate_products(method: http.Method, seg: PathSegments, body: []const u8) 
     };
 
     switch (operation) {
-        .get_product, .list_products, .delete_product, .get_product_inventory => {
+        .list_products => {
+            if (body.len != 0) return null;
+            return .{ .operation = operation, .id = 0, .event = .{ .list = .{ .cursor = cursor } } };
+        },
+        .get_product, .delete_product, .get_product_inventory => {
             if (body.len != 0) return null;
             return .{ .operation = operation, .id = seg.id, .event = .{ .none = {} } };
         },
@@ -133,7 +134,7 @@ fn translate_products(method: http.Method, seg: PathSegments, body: []const u8) 
     }
 }
 
-fn translate_collections(method: http.Method, seg: PathSegments, body: []const u8) ?message.Message {
+fn translate_collections(method: http.Method, seg: PathSegments, body: []const u8, cursor: u128) ?message.Message {
     // /collections/:id/products/:product_id — membership operations.
     if (seg.has_id and seg.sub_resource.len > 0) {
         if (!std.mem.eql(u8, seg.sub_resource, "products")) return null;
@@ -161,7 +162,11 @@ fn translate_collections(method: http.Method, seg: PathSegments, body: []const u
     };
 
     switch (operation) {
-        .get_collection, .list_collections, .delete_collection => {
+        .list_collections => {
+            if (body.len != 0) return null;
+            return .{ .operation = operation, .id = 0, .event = .{ .list = .{ .cursor = cursor } } };
+        },
+        .get_collection, .delete_collection => {
             if (body.len != 0) return null;
             return .{ .operation = operation, .id = seg.id, .event = .{ .none = {} } };
         },
@@ -177,14 +182,14 @@ fn translate_collections(method: http.Method, seg: PathSegments, body: []const u
     }
 }
 
-fn translate_orders(method: http.Method, seg: PathSegments, body: []const u8) ?message.Message {
+fn translate_orders(method: http.Method, seg: PathSegments, body: []const u8, cursor: u128) ?message.Message {
     switch (method) {
         .get => {
             if (body.len != 0) return null;
             if (seg.has_id) {
                 return .{ .operation = .get_order, .id = seg.id, .event = .{ .none = {} } };
             } else {
-                return .{ .operation = .list_orders, .id = 0, .event = .{ .none = {} } };
+                return .{ .operation = .list_orders, .id = 0, .event = .{ .list = .{ .cursor = cursor } } };
             }
         },
         .post => {
@@ -711,7 +716,7 @@ test "GET /products (list)" {
     const msg = translate(.get, "/products", "").?;
     try std.testing.expectEqual(msg.operation, .list_products);
     try std.testing.expectEqual(msg.id, 0);
-    try std.testing.expectEqual(msg.event, .none);
+    try std.testing.expectEqual(msg.event.list.cursor, 0);
 }
 
 test "GET /products/:id (get)" {
@@ -782,23 +787,23 @@ test "rejects invalid UUID in path" {
 test "strips query string" {
     const msg = translate(.get, "/products?page=1", "").?;
     try std.testing.expectEqual(msg.operation, .list_products);
-    try std.testing.expectEqual(msg.cursor, 0);
+    try std.testing.expectEqual(msg.event.list.cursor, 0);
 }
 
 test "parses after cursor from query string" {
     const msg = translate(.get, "/products?after=00000000000000000000000000000abc", "").?;
     try std.testing.expectEqual(msg.operation, .list_products);
-    try std.testing.expectEqual(msg.cursor, 0xabc);
+    try std.testing.expectEqual(msg.event.list.cursor, 0xabc);
 }
 
 test "cursor with other query params" {
     const msg = translate(.get, "/products?limit=10&after=00000000000000000000000000000042&foo=bar", "").?;
-    try std.testing.expectEqual(msg.cursor, 0x42);
+    try std.testing.expectEqual(msg.event.list.cursor, 0x42);
 }
 
 test "invalid cursor ignored" {
     const msg = translate(.get, "/products?after=notauuid", "").?;
-    try std.testing.expectEqual(msg.cursor, 0);
+    try std.testing.expectEqual(msg.event.list.cursor, 0);
 }
 
 test "GET rejects non-empty body" {
