@@ -203,7 +203,7 @@ fn gen_mutated_path(prng: *PRNG, buf: *[path_buf_max]u8) []const u8 {
     switch (mutation) {
         .flip_byte => {
             const idx = prng.int_inclusive(usize, len - 1);
-            buf[idx] ^= @as(u8, 1) << @intCast(prng.int_inclusive(u3, 7));
+            buf[idx] ^= prng.bit(u8);
         },
         .truncate => {
             const new_len = prng.int_inclusive(usize, len - 1);
@@ -478,7 +478,7 @@ fn gen_mutated_json(prng: *PRNG, buf: *[body_buf_max]u8) []const u8 {
         0 => {
             // Flip a random byte.
             const idx = prng.int_inclusive(usize, len - 1);
-            buf[idx] ^= @as(u8, 1) << @intCast(prng.int_inclusive(u3, 7));
+            buf[idx] ^= prng.bit(u8);
         },
         1 => {
             // Truncate.
