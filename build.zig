@@ -31,14 +31,30 @@ pub fn build(b: *std.Build) void {
     const test_step = b.step("test", "Run simulation tests");
     test_step.dependOn(&run_sim_tests.step);
 
+    // --- Fuzz test dispatcher ---
+    const fuzz_exe = b.addExecutable(.{
+        .name = "tiger-fuzz",
+        .root_source_file = b.path("fuzz_tests.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    b.installArtifact(fuzz_exe);
+
+    const fuzz_cmd = b.addRunArtifact(fuzz_exe);
+    fuzz_cmd.step.dependOn(b.getInstallStep());
+    if (b.args) |args| fuzz_cmd.addArgs(args);
+    const fuzz_step = b.step("fuzz", "Run fuzz tests");
+    fuzz_step.dependOn(&fuzz_cmd.step);
+
     // --- Unit tests for individual modules ---
     const modules = [_][]const u8{
         "message.zig",
         "state_machine.zig",
         "http.zig",
         "marks.zig",
-        "schema.zig",
+        "codec.zig",
         "tracer.zig",
+        "prng.zig",
     };
     const unit_test_step = b.step("unit-test", "Run unit tests");
     for (modules) |mod| {

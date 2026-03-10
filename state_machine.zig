@@ -4,6 +4,7 @@ const message = @import("message.zig");
 const Tracer = @import("tracer.zig");
 const marks = @import("marks.zig");
 const log = marks.wrap_log(std.log.scoped(.state_machine));
+const PRNG = @import("prng.zig");
 
 /// Storage result type — shared by all storage backends.
 pub const StorageResult = enum { ok, not_found, err, busy, corruption };
@@ -52,13 +53,72 @@ pub fn StateMachineType(comptime Storage: type) type {
             };
         }
 
+        /// Returns whether the message is valid input for the state machine.
+        /// Used by the fuzzer to filter random messages before calling prefetch/commit.
+        pub fn input_valid(msg: message.Message) bool {
+            if (msg.event != msg.operation.event_tag()) return false;
+
+            switch (msg.operation) {
+                .create_product => {
+                    const p = msg.event.product;
+                    if (p.id == 0) return false;
+                    if (p.name_len == 0 or p.name_len > message.product_name_max) return false;
+                    if (p.description_len > message.product_description_max) return false;
+                },
+                .update_product => {
+                    if (msg.id == 0) return false;
+                    const p = msg.event.product;
+                    if (p.name_len == 0 or p.name_len > message.product_name_max) return false;
+                    if (p.description_len > message.product_description_max) return false;
+                },
+                .create_collection => {
+                    const col = msg.event.collection;
+                    if (col.id == 0) return false;
+                    if (col.name_len == 0 or col.name_len > message.collection_name_max) return false;
+                },
+                .transfer_inventory => {
+                    const transfer = msg.event.transfer;
+                    if (msg.id == 0) return false;
+                    if (transfer.target_id == 0) return false;
+                    if (msg.id == transfer.target_id) return false;
+                },
+                .create_order => {
+                    const order = msg.event.order;
+                    if (order.id == 0) return false;
+                    if (order.items_len == 0) return false;
+                    if (order.items_len > message.order_items_max) return false;
+                    for (order.items_slice()) |item| {
+                        if (item.product_id == 0) return false;
+                        if (item.quantity == 0) return false;
+                    }
+                },
+                .get_product,
+                .get_product_inventory,
+                .delete_product,
+                .get_collection,
+                .delete_collection,
+                .get_order,
+                => {},
+                .add_collection_member,
+                .remove_collection_member,
+                => {},
+                .list_products,
+                .list_collections,
+                .list_orders,
+                => {
+                    if (msg.event.list.name_prefix_len > message.product_name_max) return false;
+                },
+            }
+            return true;
+        }
+
         /// Phase 1: read data from storage into cache slots. Never writes.
         /// Returns true if prefetch completed (success or error).
         /// Returns false if storage is busy — connection stays .ready, retried next tick.
         pub fn prefetch(self: *StateMachine, msg: message.Message) bool {
             assert(self.prefetch_result == null);
             // Pair assertion: event tag must match what EventType prescribes
-            // for this operation. Construction site is schema.zig; this is the
+            // for this operation. Construction site is codec.zig; this is the
             // consumption site — catches mismatched event/operation pairing.
             assert(msg.event == msg.operation.event_tag());
             self.reset_prefetch_cache();
@@ -620,9 +680,9 @@ pub const MemoryStorage = struct {
     order_count: u32,
 
     // Fault injection — PRNG-driven, same pattern as SimIO.
-    prng_state: u64,
-    busy_fault_probability: u8,
-    err_fault_probability: u8,
+    prng: PRNG,
+    busy_fault_probability: PRNG.Ratio,
+    err_fault_probability: PRNG.Ratio,
 
     pub fn init(allocator: std.mem.Allocator) !MemoryStorage {
         const products = try allocator.create([product_capacity]ProductEntry);
@@ -641,9 +701,9 @@ pub const MemoryStorage = struct {
             .memberships = memberships,
             .orders = orders,
             .order_count = 0,
-            .prng_state = 0,
-            .busy_fault_probability = 0,
-            .err_fault_probability = 0,
+            .prng = PRNG.from_seed(0),
+            .busy_fault_probability = PRNG.Ratio.zero(),
+            .err_fault_probability = PRNG.Ratio.zero(),
         };
     }
 
@@ -900,34 +960,17 @@ pub const MemoryStorage = struct {
 
     /// Roll PRNG against fault probabilities. Returns a fault result or null.
     fn fault(self: *MemoryStorage) ?StorageResult {
-        if (self.busy_fault_probability > 0) {
-            if (self.prng_next() % 100 < self.busy_fault_probability) {
-                log.mark.debug("storage: busy fault injected", .{});
-                return .busy;
-            }
+        if (self.prng.chance(self.busy_fault_probability)) {
+            log.mark.debug("storage: busy fault injected", .{});
+            return .busy;
         }
-        if (self.err_fault_probability > 0) {
-            if (self.prng_next() % 100 < self.err_fault_probability) {
-                log.mark.debug("storage: err fault injected", .{});
-                return .err;
-            }
+        if (self.prng.chance(self.err_fault_probability)) {
+            log.mark.debug("storage: err fault injected", .{});
+            return .err;
         }
         return null;
     }
-
-    fn prng_next(self: *MemoryStorage) u64 {
-        return splitmix64(&self.prng_state);
-    }
 };
-
-/// SplitMix64 — same as TigerBeetle's PRNG seed expansion.
-fn splitmix64(state: *u64) u64 {
-    state.* +%= 0x9e3779b97f4a7c15;
-    var z = state.*;
-    z = (z ^ (z >> 30)) *% 0xbf58476d1ce4e5b9;
-    z = (z ^ (z >> 27)) *% 0x94d049bb133111eb;
-    return z ^ (z >> 31);
-}
 
 // =====================================================================
 // Tests
