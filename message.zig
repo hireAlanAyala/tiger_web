@@ -10,7 +10,7 @@ pub fn maybe(ok: bool) void {
 
 /// Response status — named results, not generic error buckets.
 /// Each business logic failure gets its own variant (TigerBeetle style).
-/// schema.zig maps these to HTTP status codes + JSON error strings.
+/// codec.zig maps these to HTTP status codes + JSON error strings.
 pub const Status = enum(u8) {
     ok = 1,
     not_found = 2,
@@ -264,7 +264,7 @@ pub const Event = union(enum) {
     }
 };
 
-/// Typed message from the schema layer to the state machine.
+/// Typed message from the codec layer to the state machine.
 pub const Message = struct {
     operation: Operation,
     id: u128, // primary entity ID (0 for list/create)
@@ -308,7 +308,7 @@ pub const Result = union(enum) {
     empty: void,
 };
 
-/// Response from the state machine back through the schema layer.
+/// Response from the state machine back through the codec layer.
 pub const MessageResponse = struct {
     status: Status,
     result: Result,

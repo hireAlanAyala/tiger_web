@@ -3,7 +3,7 @@ const assert = std.debug.assert;
 const maybe = @import("message.zig").maybe;
 const message = @import("message.zig");
 const http = @import("http.zig");
-const schema = @import("schema.zig");
+const codec =@import("codec.zig");
 const marks = @import("marks.zig");
 const log = marks.wrap_log(std.log.scoped(.connection));
 
@@ -187,8 +187,8 @@ pub fn ConnectionType(comptime IO: type) type {
                     assert(parsed.total_len <= conn.recv_pos);
                     conn.keep_alive = parsed.keep_alive;
 
-                    // Route through schema layer.
-                    if (schema.translate(parsed.method, parsed.path, parsed.body)) |msg| {
+                    // Route through codec layer.
+                    if (codec.translate(parsed.method, parsed.path, parsed.body)) |msg| {
                         conn.typed_message = msg;
                         conn.request_consumed = parsed.total_len;
                         conn.state = .ready;

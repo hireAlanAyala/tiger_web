@@ -2,7 +2,7 @@ const std = @import("std");
 const assert = std.debug.assert;
 const maybe = @import("message.zig").maybe;
 const message = @import("message.zig");
-const schema = @import("schema.zig");
+const codec =@import("codec.zig");
 const http = @import("http.zig");
 const StateMachineType = @import("state_machine.zig").StateMachineType;
 const ConnectionType = @import("connection.zig").ConnectionType;
@@ -147,7 +147,7 @@ pub fn ServerType(comptime IO: type, comptime Storage: type) type {
 
                 server.state_machine.tracer.trace_log(msg.operation, resp.status, conn.fd);
 
-                const json = schema.encode_response_json(&json_buf, resp);
+                const json = codec.encode_response_json(&json_buf, resp);
                 conn.set_json_response(json, resp.status);
             }
         }
