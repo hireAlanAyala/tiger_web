@@ -49,11 +49,11 @@ pub fn main() !void {
 
     var storage = try SqliteStorage.init("tiger_web.db");
     defer storage.deinit();
-    var sm = StateMachine.init(&storage);
+    var sm = StateMachine.init(&storage, cli.log_trace);
 
     const listen_fd = try IO.open_listener(address);
 
-    var server = Server.init(&io, &sm, listen_fd, cli.log_trace);
+    var server = Server.init(&io, &sm, listen_fd);
 
     log.info("storage=sqlite tick_interval={d}ms connections={d}", .{
         tick_ns / std.time.ns_per_ms,

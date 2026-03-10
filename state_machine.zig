@@ -1,6 +1,7 @@
 const std = @import("std");
 const assert = std.debug.assert;
 const message = @import("message.zig");
+const Tracer = @import("tracer.zig");
 const marks = @import("marks.zig");
 const log = marks.wrap_log(std.log.scoped(.state_machine));
 
@@ -19,8 +20,9 @@ pub fn StateMachineType(comptime Storage: type) type {
         const StateMachine = @This();
 
         storage: *Storage,
+        tracer: Tracer,
 
-        // Prefetch cache — populated by prefetch(), consumed by execute().
+        // Prefetch cache — populated by prefetch(), consumed by commit().
         //
         // Two product caches for different access patterns:
         // - prefetch_product: single-entity lookup (get, create, update, delete)
@@ -35,9 +37,10 @@ pub fn StateMachineType(comptime Storage: type) type {
         prefetch_order_list: message.OrderSummaryList,
         prefetch_result: ?StorageResult,
 
-        pub fn init(storage: *Storage) StateMachine {
+        pub fn init(storage: *Storage, log_trace: bool) StateMachine {
             return .{
                 .storage = storage,
+                .tracer = Tracer.init(log_trace),
                 .prefetch_product = null,
                 .prefetch_product_list = .{ .items = undefined, .len = 0 },
                 .prefetch_products = [_]?message.Product{null} ** message.order_items_max,
@@ -129,27 +132,41 @@ pub fn StateMachineType(comptime Storage: type) type {
             return true;
         }
 
-        /// Phase 2: make decisions from cache slots, apply writes to storage.
-        /// Uses inline dispatch to route operations to per-pattern handlers,
-        /// following TigerBeetle's commit() pattern. The inline keyword makes
-        /// each operation comptime-known inside the handler, enabling:
-        /// - EventType(op) to extract typed events from the Event union
-        /// - Comptime switches inside handlers that prune dead branches
-        /// Must only be called after prefetch() returned true.
-        pub fn execute(self: *StateMachine, msg: message.Message) message.MessageResponse {
+        /// Phase 2: commit — single entry point for the execute phase.
+        /// Handles cross-cutting concerns (transaction wrapping, status
+        /// counting) so individual handlers don't have to.
+        /// Follows TigerBeetle's commit() pattern. Must only be called
+        /// after prefetch() returned true.
+        pub fn commit(self: *StateMachine, msg: message.Message) message.MessageResponse {
             const result = self.prefetch_result.?;
             defer self.reset_prefetch();
 
-            // Storage read error — return 503 regardless of operation.
-            if (result == .err) return message.MessageResponse.storage_error;
+            const resp = if (result == .err)
+                // Storage read error — return 503 regardless of operation.
+                message.MessageResponse.storage_error
+            else resp: {
+                // Wrap the execute phase in a transaction so multi-write
+                // operations (transfer_inventory, delete_collection) are atomic.
+                self.storage.begin();
+                defer self.storage.commit();
+                break :resp self.execute(msg, result);
+            };
 
-            // Wrap the entire execute phase in a transaction so multi-write
-            // operations (transfer_inventory, delete_collection) are atomic.
-            // Single-write operations: no-op — SQLite skips the implicit
-            // transaction when an explicit one is active.
-            self.storage.begin();
-            defer self.storage.commit();
+            // Cross-cutting: count every response status. No handler opts
+            // in or out — the commit loop guarantees it.
+            self.tracer.count(switch (resp.status) {
+                .ok => .requests_ok,
+                .not_found => .requests_not_found,
+                .storage_error => .requests_storage_error,
+                .insufficient_inventory => .requests_insufficient_inventory,
+                .version_conflict => .requests_version_conflict,
+            }, 1);
 
+            return resp;
+        }
+
+        /// Dispatch to per-pattern handlers. Private — only called by commit().
+        fn execute(self: *StateMachine, msg: message.Message, result: StorageResult) message.MessageResponse {
             return switch (msg.operation) {
                 inline .get_product,
                 .get_product_inventory,
@@ -936,13 +953,13 @@ const TestStateMachine = StateMachineType(MemoryStorage);
 
 fn test_execute(sm: *TestStateMachine, msg: message.Message) message.MessageResponse {
     assert(sm.prefetch(msg));
-    return sm.execute(msg);
+    return sm.commit(msg);
 }
 
 test "create and get" {
     var storage = try MemoryStorage.init(std.testing.allocator);
     defer storage.deinit(std.testing.allocator);
-    var sm = TestStateMachine.init(&storage);
+    var sm = TestStateMachine.init(&storage, false);
 
     const test_id: u128 = 0xaabbccdd11223344aabbccdd11223344;
     const create_resp = test_execute(&sm, .{
@@ -968,7 +985,7 @@ test "create and get" {
 test "get missing" {
     var storage = try MemoryStorage.init(std.testing.allocator);
     defer storage.deinit(std.testing.allocator);
-    var sm = TestStateMachine.init(&storage);
+    var sm = TestStateMachine.init(&storage, false);
 
     const resp = test_execute(&sm, .{
         .operation = .get_product,
@@ -981,7 +998,7 @@ test "get missing" {
 test "update" {
     var storage = try MemoryStorage.init(std.testing.allocator);
     defer storage.deinit(std.testing.allocator);
-    var sm = TestStateMachine.init(&storage);
+    var sm = TestStateMachine.init(&storage, false);
 
     const test_id: u128 = 0x11111111111111111111111111111111;
     const create_resp = test_execute(&sm, .{
@@ -1005,7 +1022,7 @@ test "update" {
 test "delete" {
     var storage = try MemoryStorage.init(std.testing.allocator);
     defer storage.deinit(std.testing.allocator);
-    var sm = TestStateMachine.init(&storage);
+    var sm = TestStateMachine.init(&storage, false);
 
     const test_id: u128 = 0x22222222222222222222222222222222;
     const create_resp = test_execute(&sm, .{
@@ -1033,7 +1050,7 @@ test "delete" {
 test "delete missing" {
     var storage = try MemoryStorage.init(std.testing.allocator);
     defer storage.deinit(std.testing.allocator);
-    var sm = TestStateMachine.init(&storage);
+    var sm = TestStateMachine.init(&storage, false);
 
     const resp = test_execute(&sm, .{
         .operation = .delete_product,
@@ -1046,7 +1063,7 @@ test "delete missing" {
 test "soft delete preserves product in storage" {
     var storage = try MemoryStorage.init(std.testing.allocator);
     defer storage.deinit(std.testing.allocator);
-    var sm = TestStateMachine.init(&storage);
+    var sm = TestStateMachine.init(&storage, false);
 
     const test_id: u128 = 0x33333333333333333333333333333333;
     _ = test_execute(&sm, .{
@@ -1093,7 +1110,7 @@ test "soft delete preserves product in storage" {
 test "soft delete increments version" {
     var storage = try MemoryStorage.init(std.testing.allocator);
     defer storage.deinit(std.testing.allocator);
-    var sm = TestStateMachine.init(&storage);
+    var sm = TestStateMachine.init(&storage, false);
 
     const test_id: u128 = 0x44444444444444444444444444444444;
     _ = test_execute(&sm, .{
@@ -1120,7 +1137,7 @@ test "soft delete increments version" {
 test "soft delete is idempotent" {
     var storage = try MemoryStorage.init(std.testing.allocator);
     defer storage.deinit(std.testing.allocator);
-    var sm = TestStateMachine.init(&storage);
+    var sm = TestStateMachine.init(&storage, false);
 
     const test_id: u128 = 0x55555555555555555555555555555555;
     _ = test_execute(&sm, .{
@@ -1149,7 +1166,7 @@ test "soft delete is idempotent" {
 test "list" {
     var storage = try MemoryStorage.init(std.testing.allocator);
     defer storage.deinit(std.testing.allocator);
-    var sm = TestStateMachine.init(&storage);
+    var sm = TestStateMachine.init(&storage, false);
 
     _ = test_execute(&sm, .{ .operation = .create_product, .id = 0, .event = .{ .product = make_test_product(0xaaaa0000000000000000000000000001, "A", 100) } });
     _ = test_execute(&sm, .{ .operation = .create_product, .id = 0, .event = .{ .product = make_test_product(0xaaaa0000000000000000000000000002, "B", 200) } });
@@ -1168,7 +1185,7 @@ test "list" {
 test "list with cursor skips earlier items" {
     var storage = try MemoryStorage.init(std.testing.allocator);
     defer storage.deinit(std.testing.allocator);
-    var sm = TestStateMachine.init(&storage);
+    var sm = TestStateMachine.init(&storage, false);
 
     const id1: u128 = 0x00000000000000000000000000000001;
     const id2: u128 = 0x00000000000000000000000000000002;
@@ -1210,7 +1227,7 @@ test "list with cursor skips earlier items" {
 test "list filters by active status" {
     var storage = try MemoryStorage.init(std.testing.allocator);
     defer storage.deinit(std.testing.allocator);
-    var sm = TestStateMachine.init(&storage);
+    var sm = TestStateMachine.init(&storage, false);
 
     var active = make_test_product(0x01, "Active", 100);
     active.active = true;
@@ -1250,7 +1267,7 @@ test "list filters by active status" {
 test "list filters by price range" {
     var storage = try MemoryStorage.init(std.testing.allocator);
     defer storage.deinit(std.testing.allocator);
-    var sm = TestStateMachine.init(&storage);
+    var sm = TestStateMachine.init(&storage, false);
 
     _ = test_execute(&sm, .{ .operation = .create_product, .id = 0, .event = .{ .product = make_test_product(0x01, "Cheap", 500) } });
     _ = test_execute(&sm, .{ .operation = .create_product, .id = 0, .event = .{ .product = make_test_product(0x02, "Mid", 1500) } });
@@ -1285,7 +1302,7 @@ test "list filters by price range" {
 test "list filters by name prefix" {
     var storage = try MemoryStorage.init(std.testing.allocator);
     defer storage.deinit(std.testing.allocator);
-    var sm = TestStateMachine.init(&storage);
+    var sm = TestStateMachine.init(&storage, false);
 
     _ = test_execute(&sm, .{ .operation = .create_product, .id = 0, .event = .{ .product = make_test_product(0x01, "Widget A", 100) } });
     _ = test_execute(&sm, .{ .operation = .create_product, .id = 0, .event = .{ .product = make_test_product(0x02, "Widget B", 200) } });
@@ -1307,7 +1324,7 @@ test "list filters by name prefix" {
 test "client-provided IDs" {
     var storage = try MemoryStorage.init(std.testing.allocator);
     defer storage.deinit(std.testing.allocator);
-    var sm = TestStateMachine.init(&storage);
+    var sm = TestStateMachine.init(&storage, false);
 
     const id1: u128 = 0xaabbccddaabbccddaabbccddaabbccd1;
     const id2: u128 = 0xaabbccddaabbccddaabbccddaabbccd2;
@@ -1320,7 +1337,7 @@ test "client-provided IDs" {
 test "transfer inventory — success" {
     var storage = try MemoryStorage.init(std.testing.allocator);
     defer storage.deinit(std.testing.allocator);
-    var sm = TestStateMachine.init(&storage);
+    var sm = TestStateMachine.init(&storage, false);
 
     const id_a: u128 = 0xaaaa0000000000000000000000000001;
     const id_b: u128 = 0xaaaa0000000000000000000000000002;
@@ -1354,7 +1371,7 @@ test "transfer inventory — success" {
 test "transfer inventory — insufficient stock" {
     var storage = try MemoryStorage.init(std.testing.allocator);
     defer storage.deinit(std.testing.allocator);
-    var sm = TestStateMachine.init(&storage);
+    var sm = TestStateMachine.init(&storage, false);
 
     const id_a: u128 = 0xbbbb0000000000000000000000000001;
     const id_b: u128 = 0xbbbb0000000000000000000000000002;
@@ -1379,7 +1396,7 @@ test "transfer inventory — insufficient stock" {
 test "transfer inventory — source not found" {
     var storage = try MemoryStorage.init(std.testing.allocator);
     defer storage.deinit(std.testing.allocator);
-    var sm = TestStateMachine.init(&storage);
+    var sm = TestStateMachine.init(&storage, false);
 
     const id_b: u128 = 0xcccc0000000000000000000000000002;
     _ = test_execute(&sm, .{ .operation = .create_product, .id = 0, .event = .{ .product = make_test_product(id_b, "Target", 0) } });
@@ -1395,7 +1412,7 @@ test "transfer inventory — source not found" {
 test "transfer inventory — target not found" {
     var storage = try MemoryStorage.init(std.testing.allocator);
     defer storage.deinit(std.testing.allocator);
-    var sm = TestStateMachine.init(&storage);
+    var sm = TestStateMachine.init(&storage, false);
 
     const id_a: u128 = 0xdddd0000000000000000000000000001;
     var prod_a = make_test_product(id_a, "Source", 0);
@@ -1427,7 +1444,7 @@ fn make_order_request(id: u128, items: []const struct { id: u128, qty: u32 }) me
 test "create order — success" {
     var storage = try MemoryStorage.init(std.testing.allocator);
     defer storage.deinit(std.testing.allocator);
-    var sm = TestStateMachine.init(&storage);
+    var sm = TestStateMachine.init(&storage, false);
 
     const id_a: u128 = 0xaaaa0000000000000000000000000001;
     const id_b: u128 = 0xaaaa0000000000000000000000000002;
@@ -1471,7 +1488,7 @@ test "create order — success" {
 test "create order — insufficient inventory rolls back all" {
     var storage = try MemoryStorage.init(std.testing.allocator);
     defer storage.deinit(std.testing.allocator);
-    var sm = TestStateMachine.init(&storage);
+    var sm = TestStateMachine.init(&storage, false);
 
     const id_a: u128 = 0xbbbb0000000000000000000000000001;
     const id_b: u128 = 0xbbbb0000000000000000000000000002;
@@ -1505,7 +1522,7 @@ test "create order — insufficient inventory rolls back all" {
 test "create order — product not found" {
     var storage = try MemoryStorage.init(std.testing.allocator);
     defer storage.deinit(std.testing.allocator);
-    var sm = TestStateMachine.init(&storage);
+    var sm = TestStateMachine.init(&storage, false);
 
     const id_a: u128 = 0xcccc0000000000000000000000000001;
     var prod_a = make_test_product(id_a, "Exists", 100);
@@ -1527,7 +1544,7 @@ test "create order — product not found" {
 test "create order — persisted and retrievable" {
     var storage = try MemoryStorage.init(std.testing.allocator);
     defer storage.deinit(std.testing.allocator);
-    var sm = TestStateMachine.init(&storage);
+    var sm = TestStateMachine.init(&storage, false);
 
     const id_a: u128 = 0xaaaa0000000000000000000000000001;
     var prod_a = make_test_product(id_a, "Widget", 1000);
@@ -1573,7 +1590,7 @@ test "create order — persisted and retrievable" {
 test "get order — not found" {
     var storage = try MemoryStorage.init(std.testing.allocator);
     defer storage.deinit(std.testing.allocator);
-    var sm = TestStateMachine.init(&storage);
+    var sm = TestStateMachine.init(&storage, false);
 
     const resp = test_execute(&sm, .{
         .operation = .get_order,
@@ -1586,7 +1603,7 @@ test "get order — not found" {
 test "create sets version to 1" {
     var storage = try MemoryStorage.init(std.testing.allocator);
     defer storage.deinit(std.testing.allocator);
-    var sm = TestStateMachine.init(&storage);
+    var sm = TestStateMachine.init(&storage, false);
 
     const test_id: u128 = 0xffff0000000000000000000000000001;
     const resp = test_execute(&sm, .{
@@ -1601,7 +1618,7 @@ test "create sets version to 1" {
 test "update increments version" {
     var storage = try MemoryStorage.init(std.testing.allocator);
     defer storage.deinit(std.testing.allocator);
-    var sm = TestStateMachine.init(&storage);
+    var sm = TestStateMachine.init(&storage, false);
 
     const test_id: u128 = 0xffff0000000000000000000000000002;
     _ = test_execute(&sm, .{
@@ -1625,7 +1642,7 @@ test "update increments version" {
 test "update with wrong version returns conflict" {
     var storage = try MemoryStorage.init(std.testing.allocator);
     defer storage.deinit(std.testing.allocator);
-    var sm = TestStateMachine.init(&storage);
+    var sm = TestStateMachine.init(&storage, false);
 
     const test_id: u128 = 0xffff0000000000000000000000000003;
     _ = test_execute(&sm, .{
@@ -1657,7 +1674,7 @@ test "update with wrong version returns conflict" {
 test "update with version 0 skips check" {
     var storage = try MemoryStorage.init(std.testing.allocator);
     defer storage.deinit(std.testing.allocator);
-    var sm = TestStateMachine.init(&storage);
+    var sm = TestStateMachine.init(&storage, false);
 
     const test_id: u128 = 0xffff0000000000000000000000000004;
     _ = test_execute(&sm, .{
@@ -1681,7 +1698,7 @@ test "update with version 0 skips check" {
 test "duplicate ID rejected" {
     var storage = try MemoryStorage.init(std.testing.allocator);
     defer storage.deinit(std.testing.allocator);
-    var sm = TestStateMachine.init(&storage);
+    var sm = TestStateMachine.init(&storage, false);
 
     const test_id: u128 = 0x33333333333333333333333333333333;
     const r1 = test_execute(&sm, .{ .operation = .create_product, .id = 0, .event = .{ .product = make_test_product(test_id, "A", 1) } });
@@ -1693,7 +1710,7 @@ test "duplicate ID rejected" {
 test "capacity exhaustion — returns storage_error" {
     var storage = try MemoryStorage.init(std.testing.allocator);
     defer storage.deinit(std.testing.allocator);
-    var sm = TestStateMachine.init(&storage);
+    var sm = TestStateMachine.init(&storage, false);
 
     // Fill storage to capacity.
     for (0..MemoryStorage.product_capacity) |i| {

@@ -6,7 +6,6 @@ const schema = @import("schema.zig");
 const http = @import("http.zig");
 const StateMachineType = @import("state_machine.zig").StateMachineType;
 const ConnectionType = @import("connection.zig").ConnectionType;
-const Tracer = @import("tracer.zig");
 const marks = @import("marks.zig");
 const log = marks.wrap_log(std.log.scoped(.server));
 
@@ -27,7 +26,6 @@ pub fn ServerType(comptime IO: type, comptime Storage: type) type {
 
         io: *IO,
         state_machine: *StateMachine,
-        tracer: Tracer,
 
         listen_fd: IO.fd_t,
         accept_completion: IO.Completion,
@@ -45,11 +43,10 @@ pub fn ServerType(comptime IO: type, comptime Storage: type) type {
         pub const request_timeout_ticks = 3000;
 
         /// Initialize the server. Binds and listens on the given address.
-        pub fn init(io: *IO, state_machine: *StateMachine, listen_fd: IO.fd_t, log_trace: bool) Server {
+        pub fn init(io: *IO, state_machine: *StateMachine, listen_fd: IO.fd_t) Server {
             var server = Server{
                 .io = io,
                 .state_machine = state_machine,
-                .tracer = Tracer.init(log_trace),
                 .listen_fd = listen_fd,
                 .accept_completion = .{},
                 .accepting = false,
@@ -137,25 +134,18 @@ pub fn ServerType(comptime IO: type, comptime Storage: type) type {
                 const msg = conn.typed_message orelse unreachable;
                 // Prefetch: fetch data from storage. If storage is busy
                 // (transient), skip this connection — retry next tick.
-                server.tracer.start(.prefetch);
+                server.state_machine.tracer.start(.prefetch);
                 if (!server.state_machine.prefetch(msg)) {
-                    server.tracer.cancel(.prefetch);
+                    server.state_machine.tracer.cancel(.prefetch);
                     continue;
                 }
-                server.tracer.stop(.prefetch, msg.operation);
+                server.state_machine.tracer.stop(.prefetch, msg.operation);
 
-                server.tracer.start(.execute);
-                const resp = server.state_machine.execute(msg);
-                server.tracer.stop(.execute, msg.operation);
+                server.state_machine.tracer.start(.execute);
+                const resp = server.state_machine.commit(msg);
+                server.state_machine.tracer.stop(.execute, msg.operation);
 
-                server.tracer.trace_log(msg.operation, resp.status, conn.fd);
-                server.tracer.count(switch (resp.status) {
-                    .ok => .requests_ok,
-                    .not_found => .requests_not_found,
-                    .storage_error => .requests_storage_error,
-                    .insufficient_inventory => .requests_insufficient_inventory,
-                    .version_conflict => .requests_version_conflict,
-                }, 1);
+                server.state_machine.tracer.trace_log(msg.operation, resp.status, conn.fd);
 
                 const json = schema.encode_response_json(&json_buf, resp);
                 conn.set_json_response(json, resp.status);
@@ -180,12 +170,12 @@ pub fn ServerType(comptime IO: type, comptime Storage: type) type {
                     .accepting, .closing, .free => {},
                 }
             }
-            server.tracer.gauge(.connections_active, connections_active);
-            server.tracer.gauge(.connections_receiving, connections_receiving);
-            server.tracer.gauge(.connections_ready, connections_ready);
-            server.tracer.gauge(.connections_sending, connections_sending);
+            server.state_machine.tracer.gauge(.connections_active, connections_active);
+            server.state_machine.tracer.gauge(.connections_receiving, connections_receiving);
+            server.state_machine.tracer.gauge(.connections_ready, connections_ready);
+            server.state_machine.tracer.gauge(.connections_sending, connections_sending);
 
-            _ = server.tracer.emit();
+            _ = server.state_machine.tracer.emit();
         }
 
         // --- Outbox: send pending responses ---
