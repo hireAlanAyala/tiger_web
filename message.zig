@@ -213,9 +213,24 @@ pub const Product = struct {
     }
 };
 
-/// Parameters for list operations — cursor-based pagination.
+/// Parameters for list operations — pagination and filtering.
 pub const ListParams = struct {
     cursor: u128 = 0, // 0 = first page
+    active_filter: ActiveFilter = .any,
+    price_min: u32 = 0, // 0 = no minimum
+    price_max: u32 = 0, // 0 = no maximum
+    name_prefix: [product_name_max]u8 = [_]u8{0} ** product_name_max,
+    name_prefix_len: u8 = 0,
+
+    pub const ActiveFilter = enum(u2) {
+        any = 0, // no filter
+        active_only = 1,
+        inactive_only = 2,
+    };
+
+    pub fn name_prefix_slice(self: *const ListParams) []const u8 {
+        return self.name_prefix[0..self.name_prefix_len];
+    }
 };
 
 /// Event payload — tagged union carrying operation-specific input data.

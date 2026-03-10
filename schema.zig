@@ -16,8 +16,8 @@ pub fn translate(method: http.Method, raw_path: []const u8, body: []const u8) ?m
     const path_clean = if (query_sep) |q| path[0..q] else path;
     const query_string = if (query_sep) |q| path[q + 1 ..] else "";
 
-    // Parse pagination cursor from ?after=<uuid>.
-    const cursor = parse_query_cursor(query_string);
+    // Parse list parameters from query string.
+    const list_params = parse_list_params(query_string);
 
     // Split path into up to 4 segments: /resource/:id/sub/:sub_id
     const segments = split_path(path_clean) orelse return null;
@@ -26,11 +26,11 @@ pub fn translate(method: http.Method, raw_path: []const u8, body: []const u8) ?m
 
     // Match resource and resolve to flat operation.
     return if (std.mem.eql(u8, segments.collection, "products"))
-        translate_products(method, segments, body, cursor)
+        translate_products(method, segments, body, list_params)
     else if (std.mem.eql(u8, segments.collection, "collections"))
-        translate_collections(method, segments, body, cursor)
+        translate_collections(method, segments, body, list_params)
     else if (std.mem.eql(u8, segments.collection, "orders"))
-        translate_orders(method, segments, body, cursor)
+        translate_orders(method, segments, body, list_params)
     else
         null;
 }
@@ -79,7 +79,7 @@ fn split_path(path: []const u8) ?PathSegments {
     };
 }
 
-fn translate_products(method: http.Method, seg: PathSegments, body: []const u8, cursor: u128) ?message.Message {
+fn translate_products(method: http.Method, seg: PathSegments, body: []const u8, list_params: message.ListParams) ?message.Message {
     // POST /products/:id/transfer-inventory/:target_id — uses sub_id for target.
     if (seg.has_id and seg.sub_resource.len > 0 and method == .post) {
         if (std.mem.eql(u8, seg.sub_resource, "transfer-inventory") and seg.has_sub_id) {
@@ -116,7 +116,7 @@ fn translate_products(method: http.Method, seg: PathSegments, body: []const u8, 
     switch (operation) {
         .list_products => {
             if (body.len != 0) return null;
-            return .{ .operation = operation, .id = 0, .event = .{ .list = .{ .cursor = cursor } } };
+            return .{ .operation = operation, .id = 0, .event = .{ .list = list_params } };
         },
         .get_product, .delete_product, .get_product_inventory => {
             if (body.len != 0) return null;
@@ -134,7 +134,7 @@ fn translate_products(method: http.Method, seg: PathSegments, body: []const u8, 
     }
 }
 
-fn translate_collections(method: http.Method, seg: PathSegments, body: []const u8, cursor: u128) ?message.Message {
+fn translate_collections(method: http.Method, seg: PathSegments, body: []const u8, list_params: message.ListParams) ?message.Message {
     // /collections/:id/products/:product_id — membership operations.
     if (seg.has_id and seg.sub_resource.len > 0) {
         if (!std.mem.eql(u8, seg.sub_resource, "products")) return null;
@@ -164,7 +164,7 @@ fn translate_collections(method: http.Method, seg: PathSegments, body: []const u
     switch (operation) {
         .list_collections => {
             if (body.len != 0) return null;
-            return .{ .operation = operation, .id = 0, .event = .{ .list = .{ .cursor = cursor } } };
+            return .{ .operation = operation, .id = 0, .event = .{ .list = list_params } };
         },
         .get_collection, .delete_collection => {
             if (body.len != 0) return null;
@@ -182,14 +182,14 @@ fn translate_collections(method: http.Method, seg: PathSegments, body: []const u
     }
 }
 
-fn translate_orders(method: http.Method, seg: PathSegments, body: []const u8, cursor: u128) ?message.Message {
+fn translate_orders(method: http.Method, seg: PathSegments, body: []const u8, list_params: message.ListParams) ?message.Message {
     switch (method) {
         .get => {
             if (body.len != 0) return null;
             if (seg.has_id) {
                 return .{ .operation = .get_order, .id = seg.id, .event = .{ .none = {} } };
             } else {
-                return .{ .operation = .list_orders, .id = 0, .event = .{ .list = .{ .cursor = cursor } } };
+                return .{ .operation = .list_orders, .id = 0, .event = .{ .list = list_params } };
             }
         },
         .post => {
@@ -626,25 +626,62 @@ fn json_bool_field(json: []const u8, field: []const u8) ?bool {
     return null;
 }
 
-/// Parse a 32-character hex string as a u128 UUID. Returns null on invalid input.
-/// Accepts exactly 32 lowercase hex characters (no dashes).
-/// Parse ?after=<uuid> from a query string. Returns 0 if absent or malformed.
-fn parse_query_cursor(query: []const u8) u128 {
-    const prefix = "after=";
+/// Extract the value of a query parameter by key. Returns null if not found.
+fn query_param(query: []const u8, key: []const u8) ?[]const u8 {
     var pos: usize = 0;
     while (pos < query.len) {
-        // Find start of next parameter.
         if (pos > 0) pos += 1; // skip '&'
         const rest = query[pos..];
-        if (std.mem.startsWith(u8, rest, prefix)) {
-            const value_start = pos + prefix.len;
+        if (rest.len > key.len and std.mem.startsWith(u8, rest, key) and rest[key.len] == '=') {
+            const value_start = pos + key.len + 1;
             const value_end = std.mem.indexOf(u8, query[value_start..], "&") orelse query.len - value_start;
-            return parse_uuid(query[value_start..][0..value_end]) orelse 0;
+            return query[value_start..][0..value_end];
         }
-        // Skip to next '&'.
         pos = if (std.mem.indexOf(u8, rest, "&")) |amp| pos + amp else query.len;
     }
-    return 0;
+    return null;
+}
+
+/// Parse list parameters from a query string: pagination cursor and filters.
+fn parse_list_params(query: []const u8) message.ListParams {
+    var params = message.ListParams{};
+
+    if (query_param(query, "after")) |v| {
+        params.cursor = parse_uuid(v) orelse 0;
+    }
+    if (query_param(query, "active")) |v| {
+        if (std.mem.eql(u8, v, "true")) {
+            params.active_filter = .active_only;
+        } else if (std.mem.eql(u8, v, "false")) {
+            params.active_filter = .inactive_only;
+        }
+    }
+    if (query_param(query, "price_min")) |v| {
+        params.price_min = parse_query_u32(v);
+    }
+    if (query_param(query, "price_max")) |v| {
+        params.price_max = parse_query_u32(v);
+    }
+    if (query_param(query, "name_prefix")) |v| {
+        if (v.len > 0 and v.len <= message.product_name_max) {
+            @memcpy(params.name_prefix[0..v.len], v);
+            params.name_prefix_len = @intCast(v.len);
+        }
+    }
+
+    return params;
+}
+
+/// Parse a decimal string as u32. Returns 0 on invalid input.
+fn parse_query_u32(s: []const u8) u32 {
+    if (s.len == 0 or s.len > 10) return 0;
+    var result: u32 = 0;
+    for (s) |c| {
+        if (c < '0' or c > '9') return 0;
+        result = std.math.mul(u32, result, 10) catch return 0;
+        result = std.math.add(u32, result, c - '0') catch return 0;
+    }
+    return result;
 }
 
 fn parse_uuid(s: []const u8) ?u128 {
@@ -804,6 +841,28 @@ test "cursor with other query params" {
 test "invalid cursor ignored" {
     const msg = translate(.get, "/products?after=notauuid", "").?;
     try std.testing.expectEqual(msg.event.list.cursor, 0);
+}
+
+test "parses active filter from query string" {
+    const msg1 = translate(.get, "/products?active=true", "").?;
+    try std.testing.expectEqual(msg1.event.list.active_filter, .active_only);
+
+    const msg2 = translate(.get, "/products?active=false", "").?;
+    try std.testing.expectEqual(msg2.event.list.active_filter, .inactive_only);
+
+    const msg3 = translate(.get, "/products?active=maybe", "").?;
+    try std.testing.expectEqual(msg3.event.list.active_filter, .any);
+}
+
+test "parses price range from query string" {
+    const msg = translate(.get, "/products?price_min=500&price_max=2000", "").?;
+    try std.testing.expectEqual(msg.event.list.price_min, 500);
+    try std.testing.expectEqual(msg.event.list.price_max, 2000);
+}
+
+test "parses name prefix from query string" {
+    const msg = translate(.get, "/products?name_prefix=Widget", "").?;
+    try std.testing.expectEqualSlices(u8, msg.event.list.name_prefix_slice(), "Widget");
 }
 
 test "GET rejects non-empty body" {

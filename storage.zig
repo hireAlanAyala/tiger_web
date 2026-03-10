@@ -100,7 +100,13 @@ pub const SqliteStorage = struct {
             "DELETE FROM products WHERE id = ?1;",
         );
         const stmt_list = prepare(real_db,
-            "SELECT id, name, description, price_cents, inventory, version, active FROM products WHERE id > ?1 ORDER BY id LIMIT ?2;",
+            "SELECT id, name, description, price_cents, inventory, version, active FROM products" ++
+            " WHERE id > ?1" ++
+            " AND (?3 < 0 OR active = ?3)" ++
+            " AND price_cents >= ?4" ++
+            " AND (?5 = 0 OR price_cents <= ?5)" ++
+            " AND (?6 = '' OR name LIKE ?6)" ++
+            " ORDER BY id LIMIT ?2;",
         );
 
         // Prepare collection statements.
@@ -267,12 +273,33 @@ pub const SqliteStorage = struct {
         };
     }
 
-    pub fn list(self: *SqliteStorage, out: *[message.list_max]message.Product, out_len: *u32, cursor: u128) StorageResult {
+    pub fn list(self: *SqliteStorage, out: *[message.list_max]message.Product, out_len: *u32, params: message.ListParams) StorageResult {
         const stmt = self.stmt_list;
         defer reset_stmt(stmt);
 
-        bind_uuid(stmt, 1, cursor);
+        bind_uuid(stmt, 1, params.cursor);
         _ = c.sqlite3_bind_int(stmt, 2, message.list_max);
+
+        // Active filter: -1 = any, 1 = active only, 0 = inactive only.
+        const active_val: c_int = switch (params.active_filter) {
+            .any => -1,
+            .active_only => 1,
+            .inactive_only => 0,
+        };
+        _ = c.sqlite3_bind_int(stmt, 3, active_val);
+        _ = c.sqlite3_bind_int(stmt, 4, @intCast(params.price_min));
+        _ = c.sqlite3_bind_int(stmt, 5, @intCast(params.price_max));
+
+        // Name prefix: empty string = no filter, otherwise "prefix%".
+        if (params.name_prefix_len > 0) {
+            var like_buf: [message.product_name_max + 1]u8 = undefined;
+            @memcpy(like_buf[0..params.name_prefix_len], params.name_prefix[0..params.name_prefix_len]);
+            like_buf[params.name_prefix_len] = '%';
+            const like_len = params.name_prefix_len + 1;
+            _ = c.sqlite3_bind_text(stmt, 6, &like_buf, @intCast(like_len), c.SQLITE_TRANSIENT);
+        } else {
+            _ = c.sqlite3_bind_text(stmt, 6, "", 0, c.SQLITE_TRANSIENT);
+        }
         out_len.* = 0;
 
         while (true) {

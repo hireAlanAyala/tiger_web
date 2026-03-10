@@ -62,7 +62,7 @@ pub fn StateMachineType(comptime Storage: type) type {
 
             const result: StorageResult = switch (msg.operation) {
                 .get_product, .get_product_inventory => self.prefetch_read(msg.id),
-                .list_products => self.prefetch_list_products(msg.event.list.cursor),
+                .list_products => self.prefetch_list_products(msg.event.list),
                 .create_product => blk: {
                     const p = msg.event.product;
                     assert(p.id > 0);
@@ -76,7 +76,7 @@ pub fn StateMachineType(comptime Storage: type) type {
                 },
                 .delete_product => self.prefetch_read(msg.id),
                 .get_collection => self.prefetch_collection_with_products(msg.id),
-                .list_collections => self.prefetch_list_all_collections(msg.event.list.cursor),
+                .list_collections => self.prefetch_list_all_collections(msg.event.list),
                 .create_collection => blk: {
                     const col = msg.event.collection;
                     assert(col.id > 0);
@@ -97,7 +97,7 @@ pub fn StateMachineType(comptime Storage: type) type {
                 },
                 .remove_collection_member => self.prefetch_collection_read(msg.id),
                 .get_order => self.prefetch_order_read(msg.id),
-                .list_orders => self.prefetch_list_all_orders(msg.event.list.cursor),
+                .list_orders => self.prefetch_list_all_orders(msg.event.list),
                 .transfer_inventory => blk: {
                     const transfer = msg.event.transfer;
                     assert(msg.id > 0);
@@ -463,8 +463,8 @@ pub fn StateMachineType(comptime Storage: type) type {
             return result;
         }
 
-        fn prefetch_list_products(self: *StateMachine, cursor: u128) StorageResult {
-            return self.storage.list(&self.prefetch_product_list.items, &self.prefetch_product_list.len, cursor);
+        fn prefetch_list_products(self: *StateMachine, params: message.ListParams) StorageResult {
+            return self.storage.list(&self.prefetch_product_list.items, &self.prefetch_product_list.len, params);
         }
 
         /// Multi-key prefetch: read N products by ID into the keyed cache.
@@ -502,8 +502,8 @@ pub fn StateMachineType(comptime Storage: type) type {
             return result;
         }
 
-        fn prefetch_list_all_collections(self: *StateMachine, cursor: u128) StorageResult {
-            return self.storage.list_collections(&self.prefetch_collection_list.items, &self.prefetch_collection_list.len, cursor);
+        fn prefetch_list_all_collections(self: *StateMachine, params: message.ListParams) StorageResult {
+            return self.storage.list_collections(&self.prefetch_collection_list.items, &self.prefetch_collection_list.len, params.cursor);
         }
 
         // --- Order prefetch helpers (read-only) ---
@@ -516,8 +516,8 @@ pub fn StateMachineType(comptime Storage: type) type {
             return result;
         }
 
-        fn prefetch_list_all_orders(self: *StateMachine, cursor: u128) StorageResult {
-            return self.storage.list_orders(&self.prefetch_order_list.items, &self.prefetch_order_list.len, cursor);
+        fn prefetch_list_all_orders(self: *StateMachine, params: message.ListParams) StorageResult {
+            return self.storage.list_orders(&self.prefetch_order_list.items, &self.prefetch_order_list.len, params.cursor);
         }
 
         /// Prefetch both the collection and its member products.
@@ -678,17 +678,37 @@ pub const MemoryStorage = struct {
         return .not_found;
     }
 
-    pub fn list(self: *MemoryStorage, out: *[message.list_max]message.Product, out_len: *u32, cursor: u128) StorageResult {
+    pub fn list(self: *MemoryStorage, out: *[message.list_max]message.Product, out_len: *u32, params: message.ListParams) StorageResult {
         if (self.fault()) |f| return f;
         out_len.* = 0;
         for (self.products) |*entry| {
             if (!entry.occupied) continue;
-            if (entry.product.id <= cursor) continue;
+            if (entry.product.id <= params.cursor) continue;
+            if (!match_product_filters(&entry.product, params)) continue;
             if (out_len.* >= message.list_max) break;
             out[out_len.*] = entry.product;
             out_len.* += 1;
         }
         return .ok;
+    }
+
+    fn match_product_filters(product: *const message.Product, params: message.ListParams) bool {
+        // Active filter.
+        switch (params.active_filter) {
+            .any => {},
+            .active_only => if (!product.active) return false,
+            .inactive_only => if (product.active) return false,
+        }
+        // Price range.
+        if (params.price_min > 0 and product.price_cents < params.price_min) return false;
+        if (params.price_max > 0 and product.price_cents > params.price_max) return false;
+        // Name prefix.
+        if (params.name_prefix_len > 0) {
+            const prefix = params.name_prefix[0..params.name_prefix_len];
+            if (product.name_len < params.name_prefix_len) return false;
+            if (!std.mem.startsWith(u8, product.name[0..product.name_len], prefix)) return false;
+        }
+        return true;
     }
 
     // --- Collection operations ---
@@ -1060,6 +1080,103 @@ test "list with cursor skips earlier items" {
         .event = .{ .list = .{ .cursor = id3 } },
     });
     try std.testing.expectEqual(resp3.result.product_list.len, 0);
+}
+
+test "list filters by active status" {
+    var storage = try MemoryStorage.init(std.testing.allocator);
+    defer storage.deinit(std.testing.allocator);
+    var sm = TestStateMachine.init(&storage);
+
+    var active = make_test_product(0x01, "Active", 100);
+    active.active = true;
+    var inactive = make_test_product(0x02, "Inactive", 200);
+    inactive.active = false;
+
+    _ = test_execute(&sm, .{ .operation = .create_product, .id = 0, .event = .{ .product = active } });
+    _ = test_execute(&sm, .{ .operation = .create_product, .id = 0, .event = .{ .product = inactive } });
+
+    // Filter active only.
+    const r1 = test_execute(&sm, .{
+        .operation = .list_products,
+        .id = 0,
+        .event = .{ .list = .{ .active_filter = .active_only } },
+    });
+    try std.testing.expectEqual(r1.result.product_list.len, 1);
+    try std.testing.expectEqualSlices(u8, r1.result.product_list.items[0].name_slice(), "Active");
+
+    // Filter inactive only.
+    const r2 = test_execute(&sm, .{
+        .operation = .list_products,
+        .id = 0,
+        .event = .{ .list = .{ .active_filter = .inactive_only } },
+    });
+    try std.testing.expectEqual(r2.result.product_list.len, 1);
+    try std.testing.expectEqualSlices(u8, r2.result.product_list.items[0].name_slice(), "Inactive");
+
+    // No filter — both returned.
+    const r3 = test_execute(&sm, .{
+        .operation = .list_products,
+        .id = 0,
+        .event = .{ .list = .{} },
+    });
+    try std.testing.expectEqual(r3.result.product_list.len, 2);
+}
+
+test "list filters by price range" {
+    var storage = try MemoryStorage.init(std.testing.allocator);
+    defer storage.deinit(std.testing.allocator);
+    var sm = TestStateMachine.init(&storage);
+
+    _ = test_execute(&sm, .{ .operation = .create_product, .id = 0, .event = .{ .product = make_test_product(0x01, "Cheap", 500) } });
+    _ = test_execute(&sm, .{ .operation = .create_product, .id = 0, .event = .{ .product = make_test_product(0x02, "Mid", 1500) } });
+    _ = test_execute(&sm, .{ .operation = .create_product, .id = 0, .event = .{ .product = make_test_product(0x03, "Expensive", 5000) } });
+
+    // price_min only.
+    const r1 = test_execute(&sm, .{
+        .operation = .list_products,
+        .id = 0,
+        .event = .{ .list = .{ .price_min = 1000 } },
+    });
+    try std.testing.expectEqual(r1.result.product_list.len, 2);
+
+    // price_max only.
+    const r2 = test_execute(&sm, .{
+        .operation = .list_products,
+        .id = 0,
+        .event = .{ .list = .{ .price_max = 1000 } },
+    });
+    try std.testing.expectEqual(r2.result.product_list.len, 1);
+
+    // Both min and max.
+    const r3 = test_execute(&sm, .{
+        .operation = .list_products,
+        .id = 0,
+        .event = .{ .list = .{ .price_min = 1000, .price_max = 2000 } },
+    });
+    try std.testing.expectEqual(r3.result.product_list.len, 1);
+    try std.testing.expectEqualSlices(u8, r3.result.product_list.items[0].name_slice(), "Mid");
+}
+
+test "list filters by name prefix" {
+    var storage = try MemoryStorage.init(std.testing.allocator);
+    defer storage.deinit(std.testing.allocator);
+    var sm = TestStateMachine.init(&storage);
+
+    _ = test_execute(&sm, .{ .operation = .create_product, .id = 0, .event = .{ .product = make_test_product(0x01, "Widget A", 100) } });
+    _ = test_execute(&sm, .{ .operation = .create_product, .id = 0, .event = .{ .product = make_test_product(0x02, "Widget B", 200) } });
+    _ = test_execute(&sm, .{ .operation = .create_product, .id = 0, .event = .{ .product = make_test_product(0x03, "Gadget", 300) } });
+
+    var params = message.ListParams{};
+    const prefix = "Widget";
+    @memcpy(params.name_prefix[0..prefix.len], prefix);
+    params.name_prefix_len = prefix.len;
+
+    const r1 = test_execute(&sm, .{
+        .operation = .list_products,
+        .id = 0,
+        .event = .{ .list = params },
+    });
+    try std.testing.expectEqual(r1.result.product_list.len, 2);
 }
 
 test "client-provided IDs" {
