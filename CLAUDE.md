@@ -9,8 +9,12 @@ sh zig/download.sh          # one-time: download Zig 0.14.1
 ./zig/zig build run          # run the server (default port 3000)
 ./zig/zig build run -- --log-debug          # enable debug log output
 ./zig/zig build run -- --log-debug --log-trace  # per-request trace logs
-./zig/zig build unit-test    # unit tests (message, state_machine, http, marks, schema)
+./zig/zig build unit-test    # unit tests (message, state_machine, http, marks, codec)
 ./zig/zig build test         # simulation tests (PRNG-driven, full stack)
+./zig/zig build fuzz -- state_machine              # random seed
+./zig/zig build fuzz -- state_machine 12345        # specific seed
+./zig/zig build fuzz -- --events-max=1000 state_machine  # with options
+./zig/zig build fuzz -- smoke                      # all fuzzers, small event counts
 ```
 
 ## Architecture
@@ -18,7 +22,7 @@ sh zig/download.sh          # one-time: download Zig 0.14.1
 Single-threaded event loop using epoll. No allocations after startup. Request pipeline with prefetch/execute split:
 
 ```
-http.zig → schema.zig → message.zig → state_machine.zig → storage
+http.zig → codec.zig → message.zig → state_machine.zig → storage
 (parse HTTP)  (route + JSON → typed)  (types)  (prefetch + execute)  (SQLite or in-memory)
 ```
 
@@ -28,7 +32,7 @@ http.zig → schema.zig → message.zig → state_machine.zig → storage
 | `server.zig` | `ServerType(IO, Storage)` — accepts connections, drives prefetch→execute |
 | `connection.zig` | Per-connection state machine (accepting → receiving → ready → sending) |
 | `http.zig` | HTTP/1.0+1.1 parser and response encoder |
-| `schema.zig` | Route parsing, JSON ↔ typed struct translation, UUID parsing |
+| `codec.zig` | Route parsing, JSON ↔ typed struct translation, UUID parsing |
 | `message.zig` | Types: Product, ProductCollection, flat Operation enum with EventType, Message, MessageResponse |
 | `state_machine.zig` | `StateMachineType(Storage)` — inline dispatch in execute, flat switch in prefetch, `MemoryStorage` |
 | `storage.zig` | `SqliteStorage` — SQLite backend with prepared statements, WAL mode |
@@ -36,6 +40,12 @@ http.zig → schema.zig → message.zig → state_machine.zig → storage
 | `marks.zig` | Coverage marks — links log sites to test assertions |
 | `tracer.zig` | Minimal tracer — gauges, counters, span timings, trace logging. All metrics flow through `emit()` |
 | `sim.zig` | `SimIO` + `MemoryStorage` with PRNG-driven fault injection |
+| `fuzz_tests.zig` | Fuzz test dispatcher — single binary routing to all fuzzers, matches TB's fuzz_tests.zig |
+| `fuzz_lib.zig` | Shared fuzz utilities — `FuzzArgs` struct, matches TB's testing/fuzz.zig |
+| `fuzz.zig` | State machine fuzzer — bypasses HTTP, calls prefetch/commit directly |
+| `codec_fuzz.zig` | Codec fuzzer — throws random methods/paths/JSON at codec.translate, random responses at encode |
+| `prng.zig` | Xoshiro256++ PRNG with Ratio, Combination, Reservoir — matches TigerBeetle's stdx.PRNG |
+| `flags.zig` | CLI argument parser — struct-driven `--key=value` parsing, ported from TigerBeetle's stdx/flags.zig |
 
 ## Conventions
 
