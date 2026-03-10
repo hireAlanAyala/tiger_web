@@ -80,6 +80,14 @@ pub fn ratio(numerator: u64, denominator: u64) Ratio {
     return .{ .numerator = numerator, .denominator = denominator };
 }
 
+/// Bridge to Zig's built-in test seed for reproducible unit tests.
+/// Usage: `var prng = PRNG.from_seed_testing();`
+/// Seed is passed via `--seed=N` to the test binary; defaults vary per run.
+pub fn from_seed_testing() PRNG {
+    comptime assert(@import("builtin").is_test);
+    return .from_seed(std.testing.random_seed);
+}
+
 pub fn from_seed(seed: u64) PRNG {
     var s = seed;
     return .{ .s = .{

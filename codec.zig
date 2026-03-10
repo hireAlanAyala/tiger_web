@@ -1119,4 +1119,72 @@ test "encode_response_json — inventory" {
     try std.testing.expectEqualSlices(u8, json, "{\"inventory\":42}");
 }
 
+// =====================================================================
+// Seeded roundtrip tests — explore different inputs each run.
+// Reproduce: ./zig/zig build unit-test -- --seed=<N>
+// =====================================================================
 
+const PRNG = @import("prng.zig");
+
+test "seeded: UUID parse/write roundtrip" {
+    var prng = PRNG.from_seed_testing();
+    for (0..1000) |_| {
+        const val = prng.int(u128);
+        var buf: [32]u8 = undefined;
+        write_uuid_to_buf(&buf, val);
+        const parsed = parse_uuid(&buf).?;
+        try std.testing.expectEqual(parsed, val);
+    }
+}
+
+test "seeded: format_u32 roundtrip" {
+    var prng = PRNG.from_seed_testing();
+    for (0..1000) |_| {
+        const val = prng.int(u32);
+        var buf: [10]u8 = undefined;
+        const s = format_u32(&buf, val);
+        const parsed = std.fmt.parseInt(u32, s, 10) catch unreachable;
+        try std.testing.expectEqual(parsed, val);
+    }
+}
+
+test "seeded: format_u64 roundtrip" {
+    var prng = PRNG.from_seed_testing();
+    for (0..1000) |_| {
+        const val = prng.int(u64);
+        var buf: [20]u8 = undefined;
+        const s = format_u64(&buf, val);
+        const parsed = std.fmt.parseInt(u64, s, 10) catch unreachable;
+        try std.testing.expectEqual(parsed, val);
+    }
+}
+
+test "seeded: translate valid product JSON roundtrip" {
+    var prng = PRNG.from_seed_testing();
+    const hex = "0123456789abcdef";
+    for (0..200) |_| {
+        // Generate a random UUID string.
+        var uuid_buf: [32]u8 = undefined;
+        const id = prng.int(u128) | 1; // ensure non-zero
+        write_uuid_to_buf(&uuid_buf, id);
+
+        // Generate a random name (1..8 alpha chars).
+        var name_buf: [8]u8 = undefined;
+        const name_len = prng.range_inclusive(u32, 1, 8);
+        for (name_buf[0..name_len]) |*c| {
+            c.* = hex[prng.int_inclusive(u8, 15)];
+        }
+        const name = name_buf[0..name_len];
+
+        // Build JSON body.
+        var body_buf: [256]u8 = undefined;
+        const body = std.fmt.bufPrint(&body_buf, "{{\"id\":\"{s}\",\"name\":\"{s}\",\"price_cents\":{d}}}", .{
+            uuid_buf, name, prng.int_inclusive(u32, 99999),
+        }) catch unreachable;
+
+        const msg = translate(.post, "/products", body) orelse continue;
+        try std.testing.expectEqual(msg.operation, .create_product);
+        try std.testing.expectEqual(msg.event.product.id, id);
+        try std.testing.expectEqualSlices(u8, msg.event.product.name_slice(), name);
+    }
+}
