@@ -355,8 +355,6 @@ pub fn StateMachineType(comptime Storage: type) type {
             if (result == .not_found) return message.MessageResponse.not_found;
             assert(result == .ok);
             const write_result = self.storage.remove_from_collection(id, product_id);
-            // remove_from_collection either finds the membership (.ok) or doesn't (.not_found).
-            // No capacity concern (it's a delete), no fault injection on writes.
             assert(write_result == .ok or write_result == .not_found);
             if (write_result == .not_found) return message.MessageResponse.not_found;
             return message.MessageResponse.empty_ok;

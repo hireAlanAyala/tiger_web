@@ -1110,3 +1110,5 @@ test "encode_response_json — inventory" {
     const json = encode_response_json(&buf, resp);
     try std.testing.expectEqualSlices(u8, json, "{\"inventory\":42}");
 }
+
+
