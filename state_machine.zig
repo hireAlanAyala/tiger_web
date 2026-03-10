@@ -170,8 +170,9 @@ pub fn StateMachineType(comptime Storage: type) type {
                     result,
                 ),
 
-                inline .delete_product,
-                .delete_collection,
+                .delete_product => self.execute_soft_delete_product(msg.id, result),
+
+                inline .delete_collection,
                 => |comptime_op| self.execute_delete(comptime_op, msg.id, result),
 
                 .update_product => self.execute_update_product(
@@ -214,9 +215,16 @@ pub fn StateMachineType(comptime Storage: type) type {
 
         /// Get-by-ID pattern: check not_found, return cached entity.
         /// Shared by get_product, get_product_inventory, get_collection, get_order.
+        /// Products use soft delete — inactive products return 404.
         fn execute_get(self: *StateMachine, comptime op: message.Operation, result: StorageResult) message.MessageResponse {
             if (result == .not_found) return message.MessageResponse.not_found;
             assert(result == .ok);
+
+            // Soft delete: inactive products are treated as not found.
+            if (op == .get_product or op == .get_product_inventory) {
+                if (!self.prefetch_product.?.active) return message.MessageResponse.not_found;
+            }
+
             return .{
                 .status = .ok,
                 .result = switch (op) {
@@ -284,15 +292,31 @@ pub fn StateMachineType(comptime Storage: type) type {
             return self.commit_write(write_result, ok_result);
         }
 
-        /// Delete pattern: check exists, delete, return empty.
-        /// Shared by delete_product, delete_collection.
-        /// Prefetch proved the entity exists — delete is infallible.
+        /// Soft delete: set active = false, increment version.
+        /// Already-inactive products return 404 (idempotent).
+        fn execute_soft_delete_product(self: *StateMachine, id: u128, result: StorageResult) message.MessageResponse {
+            if (result == .not_found) return message.MessageResponse.not_found;
+            assert(result == .ok);
+
+            var product = self.prefetch_product.?;
+            assert(product.id == id);
+
+            if (!product.active) return message.MessageResponse.not_found;
+
+            product.active = false;
+            product.version += 1;
+            assert(self.storage.update(id, &product) == .ok);
+
+            return message.MessageResponse.empty_ok;
+        }
+
+        /// Hard delete: remove the entity from storage.
+        /// Used by delete_collection (collections don't have soft delete).
         fn execute_delete(self: *StateMachine, comptime op: message.Operation, id: u128, result: StorageResult) message.MessageResponse {
             if (result == .not_found) return message.MessageResponse.not_found;
             assert(result == .ok);
 
             assert(switch (op) {
-                .delete_product => self.storage.delete(id),
                 .delete_collection => self.storage.delete_collection(id),
                 else => unreachable,
             } == .ok);
@@ -1019,6 +1043,109 @@ test "delete missing" {
         .event = .{ .none = {} },
     });
     try std.testing.expectEqual(resp.status, .not_found);
+}
+
+test "soft delete preserves product in storage" {
+    var storage = try MemoryStorage.init(std.testing.allocator);
+    defer storage.deinit(std.testing.allocator);
+    var sm = TestStateMachine.init(&storage);
+
+    const test_id: u128 = 0x33333333333333333333333333333333;
+    _ = test_execute(&sm, .{
+        .operation = .create_product,
+        .id = 0,
+        .event = .{ .product = make_test_product(test_id, "SoftDel", 100) },
+    });
+
+    // Delete (soft).
+    const del_resp = test_execute(&sm, .{
+        .operation = .delete_product,
+        .id = test_id,
+        .event = .{ .none = {} },
+    });
+    try std.testing.expectEqual(del_resp.status, .ok);
+
+    // GET returns 404.
+    const get_resp = test_execute(&sm, .{
+        .operation = .get_product,
+        .id = test_id,
+        .event = .{ .none = {} },
+    });
+    try std.testing.expectEqual(get_resp.status, .not_found);
+
+    // Default list (active_only) excludes it.
+    const list_resp = test_execute(&sm, .{
+        .operation = .list_products,
+        .id = 0,
+        .event = .{ .list = .{ .active_filter = .active_only } },
+    });
+    try std.testing.expectEqual(list_resp.result.product_list.len, 0);
+
+    // List with inactive_only shows it.
+    const list_inactive = test_execute(&sm, .{
+        .operation = .list_products,
+        .id = 0,
+        .event = .{ .list = .{ .active_filter = .inactive_only } },
+    });
+    try std.testing.expectEqual(list_inactive.result.product_list.len, 1);
+    try std.testing.expectEqualSlices(u8, list_inactive.result.product_list.items[0].name_slice(), "SoftDel");
+    try std.testing.expectEqual(list_inactive.result.product_list.items[0].active, false);
+}
+
+test "soft delete increments version" {
+    var storage = try MemoryStorage.init(std.testing.allocator);
+    defer storage.deinit(std.testing.allocator);
+    var sm = TestStateMachine.init(&storage);
+
+    const test_id: u128 = 0x44444444444444444444444444444444;
+    _ = test_execute(&sm, .{
+        .operation = .create_product,
+        .id = 0,
+        .event = .{ .product = make_test_product(test_id, "Versioned", 100) },
+    });
+
+    _ = test_execute(&sm, .{
+        .operation = .delete_product,
+        .id = test_id,
+        .event = .{ .none = {} },
+    });
+
+    // Check version incremented via inactive list.
+    const list_resp = test_execute(&sm, .{
+        .operation = .list_products,
+        .id = 0,
+        .event = .{ .list = .{ .active_filter = .inactive_only } },
+    });
+    try std.testing.expectEqual(list_resp.result.product_list.items[0].version, 2);
+}
+
+test "soft delete is idempotent" {
+    var storage = try MemoryStorage.init(std.testing.allocator);
+    defer storage.deinit(std.testing.allocator);
+    var sm = TestStateMachine.init(&storage);
+
+    const test_id: u128 = 0x55555555555555555555555555555555;
+    _ = test_execute(&sm, .{
+        .operation = .create_product,
+        .id = 0,
+        .event = .{ .product = make_test_product(test_id, "Idempotent", 100) },
+    });
+
+    // First delete succeeds.
+    const r1 = test_execute(&sm, .{
+        .operation = .delete_product,
+        .id = test_id,
+        .event = .{ .none = {} },
+    });
+    try std.testing.expectEqual(r1.status, .ok);
+
+    // Second delete returns 404 (already inactive).
+    const r2 = test_execute(&sm, .{
+        .operation = .delete_product,
+        .id = test_id,
+        .event = .{ .none = {} },
+    });
+    try std.testing.expectEqual(r2.status, .not_found);
 }
 
 test "list" {

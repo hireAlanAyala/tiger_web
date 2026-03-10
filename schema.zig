@@ -24,9 +24,12 @@ pub fn translate(method: http.Method, raw_path: []const u8, body: []const u8) ?m
 
     if (method == .options) return null;
 
+    // Products default to active_only when ?active is not specified.
+    const has_active_param = query_param(query_string, "active") != null;
+
     // Match resource and resolve to flat operation.
     return if (std.mem.eql(u8, segments.collection, "products"))
-        translate_products(method, segments, body, list_params)
+        translate_products(method, segments, body, list_params, has_active_param)
     else if (std.mem.eql(u8, segments.collection, "collections"))
         translate_collections(method, segments, body, list_params)
     else if (std.mem.eql(u8, segments.collection, "orders"))
@@ -79,7 +82,7 @@ fn split_path(path: []const u8) ?PathSegments {
     };
 }
 
-fn translate_products(method: http.Method, seg: PathSegments, body: []const u8, list_params: message.ListParams) ?message.Message {
+fn translate_products(method: http.Method, seg: PathSegments, body: []const u8, list_params: message.ListParams, has_active_param: bool) ?message.Message {
     // POST /products/:id/transfer-inventory/:target_id — uses sub_id for target.
     if (seg.has_id and seg.sub_resource.len > 0 and method == .post) {
         if (std.mem.eql(u8, seg.sub_resource, "transfer-inventory") and seg.has_sub_id) {
@@ -116,7 +119,11 @@ fn translate_products(method: http.Method, seg: PathSegments, body: []const u8, 
     switch (operation) {
         .list_products => {
             if (body.len != 0) return null;
-            return .{ .operation = operation, .id = 0, .event = .{ .list = list_params } };
+            var params = list_params;
+            // Default to active_only — soft-deleted items hidden unless
+            // the client explicitly passes ?active=false or ?active=all.
+            if (!has_active_param) params.active_filter = .active_only;
+            return .{ .operation = operation, .id = 0, .event = .{ .list = params } };
         },
         .get_product, .delete_product, .get_product_inventory => {
             if (body.len != 0) return null;
@@ -655,6 +662,7 @@ fn parse_list_params(query: []const u8) message.ListParams {
         } else if (std.mem.eql(u8, v, "false")) {
             params.active_filter = .inactive_only;
         }
+        // "all" or any unrecognized value → .any (no filter).
     }
     if (query_param(query, "price_min")) |v| {
         params.price_min = parse_query_u32(v);
@@ -754,6 +762,12 @@ test "GET /products (list)" {
     try std.testing.expectEqual(msg.operation, .list_products);
     try std.testing.expectEqual(msg.id, 0);
     try std.testing.expectEqual(msg.event.list.cursor, 0);
+    try std.testing.expectEqual(msg.event.list.active_filter, .active_only);
+}
+
+test "GET /products?active=all shows all" {
+    const msg = translate(.get, "/products?active=all", "").?;
+    try std.testing.expectEqual(msg.event.list.active_filter, .any);
 }
 
 test "GET /products/:id (get)" {
@@ -825,6 +839,8 @@ test "strips query string" {
     const msg = translate(.get, "/products?page=1", "").?;
     try std.testing.expectEqual(msg.operation, .list_products);
     try std.testing.expectEqual(msg.event.list.cursor, 0);
+    // Products default to active_only when ?active not specified.
+    try std.testing.expectEqual(msg.event.list.active_filter, .active_only);
 }
 
 test "parses after cursor from query string" {
