@@ -263,6 +263,7 @@ fn parse_product_json(body: []const u8) ?message.Product {
         .description_len = 0,
         .price_cents = 0,
         .inventory = 0,
+        .version = 0,
         .active = true,
     };
 
@@ -292,6 +293,11 @@ fn parse_product_json(body: []const u8) ?message.Product {
     // inventory is optional (defaults to 0).
     if (json_u32_field(body, "inventory")) |inv| {
         product.inventory = inv;
+    }
+
+    // version is optional (defaults to 0 — ignored on create, required on update).
+    if (json_u32_field(body, "version")) |v| {
+        product.version = v;
     }
 
     // active is optional (defaults to true).
@@ -336,6 +342,10 @@ pub fn encode_response_json(buf: []u8, resp: message.MessageResponse) []const u8
         },
         .insufficient_inventory => {
             w.raw("{\"error\":\"insufficient_inventory\"}");
+            return buf[0..w.pos];
+        },
+        .version_conflict => {
+            w.raw("{\"error\":\"version_conflict\"}");
             return buf[0..w.pos];
         },
         .storage_error => {
@@ -437,6 +447,8 @@ fn encode_product(w: *JsonWriter, p: *const message.Product) void {
     w.write_u32(p.price_cents);
     w.raw(",\"inventory\":");
     w.write_u32(p.inventory);
+    w.raw(",\"version\":");
+    w.write_u32(p.version);
     w.raw(",\"active\":");
     w.raw(if (p.active) "true" else "false");
     w.raw("}");
@@ -779,6 +791,7 @@ test "encode_response_json — single product" {
         .description_len = 4,
         .price_cents = 999,
         .inventory = 10,
+        .version = 1,
         .active = true,
     };
     @memcpy(p.name[0..6], "Widget");

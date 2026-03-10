@@ -260,16 +260,22 @@ pub fn StateMachineType(comptime Storage: type) type {
             if (result == .ok) return message.MessageResponse.storage_error;
             assert(result == .not_found);
 
+            // For products, set initial version.
+            var entity = event;
+            if (op == .create_product) {
+                entity.version = 1;
+            }
+
             const write_result = switch (op) {
-                .create_product => self.storage.put(&event),
-                .create_collection => self.storage.put_collection(&event),
+                .create_product => self.storage.put(&entity),
+                .create_collection => self.storage.put_collection(&entity),
                 else => unreachable,
             };
 
             const ok_result: message.Result = switch (op) {
-                .create_product => .{ .product = event },
+                .create_product => .{ .product = entity },
                 .create_collection => .{ .collection = .{
-                    .collection = event,
+                    .collection = entity,
                     .products = .{ .items = undefined, .len = 0 },
                 } },
                 else => unreachable,
@@ -294,12 +300,23 @@ pub fn StateMachineType(comptime Storage: type) type {
             return .{ .status = .ok, .result = .{ .empty = {} } };
         }
 
-        /// Prefetch proved the product exists — update is infallible.
+        /// Update with optimistic concurrency: client provides expected version,
+        /// server rejects if it doesn't match. Version increments on success.
         fn execute_update_product(self: *StateMachine, id: u128, event: message.Product, result: StorageResult) message.MessageResponse {
             if (result == .not_found) return message.MessageResponse.not_found;
             assert(result == .ok);
+
+            const current = self.prefetch_product.?;
+            assert(current.id == id);
+
+            // Version 0 means "no version check" (backwards compatibility).
+            if (event.version != 0 and event.version != current.version) {
+                return .{ .status = .version_conflict, .result = .{ .empty = {} } };
+            }
+
             var updated = event;
             updated.id = id;
+            updated.version = current.version + 1;
             assert(self.storage.update(id, &updated) == .ok);
             return .{ .status = .ok, .result = .{ .product = updated } };
         }
@@ -863,6 +880,7 @@ fn make_test_product(id: u128, name: []const u8, price: u32) message.Product {
         .description_len = 0,
         .price_cents = price,
         .inventory = 0,
+        .version = 0,
         .active = true,
     };
     @memcpy(p.name[0..name.len], name);
@@ -1276,6 +1294,101 @@ test "get order — not found" {
         .event = .{ .none = {} },
     });
     try std.testing.expectEqual(resp.status, .not_found);
+}
+
+test "create sets version to 1" {
+    var storage = try MemoryStorage.init(std.testing.allocator);
+    defer storage.deinit(std.testing.allocator);
+    var sm = TestStateMachine.init(&storage);
+
+    const test_id: u128 = 0xffff0000000000000000000000000001;
+    const resp = test_execute(&sm, .{
+        .operation = .create_product,
+        .id = 0,
+        .event = .{ .product = make_test_product(test_id, "Versioned", 100) },
+    });
+    try std.testing.expectEqual(resp.status, .ok);
+    try std.testing.expectEqual(resp.result.product.version, 1);
+}
+
+test "update increments version" {
+    var storage = try MemoryStorage.init(std.testing.allocator);
+    defer storage.deinit(std.testing.allocator);
+    var sm = TestStateMachine.init(&storage);
+
+    const test_id: u128 = 0xffff0000000000000000000000000002;
+    _ = test_execute(&sm, .{
+        .operation = .create_product,
+        .id = 0,
+        .event = .{ .product = make_test_product(test_id, "V1", 100) },
+    });
+
+    // Update with correct version.
+    var update = make_test_product(0, "V2", 200);
+    update.version = 1;
+    const resp = test_execute(&sm, .{
+        .operation = .update_product,
+        .id = test_id,
+        .event = .{ .product = update },
+    });
+    try std.testing.expectEqual(resp.status, .ok);
+    try std.testing.expectEqual(resp.result.product.version, 2);
+}
+
+test "update with wrong version returns conflict" {
+    var storage = try MemoryStorage.init(std.testing.allocator);
+    defer storage.deinit(std.testing.allocator);
+    var sm = TestStateMachine.init(&storage);
+
+    const test_id: u128 = 0xffff0000000000000000000000000003;
+    _ = test_execute(&sm, .{
+        .operation = .create_product,
+        .id = 0,
+        .event = .{ .product = make_test_product(test_id, "Original", 100) },
+    });
+
+    // Update with stale version.
+    var update = make_test_product(0, "Stale", 999);
+    update.version = 5; // current is 1
+    const resp = test_execute(&sm, .{
+        .operation = .update_product,
+        .id = test_id,
+        .event = .{ .product = update },
+    });
+    try std.testing.expectEqual(resp.status, .version_conflict);
+
+    // Verify product was not modified.
+    const get_resp = test_execute(&sm, .{
+        .operation = .get_product,
+        .id = test_id,
+        .event = .{ .none = {} },
+    });
+    try std.testing.expectEqualSlices(u8, get_resp.result.product.name_slice(), "Original");
+    try std.testing.expectEqual(get_resp.result.product.version, 1);
+}
+
+test "update with version 0 skips check" {
+    var storage = try MemoryStorage.init(std.testing.allocator);
+    defer storage.deinit(std.testing.allocator);
+    var sm = TestStateMachine.init(&storage);
+
+    const test_id: u128 = 0xffff0000000000000000000000000004;
+    _ = test_execute(&sm, .{
+        .operation = .create_product,
+        .id = 0,
+        .event = .{ .product = make_test_product(test_id, "NoCheck", 100) },
+    });
+
+    // Update without version (defaults to 0) — should succeed.
+    var update = make_test_product(0, "Updated", 200);
+    update.version = 0;
+    const resp = test_execute(&sm, .{
+        .operation = .update_product,
+        .id = test_id,
+        .event = .{ .product = update },
+    });
+    try std.testing.expectEqual(resp.status, .ok);
+    try std.testing.expectEqual(resp.result.product.version, 2);
 }
 
 test "duplicate ID rejected" {

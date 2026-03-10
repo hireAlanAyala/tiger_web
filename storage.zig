@@ -55,6 +55,7 @@ pub const SqliteStorage = struct {
             "description TEXT NOT NULL DEFAULT ''," ++
             "price_cents INTEGER NOT NULL DEFAULT 0," ++
             "inventory INTEGER NOT NULL DEFAULT 0," ++
+            "version INTEGER NOT NULL DEFAULT 1," ++
             "active INTEGER NOT NULL DEFAULT 1" ++
             ");");
 
@@ -87,19 +88,19 @@ pub const SqliteStorage = struct {
 
         // Prepare product statements.
         const stmt_get = prepare(real_db,
-            "SELECT id, name, description, price_cents, inventory, active FROM products WHERE id = ?1;",
+            "SELECT id, name, description, price_cents, inventory, version, active FROM products WHERE id = ?1;",
         );
         const stmt_put = prepare(real_db,
-            "INSERT INTO products (id, name, description, price_cents, inventory, active) VALUES (?1, ?2, ?3, ?4, ?5, ?6);",
+            "INSERT INTO products (id, name, description, price_cents, inventory, version, active) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7);",
         );
         const stmt_update = prepare(real_db,
-            "UPDATE products SET name = ?2, description = ?3, price_cents = ?4, inventory = ?5, active = ?6 WHERE id = ?1;",
+            "UPDATE products SET name = ?2, description = ?3, price_cents = ?4, inventory = ?5, version = ?6, active = ?7 WHERE id = ?1;",
         );
         const stmt_delete = prepare(real_db,
             "DELETE FROM products WHERE id = ?1;",
         );
         const stmt_list = prepare(real_db,
-            "SELECT id, name, description, price_cents, inventory, active FROM products LIMIT ?1;",
+            "SELECT id, name, description, price_cents, inventory, version, active FROM products LIMIT ?1;",
         );
 
         // Prepare collection statements.
@@ -125,7 +126,7 @@ pub const SqliteStorage = struct {
             "DELETE FROM collection_members WHERE collection_id = ?1;",
         );
         const stmt_list_members = prepare(real_db,
-            "SELECT p.id, p.name, p.description, p.price_cents, p.inventory, p.active " ++
+            "SELECT p.id, p.name, p.description, p.price_cents, p.inventory, p.version, p.active " ++
             "FROM collection_members cm JOIN products p ON cm.product_id = p.id WHERE cm.collection_id = ?1 LIMIT ?2;",
         );
 
@@ -582,7 +583,8 @@ pub const SqliteStorage = struct {
         _ = c.sqlite3_bind_text(stmt, 3, product.description[0..product.description_len].ptr, @intCast(product.description_len), c.SQLITE_TRANSIENT);
         _ = c.sqlite3_bind_int(stmt, 4, @intCast(product.price_cents));
         _ = c.sqlite3_bind_int(stmt, 5, @intCast(product.inventory));
-        _ = c.sqlite3_bind_int(stmt, 6, if (product.active) @as(c_int, 1) else @as(c_int, 0));
+        _ = c.sqlite3_bind_int(stmt, 6, @intCast(product.version));
+        _ = c.sqlite3_bind_int(stmt, 7, if (product.active) @as(c_int, 1) else @as(c_int, 0));
     }
 
     fn read_product(stmt: *c.sqlite3_stmt, out: *message.Product) void {
@@ -612,7 +614,8 @@ pub const SqliteStorage = struct {
         // Numeric fields.
         out.price_cents = @intCast(c.sqlite3_column_int(stmt, 3));
         out.inventory = @intCast(c.sqlite3_column_int(stmt, 4));
-        out.active = c.sqlite3_column_int(stmt, 5) != 0;
+        out.version = @intCast(c.sqlite3_column_int(stmt, 5));
+        out.active = c.sqlite3_column_int(stmt, 6) != 0;
     }
 
     fn read_collection(stmt: *c.sqlite3_stmt, out: *message.ProductCollection) void {

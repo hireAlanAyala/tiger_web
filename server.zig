@@ -154,6 +154,7 @@ pub fn ServerType(comptime IO: type, comptime Storage: type) type {
                     .not_found => .requests_not_found,
                     .storage_error => .requests_storage_error,
                     .insufficient_inventory => .requests_insufficient_inventory,
+                    .version_conflict => .requests_version_conflict,
                 }, 1);
 
                 const json = schema.encode_response_json(&json_buf, resp);

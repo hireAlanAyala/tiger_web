@@ -135,6 +135,7 @@ pub fn encode_json_response(buf: []u8, status: message.Status, json_body: []cons
         .not_found => "HTTP/1.1 404 Not Found\r\n",
         .storage_error => "HTTP/1.1 503 Service Unavailable\r\n",
         .insufficient_inventory => "HTTP/1.1 409 Conflict\r\n",
+        .version_conflict => "HTTP/1.1 409 Conflict\r\n",
     };
 
     var pos: usize = 0;

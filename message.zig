@@ -18,6 +18,7 @@ pub const Status = enum(u8) {
 
     // Business logic errors — one per failure reason.
     insufficient_inventory = 10,
+    version_conflict = 11,
 };
 
 /// Flat operation enum — encodes entity type AND action in a single tag,
@@ -191,6 +192,7 @@ pub const Product = struct {
     description_len: u16,
     price_cents: u32,
     inventory: u32,
+    version: u32,
     active: bool,
 
     comptime {
@@ -316,6 +318,7 @@ test "Product name and description slices" {
         .description_len = 12,
         .price_cents = 1999,
         .inventory = 10,
+        .version = 1,
         .active = true,
     };
     @memcpy(p.name[0..5], "Shirt");

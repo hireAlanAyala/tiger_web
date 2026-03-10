@@ -61,6 +61,7 @@ pub const Counter = enum {
     requests_not_found,
     requests_storage_error,
     requests_insufficient_inventory,
+    requests_version_conflict,
 };
 
 const counter_count = std.meta.fields(Counter).len;
