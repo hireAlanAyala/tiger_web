@@ -62,7 +62,7 @@ pub fn StateMachineType(comptime Storage: type) type {
 
             const result: StorageResult = switch (msg.operation) {
                 .get_product, .get_product_inventory => self.prefetch_read(msg.id),
-                .list_products => self.prefetch_list_products(),
+                .list_products => self.prefetch_list_products(msg.cursor),
                 .create_product => blk: {
                     const p = msg.event.product;
                     assert(p.id > 0);
@@ -76,7 +76,7 @@ pub fn StateMachineType(comptime Storage: type) type {
                 },
                 .delete_product => self.prefetch_read(msg.id),
                 .get_collection => self.prefetch_collection_with_products(msg.id),
-                .list_collections => self.prefetch_list_all_collections(),
+                .list_collections => self.prefetch_list_all_collections(msg.cursor),
                 .create_collection => blk: {
                     const col = msg.event.collection;
                     assert(col.id > 0);
@@ -97,7 +97,7 @@ pub fn StateMachineType(comptime Storage: type) type {
                 },
                 .remove_collection_member => self.prefetch_collection_read(msg.id),
                 .get_order => self.prefetch_order_read(msg.id),
-                .list_orders => self.prefetch_list_all_orders(),
+                .list_orders => self.prefetch_list_all_orders(msg.cursor),
                 .transfer_inventory => blk: {
                     const transfer = msg.event.transfer;
                     assert(msg.id > 0);
@@ -463,8 +463,8 @@ pub fn StateMachineType(comptime Storage: type) type {
             return result;
         }
 
-        fn prefetch_list_products(self: *StateMachine) StorageResult {
-            return self.storage.list(&self.prefetch_product_list.items, &self.prefetch_product_list.len);
+        fn prefetch_list_products(self: *StateMachine, cursor: u128) StorageResult {
+            return self.storage.list(&self.prefetch_product_list.items, &self.prefetch_product_list.len, cursor);
         }
 
         /// Multi-key prefetch: read N products by ID into the keyed cache.
@@ -502,8 +502,8 @@ pub fn StateMachineType(comptime Storage: type) type {
             return result;
         }
 
-        fn prefetch_list_all_collections(self: *StateMachine) StorageResult {
-            return self.storage.list_collections(&self.prefetch_collection_list.items, &self.prefetch_collection_list.len);
+        fn prefetch_list_all_collections(self: *StateMachine, cursor: u128) StorageResult {
+            return self.storage.list_collections(&self.prefetch_collection_list.items, &self.prefetch_collection_list.len, cursor);
         }
 
         // --- Order prefetch helpers (read-only) ---
@@ -516,8 +516,8 @@ pub fn StateMachineType(comptime Storage: type) type {
             return result;
         }
 
-        fn prefetch_list_all_orders(self: *StateMachine) StorageResult {
-            return self.storage.list_orders(&self.prefetch_order_list.items, &self.prefetch_order_list.len);
+        fn prefetch_list_all_orders(self: *StateMachine, cursor: u128) StorageResult {
+            return self.storage.list_orders(&self.prefetch_order_list.items, &self.prefetch_order_list.len, cursor);
         }
 
         /// Prefetch both the collection and its member products.
@@ -678,12 +678,13 @@ pub const MemoryStorage = struct {
         return .not_found;
     }
 
-    pub fn list(self: *MemoryStorage, out: *[message.list_max]message.Product, out_len: *u32) StorageResult {
+    pub fn list(self: *MemoryStorage, out: *[message.list_max]message.Product, out_len: *u32, cursor: u128) StorageResult {
         if (self.fault()) |f| return f;
         out_len.* = 0;
         for (self.products) |*entry| {
             if (!entry.occupied) continue;
-            assert(out_len.* < message.list_max);
+            if (entry.product.id <= cursor) continue;
+            if (out_len.* >= message.list_max) break;
             out[out_len.*] = entry.product;
             out_len.* += 1;
         }
@@ -737,12 +738,13 @@ pub const MemoryStorage = struct {
         return .ok;
     }
 
-    pub fn list_collections(self: *MemoryStorage, out: *[message.list_max]message.ProductCollection, out_len: *u32) StorageResult {
+    pub fn list_collections(self: *MemoryStorage, out: *[message.list_max]message.ProductCollection, out_len: *u32, cursor: u128) StorageResult {
         if (self.fault()) |f| return f;
         out_len.* = 0;
         for (self.collections_store) |*entry| {
             if (!entry.occupied) continue;
-            assert(out_len.* < message.list_max);
+            if (entry.collection.id <= cursor) continue;
+            if (out_len.* >= message.list_max) break;
             out[out_len.*] = entry.collection;
             out_len.* += 1;
         }
@@ -820,12 +822,13 @@ pub const MemoryStorage = struct {
         return .not_found;
     }
 
-    pub fn list_orders(self: *MemoryStorage, out: *[message.list_max]message.OrderSummary, out_len: *u32) StorageResult {
+    pub fn list_orders(self: *MemoryStorage, out: *[message.list_max]message.OrderSummary, out_len: *u32, cursor: u128) StorageResult {
         if (self.fault()) |f| return f;
         out_len.* = 0;
         for (self.orders) |*entry| {
             if (!entry.occupied) continue;
-            assert(out_len.* < message.list_max);
+            if (entry.order.id <= cursor) continue;
+            if (out_len.* >= message.list_max) break;
             out[out_len.*] = .{
                 .id = entry.order.id,
                 .total_cents = entry.order.total_cents,
@@ -1015,6 +1018,51 @@ test "list" {
     try std.testing.expectEqual(resp.result.product_list.len, 2);
     try std.testing.expectEqualSlices(u8, resp.result.product_list.items[0].name_slice(), "A");
     try std.testing.expectEqualSlices(u8, resp.result.product_list.items[1].name_slice(), "B");
+}
+
+test "list with cursor skips earlier items" {
+    var storage = try MemoryStorage.init(std.testing.allocator);
+    defer storage.deinit(std.testing.allocator);
+    var sm = TestStateMachine.init(&storage);
+
+    const id1: u128 = 0x00000000000000000000000000000001;
+    const id2: u128 = 0x00000000000000000000000000000002;
+    const id3: u128 = 0x00000000000000000000000000000003;
+
+    _ = test_execute(&sm, .{ .operation = .create_product, .id = 0, .event = .{ .product = make_test_product(id1, "A", 100) } });
+    _ = test_execute(&sm, .{ .operation = .create_product, .id = 0, .event = .{ .product = make_test_product(id2, "B", 200) } });
+    _ = test_execute(&sm, .{ .operation = .create_product, .id = 0, .event = .{ .product = make_test_product(id3, "C", 300) } });
+
+    // List with cursor = id1 should skip A, return B and C.
+    const resp = test_execute(&sm, .{
+        .operation = .list_products,
+        .id = 0,
+        .cursor = id1,
+        .event = .{ .none = {} },
+    });
+    try std.testing.expectEqual(resp.status, .ok);
+    try std.testing.expectEqual(resp.result.product_list.len, 2);
+    try std.testing.expectEqual(resp.result.product_list.items[0].id, id2);
+    try std.testing.expectEqual(resp.result.product_list.items[1].id, id3);
+
+    // List with cursor = id2 should return only C.
+    const resp2 = test_execute(&sm, .{
+        .operation = .list_products,
+        .id = 0,
+        .cursor = id2,
+        .event = .{ .none = {} },
+    });
+    try std.testing.expectEqual(resp2.result.product_list.len, 1);
+    try std.testing.expectEqual(resp2.result.product_list.items[0].id, id3);
+
+    // List with cursor = id3 should return empty.
+    const resp3 = test_execute(&sm, .{
+        .operation = .list_products,
+        .id = 0,
+        .cursor = id3,
+        .event = .{ .none = {} },
+    });
+    try std.testing.expectEqual(resp3.result.product_list.len, 0);
 }
 
 test "client-provided IDs" {

@@ -11,8 +11,13 @@ pub fn translate(method: http.Method, raw_path: []const u8, body: []const u8) ?m
     const path = if (raw_path.len > 0 and raw_path[0] == '/') raw_path[1..] else raw_path;
     if (path.len == 0) return null;
 
-    // Strip query string.
-    const path_clean = if (std.mem.indexOf(u8, path, "?")) |q| path[0..q] else path;
+    // Split path from query string.
+    const query_sep = std.mem.indexOf(u8, path, "?");
+    const path_clean = if (query_sep) |q| path[0..q] else path;
+    const query_string = if (query_sep) |q| path[q + 1 ..] else "";
+
+    // Parse pagination cursor from ?after=<uuid>.
+    const cursor = parse_query_cursor(query_string);
 
     // Split path into up to 4 segments: /resource/:id/sub/:sub_id
     const segments = split_path(path_clean) orelse return null;
@@ -20,15 +25,17 @@ pub fn translate(method: http.Method, raw_path: []const u8, body: []const u8) ?m
     if (method == .options) return null;
 
     // Match resource and resolve to flat operation.
-    if (std.mem.eql(u8, segments.collection, "products")) {
-        return translate_products(method, segments, body);
-    } else if (std.mem.eql(u8, segments.collection, "collections")) {
-        return translate_collections(method, segments, body);
-    } else if (std.mem.eql(u8, segments.collection, "orders")) {
-        return translate_orders(method, segments, body);
-    } else {
-        return null;
-    }
+    var msg: ?message.Message = if (std.mem.eql(u8, segments.collection, "products"))
+        translate_products(method, segments, body)
+    else if (std.mem.eql(u8, segments.collection, "collections"))
+        translate_collections(method, segments, body)
+    else if (std.mem.eql(u8, segments.collection, "orders"))
+        translate_orders(method, segments, body)
+    else
+        null;
+
+    if (msg) |*m| m.cursor = cursor;
+    return msg;
 }
 
 const PathSegments = struct {
@@ -358,12 +365,14 @@ pub fn encode_response_json(buf: []u8, resp: message.MessageResponse) []const u8
     switch (resp.result) {
         .product => |*p| encode_product(&w, p),
         .product_list => |*l| {
-            w.raw("[");
+            w.raw("{\"data\":[");
             for (l.items[0..l.len], 0..) |*p, i| {
                 if (i > 0) w.raw(",");
                 encode_product(&w, p);
             }
             w.raw("]");
+            write_next_cursor(&w, if (l.len > 0) l.items[l.len - 1].id else 0, l.len);
+            w.raw("}");
         },
         .inventory => |inv| {
             w.raw("{\"inventory\":");
@@ -383,7 +392,7 @@ pub fn encode_response_json(buf: []u8, resp: message.MessageResponse) []const u8
             w.raw("]}");
         },
         .collection_list => |*l| {
-            w.raw("[");
+            w.raw("{\"data\":[");
             for (l.items[0..l.len], 0..) |*col, i| {
                 if (i > 0) w.raw(",");
                 w.raw("{\"id\":\"");
@@ -393,6 +402,8 @@ pub fn encode_response_json(buf: []u8, resp: message.MessageResponse) []const u8
                 w.raw("\"}");
             }
             w.raw("]");
+            write_next_cursor(&w, if (l.len > 0) l.items[l.len - 1].id else 0, l.len);
+            w.raw("}");
         },
         .order => |*o| {
             w.raw("{\"id\":\"");
@@ -417,7 +428,7 @@ pub fn encode_response_json(buf: []u8, resp: message.MessageResponse) []const u8
             w.raw("}");
         },
         .order_list => |*l| {
-            w.raw("[");
+            w.raw("{\"data\":[");
             for (l.items[0..l.len], 0..) |*o, i| {
                 if (i > 0) w.raw(",");
                 w.raw("{\"id\":\"");
@@ -429,11 +440,24 @@ pub fn encode_response_json(buf: []u8, resp: message.MessageResponse) []const u8
                 w.raw("}");
             }
             w.raw("]");
+            write_next_cursor(&w, if (l.len > 0) l.items[l.len - 1].id else 0, l.len);
+            w.raw("}");
         },
         .empty => w.raw("[]"),
     }
 
     return buf[0..w.pos];
+}
+
+/// Write ,"next_cursor":"<uuid>" if the page is full, or ,"next_cursor":null otherwise.
+fn write_next_cursor(w: *JsonWriter, last_id: u128, len: u32) void {
+    if (len == message.list_max) {
+        w.raw(",\"next_cursor\":\"");
+        w.write_uuid(last_id);
+        w.raw("\"");
+    } else {
+        w.raw(",\"next_cursor\":null");
+    }
 }
 
 fn encode_product(w: *JsonWriter, p: *const message.Product) void {
@@ -599,6 +623,25 @@ fn json_bool_field(json: []const u8, field: []const u8) ?bool {
 
 /// Parse a 32-character hex string as a u128 UUID. Returns null on invalid input.
 /// Accepts exactly 32 lowercase hex characters (no dashes).
+/// Parse ?after=<uuid> from a query string. Returns 0 if absent or malformed.
+fn parse_query_cursor(query: []const u8) u128 {
+    const prefix = "after=";
+    var pos: usize = 0;
+    while (pos < query.len) {
+        // Find start of next parameter.
+        if (pos > 0) pos += 1; // skip '&'
+        const rest = query[pos..];
+        if (std.mem.startsWith(u8, rest, prefix)) {
+            const value_start = pos + prefix.len;
+            const value_end = std.mem.indexOf(u8, query[value_start..], "&") orelse query.len - value_start;
+            return parse_uuid(query[value_start..][0..value_end]) orelse 0;
+        }
+        // Skip to next '&'.
+        pos = if (std.mem.indexOf(u8, rest, "&")) |amp| pos + amp else query.len;
+    }
+    return 0;
+}
+
 fn parse_uuid(s: []const u8) ?u128 {
     if (s.len != 32) return null;
     var result: u128 = 0;
@@ -739,6 +782,23 @@ test "rejects invalid UUID in path" {
 test "strips query string" {
     const msg = translate(.get, "/products?page=1", "").?;
     try std.testing.expectEqual(msg.operation, .list_products);
+    try std.testing.expectEqual(msg.cursor, 0);
+}
+
+test "parses after cursor from query string" {
+    const msg = translate(.get, "/products?after=00000000000000000000000000000abc", "").?;
+    try std.testing.expectEqual(msg.operation, .list_products);
+    try std.testing.expectEqual(msg.cursor, 0xabc);
+}
+
+test "cursor with other query params" {
+    const msg = translate(.get, "/products?limit=10&after=00000000000000000000000000000042&foo=bar", "").?;
+    try std.testing.expectEqual(msg.cursor, 0x42);
+}
+
+test "invalid cursor ignored" {
+    const msg = translate(.get, "/products?after=notauuid", "").?;
+    try std.testing.expectEqual(msg.cursor, 0);
 }
 
 test "GET rejects non-empty body" {

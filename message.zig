@@ -244,6 +244,7 @@ pub const Event = union(enum) {
 pub const Message = struct {
     operation: Operation,
     id: u128, // primary entity ID (0 for list/create)
+    cursor: u128 = 0, // pagination cursor (0 = first page)
     event: Event,
 };
 

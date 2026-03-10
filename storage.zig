@@ -100,7 +100,7 @@ pub const SqliteStorage = struct {
             "DELETE FROM products WHERE id = ?1;",
         );
         const stmt_list = prepare(real_db,
-            "SELECT id, name, description, price_cents, inventory, version, active FROM products LIMIT ?1;",
+            "SELECT id, name, description, price_cents, inventory, version, active FROM products WHERE id > ?1 ORDER BY id LIMIT ?2;",
         );
 
         // Prepare collection statements.
@@ -114,7 +114,7 @@ pub const SqliteStorage = struct {
             "DELETE FROM collections WHERE id = ?1;",
         );
         const stmt_list_collections = prepare(real_db,
-            "SELECT id, name FROM collections LIMIT ?1;",
+            "SELECT id, name FROM collections WHERE id > ?1 ORDER BY id LIMIT ?2;",
         );
         const stmt_add_member = prepare(real_db,
             "INSERT OR IGNORE INTO collection_members (collection_id, product_id) VALUES (?1, ?2);",
@@ -144,7 +144,7 @@ pub const SqliteStorage = struct {
             "SELECT product_id, name, quantity, price_cents, line_total_cents FROM order_items WHERE order_id = ?1;",
         );
         const stmt_list_orders = prepare(real_db,
-            "SELECT id, total_cents, items_len FROM orders LIMIT ?1;",
+            "SELECT id, total_cents, items_len FROM orders WHERE id > ?1 ORDER BY id LIMIT ?2;",
         );
 
         log.info("storage initialized: {s}", .{path});
@@ -267,11 +267,12 @@ pub const SqliteStorage = struct {
         };
     }
 
-    pub fn list(self: *SqliteStorage, out: *[message.list_max]message.Product, out_len: *u32) StorageResult {
+    pub fn list(self: *SqliteStorage, out: *[message.list_max]message.Product, out_len: *u32, cursor: u128) StorageResult {
         const stmt = self.stmt_list;
         defer reset_stmt(stmt);
 
-        _ = c.sqlite3_bind_int(stmt, 1, message.list_max);
+        bind_uuid(stmt, 1, cursor);
+        _ = c.sqlite3_bind_int(stmt, 2, message.list_max);
         out_len.* = 0;
 
         while (true) {
@@ -347,11 +348,12 @@ pub const SqliteStorage = struct {
         };
     }
 
-    pub fn list_collections(self: *SqliteStorage, out: *[message.list_max]message.ProductCollection, out_len: *u32) StorageResult {
+    pub fn list_collections(self: *SqliteStorage, out: *[message.list_max]message.ProductCollection, out_len: *u32, cursor: u128) StorageResult {
         const stmt = self.stmt_list_collections;
         defer reset_stmt(stmt);
 
-        _ = c.sqlite3_bind_int(stmt, 1, message.list_max);
+        bind_uuid(stmt, 1, cursor);
+        _ = c.sqlite3_bind_int(stmt, 2, message.list_max);
         out_len.* = 0;
 
         while (true) {
@@ -507,11 +509,12 @@ pub const SqliteStorage = struct {
         return .ok;
     }
 
-    pub fn list_orders(self: *SqliteStorage, out: *[message.list_max]message.OrderSummary, out_len: *u32) StorageResult {
+    pub fn list_orders(self: *SqliteStorage, out: *[message.list_max]message.OrderSummary, out_len: *u32, cursor: u128) StorageResult {
         const stmt = self.stmt_list_orders;
         defer reset_stmt(stmt);
 
-        _ = c.sqlite3_bind_int(stmt, 1, message.list_max);
+        bind_uuid(stmt, 1, cursor);
+        _ = c.sqlite3_bind_int(stmt, 2, message.list_max);
         out_len.* = 0;
 
         while (true) {

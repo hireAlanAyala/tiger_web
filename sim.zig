@@ -632,7 +632,7 @@ test "product list — empty then populated" {
     const empty_resp = run_until_response(&server, &sim_io, 0, 500) orelse
         return error.TestUnexpectedResult;
     try std.testing.expectEqual(empty_resp.status_code, 200);
-    try std.testing.expectEqualSlices(u8, empty_resp.body, "[]");
+    try std.testing.expectEqualSlices(u8, empty_resp.body, "{\"data\":[],\"next_cursor\":null}");
     sim_io.clear_response(0);
 
     // Create two products.
