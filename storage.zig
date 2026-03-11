@@ -292,6 +292,11 @@ pub const SqliteStorage = struct {
 
         // Name prefix: empty string = no filter, otherwise "prefix%".
         if (params.name_prefix_len > 0) {
+            // Pair assertion: input_valid rejects NUL bytes at the boundary;
+            // assert here at consumption — NUL in LIKE patterns causes SQLite
+            // to silently match everything (C string terminator semantics).
+            for (params.name_prefix[0..params.name_prefix_len]) |b| assert(b != 0);
+
             var like_buf: [message.product_name_max + 1]u8 = undefined;
             @memcpy(like_buf[0..params.name_prefix_len], params.name_prefix[0..params.name_prefix_len]);
             like_buf[params.name_prefix_len] = '%';
@@ -617,7 +622,7 @@ pub const SqliteStorage = struct {
         _ = c.sqlite3_bind_int64(stmt, 4, @intCast(product.price_cents));
         _ = c.sqlite3_bind_int64(stmt, 5, @intCast(product.inventory));
         _ = c.sqlite3_bind_int64(stmt, 6, @intCast(product.version));
-        _ = c.sqlite3_bind_int(stmt, 7, if (product.active) @as(c_int, 1) else @as(c_int, 0));
+        _ = c.sqlite3_bind_int(stmt, 7, if (product.flags.active) @as(c_int, 1) else @as(c_int, 0));
     }
 
     fn read_product(stmt: *c.sqlite3_stmt, out: *message.Product) void {
@@ -650,7 +655,7 @@ pub const SqliteStorage = struct {
         out.price_cents = @intCast(c.sqlite3_column_int64(stmt, 3));
         out.inventory = @intCast(c.sqlite3_column_int64(stmt, 4));
         out.version = @intCast(c.sqlite3_column_int64(stmt, 5));
-        out.active = c.sqlite3_column_int64(stmt, 6) != 0;
+        out.flags = .{ .active = c.sqlite3_column_int64(stmt, 6) != 0 };
     }
 
     fn read_collection(stmt: *c.sqlite3_stmt, out: *message.ProductCollection) void {
@@ -688,17 +693,12 @@ pub const SqliteStorage = struct {
 // =====================================================================
 
 fn make_test_product(id: u128, name: []const u8, price: u32) message.Product {
-    var p = message.Product{
-        .id = id,
-        .name = undefined,
-        .name_len = @intCast(name.len),
-        .description = undefined,
-        .description_len = 0,
-        .price_cents = price,
-        .inventory = 0,
-        .version = 1,
-        .active = true,
-    };
+    var p = std.mem.zeroes(message.Product);
+    p.id = id;
+    p.name_len = @intCast(name.len);
+    p.price_cents = price;
+    p.version = 1;
+    p.flags = .{ .active = true };
     @memcpy(p.name[0..name.len], name);
     return p;
 }
@@ -730,12 +730,16 @@ test "list with max u32 price filters" {
     // price_min = maxInt(u32) should match.
     var out: [message.list_max]message.Product = undefined;
     var out_len: u32 = 0;
-    assert(s.list(&out, &out_len, .{ .price_min = std.math.maxInt(u32) }) == .ok);
+    var lp1 = std.mem.zeroes(message.ListParams);
+    lp1.price_min = std.math.maxInt(u32);
+    assert(s.list(&out, &out_len, lp1) == .ok);
     try std.testing.expectEqual(out_len, 1);
 
     // price_max = maxInt(u32) - 1 should exclude it.
     out_len = 0;
-    assert(s.list(&out, &out_len, .{ .price_max = std.math.maxInt(u32) - 1 }) == .ok);
+    var lp2 = std.mem.zeroes(message.ListParams);
+    lp2.price_max = std.math.maxInt(u32) - 1;
+    assert(s.list(&out, &out_len, lp2) == .ok);
     try std.testing.expectEqual(out_len, 0);
 }
 
@@ -744,22 +748,18 @@ test "order items preserve insertion order" {
     defer s.deinit();
 
     // Create an order with items whose product IDs are in descending order.
-    var order = message.OrderResult{
-        .id = 1,
-        .items = undefined,
-        .items_len = 3,
-        .total_cents = 600,
-    };
+    var order = std.mem.zeroes(message.OrderResult);
+    order.id = 1;
+    order.items_len = 3;
+    order.total_cents = 600;
     const ids = [3]u128{ 0xff, 0x80, 0x01 };
     for (ids, 0..) |pid, i| {
-        order.items[i] = .{
-            .product_id = pid,
-            .name = undefined,
-            .name_len = 1,
-            .quantity = 1,
-            .price_cents = 200,
-            .line_total_cents = 200,
-        };
+        order.items[i] = std.mem.zeroes(message.OrderResultItem);
+        order.items[i].product_id = pid;
+        order.items[i].name_len = 1;
+        order.items[i].quantity = 1;
+        order.items[i].price_cents = 200;
+        order.items[i].line_total_cents = 200;
         order.items[i].name[0] = 'A' + @as(u8, @intCast(i));
     }
     assert(s.put_order(&order) == .ok);

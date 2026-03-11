@@ -1,5 +1,6 @@
 const std = @import("std");
 const assert = std.debug.assert;
+const stdx = @import("stdx.zig");
 
 /// `maybe` is the dual of `assert`: it signals that a condition is sometimes
 /// true and sometimes false, and that's fine. Pure documentation — compiles
@@ -93,111 +94,41 @@ pub const Operation = enum(u8) {
     }
 };
 
-pub const collection_name_max = 128;
-
-/// Fixed-size collection record. A named group of products.
-pub const ProductCollection = struct {
-    id: u128,
-    name: [collection_name_max]u8,
-    name_len: u8,
-
-    comptime {
-        assert(collection_name_max > 0);
-        assert(collection_name_max <= std.math.maxInt(u8));
-    }
-
-    pub fn name_slice(self: *const ProductCollection) []const u8 {
-        return self.name[0..self.name_len];
-    }
-};
-
-/// Payload for transfer_inventory — move quantity units from source to target.
-/// Source ID is msg.id; this struct carries the target and amount.
-pub const InventoryTransfer = struct {
-    target_id: u128,
-    quantity: u32,
-};
-
-/// Maximum number of line items in a single order.
-pub const order_items_max = 20;
-
-/// A single line item in an order request.
-pub const OrderItem = struct {
-    product_id: u128,
-    quantity: u32,
-};
-
-/// Order creation request — variable-length array of line items in a fixed-size struct.
-pub const OrderRequest = struct {
-    id: u128,
-    items: [order_items_max]OrderItem,
-    items_len: u8,
-
-    comptime {
-        assert(order_items_max > 0);
-        assert(order_items_max <= std.math.maxInt(u8));
-    }
-
-    pub fn items_slice(self: *const OrderRequest) []const OrderItem {
-        return self.items[0..self.items_len];
-    }
-};
-
-/// A single line item in an order response — includes resolved product info.
-pub const OrderResultItem = struct {
-    product_id: u128,
-    name: [product_name_max]u8,
-    name_len: u8,
-    quantity: u32,
-    price_cents: u32,
-    line_total_cents: u64,
-
-    pub fn name_slice(self: *const OrderResultItem) []const u8 {
-        return self.name[0..self.name_len];
-    }
-};
-
-/// Order result — returned after successful checkout.
-pub const OrderResult = struct {
-    id: u128,
-    items: [order_items_max]OrderResultItem,
-    items_len: u8,
-    total_cents: u64,
-
-    pub fn items_slice(self: *const OrderResult) []const OrderResultItem {
-        return self.items[0..self.items_len];
-    }
-};
-
-/// Order summary for list responses — header only, no line items.
-pub const OrderSummary = struct {
-    id: u128,
-    total_cents: u64,
-    items_len: u8,
-};
-
-pub const OrderSummaryList = struct {
-    items: [list_max]OrderSummary,
-    len: u32,
-};
-
 pub const product_name_max = 128;
 pub const product_description_max = 512;
+pub const collection_name_max = 128;
+
+/// Product flags — packed struct matching TigerBeetle's AccountFlags pattern.
+/// Each boolean property is a single bit; unused bits are explicit padding.
+pub const ProductFlags = packed struct(u8) {
+    active: bool = false,
+    padding: u7 = 0,
+
+    comptime {
+        assert(@sizeOf(ProductFlags) == @sizeOf(u8));
+        assert(@bitSizeOf(ProductFlags) == @sizeOf(ProductFlags) * 8);
+    }
+};
 
 /// Fixed-size product record. All fields are value types — no pointers,
 /// no allocations. Stored directly in pre-allocated arrays.
-pub const Product = struct {
+///
+/// extern struct with no padding — enables byte-wise equality comparison.
+/// Fields ordered largest-to-smallest to avoid implicit alignment gaps.
+pub const Product = extern struct {
     id: u128,
-    name: [product_name_max]u8,
-    name_len: u8,
     description: [product_description_max]u8,
-    description_len: u16,
+    name: [product_name_max]u8,
     price_cents: u32,
     inventory: u32,
     version: u32,
-    active: bool,
+    description_len: u16,
+    name_len: u8,
+    flags: ProductFlags,
 
     comptime {
+        assert(stdx.no_padding(Product));
+        assert(@sizeOf(Product) == 672);
         assert(product_name_max > 0);
         assert(product_name_max <= std.math.maxInt(u8));
         assert(product_description_max > 0);
@@ -213,16 +144,142 @@ pub const Product = struct {
     }
 };
 
-/// Parameters for list operations — pagination and filtering.
-pub const ListParams = struct {
-    cursor: u128 = 0, // 0 = first page
-    active_filter: ActiveFilter = .any,
-    price_min: u32 = 0, // 0 = no minimum
-    price_max: u32 = 0, // 0 = no maximum
-    name_prefix: [product_name_max]u8 = [_]u8{0} ** product_name_max,
-    name_prefix_len: u8 = 0,
+/// Fixed-size collection record. A named group of products.
+pub const ProductCollection = extern struct {
+    id: u128,
+    name: [collection_name_max]u8,
+    name_len: u8,
+    reserved: [15]u8,
 
-    pub const ActiveFilter = enum(u2) {
+    comptime {
+        assert(stdx.no_padding(ProductCollection));
+        assert(@sizeOf(ProductCollection) == 160);
+        assert(collection_name_max > 0);
+        assert(collection_name_max <= std.math.maxInt(u8));
+    }
+
+    pub fn name_slice(self: *const ProductCollection) []const u8 {
+        return self.name[0..self.name_len];
+    }
+};
+
+/// Payload for transfer_inventory — move quantity units from source to target.
+/// Source ID is msg.id; this struct carries the target and amount.
+pub const InventoryTransfer = extern struct {
+    target_id: u128,
+    quantity: u32,
+    reserved: [12]u8,
+
+    comptime {
+        assert(stdx.no_padding(InventoryTransfer));
+        assert(@sizeOf(InventoryTransfer) == 32);
+    }
+};
+
+/// Maximum number of line items in a single order.
+pub const order_items_max = 20;
+
+/// A single line item in an order request.
+pub const OrderItem = extern struct {
+    product_id: u128,
+    quantity: u32,
+    reserved: [12]u8,
+
+    comptime {
+        assert(stdx.no_padding(OrderItem));
+        assert(@sizeOf(OrderItem) == 32);
+    }
+};
+
+/// Order creation request — variable-length array of line items in a fixed-size struct.
+pub const OrderRequest = extern struct {
+    id: u128,
+    items: [order_items_max]OrderItem,
+    items_len: u8,
+    reserved: [15]u8,
+
+    comptime {
+        assert(stdx.no_padding(OrderRequest));
+        assert(order_items_max > 0);
+        assert(order_items_max <= std.math.maxInt(u8));
+    }
+
+    pub fn items_slice(self: *const OrderRequest) []const OrderItem {
+        return self.items[0..self.items_len];
+    }
+};
+
+/// A single line item in an order response — includes resolved product info.
+pub const OrderResultItem = extern struct {
+    product_id: u128,
+    name: [product_name_max]u8,
+    line_total_cents: u64,
+    price_cents: u32,
+    quantity: u32,
+    name_len: u8,
+    reserved: [15]u8,
+
+    comptime {
+        assert(stdx.no_padding(OrderResultItem));
+        assert(@sizeOf(OrderResultItem) == 176);
+    }
+
+    pub fn name_slice(self: *const OrderResultItem) []const u8 {
+        return self.name[0..self.name_len];
+    }
+};
+
+/// Order result — returned after successful checkout.
+pub const OrderResult = extern struct {
+    id: u128,
+    items: [order_items_max]OrderResultItem,
+    total_cents: u64,
+    items_len: u8,
+    reserved: [7]u8,
+
+    comptime {
+        assert(stdx.no_padding(OrderResult));
+    }
+
+    pub fn items_slice(self: *const OrderResult) []const OrderResultItem {
+        return self.items[0..self.items_len];
+    }
+};
+
+/// Order summary for list responses — header only, no line items.
+pub const OrderSummary = extern struct {
+    id: u128,
+    total_cents: u64,
+    items_len: u8,
+    reserved: [7]u8,
+
+    comptime {
+        assert(stdx.no_padding(OrderSummary));
+        assert(@sizeOf(OrderSummary) == 32);
+    }
+};
+
+pub const OrderSummaryList = struct {
+    items: [list_max]OrderSummary,
+    len: u32,
+};
+
+/// Parameters for list operations — pagination and filtering.
+pub const ListParams = extern struct {
+    cursor: u128,
+    name_prefix: [product_name_max]u8,
+    price_min: u32,
+    price_max: u32,
+    name_prefix_len: u8,
+    active_filter: ActiveFilter,
+    reserved: [6]u8,
+
+    comptime {
+        assert(stdx.no_padding(ListParams));
+        assert(@sizeOf(ListParams) == 160);
+    }
+
+    pub const ActiveFilter = enum(u8) {
         any = 0, // no filter
         active_only = 1,
         inactive_only = 2,
@@ -334,17 +391,14 @@ pub const MessageResponse = struct {
 // =====================================================================
 
 test "Product name and description slices" {
-    var p = Product{
-        .id = 0x0102030405060708090a0b0c0d0e0f10,
-        .name = undefined,
-        .name_len = 5,
-        .description = undefined,
-        .description_len = 12,
-        .price_cents = 1999,
-        .inventory = 10,
-        .version = 1,
-        .active = true,
-    };
+    var p = std.mem.zeroes(Product);
+    p.id = 0x0102030405060708090a0b0c0d0e0f10;
+    p.name_len = 5;
+    p.description_len = 12;
+    p.price_cents = 1999;
+    p.inventory = 10;
+    p.version = 1;
+    p.flags = .{ .active = true };
     @memcpy(p.name[0..5], "Shirt");
     @memcpy(p.description[0..12], "A nice shirt");
     try std.testing.expectEqualSlices(u8, p.name_slice(), "Shirt");
@@ -354,7 +408,7 @@ test "Product name and description slices" {
 test "Product fixed size constraints" {
     try std.testing.expect(product_name_max == 128);
     try std.testing.expect(product_description_max == 512);
-    try std.testing.expect(@sizeOf(Product) > 0);
+    try std.testing.expectEqual(@sizeOf(Product), 672);
 }
 
 test "MessageResponse convenience constructors" {
@@ -394,4 +448,12 @@ test "Operation event_tag derived from EventType" {
     try std.testing.expectEqual(Operation.event_tag(.get_order), .none);
     try std.testing.expectEqual(Operation.event_tag(.get_product), .none);
     try std.testing.expectEqual(Operation.event_tag(.delete_product), .none);
+}
+
+test "extern struct byte-wise equality" {
+    const a = std.mem.zeroes(Product);
+    var b = std.mem.zeroes(Product);
+    try std.testing.expect(stdx.equal_bytes(Product, &a, &b));
+    b.price_cents = 1;
+    try std.testing.expect(!stdx.equal_bytes(Product, &a, &b));
 }

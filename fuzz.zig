@@ -9,14 +9,23 @@ const assert = std.debug.assert;
 const math = std.math;
 const message = @import("message.zig");
 const state_machine = @import("state_machine.zig");
-const FuzzArgs = @import("fuzz_lib.zig").FuzzArgs;
+const fuzz_lib = @import("fuzz_lib.zig");
+const FuzzArgs = fuzz_lib.FuzzArgs;
 const MemoryStorage = state_machine.MemoryStorage;
 const StateMachine = state_machine.StateMachineType(MemoryStorage);
+const Auditor = @import("auditor.zig").Auditor;
 const PRNG = @import("prng.zig");
 
 const log = std.log.scoped(.fuzz);
 
-const id_pool_capacity = 64;
+pub const id_pool_capacity = 64;
+
+/// Conservative threshold below MemoryStorage capacity. Leaves headroom for
+/// the ~10% random messages that bypass the gen_message switch — those can
+/// attempt creates even when we're near capacity.
+fn capacity_threshold(comptime capacity: u32) u32 {
+    return capacity - capacity / 8;
+}
 
 /// Generate a random number, biased towards all bit 'edges' of T. That is,
 /// given a u64, it's very likely to not only get 0 or maxInt(u64), but also
@@ -45,8 +54,6 @@ pub fn int_edge_biased(prng: *PRNG, comptime T: type) T {
 }
 
 pub fn main(allocator: std.mem.Allocator, args: FuzzArgs) !void {
-    _ = allocator;
-
     const seed = args.seed;
     const events_max = args.events_max orelse 50_000;
     var prng = PRNG.from_seed(seed);
@@ -72,22 +79,15 @@ pub fn main(allocator: std.mem.Allocator, args: FuzzArgs) !void {
 
     var sm = StateMachine.init(&storage, false);
 
+    // Auditor: independent reference model that validates every response.
+    // Tracks entity state and provides ID pools for message generation.
+    var auditor = try Auditor.init(allocator);
+    defer auditor.deinit(allocator);
+
     // Swarm testing: random weights per seed so different seeds stress
     // different operation mixes (TigerBeetle workload pattern).
-    const op_weights = prng.enum_weights(message.Operation);
+    const op_weights = fuzz_lib.random_enum_weights(&prng, message.Operation);
 
-    // Track known IDs for generating valid references.
-    const id_pool_max = id_pool_capacity;
-    var product_ids: [id_pool_max]u128 = undefined;
-    var product_count: u32 = 0;
-    var collection_ids: [id_pool_max]u128 = undefined;
-    var collection_count: u32 = 0;
-    var order_ids: [id_pool_max]u128 = undefined;
-    var order_count: u32 = 0;
-    var total_products_created: u32 = 0;
-    var total_collections_created: u32 = 0;
-    var total_orders_created: u32 = 0;
-    var total_memberships: u32 = 0;
     var coverage = OperationCoverage{};
 
     for (0..events_max) |event_i| {
@@ -95,15 +95,7 @@ pub fn main(allocator: std.mem.Allocator, args: FuzzArgs) !void {
 
         log.debug("Running fuzz_ops[{}/{}] == {s}", .{ event_i, events_max, @tagName(operation) });
 
-        const msg = gen_message(&prng, operation, .{
-            .product_ids = product_ids[0..product_count],
-            .collection_ids = collection_ids[0..collection_count],
-            .order_ids = order_ids[0..order_count],
-            .total_products_created = total_products_created,
-            .total_collections_created = total_collections_created,
-            .total_orders_created = total_orders_created,
-            .total_memberships = total_memberships,
-        }) orelse continue;
+        const msg = gen_message(&prng, operation, auditor.id_pools()) orelse continue;
 
         // Gate: skip invalid inputs — matches TB's input_valid pattern.
         if (!StateMachine.input_valid(msg)) continue;
@@ -114,58 +106,9 @@ pub fn main(allocator: std.mem.Allocator, args: FuzzArgs) !void {
         const resp = sm.commit(msg);
         coverage.record(operation);
 
-        // Track newly created entities.
-        if (resp.status == .ok) {
-            switch (operation) {
-                .create_product => {
-                    total_products_created += 1;
-                    if (product_count < id_pool_max) {
-                        product_ids[product_count] = msg.event.product.id;
-                        product_count += 1;
-                    }
-                },
-                .create_collection => {
-                    total_collections_created += 1;
-                    if (collection_count < id_pool_max) {
-                        collection_ids[collection_count] = msg.event.collection.id;
-                        collection_count += 1;
-                    }
-                },
-                .create_order => {
-                    total_orders_created += 1;
-                    if (order_count < id_pool_max) {
-                        order_ids[order_count] = msg.event.order.id;
-                        order_count += 1;
-                    }
-                },
-                .delete_product => {
-                    // Remove from pool.
-                    for (product_ids[0..product_count], 0..) |pid, i| {
-                        if (pid == msg.id) {
-                            product_count -= 1;
-                            product_ids[i] = product_ids[product_count];
-                            break;
-                        }
-                    }
-                },
-                .delete_collection => {
-                    for (collection_ids[0..collection_count], 0..) |cid, i| {
-                        if (cid == msg.id) {
-                            collection_count -= 1;
-                            collection_ids[i] = collection_ids[collection_count];
-                            break;
-                        }
-                    }
-                },
-                .add_collection_member => {
-                    total_memberships += 1;
-                },
-                .remove_collection_member => {
-                    if (total_memberships > 0) total_memberships -= 1;
-                },
-                else => {},
-            }
-        }
+        // Auditor validates the response against its model, then updates
+        // its state. On storage_error (injected fault), skips validation.
+        auditor.on_commit(msg, resp);
     }
 
     coverage.assert_full_coverage(op_weights);
@@ -211,12 +154,13 @@ pub const IdPools = struct {
 pub fn gen_message(prng: *PRNG, operation: message.Operation, pools: IdPools) ?message.Message {
     // Capacity checks must run before the random message path — random
     // messages bypass the switch but can still trigger storage-full errors
-    // in MemoryStorage that SqliteStorage won't hit.
+    // in MemoryStorage that SqliteStorage won't hit. Thresholds derived from
+    // MemoryStorage constants with headroom for random message attempts.
     switch (operation) {
-        .create_product => if (pools.total_products_created >= 950) return null,
-        .create_collection => if (pools.total_collections_created >= 240) return null,
-        .create_order => if (pools.total_orders_created >= 240) return null,
-        .add_collection_member => if (pools.total_memberships >= 950) return null,
+        .create_product => if (pools.total_products_created >= capacity_threshold(MemoryStorage.product_capacity)) return null,
+        .create_collection => if (pools.total_collections_created >= capacity_threshold(MemoryStorage.collection_capacity)) return null,
+        .create_order => if (pools.total_orders_created >= capacity_threshold(MemoryStorage.order_capacity)) return null,
+        .add_collection_member => if (pools.total_memberships >= capacity_threshold(MemoryStorage.membership_capacity)) return null,
         else => {},
     }
 
@@ -266,6 +210,7 @@ pub fn gen_message(prng: *PRNG, operation: message.Operation, pools: IdPools) ?m
                 .event = .{ .transfer = .{
                     .target_id = pools.product_ids[dst_idx],
                     .quantity = prng.range_inclusive(u32, 1, 1000),
+                    .reserved = .{0} ** 12,
                 } },
             };
         },
@@ -343,7 +288,7 @@ pub fn gen_product_with_id(prng: *PRNG, id: u128) message.Product {
     p.price_cents = prng.range_inclusive(u32, 0, 999_999);
     p.inventory = prng.range_inclusive(u32, 0, 10_000);
     p.version = 1;
-    p.active = prng.boolean();
+    p.flags = .{ .active = prng.boolean() };
     // Name: 1..name_max random alpha chars.
     p.name_len = prng.range_inclusive(u8, 1, message.product_name_max);
     for (p.name[0..p.name_len]) |*c| {
@@ -368,11 +313,8 @@ pub fn gen_collection(prng: *PRNG) message.ProductCollection {
 }
 
 pub fn gen_order(prng: *PRNG, product_ids: []const u128) message.OrderRequest {
-    var order: message.OrderRequest = .{
-        .id = prng.int(u128) | 1,
-        .items = undefined,
-        .items_len = 0,
-    };
+    var order = std.mem.zeroes(message.OrderRequest);
+    order.id = prng.int(u128) | 1;
     const max_items: u8 = @intCast(@min(message.order_items_max, product_ids.len));
     order.items_len = prng.range_inclusive(u8, 1, max_items);
 
@@ -400,6 +342,7 @@ pub fn gen_order(prng: *PRNG, product_ids: []const u128) message.OrderRequest {
         order.items[i] = .{
             .product_id = product_ids[prod_idx],
             .quantity = prng.range_inclusive(u32, 1, 100),
+            .reserved = .{0} ** 12,
         };
     }
     return order;
@@ -418,7 +361,7 @@ pub fn gen_random_message(prng: *PRNG, operation: message.Operation) message.Mes
             p.price_cents = prng.int(u32);
             p.inventory = prng.int(u32);
             p.version = prng.int(u32);
-            p.active = prng.boolean();
+            p.flags = .{ .active = prng.boolean() };
             break :blk p;
         } },
         .collection => .{ .collection = blk: {
@@ -436,6 +379,7 @@ pub fn gen_random_message(prng: *PRNG, operation: message.Operation) message.Mes
                 item.* = .{
                     .product_id = prng.int(u128),
                     .quantity = prng.int(u32),
+                    .reserved = .{0} ** 12,
                 };
             }
             break :blk o;
@@ -443,13 +387,16 @@ pub fn gen_random_message(prng: *PRNG, operation: message.Operation) message.Mes
         .transfer => .{ .transfer = .{
             .target_id = prng.int(u128),
             .quantity = prng.int(u32),
+            .reserved = .{0} ** 12,
         } },
         .member_id => .{ .member_id = prng.int(u128) },
-        .list => .{ .list = .{
-            .active_filter = prng.enum_uniform(message.ListParams.ActiveFilter),
-            .price_min = prng.int(u32),
-            .price_max = prng.int(u32),
-            .name_prefix_len = prng.int(u8),
+        .list => .{ .list = blk: {
+            var lp = std.mem.zeroes(message.ListParams);
+            lp.active_filter = prng.enum_uniform(message.ListParams.ActiveFilter);
+            lp.price_min = prng.int(u32);
+            lp.price_max = prng.int(u32);
+            lp.name_prefix_len = prng.int(u8);
+            break :blk lp;
         } },
         .none => .{ .none = {} },
     };
@@ -461,7 +408,7 @@ pub fn gen_random_message(prng: *PRNG, operation: message.Operation) message.Mes
 }
 
 pub fn gen_list_params(prng: *PRNG) message.ListParams {
-    var params: message.ListParams = .{};
+    var params = std.mem.zeroes(message.ListParams);
     if (prng.boolean()) {
         params.active_filter = prng.enum_uniform(message.ListParams.ActiveFilter);
     }

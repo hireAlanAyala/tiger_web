@@ -238,30 +238,6 @@ fn enum_weighted_impl(prng: *PRNG, comptime Enum: type, weights: anytype) Enum {
     unreachable;
 }
 
-/// Return a distribution for use with `enum_weighted`.
-///
-/// This is swarm testing: some variants are disabled completely,
-/// and the rest have wildly different probabilities.
-pub fn enum_weights(prng: *PRNG, comptime Enum: type) EnumWeightsType(Enum) {
-    const fields = comptime std.meta.fieldNames(Enum);
-
-    var combination = Combination.init(.{
-        .total = fields.len,
-        .sample = prng.range_inclusive(u32, 1, fields.len),
-    });
-    defer assert(combination.done());
-
-    var ws: EnumWeightsType(Enum) = undefined;
-    inline for (fields) |field| {
-        @field(ws, field) = if (combination.take(prng))
-            prng.range_inclusive(u64, 1, 100)
-        else
-            0;
-    }
-
-    return ws;
-}
-
 /// An iterator-style API for selecting a random k-of-n combination.
 pub const Combination = struct {
     total: u32,
@@ -445,16 +421,6 @@ test "enum_weighted respects zero weight" {
     for (0..100) |_| {
         const v = prng.enum_weighted(E, .{ .a = 0, .b = 1, .c = 2 });
         assert(v != .a);
-    }
-}
-
-test "enum_weights produces at least one non-zero" {
-    const E = enum { a, b, c, d, e };
-    var prng = PRNG.from_seed(44);
-    for (0..20) |_| {
-        const ws = prng.enum_weights(E);
-        const total = ws.a + ws.b + ws.c + ws.d + ws.e;
-        assert(total > 0);
     }
 }
 

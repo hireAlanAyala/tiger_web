@@ -544,17 +544,12 @@ fn gen_response(prng: *PRNG) message.MessageResponse {
 }
 
 fn gen_product(prng: *PRNG) message.Product {
-    var p: message.Product = .{
-        .id = prng.int(u128) | 1,
-        .name = undefined,
-        .name_len = 0,
-        .description = undefined,
-        .description_len = 0,
-        .price_cents = prng.int(u32),
-        .inventory = prng.int(u32),
-        .version = prng.int(u32),
-        .active = prng.boolean(),
-    };
+    var p = std.mem.zeroes(message.Product);
+    p.id = prng.int(u128) | 1;
+    p.price_cents = prng.int(u32);
+    p.inventory = prng.int(u32);
+    p.version = prng.int(u32);
+    p.flags = .{ .active = prng.boolean() };
     p.name_len = prng.range_inclusive(u8, 1, message.product_name_max);
     for (p.name[0..p.name_len]) |*c| {
         // Include chars that need JSON escaping.
@@ -587,11 +582,8 @@ fn gen_product_list(prng: *PRNG) message.ProductList {
 }
 
 fn gen_collection_with_products(prng: *PRNG) message.CollectionWithProducts {
-    var col: message.ProductCollection = .{
-        .id = prng.int(u128) | 1,
-        .name = undefined,
-        .name_len = 0,
-    };
+    var col = std.mem.zeroes(message.ProductCollection);
+    col.id = prng.int(u128) | 1;
     col.name_len = prng.range_inclusive(u8, 1, message.collection_name_max);
     for (col.name[0..col.name_len]) |*c| {
         c.* = gen_json_char(prng);
@@ -611,11 +603,8 @@ fn gen_collection_list(prng: *PRNG) message.CollectionList {
         .len = prng.range_inclusive(u32, 0, message.list_max),
     };
     for (list.items[0..list.len]) |*col| {
-        col.* = .{
-            .id = prng.int(u128) | 1,
-            .name = undefined,
-            .name_len = 0,
-        };
+        col.* = std.mem.zeroes(message.ProductCollection);
+        col.id = prng.int(u128) | 1;
         col.name_len = prng.range_inclusive(u8, 1, message.collection_name_max);
         for (col.name[0..col.name_len]) |*c| {
             c.* = gen_json_char(prng);
@@ -628,21 +617,16 @@ fn gen_collection_list(prng: *PRNG) message.CollectionList {
 }
 
 fn gen_order_result(prng: *PRNG) message.OrderResult {
-    var order: message.OrderResult = .{
-        .id = prng.int(u128) | 1,
-        .items = undefined,
-        .items_len = prng.range_inclusive(u8, 1, message.order_items_max),
-        .total_cents = prng.int(u64),
-    };
+    var order = std.mem.zeroes(message.OrderResult);
+    order.id = prng.int(u128) | 1;
+    order.items_len = prng.range_inclusive(u8, 1, message.order_items_max);
+    order.total_cents = prng.int(u64);
     for (order.items[0..order.items_len]) |*item| {
-        item.* = .{
-            .product_id = prng.int(u128) | 1,
-            .name = undefined,
-            .name_len = 0,
-            .quantity = prng.range_inclusive(u32, 1, 10_000),
-            .price_cents = prng.int(u32),
-            .line_total_cents = prng.int(u64),
-        };
+        item.* = std.mem.zeroes(message.OrderResultItem);
+        item.product_id = prng.int(u128) | 1;
+        item.quantity = prng.range_inclusive(u32, 1, 10_000);
+        item.price_cents = prng.int(u32);
+        item.line_total_cents = prng.int(u64);
         item.name_len = prng.range_inclusive(u8, 1, message.product_name_max);
         for (item.name[0..item.name_len]) |*c| {
             c.* = gen_json_char(prng);
@@ -657,11 +641,10 @@ fn gen_order_summary_list(prng: *PRNG) message.OrderSummaryList {
         .len = prng.range_inclusive(u32, 0, message.list_max),
     };
     for (list.items[0..list.len]) |*o| {
-        o.* = .{
-            .id = prng.int(u128) | 1,
-            .total_cents = prng.int(u64),
-            .items_len = prng.range_inclusive(u8, 1, message.order_items_max),
-        };
+        o.* = std.mem.zeroes(message.OrderSummary);
+        o.id = prng.int(u128) | 1;
+        o.total_cents = prng.int(u64);
+        o.items_len = prng.range_inclusive(u8, 1, message.order_items_max);
     }
     return list;
 }

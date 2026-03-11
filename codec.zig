@@ -97,6 +97,7 @@ fn translate_products(method: http.Method, seg: PathSegments, body: []const u8, 
                 .event = .{ .transfer = .{
                     .target_id = seg.sub_id,
                     .quantity = quantity,
+                    .reserved = .{0} ** 12,
                 } },
             };
         }
@@ -221,11 +222,7 @@ fn translate_orders(method: http.Method, seg: PathSegments, body: []const u8, li
 /// Expected format:
 /// {"id":"...","items":[{"product_id":"...","quantity":N},...]}
 fn parse_order_json(body: []const u8) ?message.OrderRequest {
-    var order = message.OrderRequest{
-        .id = 0,
-        .items = undefined,
-        .items_len = 0,
-    };
+    var order = std.mem.zeroes(message.OrderRequest);
 
     // ID is required.
     const id_str = json_string_field(body, "id") orelse return null;
@@ -261,6 +258,7 @@ fn parse_order_json(body: []const u8) ?message.OrderRequest {
         order.items[order.items_len] = .{
             .product_id = pid,
             .quantity = qty,
+            .reserved = .{0} ** 12,
         };
         order.items_len += 1;
         pos = obj_end + 1;
@@ -278,17 +276,8 @@ fn parse_order_json(body: []const u8) ?message.OrderRequest {
 ///
 /// All fields except name are optional for updates. Name is always required.
 fn parse_product_json(body: []const u8) ?message.Product {
-    var product = message.Product{
-        .id = 0,
-        .name = undefined,
-        .name_len = 0,
-        .description = undefined,
-        .description_len = 0,
-        .price_cents = 0,
-        .inventory = 0,
-        .version = 0,
-        .active = true,
-    };
+    var product = std.mem.zeroes(message.Product);
+    product.flags = .{ .active = true };
 
     // ID is optional in the body (used for create).
     if (json_string_field(body, "id")) |id_str| {
@@ -325,7 +314,7 @@ fn parse_product_json(body: []const u8) ?message.Product {
 
     // active is optional (defaults to true).
     if (json_bool_field(body, "active")) |a| {
-        product.active = a;
+        product.flags.active = a;
     }
 
     return product;
@@ -335,11 +324,7 @@ fn parse_product_json(body: []const u8) ?message.Product {
 /// Expected: {"id":"...","name":"..."}
 /// ID is required (client-provided). Name is required.
 fn parse_collection_json(body: []const u8) ?message.ProductCollection {
-    var col = message.ProductCollection{
-        .id = 0,
-        .name = undefined,
-        .name_len = 0,
-    };
+    var col = std.mem.zeroes(message.ProductCollection);
 
     const id_str = json_string_field(body, "id") orelse return null;
     col.id = parse_uuid(id_str) orelse return null;
@@ -490,7 +475,7 @@ fn encode_product(w: *JsonWriter, p: *const message.Product) void {
     w.raw(",\"version\":");
     w.write_u32(p.version);
     w.raw(",\"active\":");
-    w.raw(if (p.active) "true" else "false");
+    w.raw(if (p.flags.active) "true" else "false");
     w.raw("}");
 }
 
@@ -659,7 +644,7 @@ fn query_param(query: []const u8, key: []const u8) ?[]const u8 {
 
 /// Parse list parameters from a query string: pagination cursor and filters.
 fn parse_list_params(query: []const u8) message.ListParams {
-    var params = message.ListParams{};
+    var params = std.mem.zeroes(message.ListParams);
 
     if (query_param(query, "after")) |v| {
         params.cursor = parse_uuid(v) orelse 0;
@@ -797,7 +782,7 @@ test "POST /products (create)" {
     try std.testing.expectEqualSlices(u8, p.description_slice(), "A small widget");
     try std.testing.expectEqual(p.price_cents, 999);
     try std.testing.expectEqual(p.inventory, 50);
-    try std.testing.expect(p.active);
+    try std.testing.expect(p.flags.active);
 }
 
 test "PUT /products/:id (update)" {
@@ -931,17 +916,14 @@ test "json_bool_field extracts boolean" {
 }
 
 test "encode_response_json — single product" {
-    var p = message.Product{
-        .id = 0xaabbccdd11223344aabbccdd11223344,
-        .name = undefined,
-        .name_len = 6,
-        .description = undefined,
-        .description_len = 4,
-        .price_cents = 999,
-        .inventory = 10,
-        .version = 1,
-        .active = true,
-    };
+    var p = std.mem.zeroes(message.Product);
+    p.id = 0xaabbccdd11223344aabbccdd11223344;
+    p.name_len = 6;
+    p.description_len = 4;
+    p.price_cents = 999;
+    p.inventory = 10;
+    p.version = 1;
+    p.flags = .{ .active = true };
     @memcpy(p.name[0..6], "Widget");
     @memcpy(p.description[0..4], "Cool");
 
@@ -1079,20 +1061,16 @@ test "GET /orders/:id (get)" {
 }
 
 test "encode_response_json — order" {
-    var order_result = message.OrderResult{
-        .id = 0xeeee0000000000000000000000000001,
-        .items = undefined,
-        .items_len = 1,
-        .total_cents = 1998,
-    };
-    order_result.items[0] = .{
-        .product_id = test_uuid,
-        .name = undefined,
-        .name_len = 6,
-        .quantity = 2,
-        .price_cents = 999,
-        .line_total_cents = 1998,
-    };
+    var order_result = std.mem.zeroes(message.OrderResult);
+    order_result.id = 0xeeee0000000000000000000000000001;
+    order_result.items_len = 1;
+    order_result.total_cents = 1998;
+    order_result.items[0] = std.mem.zeroes(message.OrderResultItem);
+    order_result.items[0].product_id = test_uuid;
+    order_result.items[0].name_len = 6;
+    order_result.items[0].quantity = 2;
+    order_result.items[0].price_cents = 999;
+    order_result.items[0].line_total_cents = 1998;
     @memcpy(order_result.items[0].name[0..6], "Widget");
 
     const resp = message.MessageResponse{
@@ -1120,24 +1098,18 @@ test "encode_response_json — inventory" {
 }
 
 test "encode_response_json — collection with products" {
-    var col = message.ProductCollection{
-        .id = 0xcc000000000000000000000000000001,
-        .name = undefined,
-        .name_len = 11,
-    };
+    var col = std.mem.zeroes(message.ProductCollection);
+    col.id = 0xcc000000000000000000000000000001;
+    col.name_len = 11;
     @memcpy(col.name[0..11], "Summer Sale");
 
-    var p = message.Product{
-        .id = test_uuid,
-        .name = undefined,
-        .name_len = 6,
-        .description = undefined,
-        .description_len = 0,
-        .price_cents = 999,
-        .inventory = 10,
-        .version = 1,
-        .active = true,
-    };
+    var p = std.mem.zeroes(message.Product);
+    p.id = test_uuid;
+    p.name_len = 6;
+    p.price_cents = 999;
+    p.inventory = 10;
+    p.version = 1;
+    p.flags = .{ .active = true };
     @memcpy(p.name[0..6], "Widget");
 
     var products = message.ProductList{ .items = undefined, .len = 1 };
@@ -1160,11 +1132,9 @@ test "encode_response_json — collection with products" {
 }
 
 test "encode_response_json — collection with empty products" {
-    var col = message.ProductCollection{
-        .id = 0xcc000000000000000000000000000002,
-        .name = undefined,
-        .name_len = 5,
-    };
+    var col = std.mem.zeroes(message.ProductCollection);
+    col.id = 0xcc000000000000000000000000000002;
+    col.name_len = 5;
     @memcpy(col.name[0..5], "Empty");
 
     const resp = message.MessageResponse{

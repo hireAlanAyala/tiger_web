@@ -10,11 +10,14 @@
 
 const std = @import("std");
 const assert = std.debug.assert;
+const stdx = @import("stdx.zig");
 const message = @import("message.zig");
 const state_machine = @import("state_machine.zig");
 const MemoryStorage = state_machine.MemoryStorage;
 const SqliteStorage = @import("storage.zig").SqliteStorage;
-const FuzzArgs = @import("fuzz_lib.zig").FuzzArgs;
+const Auditor = @import("auditor.zig").Auditor;
+const fuzz_lib = @import("fuzz_lib.zig");
+const FuzzArgs = fuzz_lib.FuzzArgs;
 const PRNG = @import("prng.zig");
 const gen = @import("fuzz.zig");
 
@@ -23,11 +26,7 @@ const log = std.log.scoped(.fuzz);
 const MemSM = state_machine.StateMachineType(MemoryStorage);
 const SqlSM = state_machine.StateMachineType(SqliteStorage);
 
-const id_pool_capacity = 64;
-
 pub fn main(allocator: std.mem.Allocator, args: FuzzArgs) !void {
-    _ = allocator;
-
     const seed = args.seed;
     const events_max = args.events_max orelse 50_000;
     var prng = PRNG.from_seed(seed);
@@ -43,19 +42,13 @@ pub fn main(allocator: std.mem.Allocator, args: FuzzArgs) !void {
     var mem_sm = MemSM.init(&mem_storage, false);
     var sql_sm = SqlSM.init(&sql_storage, false);
 
-    const op_weights = prng.enum_weights(message.Operation);
+    // Auditor: third independent reference model — pure-logic state
+    // tracking. Validates both backends against predicted results.
+    var auditor = try Auditor.init(allocator);
+    defer auditor.deinit(allocator);
 
-    // Track known IDs for generating valid references.
-    var product_ids: [id_pool_capacity]u128 = undefined;
-    var product_count: u32 = 0;
-    var collection_ids: [id_pool_capacity]u128 = undefined;
-    var collection_count: u32 = 0;
-    var order_ids: [id_pool_capacity]u128 = undefined;
-    var order_count: u32 = 0;
-    var total_products_created: u32 = 0;
-    var total_collections_created: u32 = 0;
-    var total_orders_created: u32 = 0;
-    var total_memberships: u32 = 0;
+    const op_weights = fuzz_lib.random_enum_weights(&prng, message.Operation);
+
     var coverage = gen.OperationCoverage{};
 
     for (0..events_max) |event_i| {
@@ -63,15 +56,7 @@ pub fn main(allocator: std.mem.Allocator, args: FuzzArgs) !void {
 
         log.debug("Running fuzz_ops[{}/{}] == {s}", .{ event_i, events_max, @tagName(operation) });
 
-        const msg = gen.gen_message(&prng, operation, .{
-            .product_ids = product_ids[0..product_count],
-            .collection_ids = collection_ids[0..collection_count],
-            .order_ids = order_ids[0..order_count],
-            .total_products_created = total_products_created,
-            .total_collections_created = total_collections_created,
-            .total_orders_created = total_orders_created,
-            .total_memberships = total_memberships,
-        }) orelse continue;
+        const msg = gen.gen_message(&prng, operation, auditor.id_pools()) orelse continue;
 
         if (!MemSM.input_valid(msg)) continue;
 
@@ -82,61 +67,12 @@ pub fn main(allocator: std.mem.Allocator, args: FuzzArgs) !void {
         const mem_resp = mem_sm.commit(msg);
         const sql_resp = sql_sm.commit(msg);
 
-        // Assert the two backends agree.
+        // Three-way validation:
+        // 1. Both backends agree (storage equivalence).
         assert_response_equal(mem_resp, sql_resp, event_i, operation);
+        // 2. Response matches independent model (logic correctness).
+        auditor.on_commit(msg, mem_resp);
         coverage.record(operation);
-
-        // Track newly created entities (same as fuzz.zig).
-        if (mem_resp.status == .ok) {
-            switch (operation) {
-                .create_product => {
-                    total_products_created += 1;
-                    if (product_count < id_pool_capacity) {
-                        product_ids[product_count] = msg.event.product.id;
-                        product_count += 1;
-                    }
-                },
-                .create_collection => {
-                    total_collections_created += 1;
-                    if (collection_count < id_pool_capacity) {
-                        collection_ids[collection_count] = msg.event.collection.id;
-                        collection_count += 1;
-                    }
-                },
-                .create_order => {
-                    total_orders_created += 1;
-                    if (order_count < id_pool_capacity) {
-                        order_ids[order_count] = msg.event.order.id;
-                        order_count += 1;
-                    }
-                },
-                .delete_product => {
-                    for (product_ids[0..product_count], 0..) |pid, i| {
-                        if (pid == msg.id) {
-                            product_count -= 1;
-                            product_ids[i] = product_ids[product_count];
-                            break;
-                        }
-                    }
-                },
-                .delete_collection => {
-                    for (collection_ids[0..collection_count], 0..) |cid, i| {
-                        if (cid == msg.id) {
-                            collection_count -= 1;
-                            collection_ids[i] = collection_ids[collection_count];
-                            break;
-                        }
-                    }
-                },
-                .add_collection_member => {
-                    total_memberships += 1;
-                },
-                .remove_collection_member => {
-                    if (total_memberships > 0) total_memberships -= 1;
-                },
-                else => {},
-            }
-        }
     }
 
     coverage.assert_full_coverage(op_weights);
@@ -188,11 +124,11 @@ fn assert_response_equal(
     }
 }
 
-/// Byte-wise struct equality — automatically covers all fields including
-/// padding. Requires both backends to zero-init structs so padding and
-/// array tails are deterministic. Matches TigerBeetle's asBytes pattern.
+/// Byte-wise struct equality using stdx.equal_bytes — comptime-verified
+/// no padding, no pointers, unique representation. Matches TigerBeetle's
+/// equal_bytes pattern.
 fn assert_bytes_equal(comptime T: type, a: *const T, b: *const T, event_i: usize) void {
-    if (!std.mem.eql(u8, std.mem.asBytes(a), std.mem.asBytes(b))) {
+    if (!stdx.equal_bytes(T, a, b)) {
         std.debug.panic("{s} data mismatch at event {}", .{ @typeName(T), event_i });
     }
 }
