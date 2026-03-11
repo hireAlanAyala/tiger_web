@@ -5,3 +5,12 @@ zig/
 *.db
 *.db-wal
 *.db-shm
+
+# Visualization build artifacts (regenerate with ./graph --json, ./graph_comptime, dot)
+graph
+graph.o
+graph_comptime
+graph_comptime.o
+graph.json
+types.json
+callgraph.svg
