@@ -1119,6 +1119,68 @@ test "encode_response_json — inventory" {
     try std.testing.expectEqualSlices(u8, json, "{\"inventory\":42}");
 }
 
+test "encode_response_json — collection with products" {
+    var col = message.ProductCollection{
+        .id = 0xcc000000000000000000000000000001,
+        .name = undefined,
+        .name_len = 11,
+    };
+    @memcpy(col.name[0..11], "Summer Sale");
+
+    var p = message.Product{
+        .id = test_uuid,
+        .name = undefined,
+        .name_len = 6,
+        .description = undefined,
+        .description_len = 0,
+        .price_cents = 999,
+        .inventory = 10,
+        .version = 1,
+        .active = true,
+    };
+    @memcpy(p.name[0..6], "Widget");
+
+    var products = message.ProductList{ .items = undefined, .len = 1 };
+    products.items[0] = p;
+
+    const resp = message.MessageResponse{
+        .status = .ok,
+        .result = .{ .collection = .{
+            .collection = col,
+            .products = products,
+        } },
+    };
+
+    var buf: [4096]u8 = undefined;
+    const json = encode_response_json(&buf, resp);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"name\":\"Summer Sale\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"products\":[") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"name\":\"Widget\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"price_cents\":999") != null);
+}
+
+test "encode_response_json — collection with empty products" {
+    var col = message.ProductCollection{
+        .id = 0xcc000000000000000000000000000002,
+        .name = undefined,
+        .name_len = 5,
+    };
+    @memcpy(col.name[0..5], "Empty");
+
+    const resp = message.MessageResponse{
+        .status = .ok,
+        .result = .{ .collection = .{
+            .collection = col,
+            .products = .{ .items = undefined, .len = 0 },
+        } },
+    };
+
+    var buf: [4096]u8 = undefined;
+    const json = encode_response_json(&buf, resp);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"name\":\"Empty\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"products\":[]") != null);
+}
+
 // =====================================================================
 // Seeded roundtrip tests — explore different inputs each run.
 // Reproduce: ./zig/zig build unit-test -- --seed=<N>
