@@ -21,7 +21,7 @@ const id_pool_capacity = 64;
 /// Generate a random number, biased towards all bit 'edges' of T. That is,
 /// given a u64, it's very likely to not only get 0 or maxInt(u64), but also
 /// values around maxInt(u63), maxInt(u62), ..., maxInt(u1).
-fn int_edge_biased(prng: *PRNG, comptime T: type) T {
+pub fn int_edge_biased(prng: *PRNG, comptime T: type) T {
     const bits = @typeInfo(T).int.bits;
     comptime assert(@typeInfo(T).int.signedness == .unsigned);
 
@@ -72,6 +72,10 @@ pub fn main(allocator: std.mem.Allocator, args: FuzzArgs) !void {
 
     var sm = StateMachine.init(&storage, false);
 
+    // Swarm testing: random weights per seed so different seeds stress
+    // different operation mixes (TigerBeetle workload pattern).
+    const op_weights = prng.enum_weights(message.Operation);
+
     // Track known IDs for generating valid references.
     const id_pool_max = id_pool_capacity;
     var product_ids: [id_pool_max]u128 = undefined;
@@ -81,10 +85,13 @@ pub fn main(allocator: std.mem.Allocator, args: FuzzArgs) !void {
     var order_ids: [id_pool_max]u128 = undefined;
     var order_count: u32 = 0;
     var total_products_created: u32 = 0;
+    var total_collections_created: u32 = 0;
     var total_orders_created: u32 = 0;
+    var total_memberships: u32 = 0;
+    var coverage = OperationCoverage{};
 
     for (0..events_max) |event_i| {
-        const operation = prng.enum_uniform(message.Operation);
+        const operation = prng.enum_weighted(message.Operation, op_weights);
 
         log.debug("Running fuzz_ops[{}/{}] == {s}", .{ event_i, events_max, @tagName(operation) });
 
@@ -93,7 +100,9 @@ pub fn main(allocator: std.mem.Allocator, args: FuzzArgs) !void {
             .collection_ids = collection_ids[0..collection_count],
             .order_ids = order_ids[0..order_count],
             .total_products_created = total_products_created,
+            .total_collections_created = total_collections_created,
             .total_orders_created = total_orders_created,
+            .total_memberships = total_memberships,
         }) orelse continue;
 
         // Gate: skip invalid inputs — matches TB's input_valid pattern.
@@ -103,6 +112,7 @@ pub fn main(allocator: std.mem.Allocator, args: FuzzArgs) !void {
         if (!sm.prefetch(msg)) continue;
 
         const resp = sm.commit(msg);
+        coverage.record(operation);
 
         // Track newly created entities.
         if (resp.status == .ok) {
@@ -115,6 +125,7 @@ pub fn main(allocator: std.mem.Allocator, args: FuzzArgs) !void {
                     }
                 },
                 .create_collection => {
+                    total_collections_created += 1;
                     if (collection_count < id_pool_max) {
                         collection_ids[collection_count] = msg.event.collection.id;
                         collection_count += 1;
@@ -146,24 +157,69 @@ pub fn main(allocator: std.mem.Allocator, args: FuzzArgs) !void {
                         }
                     }
                 },
+                .add_collection_member => {
+                    total_memberships += 1;
+                },
+                .remove_collection_member => {
+                    if (total_memberships > 0) total_memberships -= 1;
+                },
                 else => {},
             }
         }
     }
+
+    coverage.assert_full_coverage(op_weights);
 }
 
-const IdPools = struct {
+/// Tracks which operations were actually committed during a fuzz run.
+/// Asserts full coverage at the end — catches gen_message handlers that
+/// silently return null for new operations.
+pub const OperationCoverage = struct {
+    counts: std.enums.EnumArray(message.Operation, u32) = std.enums.EnumArray(message.Operation, u32).initFill(0),
+
+    pub fn record(self: *OperationCoverage, operation: message.Operation) void {
+        self.counts.set(operation, self.counts.get(operation) + 1);
+    }
+
+    /// Assert every operation with non-zero weight was actually committed.
+    /// Operations with zero weight are disabled by swarm testing and skipped.
+    pub fn assert_full_coverage(self: *const OperationCoverage, weights: PRNG.EnumWeightsType(message.Operation)) void {
+        inline for (comptime std.enums.values(message.Operation)) |op| {
+            if (@field(weights, @tagName(op)) > 0 and self.counts.get(op) == 0) {
+                std.debug.panic(
+                    "operation {s} was never committed — gen_message may be broken",
+                    .{@tagName(op)},
+                );
+            }
+        }
+    }
+};
+
+pub const IdPools = struct {
     product_ids: []const u128,
     collection_ids: []const u128,
     order_ids: []const u128,
     total_products_created: u32,
+    total_collections_created: u32,
     total_orders_created: u32,
+    total_memberships: u32,
 };
 
 /// Generate a Message for the given operation, or null if prerequisites
 /// aren't met (e.g., transfer_inventory needs 2 products).
 /// Sometimes generates intentionally invalid messages to exercise input_valid.
-fn gen_message(prng: *PRNG, operation: message.Operation, pools: IdPools) ?message.Message {
+pub fn gen_message(prng: *PRNG, operation: message.Operation, pools: IdPools) ?message.Message {
+    // Capacity checks must run before the random message path — random
+    // messages bypass the switch but can still trigger storage-full errors
+    // in MemoryStorage that SqliteStorage won't hit.
+    switch (operation) {
+        .create_product => if (pools.total_products_created >= 950) return null,
+        .create_collection => if (pools.total_collections_created >= 240) return null,
+        .create_order => if (pools.total_orders_created >= 240) return null,
+        .add_collection_member => if (pools.total_memberships >= 950) return null,
+        else => {},
+    }
+
     // ~10% chance: generate a random message with correct operation tag but
     // random fields — exercises the input_valid boundary.
     if (prng.chance(PRNG.ratio(1, 10))) {
@@ -171,15 +227,10 @@ fn gen_message(prng: *PRNG, operation: message.Operation, pools: IdPools) ?messa
     }
 
     return switch (operation) {
-        .create_product => blk: {
-            // Stay below MemoryStorage.product_capacity (1024) — soft
-            // delete never frees slots, so track total created.
-            if (pools.total_products_created >= 950) return null;
-            break :blk .{
-                .operation = .create_product,
-                .id = 0,
-                .event = .{ .product = gen_product(prng) },
-            };
+        .create_product => .{
+            .operation = .create_product,
+            .id = 0,
+            .event = .{ .product = gen_product(prng) },
         },
         .get_product, .get_product_inventory => .{
             .operation = operation,
@@ -220,9 +271,6 @@ fn gen_message(prng: *PRNG, operation: message.Operation, pools: IdPools) ?messa
         },
         .create_order => blk: {
             if (pools.product_ids.len == 0) return null;
-            // Stay below MemoryStorage.order_capacity (256) to avoid
-            // storage-full assert in execute_create_order.
-            if (pools.total_orders_created >= 240) return null;
             break :blk .{
                 .operation = .create_order,
                 .id = 0,
@@ -239,13 +287,10 @@ fn gen_message(prng: *PRNG, operation: message.Operation, pools: IdPools) ?messa
             .id = 0,
             .event = .{ .list = gen_list_params(prng) },
         },
-        .create_collection => blk: {
-            if (pools.collection_ids.len >= 200) return null;
-            break :blk .{
-                .operation = .create_collection,
-                .id = 0,
-                .event = .{ .collection = gen_collection(prng) },
-            };
+        .create_collection => .{
+            .operation = .create_collection,
+            .id = 0,
+            .event = .{ .collection = gen_collection(prng) },
         },
         .get_collection => .{
             .operation = .get_collection,
@@ -281,29 +326,24 @@ fn gen_message(prng: *PRNG, operation: message.Operation, pools: IdPools) ?messa
     };
 }
 
-fn pick_or_random_id(prng: *PRNG, pool: []const u128) u128 {
+pub fn pick_or_random_id(prng: *PRNG, pool: []const u128) u128 {
     if (pool.len > 0 and prng.chance(PRNG.ratio(3, 4))) {
         return pool[prng.int_inclusive(usize, pool.len - 1)];
     }
     return prng.int(u128) | 1;
 }
 
-fn gen_product(prng: *PRNG) message.Product {
+pub fn gen_product(prng: *PRNG) message.Product {
     return gen_product_with_id(prng, prng.int(u128) | 1);
 }
 
-fn gen_product_with_id(prng: *PRNG, id: u128) message.Product {
-    var p: message.Product = .{
-        .id = id,
-        .name = undefined,
-        .name_len = 0,
-        .description = undefined,
-        .description_len = 0,
-        .price_cents = prng.range_inclusive(u32, 0, 999_999),
-        .inventory = prng.range_inclusive(u32, 0, 10_000),
-        .version = 1,
-        .active = prng.boolean(),
-    };
+pub fn gen_product_with_id(prng: *PRNG, id: u128) message.Product {
+    var p: message.Product = std.mem.zeroes(message.Product);
+    p.id = id;
+    p.price_cents = prng.range_inclusive(u32, 0, 999_999);
+    p.inventory = prng.range_inclusive(u32, 0, 10_000);
+    p.version = 1;
+    p.active = prng.boolean();
     // Name: 1..name_max random alpha chars.
     p.name_len = prng.range_inclusive(u8, 1, message.product_name_max);
     for (p.name[0..p.name_len]) |*c| {
@@ -317,12 +357,9 @@ fn gen_product_with_id(prng: *PRNG, id: u128) message.Product {
     return p;
 }
 
-fn gen_collection(prng: *PRNG) message.ProductCollection {
-    var c: message.ProductCollection = .{
-        .id = prng.int(u128) | 1,
-        .name = undefined,
-        .name_len = 0,
-    };
+pub fn gen_collection(prng: *PRNG) message.ProductCollection {
+    var c: message.ProductCollection = std.mem.zeroes(message.ProductCollection);
+    c.id = prng.int(u128) | 1;
     c.name_len = prng.range_inclusive(u8, 1, message.collection_name_max);
     for (c.name[0..c.name_len]) |*ch| {
         ch.* = 'a' + @as(u8, @intCast(prng.int_inclusive(u8, 25)));
@@ -330,7 +367,7 @@ fn gen_collection(prng: *PRNG) message.ProductCollection {
     return c;
 }
 
-fn gen_order(prng: *PRNG, product_ids: []const u128) message.OrderRequest {
+pub fn gen_order(prng: *PRNG, product_ids: []const u128) message.OrderRequest {
     var order: message.OrderRequest = .{
         .id = prng.int(u128) | 1,
         .items = undefined,
@@ -369,32 +406,31 @@ fn gen_order(prng: *PRNG, product_ids: []const u128) message.OrderRequest {
 }
 
 /// Generate a message with random fields — likely invalid, exercises input_valid.
-fn gen_random_message(prng: *PRNG, operation: message.Operation) message.Message {
+pub fn gen_random_message(prng: *PRNG, operation: message.Operation) message.Message {
     // Use random scalars for each field rather than prng.fill on the whole
     // struct — avoids undefined behavior from invalid enum/bool bit patterns.
     const event: message.Event = switch (operation.event_tag()) {
-        .product => .{ .product = .{
-            .id = prng.int(u128),
-            .name = undefined,
-            .name_len = prng.int(u8),
-            .description = undefined,
-            .description_len = prng.int(u16),
-            .price_cents = prng.int(u32),
-            .inventory = prng.int(u32),
-            .version = prng.int(u32),
-            .active = prng.boolean(),
+        .product => .{ .product = blk: {
+            var p = std.mem.zeroes(message.Product);
+            p.id = prng.int(u128);
+            p.name_len = prng.int(u8);
+            p.description_len = prng.int(u16);
+            p.price_cents = prng.int(u32);
+            p.inventory = prng.int(u32);
+            p.version = prng.int(u32);
+            p.active = prng.boolean();
+            break :blk p;
         } },
-        .collection => .{ .collection = .{
-            .id = prng.int(u128),
-            .name = undefined,
-            .name_len = prng.int(u8),
+        .collection => .{ .collection = blk: {
+            var c = std.mem.zeroes(message.ProductCollection);
+            c.id = prng.int(u128);
+            c.name_len = prng.int(u8);
+            break :blk c;
         } },
         .order => .{ .order = blk: {
-            var o: message.OrderRequest = .{
-                .id = prng.int(u128),
-                .items = undefined,
-                .items_len = prng.int(u8),
-            };
+            var o = std.mem.zeroes(message.OrderRequest);
+            o.id = prng.int(u128);
+            o.items_len = prng.int(u8);
             const len = @min(o.items_len, message.order_items_max);
             for (o.items[0..len]) |*item| {
                 item.* = .{
@@ -424,7 +460,7 @@ fn gen_random_message(prng: *PRNG, operation: message.Operation) message.Message
     };
 }
 
-fn gen_list_params(prng: *PRNG) message.ListParams {
+pub fn gen_list_params(prng: *PRNG) message.ListParams {
     var params: message.ListParams = .{};
     if (prng.boolean()) {
         params.active_filter = prng.enum_uniform(message.ListParams.ActiveFilter);

@@ -38,6 +38,8 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
+    fuzz_exe.linkSystemLibrary("sqlite3");
+    fuzz_exe.linkLibC();
     b.installArtifact(fuzz_exe);
 
     const fuzz_cmd = b.addRunArtifact(fuzz_exe);
@@ -66,4 +68,14 @@ pub fn build(b: *std.Build) void {
         const run_unit_test = b.addRunArtifact(unit_test);
         unit_test_step.dependOn(&run_unit_test.step);
     }
+
+    // storage.zig needs sqlite3 + libc.
+    const storage_test = b.addTest(.{
+        .root_source_file = b.path("storage.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    storage_test.linkSystemLibrary("sqlite3");
+    storage_test.linkLibC();
+    unit_test_step.dependOn(&b.addRunArtifact(storage_test).step);
 }
