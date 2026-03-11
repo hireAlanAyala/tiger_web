@@ -133,7 +133,7 @@ pub const SqliteStorage = struct {
         );
         const stmt_list_members = prepare(real_db,
             "SELECT p.id, p.name, p.description, p.price_cents, p.inventory, p.version, p.active " ++
-            "FROM collection_members cm JOIN products p ON cm.product_id = p.id WHERE cm.collection_id = ?1 LIMIT ?2;",
+            "FROM collection_members cm JOIN products p ON cm.product_id = p.id WHERE cm.collection_id = ?1 ORDER BY p.id LIMIT ?2;",
         );
 
         // Prepare order statements.
@@ -147,7 +147,7 @@ pub const SqliteStorage = struct {
             "SELECT id, total_cents, items_len FROM orders WHERE id = ?1;",
         );
         const stmt_get_order_items = prepare(real_db,
-            "SELECT product_id, name, quantity, price_cents, line_total_cents FROM order_items WHERE order_id = ?1;",
+            "SELECT product_id, name, quantity, price_cents, line_total_cents FROM order_items WHERE order_id = ?1 ORDER BY rowid;",
         );
         const stmt_list_orders = prepare(real_db,
             "SELECT id, total_cents, items_len FROM orders WHERE id > ?1 ORDER BY id LIMIT ?2;",
@@ -287,8 +287,8 @@ pub const SqliteStorage = struct {
             .inactive_only => 0,
         };
         _ = c.sqlite3_bind_int(stmt, 3, active_val);
-        _ = c.sqlite3_bind_int(stmt, 4, @intCast(params.price_min));
-        _ = c.sqlite3_bind_int(stmt, 5, @intCast(params.price_max));
+        _ = c.sqlite3_bind_int64(stmt, 4, @intCast(params.price_min));
+        _ = c.sqlite3_bind_int64(stmt, 5, @intCast(params.price_max));
 
         // Name prefix: empty string = no filter, otherwise "prefix%".
         if (params.name_prefix_len > 0) {
@@ -479,8 +479,8 @@ pub const SqliteStorage = struct {
             bind_uuid(stmt, 1, order.id);
             bind_uuid(stmt, 2, item.product_id);
             _ = c.sqlite3_bind_text(stmt, 3, item.name[0..item.name_len].ptr, @intCast(item.name_len), c.SQLITE_TRANSIENT);
-            _ = c.sqlite3_bind_int(stmt, 4, @intCast(item.quantity));
-            _ = c.sqlite3_bind_int(stmt, 5, @intCast(item.price_cents));
+            _ = c.sqlite3_bind_int64(stmt, 4, @intCast(item.quantity));
+            _ = c.sqlite3_bind_int64(stmt, 5, @intCast(item.price_cents));
             _ = c.sqlite3_bind_int64(stmt, 6, @intCast(item.line_total_cents));
             switch (step_result(stmt)) {
                 .done => {},
@@ -494,6 +494,8 @@ pub const SqliteStorage = struct {
     }
 
     pub fn get_order(self: *SqliteStorage, id: u128, out: *message.OrderResult) StorageResult {
+        out.* = std.mem.zeroes(message.OrderResult);
+
         // Read order header.
         {
             const stmt = self.stmt_get_order;
@@ -548,12 +550,11 @@ pub const SqliteStorage = struct {
             switch (step_result(stmt)) {
                 .row => {
                     assert(out_len.* < message.list_max);
+                    out[out_len.*] = std.mem.zeroes(message.OrderSummary);
                     const id_blob: [*]const u8 = @ptrCast(c.sqlite3_column_blob(stmt, 0));
-                    out[out_len.*] = .{
-                        .id = std.mem.readInt(u128, id_blob[0..16], .big),
-                        .total_cents = @intCast(c.sqlite3_column_int64(stmt, 1)),
-                        .items_len = @intCast(c.sqlite3_column_int(stmt, 2)),
-                    };
+                    out[out_len.*].id = std.mem.readInt(u128, id_blob[0..16], .big);
+                    out[out_len.*].total_cents = @intCast(c.sqlite3_column_int64(stmt, 1));
+                    out[out_len.*].items_len = @intCast(c.sqlite3_column_int(stmt, 2));
                     out_len.* += 1;
                 },
                 .done => return .ok,
@@ -565,6 +566,8 @@ pub const SqliteStorage = struct {
     }
 
     fn read_order_item(stmt: *c.sqlite3_stmt, out: *message.OrderResultItem) void {
+        out.* = std.mem.zeroes(message.OrderResultItem);
+
         const pid_blob: [*]const u8 = @ptrCast(c.sqlite3_column_blob(stmt, 0));
         out.product_id = std.mem.readInt(u128, pid_blob[0..16], .big);
 
@@ -574,8 +577,8 @@ pub const SqliteStorage = struct {
         @memcpy(out.name[0..name_len], name_ptr[0..name_len]);
         out.name_len = @intCast(name_len);
 
-        out.quantity = @intCast(c.sqlite3_column_int(stmt, 2));
-        out.price_cents = @intCast(c.sqlite3_column_int(stmt, 3));
+        out.quantity = @intCast(c.sqlite3_column_int64(stmt, 2));
+        out.price_cents = @intCast(c.sqlite3_column_int64(stmt, 3));
         out.line_total_cents = @intCast(c.sqlite3_column_int64(stmt, 4));
     }
 
@@ -611,13 +614,15 @@ pub const SqliteStorage = struct {
         bind_uuid(stmt, 1, product.id);
         _ = c.sqlite3_bind_text(stmt, 2, product.name[0..product.name_len].ptr, @intCast(product.name_len), c.SQLITE_TRANSIENT);
         _ = c.sqlite3_bind_text(stmt, 3, product.description[0..product.description_len].ptr, @intCast(product.description_len), c.SQLITE_TRANSIENT);
-        _ = c.sqlite3_bind_int(stmt, 4, @intCast(product.price_cents));
-        _ = c.sqlite3_bind_int(stmt, 5, @intCast(product.inventory));
-        _ = c.sqlite3_bind_int(stmt, 6, @intCast(product.version));
+        _ = c.sqlite3_bind_int64(stmt, 4, @intCast(product.price_cents));
+        _ = c.sqlite3_bind_int64(stmt, 5, @intCast(product.inventory));
+        _ = c.sqlite3_bind_int64(stmt, 6, @intCast(product.version));
         _ = c.sqlite3_bind_int(stmt, 7, if (product.active) @as(c_int, 1) else @as(c_int, 0));
     }
 
     fn read_product(stmt: *c.sqlite3_stmt, out: *message.Product) void {
+        out.* = std.mem.zeroes(message.Product);
+
         // ID (BLOB 16 bytes → u128 big-endian).
         const id_blob: [*]const u8 = @ptrCast(c.sqlite3_column_blob(stmt, 0));
         out.id = std.mem.readInt(u128, id_blob[0..16], .big);
@@ -642,13 +647,15 @@ pub const SqliteStorage = struct {
         }
 
         // Numeric fields.
-        out.price_cents = @intCast(c.sqlite3_column_int(stmt, 3));
-        out.inventory = @intCast(c.sqlite3_column_int(stmt, 4));
-        out.version = @intCast(c.sqlite3_column_int(stmt, 5));
-        out.active = c.sqlite3_column_int(stmt, 6) != 0;
+        out.price_cents = @intCast(c.sqlite3_column_int64(stmt, 3));
+        out.inventory = @intCast(c.sqlite3_column_int64(stmt, 4));
+        out.version = @intCast(c.sqlite3_column_int64(stmt, 5));
+        out.active = c.sqlite3_column_int64(stmt, 6) != 0;
     }
 
     fn read_collection(stmt: *c.sqlite3_stmt, out: *message.ProductCollection) void {
+        out.* = std.mem.zeroes(message.ProductCollection);
+
         const id_blob: [*]const u8 = @ptrCast(c.sqlite3_column_blob(stmt, 0));
         out.id = std.mem.readInt(u128, id_blob[0..16], .big);
 
@@ -675,3 +682,93 @@ pub const SqliteStorage = struct {
         }
     }
 };
+
+// =====================================================================
+// Tests
+// =====================================================================
+
+fn make_test_product(id: u128, name: []const u8, price: u32) message.Product {
+    var p = message.Product{
+        .id = id,
+        .name = undefined,
+        .name_len = @intCast(name.len),
+        .description = undefined,
+        .description_len = 0,
+        .price_cents = price,
+        .inventory = 0,
+        .version = 1,
+        .active = true,
+    };
+    @memcpy(p.name[0..name.len], name);
+    return p;
+}
+
+test "roundtrip product with max u32 fields" {
+    var s = try SqliteStorage.init(":memory:");
+    defer s.deinit();
+
+    const max = std.math.maxInt(u32);
+    var p = make_test_product(1, "Expensive", max);
+    p.inventory = max;
+    p.version = max;
+    assert(s.put(&p) == .ok);
+
+    var out: message.Product = undefined;
+    assert(s.get(1, &out) == .ok);
+    try std.testing.expectEqual(out.price_cents, max);
+    try std.testing.expectEqual(out.inventory, max);
+    try std.testing.expectEqual(out.version, max);
+}
+
+test "list with max u32 price filters" {
+    var s = try SqliteStorage.init(":memory:");
+    defer s.deinit();
+
+    var p = make_test_product(1, "Widget", std.math.maxInt(u32));
+    assert(s.put(&p) == .ok);
+
+    // price_min = maxInt(u32) should match.
+    var out: [message.list_max]message.Product = undefined;
+    var out_len: u32 = 0;
+    assert(s.list(&out, &out_len, .{ .price_min = std.math.maxInt(u32) }) == .ok);
+    try std.testing.expectEqual(out_len, 1);
+
+    // price_max = maxInt(u32) - 1 should exclude it.
+    out_len = 0;
+    assert(s.list(&out, &out_len, .{ .price_max = std.math.maxInt(u32) - 1 }) == .ok);
+    try std.testing.expectEqual(out_len, 0);
+}
+
+test "order items preserve insertion order" {
+    var s = try SqliteStorage.init(":memory:");
+    defer s.deinit();
+
+    // Create an order with items whose product IDs are in descending order.
+    var order = message.OrderResult{
+        .id = 1,
+        .items = undefined,
+        .items_len = 3,
+        .total_cents = 600,
+    };
+    const ids = [3]u128{ 0xff, 0x80, 0x01 };
+    for (ids, 0..) |pid, i| {
+        order.items[i] = .{
+            .product_id = pid,
+            .name = undefined,
+            .name_len = 1,
+            .quantity = 1,
+            .price_cents = 200,
+            .line_total_cents = 200,
+        };
+        order.items[i].name[0] = 'A' + @as(u8, @intCast(i));
+    }
+    assert(s.put_order(&order) == .ok);
+
+    var out: message.OrderResult = undefined;
+    assert(s.get_order(1, &out) == .ok);
+    try std.testing.expectEqual(out.items_len, 3);
+    // Items must come back in insertion order (ORDER BY rowid), not by product_id.
+    try std.testing.expectEqual(out.items[0].product_id, 0xff);
+    try std.testing.expectEqual(out.items[1].product_id, 0x80);
+    try std.testing.expectEqual(out.items[2].product_id, 0x01);
+}

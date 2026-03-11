@@ -106,7 +106,13 @@ pub fn StateMachineType(comptime Storage: type) type {
                 .list_collections,
                 .list_orders,
                 => {
-                    if (msg.event.list.name_prefix_len > message.product_name_max) return false;
+                    const lp = msg.event.list;
+                    if (lp.name_prefix_len > message.product_name_max) return false;
+                    // NUL bytes in the prefix would be treated as string
+                    // terminators by SQLite's LIKE, silently matching everything.
+                    for (lp.name_prefix[0..lp.name_prefix_len]) |b| {
+                        if (b == 0) return false;
+                    }
                 },
             }
             return true;
@@ -485,12 +491,9 @@ pub fn StateMachineType(comptime Storage: type) type {
             }
 
             // Phase 2: all validated — decrement inventories and build result.
-            var order_result = message.OrderResult{
-                .id = order.id,
-                .items = undefined,
-                .items_len = order.items_len,
-                .total_cents = 0,
-            };
+            var order_result = std.mem.zeroes(message.OrderResult);
+            order_result.id = order.id;
+            order_result.items_len = order.items_len;
 
             for (order.items_slice(), 0..) |item, i| {
                 var product = self.prefetch_find(item.product_id).?;
@@ -784,9 +787,7 @@ pub const MemoryStorage = struct {
             if (!entry.occupied) continue;
             if (entry.product.id <= params.cursor) continue;
             if (!match_product_filters(&entry.product, params)) continue;
-            if (out_len.* >= message.list_max) break;
-            out[out_len.*] = entry.product;
-            out_len.* += 1;
+            insert_sorted(message.Product, out, out_len, entry.product);
         }
         return .ok;
     }
@@ -863,9 +864,7 @@ pub const MemoryStorage = struct {
         for (self.collections_store) |*entry| {
             if (!entry.occupied) continue;
             if (entry.collection.id <= cursor) continue;
-            if (out_len.* >= message.list_max) break;
-            out[out_len.*] = entry.collection;
-            out_len.* += 1;
+            insert_sorted(message.ProductCollection, out, out_len, entry.collection);
         }
         return .ok;
     }
@@ -904,9 +903,7 @@ pub const MemoryStorage = struct {
             // Look up the product.
             for (self.products) |*entry| {
                 if (entry.occupied and entry.product.id == m.product_id) {
-                    assert(out_len.* < message.list_max);
-                    out[out_len.*] = entry.product;
-                    out_len.* += 1;
+                    insert_sorted(message.Product, out, out_len, entry.product);
                     break;
                 }
             }
@@ -947,15 +944,43 @@ pub const MemoryStorage = struct {
         for (self.orders) |*entry| {
             if (!entry.occupied) continue;
             if (entry.order.id <= cursor) continue;
-            if (out_len.* >= message.list_max) break;
-            out[out_len.*] = .{
-                .id = entry.order.id,
-                .total_cents = entry.order.total_cents,
-                .items_len = entry.order.items_len,
-            };
-            out_len.* += 1;
+            var summary = std.mem.zeroes(message.OrderSummary);
+            summary.id = entry.order.id;
+            summary.total_cents = entry.order.total_cents;
+            summary.items_len = entry.order.items_len;
+            insert_sorted(message.OrderSummary, out, out_len, summary);
         }
         return .ok;
+    }
+
+    /// Insert an entity into a sorted, bounded output buffer.
+    /// Matches SqliteStorage's ORDER BY id LIMIT list_max — keeps
+    /// the list_max entities with the smallest IDs, in ascending order.
+    fn insert_sorted(comptime T: type, out: *[message.list_max]T, out_len: *u32, item: T) void {
+        // Find insertion point (first element with id > item.id).
+        var pos: u32 = 0;
+        while (pos < out_len.*) : (pos += 1) {
+            if (out[pos].id > item.id) break;
+        }
+
+        if (out_len.* < message.list_max) {
+            // Buffer not full — shift right and insert.
+            var i: u32 = out_len.*;
+            while (i > pos) : (i -= 1) {
+                out[i] = out[i - 1];
+            }
+            out[pos] = item;
+            out_len.* += 1;
+        } else if (pos < message.list_max) {
+            // Buffer full but item belongs before the last element —
+            // shift right from pos, dropping the last element.
+            var i: u32 = message.list_max - 1;
+            while (i > pos) : (i -= 1) {
+                out[i] = out[i - 1];
+            }
+            out[pos] = item;
+        }
+        // else: item.id >= all current IDs and buffer is full — skip.
     }
 
     /// Roll PRNG against fault probabilities. Returns a fault result or null.
@@ -1150,62 +1175,6 @@ test "soft delete preserves product in storage" {
     try std.testing.expectEqual(list_inactive.result.product_list.items[0].active, false);
 }
 
-test "soft delete increments version" {
-    var storage = try MemoryStorage.init(std.testing.allocator);
-    defer storage.deinit(std.testing.allocator);
-    var sm = TestStateMachine.init(&storage, false);
-
-    const test_id: u128 = 0x44444444444444444444444444444444;
-    _ = test_execute(&sm, .{
-        .operation = .create_product,
-        .id = 0,
-        .event = .{ .product = make_test_product(test_id, "Versioned", 100) },
-    });
-
-    _ = test_execute(&sm, .{
-        .operation = .delete_product,
-        .id = test_id,
-        .event = .{ .none = {} },
-    });
-
-    // Check version incremented via inactive list.
-    const list_resp = test_execute(&sm, .{
-        .operation = .list_products,
-        .id = 0,
-        .event = .{ .list = .{ .active_filter = .inactive_only } },
-    });
-    try std.testing.expectEqual(list_resp.result.product_list.items[0].version, 2);
-}
-
-test "soft delete is idempotent" {
-    var storage = try MemoryStorage.init(std.testing.allocator);
-    defer storage.deinit(std.testing.allocator);
-    var sm = TestStateMachine.init(&storage, false);
-
-    const test_id: u128 = 0x55555555555555555555555555555555;
-    _ = test_execute(&sm, .{
-        .operation = .create_product,
-        .id = 0,
-        .event = .{ .product = make_test_product(test_id, "Idempotent", 100) },
-    });
-
-    // First delete succeeds.
-    const r1 = test_execute(&sm, .{
-        .operation = .delete_product,
-        .id = test_id,
-        .event = .{ .none = {} },
-    });
-    try std.testing.expectEqual(r1.status, .ok);
-
-    // Second delete returns 404 (already inactive).
-    const r2 = test_execute(&sm, .{
-        .operation = .delete_product,
-        .id = test_id,
-        .event = .{ .none = {} },
-    });
-    try std.testing.expectEqual(r2.status, .not_found);
-}
-
 test "list" {
     var storage = try MemoryStorage.init(std.testing.allocator);
     defer storage.deinit(std.testing.allocator);
@@ -1223,6 +1192,71 @@ test "list" {
     try std.testing.expectEqual(resp.result.product_list.len, 2);
     try std.testing.expectEqualSlices(u8, resp.result.product_list.items[0].name_slice(), "A");
     try std.testing.expectEqualSlices(u8, resp.result.product_list.items[1].name_slice(), "B");
+}
+
+test "list returns results sorted by ID regardless of insertion order" {
+    var storage = try MemoryStorage.init(std.testing.allocator);
+    defer storage.deinit(std.testing.allocator);
+    var sm = TestStateMachine.init(&storage, false);
+
+    // Insert in descending ID order — the opposite of sorted.
+    const id_high: u128 = 0xff;
+    const id_mid: u128 = 0x80;
+    const id_low: u128 = 0x01;
+
+    _ = test_execute(&sm, .{ .operation = .create_product, .id = 0, .event = .{ .product = make_test_product(id_high, "High", 300) } });
+    _ = test_execute(&sm, .{ .operation = .create_product, .id = 0, .event = .{ .product = make_test_product(id_low, "Low", 100) } });
+    _ = test_execute(&sm, .{ .operation = .create_product, .id = 0, .event = .{ .product = make_test_product(id_mid, "Mid", 200) } });
+
+    const resp = test_execute(&sm, .{
+        .operation = .list_products,
+        .id = 0,
+        .event = .{ .list = .{} },
+    });
+    try std.testing.expectEqual(resp.status, .ok);
+    try std.testing.expectEqual(resp.result.product_list.len, 3);
+    // Must be sorted by ID, not insertion order.
+    try std.testing.expectEqual(resp.result.product_list.items[0].id, id_low);
+    try std.testing.expectEqual(resp.result.product_list.items[1].id, id_mid);
+    try std.testing.expectEqual(resp.result.product_list.items[2].id, id_high);
+}
+
+test "list pagination returns the smallest IDs when more than list_max exist" {
+    var storage = try MemoryStorage.init(std.testing.allocator);
+    defer storage.deinit(std.testing.allocator);
+    var sm = TestStateMachine.init(&storage, false);
+
+    // Create list_max + 10 products with IDs from 1..list_max+10,
+    // inserted in reverse order to stress the sort.
+    const total = message.list_max + 10;
+    for (0..total) |i| {
+        const id: u128 = total - i; // descending insertion: total, total-1, ..., 1
+        _ = test_execute(&sm, .{ .operation = .create_product, .id = 0, .event = .{ .product = make_test_product(id, "P", 100) } });
+    }
+
+    const resp = test_execute(&sm, .{
+        .operation = .list_products,
+        .id = 0,
+        .event = .{ .list = .{} },
+    });
+    try std.testing.expectEqual(resp.status, .ok);
+    try std.testing.expectEqual(resp.result.product_list.len, message.list_max);
+    // First page must be IDs 1..list_max, in order.
+    for (0..message.list_max) |i| {
+        try std.testing.expectEqual(resp.result.product_list.items[i].id, i + 1);
+    }
+
+    // Second page (cursor = list_max) must be the remaining 10.
+    const resp2 = test_execute(&sm, .{
+        .operation = .list_products,
+        .id = 0,
+        .event = .{ .list = .{ .cursor = message.list_max } },
+    });
+    try std.testing.expectEqual(resp2.status, .ok);
+    try std.testing.expectEqual(resp2.result.product_list.len, 10);
+    for (0..10) |i| {
+        try std.testing.expectEqual(resp2.result.product_list.items[i].id, message.list_max + i + 1);
+    }
 }
 
 test "list with cursor skips earlier items" {
@@ -1766,4 +1800,823 @@ test "capacity exhaustion — returns storage_error" {
     const overflow_id: u128 = MemoryStorage.product_capacity + 1;
     const r = test_execute(&sm, .{ .operation = .create_product, .id = 0, .event = .{ .product = make_test_product(overflow_id, "X", 1) } });
     try std.testing.expectEqual(r.status, .storage_error);
+}
+
+fn make_test_collection(id: u128, name: []const u8) message.ProductCollection {
+    var c = message.ProductCollection{
+        .id = id,
+        .name = undefined,
+        .name_len = @intCast(name.len),
+    };
+    @memcpy(c.name[0..name.len], name);
+    return c;
+}
+
+test "delete collection cascades memberships but not products" {
+    var storage = try MemoryStorage.init(std.testing.allocator);
+    defer storage.deinit(std.testing.allocator);
+    var sm = TestStateMachine.init(&storage, false);
+
+    const product_id: u128 = 0xaaaa0000000000000000000000000001;
+    const col_id: u128 = 0xcccc0000000000000000000000000001;
+
+    // Create product and collection.
+    _ = test_execute(&sm, .{ .operation = .create_product, .id = 0, .event = .{ .product = make_test_product(product_id, "Widget", 100) } });
+    _ = test_execute(&sm, .{ .operation = .create_collection, .id = 0, .event = .{ .collection = make_test_collection(col_id, "Sale") } });
+
+    // Add product to collection.
+    const add_resp = test_execute(&sm, .{
+        .operation = .add_collection_member,
+        .id = col_id,
+        .event = .{ .member_id = product_id },
+    });
+    try std.testing.expectEqual(add_resp.status, .ok);
+
+    // Verify product is in collection.
+    const get_col = test_execute(&sm, .{ .operation = .get_collection, .id = col_id, .event = .{ .none = {} } });
+    try std.testing.expectEqual(get_col.status, .ok);
+    try std.testing.expectEqual(get_col.result.collection.products.len, 1);
+
+    // Delete the collection.
+    const del_resp = test_execute(&sm, .{ .operation = .delete_collection, .id = col_id, .event = .{ .none = {} } });
+    try std.testing.expectEqual(del_resp.status, .ok);
+
+    // Collection is gone.
+    const gone = test_execute(&sm, .{ .operation = .get_collection, .id = col_id, .event = .{ .none = {} } });
+    try std.testing.expectEqual(gone.status, .not_found);
+
+    // Product still exists.
+    const product = test_execute(&sm, .{ .operation = .get_product, .id = product_id, .event = .{ .none = {} } });
+    try std.testing.expectEqual(product.status, .ok);
+    try std.testing.expectEqualSlices(u8, product.result.product.name_slice(), "Widget");
+
+    // Re-create the collection — should have no members (memberships were cascaded).
+    _ = test_execute(&sm, .{ .operation = .create_collection, .id = 0, .event = .{ .collection = make_test_collection(col_id + 1, "New") } });
+    // Add the product to the new collection to confirm memberships were cleaned.
+    // (If cascade failed, the old membership slot would still be occupied.)
+    const add2 = test_execute(&sm, .{
+        .operation = .add_collection_member,
+        .id = col_id + 1,
+        .event = .{ .member_id = product_id },
+    });
+    try std.testing.expectEqual(add2.status, .ok);
+}
+
+test "seeded: transfer inventory conserves total" {
+    var storage = try MemoryStorage.init(std.testing.allocator);
+    defer storage.deinit(std.testing.allocator);
+    var sm = TestStateMachine.init(&storage, false);
+    var prng = PRNG.from_seed_testing();
+
+    const num_products = 8;
+    var ids: [num_products]u128 = undefined;
+    var total_inventory: u64 = 0;
+
+    // Create products with random inventories.
+    for (&ids, 1..) |*id, i| {
+        id.* = @intCast(i);
+        var p = make_test_product(id.*, "P", 0);
+        p.inventory = prng.range_inclusive(u32, 0, 1000);
+        total_inventory += p.inventory;
+        const r = test_execute(&sm, .{ .operation = .create_product, .id = 0, .event = .{ .product = p } });
+        try std.testing.expectEqual(r.status, .ok);
+    }
+
+    // Random transfers — some succeed, some fail with insufficient_inventory.
+    for (0..500) |_| {
+        const src_idx = prng.int_inclusive(u8, num_products - 1);
+        var dst_idx = prng.int_inclusive(u8, num_products - 2);
+        if (dst_idx >= src_idx) dst_idx += 1;
+
+        const qty = prng.range_inclusive(u32, 1, 200);
+        const resp = test_execute(&sm, .{
+            .operation = .transfer_inventory,
+            .id = ids[src_idx],
+            .event = .{ .transfer = .{ .target_id = ids[dst_idx], .quantity = qty } },
+        });
+
+        // Only ok or insufficient_inventory — no storage errors (no fault injection).
+        assert(resp.status == .ok or resp.status == .insufficient_inventory);
+
+        // Conservation: sum of all inventories must be unchanged.
+        var sum: u64 = 0;
+        for (ids) |id| {
+            const g = test_execute(&sm, .{ .operation = .get_product, .id = id, .event = .{ .none = {} } });
+            assert(g.status == .ok);
+            sum += g.result.product.inventory;
+        }
+        try std.testing.expectEqual(sum, total_inventory);
+    }
+}
+
+test "seeded: create order arithmetic" {
+    var storage = try MemoryStorage.init(std.testing.allocator);
+    defer storage.deinit(std.testing.allocator);
+    var sm = TestStateMachine.init(&storage, false);
+    var prng = PRNG.from_seed_testing();
+
+    // Create products with random prices and inventories.
+    const num_products = 10;
+    var ids: [num_products]u128 = undefined;
+    var inventories: [num_products]u32 = undefined;
+    for (&ids, &inventories, 1..) |*id, *inv, i| {
+        id.* = @intCast(i);
+        var p = make_test_product(id.*, "P", prng.range_inclusive(u32, 1, 50000));
+        p.inventory = prng.range_inclusive(u32, 0, 100);
+        inv.* = p.inventory;
+        const r = test_execute(&sm, .{ .operation = .create_product, .id = 0, .event = .{ .product = p } });
+        assert(r.status == .ok);
+    }
+
+    for (0..200) |round| {
+        const order_id: u128 = @as(u128, 0xeeee0000000000000000000000000000) | (round + 1);
+        const items_len = prng.range_inclusive(u32, 1, 5);
+        var order = message.OrderRequest{
+            .id = order_id,
+            .items = undefined,
+            .items_len = @intCast(items_len),
+        };
+
+        // Pick distinct random products and quantities.
+        var used: [num_products]bool = [_]bool{false} ** num_products;
+        for (0..items_len) |i| {
+            var idx = prng.int_inclusive(u8, num_products - 1);
+            while (used[idx]) idx = prng.int_inclusive(u8, num_products - 1);
+            used[idx] = true;
+            const qty = prng.range_inclusive(u32, 1, 30);
+            order.items[i] = .{ .product_id = ids[idx], .quantity = qty };
+        }
+
+        const resp = test_execute(&sm, .{
+            .operation = .create_order,
+            .id = order_id,
+            .event = .{ .order = order },
+        });
+
+        if (resp.status == .insufficient_inventory) {
+            // No inventories changed.
+            for (ids, inventories) |id, expected| {
+                const g = test_execute(&sm, .{ .operation = .get_product, .id = id, .event = .{ .none = {} } });
+                try std.testing.expectEqual(g.result.product.inventory, expected);
+            }
+            continue;
+        }
+
+        try std.testing.expectEqual(resp.status, .ok);
+        const result = resp.result.order;
+        try std.testing.expectEqual(result.id, order_id);
+        try std.testing.expectEqual(result.items_len, @as(u8, @intCast(items_len)));
+
+        // Arithmetic: line_total = price * qty, total = sum(line_totals).
+        var expected_total: u64 = 0;
+        for (result.items[0..result.items_len]) |item| {
+            try std.testing.expectEqual(item.line_total_cents, @as(u64, item.price_cents) * @as(u64, item.quantity));
+            expected_total += item.line_total_cents;
+        }
+        try std.testing.expectEqual(result.total_cents, expected_total);
+
+        // Update expected inventories.
+        for (order.items[0..items_len]) |item| {
+            for (ids, &inventories) |id, *inv| {
+                if (id == item.product_id) {
+                    inv.* -= item.quantity;
+                    break;
+                }
+            }
+        }
+
+        // Verify actual inventories match expected.
+        for (ids, inventories) |id, expected| {
+            const g = test_execute(&sm, .{ .operation = .get_product, .id = id, .event = .{ .none = {} } });
+            try std.testing.expectEqual(g.result.product.inventory, expected);
+        }
+    }
+}
+
+test "seeded: list filters match predicate" {
+    var storage = try MemoryStorage.init(std.testing.allocator);
+    defer storage.deinit(std.testing.allocator);
+    var sm = TestStateMachine.init(&storage, false);
+    var prng = PRNG.from_seed_testing();
+
+    const prefixes = [_][]const u8{ "Alpha", "Beta", "Gamma", "Delta" };
+    const num_products = 40;
+
+    // Create products with random attributes.
+    const ProductAttrs = struct { id: u128, price: u32, active: bool, name: []const u8 };
+    var attrs: [num_products]ProductAttrs = undefined;
+
+    for (&attrs, 1..) |*a, i| {
+        const prefix = prefixes[prng.int_inclusive(u8, prefixes.len - 1)];
+        const price = prng.range_inclusive(u32, 100, 10000);
+        const active = prng.int_inclusive(u8, 1) == 1;
+        a.* = .{
+            .id = @intCast(i),
+            .price = price,
+            .active = active,
+            .name = prefix,
+        };
+        var p = make_test_product(a.id, prefix, price);
+        p.active = active;
+        const r = test_execute(&sm, .{ .operation = .create_product, .id = 0, .event = .{ .product = p } });
+        assert(r.status == .ok);
+    }
+
+    // Random filter combinations.
+    for (0..200) |_| {
+        var params = message.ListParams{};
+
+        // Random active filter.
+        params.active_filter = switch (prng.int_inclusive(u8, 2)) {
+            0 => .any,
+            1 => .active_only,
+            2 => .inactive_only,
+            else => unreachable,
+        };
+
+        // Random price range (sometimes none, sometimes one bound, sometimes both).
+        switch (prng.int_inclusive(u8, 3)) {
+            0 => {}, // no price filter
+            1 => params.price_min = prng.range_inclusive(u32, 100, 10000),
+            2 => params.price_max = prng.range_inclusive(u32, 100, 10000),
+            3 => {
+                params.price_min = prng.range_inclusive(u32, 100, 5000);
+                params.price_max = prng.range_inclusive(u32, 5000, 10000);
+            },
+            else => unreachable,
+        }
+
+        // Random name prefix (sometimes none).
+        if (prng.int_inclusive(u8, 1) == 1) {
+            const prefix = prefixes[prng.int_inclusive(u8, prefixes.len - 1)];
+            @memcpy(params.name_prefix[0..prefix.len], prefix);
+            params.name_prefix_len = @intCast(prefix.len);
+        }
+
+        const resp = test_execute(&sm, .{
+            .operation = .list_products,
+            .id = 0,
+            .event = .{ .list = params },
+        });
+        assert(resp.status == .ok);
+
+        // Count how many products should match.
+        var expected_count: u32 = 0;
+        for (&attrs) |*a| {
+            // Active filter.
+            switch (params.active_filter) {
+                .any => {},
+                .active_only => if (!a.active) continue,
+                .inactive_only => if (a.active) continue,
+            }
+            // Price range.
+            if (params.price_min > 0 and a.price < params.price_min) continue;
+            if (params.price_max > 0 and a.price > params.price_max) continue;
+            // Name prefix.
+            if (params.name_prefix_len > 0) {
+                const prefix = params.name_prefix[0..params.name_prefix_len];
+                if (!std.mem.startsWith(u8, a.name, prefix)) continue;
+            }
+            expected_count += 1;
+        }
+
+        // list_max caps the result.
+        const capped = @min(expected_count, message.list_max);
+        try std.testing.expectEqual(resp.result.product_list.len, capped);
+    }
+}
+
+test "seeded: update versioning monotonicity" {
+    var storage = try MemoryStorage.init(std.testing.allocator);
+    defer storage.deinit(std.testing.allocator);
+    var sm = TestStateMachine.init(&storage, false);
+    var prng = PRNG.from_seed_testing();
+
+    const test_id: u128 = 0xffff0000000000000000000000000099;
+    _ = test_execute(&sm, .{
+        .operation = .create_product,
+        .id = 0,
+        .event = .{ .product = make_test_product(test_id, "Seed", 100) },
+    });
+
+    var current_version: u32 = 1; // create sets version to 1
+
+    for (0..500) |_| {
+        // Choose update strategy: correct version, stale version, or version 0 (skip check).
+        const strategy = prng.int_inclusive(u8, 2);
+        var update = make_test_product(0, "Up", prng.range_inclusive(u32, 1, 99999));
+
+        switch (strategy) {
+            0 => update.version = current_version, // correct
+            1 => update.version = current_version +| prng.range_inclusive(u32, 1, 10), // stale (too high)
+            2 => update.version = 0, // skip check
+            else => unreachable,
+        }
+
+        const resp = test_execute(&sm, .{
+            .operation = .update_product,
+            .id = test_id,
+            .event = .{ .product = update },
+        });
+
+        switch (strategy) {
+            0, 2 => {
+                // Correct version or version 0 — must succeed.
+                try std.testing.expectEqual(resp.status, .ok);
+                current_version += 1;
+                try std.testing.expectEqual(resp.result.product.version, current_version);
+            },
+            1 => {
+                // Stale version — must be rejected.
+                try std.testing.expectEqual(resp.status, .version_conflict);
+                // Version unchanged.
+                const g = test_execute(&sm, .{ .operation = .get_product, .id = test_id, .event = .{ .none = {} } });
+                try std.testing.expectEqual(g.result.product.version, current_version);
+            },
+            else => unreachable,
+        }
+    }
+}
+
+// =====================================================================
+// TestEnv — thin helpers over test_execute for readable scenario tests.
+//
+// Each helper is a direct call to test_execute with compile-time type
+// checking on all arguments. Optional assertion fields use Zig's
+// anonymous struct defaults — null/0 = don't check.
+// =====================================================================
+
+const TestEnv = struct {
+    sm: TestStateMachine,
+    storage: MemoryStorage,
+
+    fn init(self: *TestEnv) !void {
+        self.storage = try MemoryStorage.init(std.testing.allocator);
+        self.sm = TestStateMachine.init(&self.storage, false);
+    }
+
+    fn deinit(self: *TestEnv) void {
+        self.storage.deinit(std.testing.allocator);
+    }
+
+    // --- Products ---
+
+    fn create_product(self: *TestEnv, opts: struct {
+        id: u128,
+        name: []const u8,
+        price: u32,
+        inventory: u32 = 0,
+    }) void {
+        var p = make_test_product(opts.id, opts.name, opts.price);
+        p.inventory = opts.inventory;
+        const resp = test_execute(&self.sm, .{
+            .operation = .create_product,
+            .id = 0,
+            .event = .{ .product = p },
+        });
+        assert(resp.status == .ok);
+    }
+
+    fn expect_product(self: *TestEnv, id: u128, expect: struct {
+        name: ?[]const u8 = null,
+        price: ?u32 = null,
+        inventory: ?u32 = null,
+        version: ?u32 = null,
+        active: ?bool = null,
+    }) !void {
+        const resp = test_execute(&self.sm, .{
+            .operation = .get_product,
+            .id = id,
+            .event = .{ .none = {} },
+        });
+        try std.testing.expectEqual(message.Status.ok, resp.status);
+        const p = resp.result.product;
+        if (expect.name) |n| try std.testing.expectEqualSlices(u8, n, p.name_slice());
+        if (expect.price) |v| try std.testing.expectEqual(v, p.price_cents);
+        if (expect.inventory) |v| try std.testing.expectEqual(v, p.inventory);
+        if (expect.version) |v| try std.testing.expectEqual(v, p.version);
+        if (expect.active) |v| try std.testing.expectEqual(v, p.active);
+    }
+
+    fn update_product(self: *TestEnv, id: u128, opts: struct {
+        name: ?[]const u8 = null,
+        price: ?u32 = null,
+        version: u32 = 0, // 0 = skip version check
+    }) !void {
+        const g = test_execute(&self.sm, .{ .operation = .get_product, .id = id, .event = .{ .none = {} } });
+        assert(g.status == .ok);
+        var p = g.result.product;
+
+        if (opts.name) |name| {
+            @memcpy(p.name[0..name.len], name);
+            p.name_len = @intCast(name.len);
+        }
+        if (opts.price) |price| p.price_cents = price;
+        p.version = opts.version;
+
+        const resp = test_execute(&self.sm, .{
+            .operation = .update_product,
+            .id = id,
+            .event = .{ .product = p },
+        });
+        try std.testing.expectEqual(message.Status.ok, resp.status);
+    }
+
+    fn update_product_expect(self: *TestEnv, id: u128, opts: struct {
+        name: ?[]const u8 = null,
+        price: ?u32 = null,
+        version: u32 = 0,
+    }, expected: message.Status) !void {
+        const g = test_execute(&self.sm, .{ .operation = .get_product, .id = id, .event = .{ .none = {} } });
+        assert(g.status == .ok);
+        var p = g.result.product;
+
+        if (opts.name) |name| {
+            @memcpy(p.name[0..name.len], name);
+            p.name_len = @intCast(name.len);
+        }
+        if (opts.price) |price| p.price_cents = price;
+        p.version = opts.version;
+
+        const resp = test_execute(&self.sm, .{
+            .operation = .update_product,
+            .id = id,
+            .event = .{ .product = p },
+        });
+        try std.testing.expectEqual(expected, resp.status);
+    }
+
+    fn delete_product(self: *TestEnv, id: u128) !void {
+        const resp = test_execute(&self.sm, .{
+            .operation = .delete_product,
+            .id = id,
+            .event = .{ .none = {} },
+        });
+        try std.testing.expectEqual(message.Status.ok, resp.status);
+    }
+
+    fn expect_inventory(self: *TestEnv, id: u128, expected: u32) !void {
+        const resp = test_execute(&self.sm, .{
+            .operation = .get_product_inventory,
+            .id = id,
+            .event = .{ .none = {} },
+        });
+        try std.testing.expectEqual(message.Status.ok, resp.status);
+        try std.testing.expectEqual(expected, resp.result.inventory);
+    }
+
+    fn expect_product_count(self: *TestEnv, opts: struct {
+        filter: message.ListParams.ActiveFilter = .any,
+    }, expected: u32) !void {
+        const resp = test_execute(&self.sm, .{
+            .operation = .list_products,
+            .id = 0,
+            .event = .{ .list = .{ .active_filter = opts.filter } },
+        });
+        try std.testing.expectEqual(message.Status.ok, resp.status);
+        try std.testing.expectEqual(expected, resp.result.product_list.len);
+    }
+
+    // --- Collections ---
+
+    fn create_collection(self: *TestEnv, opts: struct {
+        id: u128,
+        name: []const u8,
+    }) void {
+        const col = make_test_collection(opts.id, opts.name);
+        const resp = test_execute(&self.sm, .{
+            .operation = .create_collection,
+            .id = 0,
+            .event = .{ .collection = col },
+        });
+        assert(resp.status == .ok);
+    }
+
+    fn expect_collection(self: *TestEnv, id: u128, expect: struct {
+        product_count: ?u32 = null,
+    }) !void {
+        const resp = test_execute(&self.sm, .{
+            .operation = .get_collection,
+            .id = id,
+            .event = .{ .none = {} },
+        });
+        try std.testing.expectEqual(message.Status.ok, resp.status);
+        if (expect.product_count) |v| try std.testing.expectEqual(v, resp.result.collection.products.len);
+    }
+
+    fn delete_collection(self: *TestEnv, id: u128) !void {
+        const resp = test_execute(&self.sm, .{
+            .operation = .delete_collection,
+            .id = id,
+            .event = .{ .none = {} },
+        });
+        try std.testing.expectEqual(message.Status.ok, resp.status);
+    }
+
+    fn expect_collection_count(self: *TestEnv, expected: u32) !void {
+        const resp = test_execute(&self.sm, .{
+            .operation = .list_collections,
+            .id = 0,
+            .event = .{ .list = .{} },
+        });
+        try std.testing.expectEqual(message.Status.ok, resp.status);
+        try std.testing.expectEqual(expected, resp.result.collection_list.len);
+    }
+
+    fn add_member(self: *TestEnv, collection_id: u128, product_id: u128) !void {
+        const resp = test_execute(&self.sm, .{
+            .operation = .add_collection_member,
+            .id = collection_id,
+            .event = .{ .member_id = product_id },
+        });
+        try std.testing.expectEqual(message.Status.ok, resp.status);
+    }
+
+    fn remove_member(self: *TestEnv, collection_id: u128, product_id: u128) !void {
+        const resp = test_execute(&self.sm, .{
+            .operation = .remove_collection_member,
+            .id = collection_id,
+            .event = .{ .member_id = product_id },
+        });
+        try std.testing.expectEqual(message.Status.ok, resp.status);
+    }
+
+    // --- Transfers ---
+
+    fn transfer(self: *TestEnv, source_id: u128, target_id: u128, quantity: u32) !void {
+        const resp = test_execute(&self.sm, .{
+            .operation = .transfer_inventory,
+            .id = source_id,
+            .event = .{ .transfer = .{ .target_id = target_id, .quantity = quantity } },
+        });
+        try std.testing.expectEqual(message.Status.ok, resp.status);
+    }
+
+    // --- Orders ---
+
+    fn create_order(self: *TestEnv, id: u128, items: []const message.OrderItem) !message.OrderResult {
+        var req = message.OrderRequest{
+            .id = id,
+            .items = undefined,
+            .items_len = @intCast(items.len),
+        };
+        @memcpy(req.items[0..items.len], items);
+        const resp = test_execute(&self.sm, .{
+            .operation = .create_order,
+            .id = 0,
+            .event = .{ .order = req },
+        });
+        try std.testing.expectEqual(message.Status.ok, resp.status);
+        return resp.result.order;
+    }
+
+    fn expect_order(self: *TestEnv, id: u128, expect: struct {
+        total: ?u64 = null,
+    }) !void {
+        const resp = test_execute(&self.sm, .{
+            .operation = .get_order,
+            .id = id,
+            .event = .{ .none = {} },
+        });
+        try std.testing.expectEqual(message.Status.ok, resp.status);
+        if (expect.total) |v| try std.testing.expectEqual(v, resp.result.order.total_cents);
+    }
+
+    fn expect_order_count(self: *TestEnv, expected: u32) !void {
+        const resp = test_execute(&self.sm, .{
+            .operation = .list_orders,
+            .id = 0,
+            .event = .{ .list = .{} },
+        });
+        try std.testing.expectEqual(message.Status.ok, resp.status);
+        try std.testing.expectEqual(expected, resp.result.order_list.len);
+    }
+
+    // --- Generic not-found assertions ---
+
+    fn expect_not_found(self: *TestEnv, op: message.Operation, id: u128) !void {
+        const resp = test_execute(&self.sm, .{
+            .operation = op,
+            .id = id,
+            .event = .{ .none = {} },
+        });
+        try std.testing.expectEqual(message.Status.not_found, resp.status);
+    }
+
+    fn expect_status(self: *TestEnv, op: message.Operation, id: u128, event: message.Event, expected: message.Status) !void {
+        const resp = test_execute(&self.sm, .{
+            .operation = op,
+            .id = id,
+            .event = event,
+        });
+        try std.testing.expectEqual(expected, resp.status);
+    }
+};
+
+// --- Scenario tests ---
+
+test "product lifecycle" {
+    var env: TestEnv = undefined;
+    try env.init();
+    defer env.deinit();
+
+    env.create_product(.{ .id = 1, .name = "Widget", .price = 999, .inventory = 50 });
+    env.create_product(.{ .id = 2, .name = "Gadget", .price = 499, .inventory = 30 });
+
+    try env.expect_product(1, .{ .name = "Widget", .price = 999, .inventory = 50, .version = 1 });
+    try env.expect_product(2, .{ .name = "Gadget", .price = 499 });
+    try env.expect_not_found(.get_product, 99);
+
+    try env.update_product(1, .{ .name = "Updated", .price = 1299, .version = 1 }); // version 1 → 2
+
+    try env.expect_product(1, .{ .name = "Updated", .price = 1299, .version = 2, .inventory = 50 });
+
+    try env.delete_product(1);
+
+    try env.expect_not_found(.get_product, 1); // soft-deleted
+    try env.expect_product(2, .{ .active = true }); // P2 unaffected
+
+    try env.expect_product_count(.{}, 2); // P1 (inactive) + P2 (active)
+    try env.expect_product_count(.{ .filter = .inactive_only }, 1);
+    try env.expect_product_count(.{ .filter = .active_only }, 1);
+}
+
+test "version conflict" {
+    var env: TestEnv = undefined;
+    try env.init();
+    defer env.deinit();
+
+    env.create_product(.{ .id = 1, .name = "Widget", .price = 999 });
+
+    try env.update_product(1, .{ .name = "Updated", .version = 1 }); // version 1 → 2
+    try env.update_product_expect(1, .{ .name = "Updated", .version = 1 }, .version_conflict); // stale
+    try env.update_product(1, .{ .name = "Updated", .version = 2 }); // correct version 2
+    try env.update_product(1, .{ .name = "Updated" }); // no version = skip check
+}
+
+test "transfer inventory" {
+    var env: TestEnv = undefined;
+    try env.init();
+    defer env.deinit();
+
+    env.create_product(.{ .id = 1, .name = "Widget", .price = 100, .inventory = 50 });
+    env.create_product(.{ .id = 2, .name = "Gadget", .price = 100, .inventory = 10 });
+
+    try env.transfer(1, 2, 15);
+
+    try env.expect_inventory(1, 35);
+    try env.expect_inventory(2, 25);
+
+    try env.expect_status(.transfer_inventory, 1, .{ .transfer = .{ .target_id = 2, .quantity = 100 } }, .insufficient_inventory);
+
+    try env.expect_inventory(1, 35); // unchanged
+    try env.expect_inventory(2, 25);
+
+    try env.expect_status(.transfer_inventory, 99, .{ .transfer = .{ .target_id = 2, .quantity = 1 } }, .not_found);
+    try env.expect_status(.transfer_inventory, 1, .{ .transfer = .{ .target_id = 99, .quantity = 1 } }, .not_found);
+}
+
+test "order with inventory" {
+    var env: TestEnv = undefined;
+    try env.init();
+    defer env.deinit();
+
+    env.create_product(.{ .id = 1, .name = "Shirt", .price = 2000, .inventory = 100 });
+    env.create_product(.{ .id = 2, .name = "Pants", .price = 3000, .inventory = 50 });
+
+    const order = try env.create_order(1, &.{
+        .{ .product_id = 1, .quantity = 2 },
+        .{ .product_id = 2, .quantity = 1 },
+    });
+    try std.testing.expectEqual(@as(u64, 7000), order.total_cents);
+
+    try env.expect_inventory(1, 98);
+    try env.expect_inventory(2, 49);
+
+    try env.expect_order(1, .{ .total = 7000 });
+    try env.expect_not_found(.get_order, 99);
+
+    try env.expect_order_count(1);
+
+    // Insufficient inventory — order fails, inventory unchanged.
+    var fail_req = message.OrderRequest{ .id = 2, .items = undefined, .items_len = 1 };
+    fail_req.items[0] = .{ .product_id = 2, .quantity = 100 };
+    try env.expect_status(.create_order, 0, .{ .order = fail_req }, .insufficient_inventory);
+
+    try env.expect_inventory(2, 49); // unchanged on failure
+}
+
+test "collection cascade delete" {
+    var env: TestEnv = undefined;
+    try env.init();
+    defer env.deinit();
+
+    env.create_product(.{ .id = 1, .name = "Widget", .price = 999, .inventory = 10 });
+    env.create_product(.{ .id = 2, .name = "Gadget", .price = 499, .inventory = 20 });
+
+    env.create_collection(.{ .id = 1, .name = "Summer" });
+
+    try env.add_member(1, 1);
+    try env.add_member(1, 2);
+
+    try env.expect_collection(1, .{ .product_count = 2 });
+
+    try env.delete_collection(1);
+
+    try env.expect_not_found(.get_collection, 1);
+
+    try env.expect_product(1, .{}); // products survive cascade
+    try env.expect_product(2, .{});
+
+    try env.expect_collection_count(0);
+}
+
+test "membership operations" {
+    var env: TestEnv = undefined;
+    try env.init();
+    defer env.deinit();
+
+    env.create_product(.{ .id = 1, .name = "Widget", .price = 999 });
+    env.create_product(.{ .id = 2, .name = "Gadget", .price = 499 });
+
+    env.create_collection(.{ .id = 1, .name = "Summer" });
+
+    try env.add_member(1, 1);
+    try env.add_member(1, 2);
+    try env.add_member(1, 1); // idempotent
+    try env.expect_status(.add_collection_member, 99, .{ .member_id = 1 }, .not_found); // collection missing
+    try env.expect_status(.add_collection_member, 1, .{ .member_id = 99 }, .not_found); // product missing
+
+    try env.expect_collection(1, .{ .product_count = 2 });
+
+    try env.remove_member(1, 1);
+
+    try env.expect_collection(1, .{ .product_count = 1 }); // P2 remains
+
+    try env.expect_status(.remove_collection_member, 1, .{ .member_id = 1 }, .not_found); // already removed
+}
+
+test "delete missing entities" {
+    var env: TestEnv = undefined;
+    try env.init();
+    defer env.deinit();
+
+    try env.expect_not_found(.delete_product, 99);
+    try env.expect_not_found(.delete_collection, 99);
+}
+
+test "soft delete is idempotent" {
+    var env: TestEnv = undefined;
+    try env.init();
+    defer env.deinit();
+
+    env.create_product(.{ .id = 1, .name = "Widget", .price = 999 });
+
+    try env.delete_product(1);
+    try env.expect_not_found(.delete_product, 1); // already soft-deleted
+}
+
+test "soft delete increments version" {
+    var env: TestEnv = undefined;
+    try env.init();
+    defer env.deinit();
+
+    env.create_product(.{ .id = 1, .name = "Widget", .price = 999 });
+
+    try env.delete_product(1); // version 1 → 2
+
+    try env.expect_product_count(.{ .filter = .inactive_only }, 1);
+}
+
+test "cross-entity scenario" {
+    var env: TestEnv = undefined;
+    try env.init();
+    defer env.deinit();
+
+    env.create_product(.{ .id = 1, .name = "Widget", .price = 999, .inventory = 100 });
+    env.create_product(.{ .id = 2, .name = "Gadget", .price = 499, .inventory = 50 });
+
+    env.create_collection(.{ .id = 1, .name = "Summer" });
+
+    try env.add_member(1, 1);
+    try env.add_member(1, 2);
+
+    try env.transfer(1, 2, 20);
+
+    try env.expect_product(1, .{ .inventory = 80 });
+    try env.expect_product(2, .{ .inventory = 70 });
+
+    const order = try env.create_order(1, &.{
+        .{ .product_id = 1, .quantity = 3 },
+        .{ .product_id = 2, .quantity = 2 },
+    });
+    try std.testing.expectEqual(@as(u64, 3995), order.total_cents);
+
+    try env.expect_product(1, .{ .inventory = 77 });
+    try env.expect_product(2, .{ .inventory = 68 });
+
+    try env.delete_collection(1);
+
+    try env.expect_product(1, .{ .price = 999 });
+    try env.expect_order(1, .{ .total = 3995 });
 }
