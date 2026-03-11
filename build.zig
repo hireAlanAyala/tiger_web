@@ -57,6 +57,8 @@ pub fn build(b: *std.Build) void {
         "codec.zig",
         "tracer.zig",
         "prng.zig",
+        "time.zig",
+        "auth.zig",
     };
     const unit_test_step = b.step("unit-test", "Run unit tests");
     for (modules) |mod| {
