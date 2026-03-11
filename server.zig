@@ -4,6 +4,7 @@ const maybe = @import("message.zig").maybe;
 const message = @import("message.zig");
 const codec = @import("codec.zig");
 const http = @import("http.zig");
+const auth = @import("auth.zig");
 const StateMachineType = @import("state_machine.zig").StateMachineType;
 const ConnectionType = @import("connection.zig").ConnectionType;
 const Time = @import("time.zig").Time;
@@ -59,7 +60,7 @@ pub fn ServerType(comptime IO: type, comptime Storage: type) type {
             };
 
             for (&server.connections) |*conn| {
-                conn.* = Connection.init_free(time);
+                conn.* = Connection.init_free();
             }
 
             return server;
@@ -127,16 +128,45 @@ pub fn ServerType(comptime IO: type, comptime Storage: type) type {
         // --- Inbox: process ready requests ---
 
         fn process_inbox(server: *Server) void {
-            // Scratch buffer for encoding JSON responses.
             var json_buf: [http.response_body_max]u8 = undefined;
 
             for (&server.connections, &server.connections_busy) |*conn, busy| {
                 if (!busy) continue;
                 if (conn.state != .ready) continue;
 
-                const msg = conn.typed_message orelse unreachable;
-                // Prefetch: fetch data from storage. If storage is busy
-                // (transient), skip this connection — retry next tick.
+                // Re-parse HTTP from recv_buf. Deterministic — same bytes, same result.
+                const parsed = switch (http.parse_request(conn.recv_buf[0..conn.recv_pos])) {
+                    .complete => |p| p,
+                    // Frame was validated by connection, re-parse must succeed.
+                    .incomplete, .invalid => unreachable,
+                };
+
+                // OPTIONS preflight — respond directly, no auth needed.
+                if (parsed.method == .options) {
+                    conn.set_response(http.encode_options_response(&conn.send_buf));
+                    continue;
+                }
+
+                // Auth gate.
+                const token = parsed.authorization orelse {
+                    log.mark.warn("auth: missing token fd={d}", .{conn.fd});
+                    conn.set_response(http.encode_401_response(&conn.send_buf));
+                    continue;
+                };
+                if (auth.verify(token, server.time.realtime()) == null) {
+                    log.mark.warn("auth: invalid token fd={d}", .{conn.fd});
+                    conn.set_response(http.encode_401_response(&conn.send_buf));
+                    continue;
+                }
+
+                // Route through codec.
+                const msg = codec.translate(parsed.method, parsed.path, parsed.body) orelse {
+                    log.mark.warn("unmapped request fd={d}", .{conn.fd});
+                    conn.state = .closing;
+                    continue;
+                };
+
+                // Prefetch. Storage busy → skip, retry next tick.
                 server.state_machine.tracer.start(.prefetch);
                 if (!server.state_machine.prefetch(msg)) {
                     server.state_machine.tracer.cancel(.prefetch);
@@ -144,14 +174,14 @@ pub fn ServerType(comptime IO: type, comptime Storage: type) type {
                 }
                 server.state_machine.tracer.stop(.prefetch, msg.operation);
 
+                // Execute.
                 server.state_machine.tracer.start(.execute);
                 const resp = server.state_machine.commit(msg);
                 server.state_machine.tracer.stop(.execute, msg.operation);
-
                 server.state_machine.tracer.trace_log(msg.operation, resp.status, conn.fd);
 
                 const json = codec.encode_response_json(&json_buf, resp);
-                conn.set_json_response(json, resp.status);
+                conn.set_response(http.encode_json_response(&conn.send_buf, resp.status, json));
             }
         }
 
@@ -214,7 +244,7 @@ pub fn ServerType(comptime IO: type, comptime Storage: type) type {
 
                 log.debug("closing connection fd={d}", .{conn.fd});
                 server.io.close(conn.fd);
-                conn.* = Connection.init_free(server.time);
+                conn.* = Connection.init_free();
                 busy.* = false;
             }
         }

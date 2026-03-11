@@ -1,11 +1,7 @@
 const std = @import("std");
 const assert = std.debug.assert;
 const maybe = @import("message.zig").maybe;
-const message = @import("message.zig");
 const http = @import("http.zig");
-const codec = @import("codec.zig");
-const auth = @import("auth.zig");
-const Time = @import("time.zig").Time;
 const marks = @import("marks.zig");
 const log = marks.wrap_log(std.log.scoped(.connection));
 
@@ -35,7 +31,6 @@ pub fn ConnectionType(comptime IO: type) type {
 
         state: State,
         fd: IO.fd_t,
-        time: Time,
 
         // Receive buffer: accumulate incoming HTTP bytes until a full request arrives.
         recv_buf: [http.recv_buf_max]u8,
@@ -61,15 +56,11 @@ pub fn ConnectionType(comptime IO: type) type {
         // Whether the client wants keep-alive (HTTP/1.1 default) or close (HTTP/1.0 default).
         keep_alive: bool,
 
-        // Inbox: filled by recv callback when a complete request is parsed.
-        typed_message: ?message.Message,
 
-
-        pub fn init_free(time: Time) Connection {
+        pub fn init_free() Connection {
             return .{
                 .state = .free,
                 .fd = 0,
-                .time = time,
                 .recv_buf = undefined,
                 .recv_pos = 0,
                 .recv_completion = .{},
@@ -82,7 +73,6 @@ pub fn ConnectionType(comptime IO: type) type {
                 .recv_activity = false,
                 .send_activity = false,
                 .keep_alive = true,
-                .typed_message = null,
             };
         }
 
@@ -129,28 +119,23 @@ pub fn ConnectionType(comptime IO: type) type {
             switch (conn.state) {
                 .free => {
                     assert(conn.fd == 0);
-                    assert(conn.typed_message == null);
                     assert(conn.recv_completion.operation == .none);
                     assert(conn.send_completion.operation == .none);
                 },
                 .accepting => {
                     assert(conn.fd == 0);
-                    assert(conn.typed_message == null);
                 },
                 .receiving => {
                     assert(conn.fd > 0);
-                    assert(conn.typed_message == null);
                     assert(conn.recv_pos <= conn.recv_buf.len);
                 },
                 .ready => {
                     assert(conn.fd > 0);
-                    assert(conn.typed_message != null);
                     assert(conn.request_consumed > 0);
                     assert(conn.request_consumed <= conn.recv_pos);
                 },
                 .sending => {
                     assert(conn.fd > 0);
-                    assert(conn.typed_message == null);
                     assert(conn.send_len > 0);
                     assert(conn.send_len <= conn.send_buf.len);
                     assert(conn.send_pos <= conn.send_len);
@@ -183,48 +168,18 @@ pub fn ConnectionType(comptime IO: type) type {
         /// Try to parse an HTTP request from the current recv buffer.
         /// Called from recv_callback (new data arrived) and from the keep-alive
         /// path in send_callback (pipelined data may already be buffered).
+        ///
+        /// Pure frame detection — validates that a complete HTTP request is
+        /// buffered. Application logic (auth, routing) runs in the server tick.
         fn try_parse_request(conn: *Connection) void {
             assert(conn.state == .receiving);
             switch (http.parse_request(conn.recv_buf[0..conn.recv_pos])) {
                 .complete => |parsed| {
                     assert(parsed.total_len > 0);
                     assert(parsed.total_len <= conn.recv_pos);
+                    conn.request_consumed = parsed.total_len;
                     conn.keep_alive = parsed.keep_alive;
-
-                    // OPTIONS preflight — respond with CORS headers directly.
-                    // No auth required for preflight.
-                    if (parsed.method == .options) {
-                        const encoded = http.encode_options_response(&conn.send_buf);
-                        conn.send_len = @intCast(encoded.len);
-                        conn.send_pos = 0;
-                        conn.request_consumed = parsed.total_len;
-                        conn.typed_message = null;
-                        conn.state = .sending;
-                        return;
-                    }
-
-                    // Auth gate — verify bearer token before routing.
-                    const token = parsed.authorization orelse {
-                        log.mark.warn("auth: missing token fd={d}", .{conn.fd});
-                        conn.send_401(parsed.total_len);
-                        return;
-                    };
-                    if (auth.verify(token, conn.time.realtime()) == null) {
-                        log.mark.warn("auth: invalid token fd={d}", .{conn.fd});
-                        conn.send_401(parsed.total_len);
-                        return;
-                    }
-
-                    // Route through codec layer.
-                    if (codec.translate(parsed.method, parsed.path, parsed.body)) |msg| {
-                        conn.typed_message = msg;
-                        conn.request_consumed = parsed.total_len;
-                        conn.state = .ready;
-                        return;
-                    }
-
-                    log.mark.warn("unmapped request fd={d}", .{conn.fd});
-                    conn.state = .closing;
+                    conn.state = .ready;
                 },
                 .incomplete => {
                     // Need more bytes — stay in receiving state.
@@ -234,18 +189,6 @@ pub fn ConnectionType(comptime IO: type) type {
                     conn.state = .closing;
                 },
             }
-        }
-
-        /// Send a 401 Unauthorized response directly, bypassing the state machine.
-        /// Same pattern as OPTIONS preflight — a connection-level shortcut.
-        fn send_401(conn: *Connection, consumed: u32) void {
-            assert(conn.state == .receiving);
-            const encoded = http.encode_401_response(&conn.send_buf);
-            conn.send_len = @intCast(encoded.len);
-            conn.send_pos = 0;
-            conn.request_consumed = consumed;
-            conn.typed_message = null;
-            conn.state = .sending;
         }
 
         /// Returns true if the connection has been idle for longer than timeout_ticks.
@@ -261,15 +204,14 @@ pub fn ConnectionType(comptime IO: type) type {
             conn.submit_recv(io);
         }
 
-        /// Called by the server tick after execute. Encodes the JSON response into the send buffer.
-        pub fn set_json_response(conn: *Connection, json_body: []const u8, status: message.Status) void {
+        /// Called by the server tick to place an encoded HTTP response in the
+        /// send buffer. The server encodes the response; the connection is
+        /// pure byte mechanics.
+        pub fn set_response(conn: *Connection, encoded: []const u8) void {
             assert(conn.state == .ready);
-            assert(conn.typed_message != null);
             defer conn.invariants();
-            const encoded = http.encode_json_response(&conn.send_buf, status, json_body);
             conn.send_len = @intCast(encoded.len);
             conn.send_pos = 0;
-            conn.typed_message = null;
             conn.state = .sending;
         }
 
