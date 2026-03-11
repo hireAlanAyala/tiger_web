@@ -105,7 +105,7 @@ pub const SqliteStorage = struct {
             " AND (?3 < 0 OR active = ?3)" ++
             " AND price_cents >= ?4" ++
             " AND (?5 = 0 OR price_cents <= ?5)" ++
-            " AND (?6 = '' OR name LIKE ?6)" ++
+            " AND (?6 = '' OR substr(name, 1, length(?6)) = ?6)" ++
             " ORDER BY id LIMIT ?2;",
         );
 
@@ -290,18 +290,16 @@ pub const SqliteStorage = struct {
         _ = c.sqlite3_bind_int64(stmt, 4, @intCast(params.price_min));
         _ = c.sqlite3_bind_int64(stmt, 5, @intCast(params.price_max));
 
-        // Name prefix: empty string = no filter, otherwise "prefix%".
+        // Name prefix: empty string = no filter, otherwise exact prefix
+        // match via substr. No LIKE — avoids wildcard divergence (% and _
+        // are literals in MemoryStorage's startsWith but wildcards in LIKE).
         if (params.name_prefix_len > 0) {
             // Pair assertion: input_valid rejects NUL bytes at the boundary;
-            // assert here at consumption — NUL in LIKE patterns causes SQLite
-            // to silently match everything (C string terminator semantics).
+            // assert here at consumption — NUL in text causes SQLite's
+            // length() to return a truncated count.
             for (params.name_prefix[0..params.name_prefix_len]) |b| assert(b != 0);
 
-            var like_buf: [message.product_name_max + 1]u8 = undefined;
-            @memcpy(like_buf[0..params.name_prefix_len], params.name_prefix[0..params.name_prefix_len]);
-            like_buf[params.name_prefix_len] = '%';
-            const like_len = params.name_prefix_len + 1;
-            _ = c.sqlite3_bind_text(stmt, 6, &like_buf, @intCast(like_len), c.SQLITE_TRANSIENT);
+            _ = c.sqlite3_bind_text(stmt, 6, params.name_prefix[0..params.name_prefix_len].ptr, @intCast(params.name_prefix_len), c.SQLITE_TRANSIENT);
         } else {
             _ = c.sqlite3_bind_text(stmt, 6, "", 0, c.SQLITE_TRANSIENT);
         }

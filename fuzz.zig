@@ -400,5 +400,11 @@ pub fn gen_list_params(prng: *PRNG) message.ListParams {
             params.price_max = params.price_min;
         }
     }
+    if (prng.boolean()) {
+        params.name_prefix_len = prng.range_inclusive(u8, 1, 3);
+        for (params.name_prefix[0..params.name_prefix_len]) |*ch| {
+            ch.* = 'a' + @as(u8, @intCast(prng.int_inclusive(u8, 25)));
+        }
+    }
     return params;
 }
