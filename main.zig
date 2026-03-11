@@ -4,6 +4,7 @@ const state_machine = @import("state_machine.zig");
 const SqliteStorage = @import("storage.zig").SqliteStorage;
 const StateMachine = state_machine.StateMachineType(SqliteStorage);
 const ServerType = @import("server.zig").ServerType;
+const TimeReal = @import("time.zig").TimeReal;
 
 const Server = ServerType(IO, SqliteStorage);
 const marks = @import("marks.zig");
@@ -53,7 +54,8 @@ pub fn main() !void {
 
     const listen_fd = try IO.open_listener(address);
 
-    var server = Server.init(&io, &sm, listen_fd);
+    var time_real = TimeReal{};
+    var server = Server.init(&io, &sm, listen_fd, time_real.time());
 
     log.info("storage=sqlite tick_interval={d}ms connections={d}", .{
         tick_ns / std.time.ns_per_ms,

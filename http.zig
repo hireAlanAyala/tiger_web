@@ -35,6 +35,9 @@ pub const ParseResult = union(enum) {
         /// Whether the client wants to keep the connection alive.
         /// HTTP/1.1 defaults to true, HTTP/1.0 defaults to false.
         keep_alive: bool,
+        /// Bearer token from Authorization header, or null if absent.
+        /// Points into buf — valid only while buf is live.
+        authorization: ?[]const u8,
     },
 };
 
@@ -117,12 +120,25 @@ pub fn parse_request(buf: []const u8) ParseResult {
 
     const body = if (content_length > 0) buf[body_start..total_len] else &[_]u8{};
 
+    // Extract Bearer token from Authorization header (if present).
+    const authorization = blk: {
+        const auth_value = find_header_value(headers, "Authorization") orelse break :blk null;
+        const bearer_prefix = "Bearer ";
+        if (auth_value.len > bearer_prefix.len and
+            std.mem.eql(u8, auth_value[0..bearer_prefix.len], bearer_prefix))
+        {
+            break :blk auth_value[bearer_prefix.len..];
+        }
+        break :blk null;
+    };
+
     return .{ .complete = .{
         .method = method,
         .path = raw_path,
         .body = body,
         .total_len = @intCast(total_len),
         .keep_alive = keep_alive,
+        .authorization = authorization,
     } };
 }
 
@@ -175,6 +191,21 @@ pub fn encode_options_response(buf: []u8) []const u8 {
         cors_headers ++
         "\r\nAccess-Control-Max-Age: 86400" ++
         "\r\n\r\n";
+    assert(buf.len >= response.len);
+    @memcpy(buf[0..response.len], response);
+    return buf[0..response.len];
+}
+
+/// Encode a 401 Unauthorized response.
+pub fn encode_401_response(buf: []u8) []const u8 {
+    const response = "HTTP/1.1 401 Unauthorized" ++
+        "\r\nContent-Length: 26" ++
+        "\r\nContent-Type: application/json" ++
+        "\r\nConnection: keep-alive" ++
+        "\r\nWWW-Authenticate: Bearer" ++
+        cors_headers ++
+        "\r\n\r\n" ++
+        "{\"error\":\"unauthorized\"}";
     assert(buf.len >= response.len);
     @memcpy(buf[0..response.len], response);
     return buf[0..response.len];

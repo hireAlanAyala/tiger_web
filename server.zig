@@ -2,10 +2,11 @@ const std = @import("std");
 const assert = std.debug.assert;
 const maybe = @import("message.zig").maybe;
 const message = @import("message.zig");
-const codec =@import("codec.zig");
+const codec = @import("codec.zig");
 const http = @import("http.zig");
 const StateMachineType = @import("state_machine.zig").StateMachineType;
 const ConnectionType = @import("connection.zig").ConnectionType;
+const Time = @import("time.zig").Time;
 const marks = @import("marks.zig");
 const log = marks.wrap_log(std.log.scoped(.server));
 
@@ -26,6 +27,7 @@ pub fn ServerType(comptime IO: type, comptime Storage: type) type {
 
         io: *IO,
         state_machine: *StateMachine,
+        time: Time,
 
         listen_fd: IO.fd_t,
         accept_completion: IO.Completion,
@@ -43,10 +45,11 @@ pub fn ServerType(comptime IO: type, comptime Storage: type) type {
         pub const request_timeout_ticks = 3000;
 
         /// Initialize the server. Binds and listens on the given address.
-        pub fn init(io: *IO, state_machine: *StateMachine, listen_fd: IO.fd_t) Server {
+        pub fn init(io: *IO, state_machine: *StateMachine, listen_fd: IO.fd_t, time: Time) Server {
             var server = Server{
                 .io = io,
                 .state_machine = state_machine,
+                .time = time,
                 .listen_fd = listen_fd,
                 .accept_completion = .{},
                 .accepting = false,
@@ -56,7 +59,7 @@ pub fn ServerType(comptime IO: type, comptime Storage: type) type {
             };
 
             for (&server.connections) |*conn| {
-                conn.* = Connection.init_free();
+                conn.* = Connection.init_free(time);
             }
 
             return server;
@@ -211,7 +214,7 @@ pub fn ServerType(comptime IO: type, comptime Storage: type) type {
 
                 log.debug("closing connection fd={d}", .{conn.fd});
                 server.io.close(conn.fd);
-                conn.* = Connection.init_free();
+                conn.* = Connection.init_free(server.time);
                 busy.* = false;
             }
         }

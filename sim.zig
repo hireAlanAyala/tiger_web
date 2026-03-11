@@ -9,6 +9,8 @@ const ServerType = @import("server.zig").ServerType;
 const ConnectionType = @import("connection.zig").ConnectionType;
 const marks = @import("marks.zig");
 const PRNG = @import("prng.zig");
+const TimeSim = @import("time.zig").TimeSim;
+const auth = @import("auth.zig");
 
 /// Simulated IO that replaces the real epoll-based IO for deterministic testing.
 /// All operations complete synchronously during `run_for_ns`. A seeded PRNG
@@ -149,9 +151,13 @@ pub const SimIO = struct {
         pos += line1.len;
         @memcpy(buf[pos..][0..path.len], path);
         pos += path.len;
-        const line2 = " HTTP/1.1\r\nContent-Length: ";
+        const line2 = " HTTP/1.1\r\n";
         @memcpy(buf[pos..][0..line2.len], line2);
         pos += line2.len;
+        pos += write_auth_header(buf[pos..]);
+        const cl_hdr = "Content-Length: ";
+        @memcpy(buf[pos..][0..cl_hdr.len], cl_hdr);
+        pos += cl_hdr.len;
 
         var cl_buf: [10]u8 = undefined;
         const cl_str = format_u32(&cl_buf, @intCast(body.len));
@@ -177,9 +183,13 @@ pub const SimIO = struct {
         pos += line1.len;
         @memcpy(buf[pos..][0..path.len], path);
         pos += path.len;
-        const line2 = " HTTP/1.1\r\nContent-Length: ";
+        const line2 = " HTTP/1.1\r\n";
         @memcpy(buf[pos..][0..line2.len], line2);
         pos += line2.len;
+        pos += write_auth_header(buf[pos..]);
+        const cl_hdr = "Content-Length: ";
+        @memcpy(buf[pos..][0..cl_hdr.len], cl_hdr);
+        pos += cl_hdr.len;
 
         var cl_buf: [10]u8 = undefined;
         const cl_str = format_u32(&cl_buf, @intCast(body.len));
@@ -205,9 +215,13 @@ pub const SimIO = struct {
         pos += line1.len;
         @memcpy(buf[pos..][0..path.len], path);
         pos += path.len;
-        const line2 = " HTTP/1.1\r\n\r\n";
+        const line2 = " HTTP/1.1\r\n";
         @memcpy(buf[pos..][0..line2.len], line2);
         pos += line2.len;
+        pos += write_auth_header(buf[pos..]);
+        const end = "\r\n";
+        @memcpy(buf[pos..][0..end.len], end);
+        pos += end.len;
 
         self.inject_bytes(client_index, buf[0..pos]);
     }
@@ -222,9 +236,13 @@ pub const SimIO = struct {
         pos += line1.len;
         @memcpy(buf[pos..][0..path.len], path);
         pos += path.len;
-        const line2 = " HTTP/1.1\r\n\r\n";
+        const line2 = " HTTP/1.1\r\n";
         @memcpy(buf[pos..][0..line2.len], line2);
         pos += line2.len;
+        pos += write_auth_header(buf[pos..]);
+        const end = "\r\n";
+        @memcpy(buf[pos..][0..end.len], end);
+        pos += end.len;
 
         self.inject_bytes(client_index, buf[0..pos]);
     }
@@ -509,6 +527,19 @@ fn format_u32(buf: *[10]u8, val: u32) []const u8 {
 
 const Server = ServerType(SimIO, MemoryStorage);
 
+/// Write "Authorization: Bearer <token>\r\n" into buf. Returns bytes written.
+/// Token expires at 2_000_000_000 (~2033), well past any TimeSim default.
+fn write_auth_header(buf: []u8) usize {
+    const prefix = "Authorization: Bearer ";
+    @memcpy(buf[0..prefix.len], prefix);
+    var token_buf: [auth.token_max]u8 = undefined;
+    const token = auth.sign(&token_buf, 1, 2_000_000_000);
+    @memcpy(buf[prefix.len..][0..token.len], token);
+    const crlf = "\r\n";
+    @memcpy(buf[prefix.len + token.len ..][0..crlf.len], crlf);
+    return prefix.len + token.len + crlf.len;
+}
+
 /// Run ticks until the server processes pending work.
 fn run_ticks(server: *Server, io: *SimIO, n: usize) void {
     for (0..n) |_| {
@@ -548,7 +579,8 @@ test "deterministic replay — same seed same result" {
         var storage = try MemoryStorage.init(std.testing.allocator);
         defer storage.deinit(std.testing.allocator);
         var sm = StateMachine.init(&storage, false);
-        var server = Server.init(&sim_io, &sm, 1);
+        var time_sim = TimeSim{};
+        var server = Server.init(&sim_io, &sm, 1, time_sim.time());
 
         sim_io.connect_client(0);
         sim_io.inject_post(0, "/products",
@@ -574,7 +606,8 @@ test "pipelining — back-to-back requests on one connection" {
     var storage = try MemoryStorage.init(std.testing.allocator);
     defer storage.deinit(std.testing.allocator);
     var sm = StateMachine.init(&storage, false);
-    var server = Server.init(&sim_io, &sm, 1);
+    var time_sim = TimeSim{};
+    var server = Server.init(&sim_io, &sm, 1, time_sim.time());
 
     sim_io.connect_client(0);
     run_ticks(&server, &sim_io, 10);
@@ -603,7 +636,8 @@ test "connection drops and reconnects — state machine survives" {
     var storage = try MemoryStorage.init(std.testing.allocator);
     defer storage.deinit(std.testing.allocator);
     var sm = StateMachine.init(&storage, false);
-    var server = Server.init(&sim_io, &sm, 1);
+    var time_sim = TimeSim{};
+    var server = Server.init(&sim_io, &sm, 1, time_sim.time());
 
     sim_io.connect_client(0);
     run_ticks(&server, &sim_io, 10);
@@ -638,7 +672,8 @@ test "timeout — partial request triggers close" {
     var storage = try MemoryStorage.init(std.testing.allocator);
     defer storage.deinit(std.testing.allocator);
     var sm = StateMachine.init(&storage, false);
-    var server = Server.init(&sim_io, &sm, 1);
+    var time_sim = TimeSim{};
+    var server = Server.init(&sim_io, &sm, 1, time_sim.time());
 
     sim_io.connect_client(0);
     run_ticks(&server, &sim_io, 10);
@@ -685,7 +720,8 @@ test "mark: disconnect triggers recv peer closed" {
     var storage = try MemoryStorage.init(std.testing.allocator);
     defer storage.deinit(std.testing.allocator);
     var sm = StateMachine.init(&storage, false);
-    var server = Server.init(&sim_io, &sm, 1);
+    var time_sim = TimeSim{};
+    var server = Server.init(&sim_io, &sm, 1, time_sim.time());
 
     sim_io.connect_client(0);
     run_ticks(&server, &sim_io, 10);
@@ -701,7 +737,8 @@ test "mark: send fault triggers send error" {
     var storage = try MemoryStorage.init(std.testing.allocator);
     defer storage.deinit(std.testing.allocator);
     var sm = StateMachine.init(&storage, false);
-    var server = Server.init(&sim_io, &sm, 1);
+    var time_sim = TimeSim{};
+    var server = Server.init(&sim_io, &sm, 1, time_sim.time());
 
     sim_io.connect_client(0);
     run_ticks(&server, &sim_io, 10);
@@ -727,7 +764,8 @@ test "mark: idle connection triggers timeout" {
     var storage = try MemoryStorage.init(std.testing.allocator);
     defer storage.deinit(std.testing.allocator);
     var sm = StateMachine.init(&storage, false);
-    var server = Server.init(&sim_io, &sm, 1);
+    var time_sim = TimeSim{};
+    var server = Server.init(&sim_io, &sm, 1, time_sim.time());
 
     sim_io.connect_client(0);
     run_ticks(&server, &sim_io, 10);
@@ -751,7 +789,8 @@ test "mark: garbage bytes trigger invalid HTTP" {
     var storage = try MemoryStorage.init(std.testing.allocator);
     defer storage.deinit(std.testing.allocator);
     var sm = StateMachine.init(&storage, false);
-    var server = Server.init(&sim_io, &sm, 1);
+    var time_sim = TimeSim{};
+    var server = Server.init(&sim_io, &sm, 1, time_sim.time());
 
     sim_io.connect_client(0);
     run_ticks(&server, &sim_io, 10);
@@ -767,14 +806,25 @@ test "mark: unknown route triggers unmapped request" {
     var storage = try MemoryStorage.init(std.testing.allocator);
     defer storage.deinit(std.testing.allocator);
     var sm = StateMachine.init(&storage, false);
-    var server = Server.init(&sim_io, &sm, 1);
+    var time_sim = TimeSim{};
+    var server = Server.init(&sim_io, &sm, 1, time_sim.time());
 
     sim_io.connect_client(0);
     run_ticks(&server, &sim_io, 10);
 
     // GET / doesn't match any known route — triggers unmapped.
+    // Must include a valid auth token to pass the auth gate.
     const mark = marks.check("unmapped request");
-    sim_io.inject_bytes(0, "GET / HTTP/1.1\r\n\r\n");
+    var req_buf: [http.recv_buf_max]u8 = undefined;
+    var pos: usize = 0;
+    const req_line = "GET / HTTP/1.1\r\n";
+    @memcpy(req_buf[pos..][0..req_line.len], req_line);
+    pos += req_line.len;
+    pos += write_auth_header(req_buf[pos..]);
+    const end = "\r\n";
+    @memcpy(req_buf[pos..][0..end.len], end);
+    pos += end.len;
+    sim_io.inject_bytes(0, req_buf[0..pos]);
     run_ticks(&server, &sim_io, 50);
     try mark.expect_hit();
 }
@@ -784,7 +834,8 @@ test "mark: accept failure logs warning" {
     var storage = try MemoryStorage.init(std.testing.allocator);
     defer storage.deinit(std.testing.allocator);
     var sm = StateMachine.init(&storage, false);
-    var server = Server.init(&sim_io, &sm, 1);
+    var time_sim = TimeSim{};
+    var server = Server.init(&sim_io, &sm, 1, time_sim.time());
 
     // 100% accept fault — every accept attempt fails.
     sim_io.accept_fault_probability = PRNG.ratio(1, 1);
@@ -803,7 +854,8 @@ test "storage busy fault — prefetch retries next tick then succeeds" {
     var storage = try MemoryStorage.init(std.testing.allocator);
     defer storage.deinit(std.testing.allocator);
     var sm = StateMachine.init(&storage, false);
-    var server = Server.init(&sim_io, &sm, 1);
+    var time_sim = TimeSim{};
+    var server = Server.init(&sim_io, &sm, 1, time_sim.time());
 
     // Create a product first (no faults).
     sim_io.connect_client(0);
@@ -842,7 +894,8 @@ test "storage err fault — returns 503" {
     var storage = try MemoryStorage.init(std.testing.allocator);
     defer storage.deinit(std.testing.allocator);
     var sm = StateMachine.init(&storage, false);
-    var server = Server.init(&sim_io, &sm, 1);
+    var time_sim = TimeSim{};
+    var server = Server.init(&sim_io, &sm, 1, time_sim.time());
 
     sim_io.connect_client(0);
     run_ticks(&server, &sim_io, 10);
@@ -865,7 +918,8 @@ test "concurrent connections — busy client deferred, ready client served" {
     var storage = try MemoryStorage.init(std.testing.allocator);
     defer storage.deinit(std.testing.allocator);
     var sm = StateMachine.init(&storage, false);
-    var server = Server.init(&sim_io, &sm, 2);
+    var time_sim = TimeSim{};
+    var server = Server.init(&sim_io, &sm, 2, time_sim.time());
 
     // Connect two clients and let them establish.
     sim_io.connect_client(0);
@@ -907,7 +961,8 @@ test "interleaved writes — update and delete same entity across connections" {
     var storage = try MemoryStorage.init(std.testing.allocator);
     defer storage.deinit(std.testing.allocator);
     var sm = StateMachine.init(&storage, false);
-    var server = Server.init(&sim_io, &sm, 2);
+    var time_sim = TimeSim{};
+    var server = Server.init(&sim_io, &sm, 2, time_sim.time());
 
     // Connect two clients and let them establish.
     sim_io.connect_client(0);
@@ -1525,7 +1580,8 @@ fn run_fuzz(seed: u64) !void {
     defer storage.deinit(std.testing.allocator);
     storage.prng = PRNG.from_seed(prng.int(u64));
     var sm = StateMachine.init(&storage, false);
-    var server = Server.init(&sim_io, &sm, 1);
+    var time_sim = TimeSim{};
+    var server = Server.init(&sim_io, &sm, 1, time_sim.time());
 
     var fuzzer = Fuzzer.init();
 

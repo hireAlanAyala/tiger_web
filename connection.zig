@@ -3,7 +3,9 @@ const assert = std.debug.assert;
 const maybe = @import("message.zig").maybe;
 const message = @import("message.zig");
 const http = @import("http.zig");
-const codec =@import("codec.zig");
+const codec = @import("codec.zig");
+const auth = @import("auth.zig");
+const Time = @import("time.zig").Time;
 const marks = @import("marks.zig");
 const log = marks.wrap_log(std.log.scoped(.connection));
 
@@ -33,6 +35,7 @@ pub fn ConnectionType(comptime IO: type) type {
 
         state: State,
         fd: IO.fd_t,
+        time: Time,
 
         // Receive buffer: accumulate incoming HTTP bytes until a full request arrives.
         recv_buf: [http.recv_buf_max]u8,
@@ -62,10 +65,11 @@ pub fn ConnectionType(comptime IO: type) type {
         typed_message: ?message.Message,
 
 
-        pub fn init_free() Connection {
+        pub fn init_free(time: Time) Connection {
             return .{
                 .state = .free,
                 .fd = 0,
+                .time = time,
                 .recv_buf = undefined,
                 .recv_pos = 0,
                 .recv_completion = .{},
@@ -187,15 +191,8 @@ pub fn ConnectionType(comptime IO: type) type {
                     assert(parsed.total_len <= conn.recv_pos);
                     conn.keep_alive = parsed.keep_alive;
 
-                    // Route through codec layer.
-                    if (codec.translate(parsed.method, parsed.path, parsed.body)) |msg| {
-                        conn.typed_message = msg;
-                        conn.request_consumed = parsed.total_len;
-                        conn.state = .ready;
-                        return;
-                    }
-
                     // OPTIONS preflight — respond with CORS headers directly.
+                    // No auth required for preflight.
                     if (parsed.method == .options) {
                         const encoded = http.encode_options_response(&conn.send_buf);
                         conn.send_len = @intCast(encoded.len);
@@ -203,6 +200,26 @@ pub fn ConnectionType(comptime IO: type) type {
                         conn.request_consumed = parsed.total_len;
                         conn.typed_message = null;
                         conn.state = .sending;
+                        return;
+                    }
+
+                    // Auth gate — verify bearer token before routing.
+                    const token = parsed.authorization orelse {
+                        log.mark.warn("auth: missing token fd={d}", .{conn.fd});
+                        conn.send_401(parsed.total_len);
+                        return;
+                    };
+                    if (auth.verify(token, conn.time.realtime()) == null) {
+                        log.mark.warn("auth: invalid token fd={d}", .{conn.fd});
+                        conn.send_401(parsed.total_len);
+                        return;
+                    }
+
+                    // Route through codec layer.
+                    if (codec.translate(parsed.method, parsed.path, parsed.body)) |msg| {
+                        conn.typed_message = msg;
+                        conn.request_consumed = parsed.total_len;
+                        conn.state = .ready;
                         return;
                     }
 
@@ -217,6 +234,18 @@ pub fn ConnectionType(comptime IO: type) type {
                     conn.state = .closing;
                 },
             }
+        }
+
+        /// Send a 401 Unauthorized response directly, bypassing the state machine.
+        /// Same pattern as OPTIONS preflight — a connection-level shortcut.
+        fn send_401(conn: *Connection, consumed: u32) void {
+            assert(conn.state == .receiving);
+            const encoded = http.encode_401_response(&conn.send_buf);
+            conn.send_len = @intCast(encoded.len);
+            conn.send_pos = 0;
+            conn.request_consumed = consumed;
+            conn.typed_message = null;
+            conn.state = .sending;
         }
 
         /// Returns true if the connection has been idle for longer than timeout_ticks.
