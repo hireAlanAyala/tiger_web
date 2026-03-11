@@ -41,9 +41,12 @@ http.zig → codec.zig → message.zig → state_machine.zig → storage
 | `tracer.zig` | Minimal tracer — gauges, counters, span timings, trace logging. All metrics flow through `emit()` |
 | `sim.zig` | `SimIO` + `MemoryStorage` with PRNG-driven fault injection |
 | `fuzz_tests.zig` | Fuzz test dispatcher — single binary routing to all fuzzers, matches TB's fuzz_tests.zig |
-| `fuzz_lib.zig` | Shared fuzz utilities — `FuzzArgs` struct, matches TB's testing/fuzz.zig |
+| `fuzz_lib.zig` | Shared fuzz utilities — `FuzzArgs` struct, `random_enum_weights`, matches TB's testing/fuzz.zig |
 | `fuzz.zig` | State machine fuzzer — bypasses HTTP, calls prefetch/commit directly |
 | `codec_fuzz.zig` | Codec fuzzer — throws random methods/paths/JSON at codec.translate, random responses at encode |
+| `auditor.zig` | Auditor oracle — independent reference model that validates state machine responses (TB pattern) |
+| `storage_fuzz.zig` | Storage equivalence fuzzer — runs MemoryStorage vs SqliteStorage vs Auditor, asserts agreement |
+| `stdx.zig` | Ported from TB's stdx — `no_padding`, `equal_bytes`, `has_unique_representation` |
 | `prng.zig` | Xoshiro256++ PRNG with Ratio, Combination, Reservoir — matches TigerBeetle's stdx.PRNG |
 | `flags.zig` | CLI argument parser — struct-driven `--key=value` parsing, ported from TigerBeetle's stdx/flags.zig |
 
