@@ -82,6 +82,7 @@ pub fn main(allocator: std.mem.Allocator, args: FuzzArgs) !void {
     const op_weights = fuzz_lib.random_enum_weights(&prng, message.Operation);
 
     var coverage = OperationCoverage{};
+    var features = FeatureCoverage{};
 
     for (0..events_max) |event_i| {
         const operation = prng.enum_weighted(message.Operation, op_weights);
@@ -100,6 +101,7 @@ pub fn main(allocator: std.mem.Allocator, args: FuzzArgs) !void {
 
         const resp = sm.commit(msg);
         coverage.record(operation);
+        features.record_message(msg, resp);
 
         // Auditor validates the response against its model, then updates
         // its state. On storage_error (injected fault), skips validation.
@@ -107,6 +109,7 @@ pub fn main(allocator: std.mem.Allocator, args: FuzzArgs) !void {
     }
 
     coverage.assert_full_coverage(op_weights);
+    features.assert_full_coverage(&coverage);
 }
 
 /// Tracks which operations were actually committed during a fuzz run.
@@ -129,6 +132,60 @@ pub const OperationCoverage = struct {
                     .{@tagName(op)},
                 );
             }
+        }
+    }
+};
+
+/// Tracks whether specific input features were exercised during a fuzz run.
+/// Catches blind spots where the fuzzer generates operations but never with
+/// the interesting parameters that differ between backends.
+pub const FeatureCoverage = struct {
+    list_with_name_prefix: bool = false,
+    list_with_price_filter: bool = false,
+    list_with_active_filter: bool = false,
+    list_with_cursor: bool = false,
+    utf8_multibyte_name: bool = false,
+
+    pub fn record_message(self: *FeatureCoverage, msg: message.Message, resp: message.MessageResponse) void {
+        switch (msg.operation) {
+            .list_products, .list_collections, .list_orders => {
+                const lp = msg.event.list;
+                if (lp.name_prefix_len > 0) self.list_with_name_prefix = true;
+                if (lp.price_min > 0 or lp.price_max > 0) self.list_with_price_filter = true;
+                if (lp.active_filter != .any) self.list_with_active_filter = true;
+                if (lp.cursor != 0) self.list_with_cursor = true;
+            },
+            .create_product => {
+                const p = msg.event.product;
+                if (resp.status == .ok) {
+                    for (p.name[0..p.name_len]) |b| {
+                        if (b >= 0x80) {
+                            self.utf8_multibyte_name = true;
+                            break;
+                        }
+                    }
+                }
+            },
+            else => {},
+        }
+    }
+
+    /// Assert all features that could have been exercised were exercised.
+    /// Features that depend on operations with zero swarm weight are skipped.
+    pub fn assert_full_coverage(self: *const FeatureCoverage, op_counts: *const OperationCoverage) void {
+        const has_lists = op_counts.counts.get(.list_products) > 0 or
+            op_counts.counts.get(.list_collections) > 0 or
+            op_counts.counts.get(.list_orders) > 0;
+        const has_creates = op_counts.counts.get(.create_product) > 0;
+
+        if (has_lists) {
+            if (!self.list_with_name_prefix) @panic("feature list_with_name_prefix was never exercised");
+            if (!self.list_with_price_filter) @panic("feature list_with_price_filter was never exercised");
+            if (!self.list_with_active_filter) @panic("feature list_with_active_filter was never exercised");
+            if (!self.list_with_cursor) @panic("feature list_with_cursor was never exercised");
+        }
+        if (has_creates) {
+            if (!self.utf8_multibyte_name) @panic("feature utf8_multibyte_name was never exercised");
         }
     }
 };
@@ -268,26 +325,18 @@ pub fn gen_product_with_id(prng: *PRNG, id: u128) message.Product {
     p.inventory = prng.range_inclusive(u32, 0, 10_000);
     p.version = 1;
     p.flags = .{ .active = prng.boolean() };
-    // Name: 1..name_max random alpha chars.
-    p.name_len = prng.range_inclusive(u8, 1, message.product_name_max);
-    for (p.name[0..p.name_len]) |*c| {
-        c.* = 'a' + @as(u8, @intCast(prng.int_inclusive(u8, 25)));
-    }
-    // Description: 0..desc_max random alpha chars.
-    p.description_len = prng.range_inclusive(u16, 0, message.product_description_max);
-    for (p.description[0..p.description_len]) |*c| {
-        c.* = 'a' + @as(u8, @intCast(prng.int_inclusive(u8, 25)));
-    }
+    // Name: 1..name_max random UTF-8 chars.
+    p.name_len = @intCast(gen_utf8_text(prng, &p.name, 1, message.product_name_max));
+    // Description: 0..desc_max random UTF-8 chars.
+    const desc_len = gen_utf8_text(prng, &p.description, 0, message.product_description_max);
+    p.description_len = @intCast(desc_len);
     return p;
 }
 
 pub fn gen_collection(prng: *PRNG) message.ProductCollection {
     var c: message.ProductCollection = std.mem.zeroes(message.ProductCollection);
     c.id = prng.int(u128) | 1;
-    c.name_len = prng.range_inclusive(u8, 1, message.collection_name_max);
-    for (c.name[0..c.name_len]) |*ch| {
-        ch.* = 'a' + @as(u8, @intCast(prng.int_inclusive(u8, 25)));
-    }
+    c.name_len = @intCast(gen_utf8_text(prng, &c.name, 1, message.collection_name_max));
     return c;
 }
 
@@ -341,12 +390,17 @@ pub fn gen_random_message(prng: *PRNG, operation: message.Operation) message.Mes
             p.inventory = prng.int(u32);
             p.version = prng.int(u32);
             p.flags = .{ .active = prng.boolean() };
+            // Fill name/description with random bytes — exercises UTF-8 validation.
+            prng.fill(&p.name);
+            prng.fill(&p.description);
             break :blk p;
         } },
         .collection => .{ .collection = blk: {
             var c = std.mem.zeroes(message.ProductCollection);
             c.id = prng.int(u128);
             c.name_len = prng.int(u8);
+            // Fill name with random bytes — exercises UTF-8 validation.
+            prng.fill(&c.name);
             break :blk c;
         } },
         .order => .{ .order = blk: {
@@ -375,6 +429,8 @@ pub fn gen_random_message(prng: *PRNG, operation: message.Operation) message.Mes
             lp.price_min = prng.int(u32);
             lp.price_max = prng.int(u32);
             lp.name_prefix_len = prng.int(u8);
+            // Fill prefix with random bytes — exercises UTF-8 and NUL validation.
+            prng.fill(&lp.name_prefix);
             break :blk lp;
         } },
         .none => .{ .none = {} },
@@ -384,6 +440,55 @@ pub fn gen_random_message(prng: *PRNG, operation: message.Operation) message.Mes
         .id = prng.int(u128),
         .event = event,
     };
+}
+
+/// Fill buf with random UTF-8 text between min_len and max_len bytes.
+/// ~70% ASCII-only, ~30% mixed with multi-byte characters (2-3 byte).
+/// Returns the actual byte length written.
+pub fn gen_utf8_text(prng: *PRNG, buf: []u8, min_len: u16, max_len: u16) u16 {
+    assert(max_len >= min_len);
+    assert(max_len > 0);
+    assert(buf.len >= max_len);
+
+    const use_multibyte = prng.chance(PRNG.ratio(3, 10));
+    if (!use_multibyte) {
+        // Pure ASCII — fast path.
+        const len = prng.range_inclusive(u16, min_len, max_len);
+        for (buf[0..len]) |*c| {
+            c.* = 'a' + @as(u8, @intCast(prng.int_inclusive(u8, 25)));
+        }
+        return len;
+    }
+
+    // Mixed: fill with a combination of 1, 2, and 3-byte sequences.
+    // Sample codepoints from common non-ASCII ranges.
+    var pos: u16 = 0;
+    while (pos < min_len or (pos < max_len and prng.boolean())) {
+        const remaining = max_len - pos;
+        if (remaining == 0) break;
+
+        // Choose a codepoint class based on remaining space.
+        const cp: u21 = if (remaining >= 3 and prng.chance(PRNG.ratio(1, 4)))
+            // 3-byte: CJK, Cyrillic supplement, common symbols (U+0800..U+9FFF)
+            prng.range_inclusive(u21, 0x0800, 0x9FFF)
+        else if (remaining >= 2 and prng.chance(PRNG.ratio(1, 3)))
+            // 2-byte: Latin extended, Greek, Cyrillic, accented (U+00C0..U+07FF)
+            prng.range_inclusive(u21, 0x00C0, 0x07FF)
+        else
+            // ASCII
+            @as(u21, 'a') + prng.int_inclusive(u21, 25);
+
+        const seq_len = std.unicode.utf8Encode(cp, buf[pos..max_len]) catch break;
+        pos += @intCast(seq_len);
+    }
+
+    // Ensure minimum length — pad with ASCII if needed.
+    while (pos < min_len) {
+        buf[pos] = 'a' + @as(u8, @intCast(prng.int_inclusive(u8, 25)));
+        pos += 1;
+    }
+
+    return pos;
 }
 
 pub fn gen_list_params(prng: *PRNG) message.ListParams {
@@ -401,10 +506,10 @@ pub fn gen_list_params(prng: *PRNG) message.ListParams {
         }
     }
     if (prng.boolean()) {
-        params.name_prefix_len = prng.range_inclusive(u8, 1, 3);
-        for (params.name_prefix[0..params.name_prefix_len]) |*ch| {
-            ch.* = 'a' + @as(u8, @intCast(prng.int_inclusive(u8, 25)));
-        }
+        params.name_prefix_len = @intCast(gen_utf8_text(prng, &params.name_prefix, 1, 3));
+    }
+    if (prng.boolean()) {
+        params.cursor = prng.int(u128);
     }
     return params;
 }

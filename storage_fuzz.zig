@@ -50,6 +50,7 @@ pub fn main(allocator: std.mem.Allocator, args: FuzzArgs) !void {
     const op_weights = fuzz_lib.random_enum_weights(&prng, message.Operation);
 
     var coverage = gen.OperationCoverage{};
+    var features = gen.FeatureCoverage{};
 
     for (0..events_max) |event_i| {
         const operation = prng.enum_weighted(message.Operation, op_weights);
@@ -75,9 +76,11 @@ pub fn main(allocator: std.mem.Allocator, args: FuzzArgs) !void {
         // 2. Response matches independent model (logic correctness).
         auditor.on_commit(msg, mem_resp);
         coverage.record(operation);
+        features.record_message(msg, mem_resp);
     }
 
     coverage.assert_full_coverage(op_weights);
+    features.assert_full_coverage(&coverage);
     log.info("storage equivalence: {} events, all agreed", .{events_max});
 }
 

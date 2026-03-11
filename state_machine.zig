@@ -64,17 +64,22 @@ pub fn StateMachineType(comptime Storage: type) type {
                     if (p.id == 0) return false;
                     if (p.name_len == 0 or p.name_len > message.product_name_max) return false;
                     if (p.description_len > message.product_description_max) return false;
+                    if (!std.unicode.utf8ValidateSlice(p.name[0..p.name_len])) return false;
+                    if (!std.unicode.utf8ValidateSlice(p.description[0..p.description_len])) return false;
                 },
                 .update_product => {
                     if (msg.id == 0) return false;
                     const p = msg.event.product;
                     if (p.name_len == 0 or p.name_len > message.product_name_max) return false;
                     if (p.description_len > message.product_description_max) return false;
+                    if (!std.unicode.utf8ValidateSlice(p.name[0..p.name_len])) return false;
+                    if (!std.unicode.utf8ValidateSlice(p.description[0..p.description_len])) return false;
                 },
                 .create_collection => {
                     const col = msg.event.collection;
                     if (col.id == 0) return false;
                     if (col.name_len == 0 or col.name_len > message.collection_name_max) return false;
+                    if (!std.unicode.utf8ValidateSlice(col.name[0..col.name_len])) return false;
                 },
                 .transfer_inventory => {
                     const transfer = msg.event.transfer;
@@ -108,11 +113,13 @@ pub fn StateMachineType(comptime Storage: type) type {
                 => {
                     const lp = msg.event.list;
                     if (lp.name_prefix_len > message.product_name_max) return false;
+                    const prefix = lp.name_prefix[0..lp.name_prefix_len];
                     // NUL bytes in the prefix would be treated as string
-                    // terminators by SQLite's LIKE, silently matching everything.
-                    for (lp.name_prefix[0..lp.name_prefix_len]) |b| {
+                    // terminators by SQLite, silently matching everything.
+                    for (prefix) |b| {
                         if (b == 0) return false;
                     }
+                    if (!std.unicode.utf8ValidateSlice(prefix)) return false;
                 },
             }
             return true;
