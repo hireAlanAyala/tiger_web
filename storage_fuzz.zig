@@ -56,6 +56,8 @@ pub fn main(allocator: std.mem.Allocator, args: FuzzArgs) !void {
 
         log.debug("Running fuzz_ops[{}/{}] == {s}", .{ event_i, events_max, @tagName(operation) });
 
+        if (auditor.at_capacity(operation)) continue;
+
         const msg = gen.gen_message(&prng, operation, auditor.id_pools()) orelse continue;
 
         if (!MemSM.input_valid(msg)) continue;

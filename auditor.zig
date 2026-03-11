@@ -46,11 +46,6 @@ pub const Auditor = struct {
     order_ids: [id_pool_capacity]u128,
     order_id_count: u32,
 
-    total_products_created: u32,
-    total_collections_created: u32,
-    total_orders_created: u32,
-    total_memberships_created: u32,
-
     pub fn init(allocator: std.mem.Allocator) !Auditor {
         const products = try allocator.create([product_capacity]?message.Product);
         @memset(products, null);
@@ -76,10 +71,6 @@ pub const Auditor = struct {
             .collection_id_count = 0,
             .order_ids = undefined,
             .order_id_count = 0,
-            .total_products_created = 0,
-            .total_collections_created = 0,
-            .total_orders_created = 0,
-            .total_memberships_created = 0,
         };
     }
 
@@ -95,11 +86,38 @@ pub const Auditor = struct {
             .product_ids = self.product_ids[0..self.product_id_count],
             .collection_ids = self.collection_ids[0..self.collection_id_count],
             .order_ids = self.order_ids[0..self.order_id_count],
-            .total_products_created = self.total_products_created,
-            .total_collections_created = self.total_collections_created,
-            .total_orders_created = self.total_orders_created,
-            .total_memberships = self.total_memberships_created,
         };
+    }
+
+    /// Exhaustive capacity check — adding a new Operation variant forces
+    /// the developer to decide whether it has capacity constraints.
+    /// Returns true if MemoryStorage is near capacity for this operation.
+    pub fn at_capacity(self: *const Auditor, operation: message.Operation) bool {
+        return switch (operation) {
+            .create_product => self.product_count >= capacity_threshold(product_capacity),
+            .create_collection => self.collection_count >= capacity_threshold(collection_capacity),
+            .create_order => self.order_count >= capacity_threshold(order_capacity),
+            .add_collection_member => self.membership_count >= capacity_threshold(membership_capacity),
+            .get_product,
+            .get_product_inventory,
+            .update_product,
+            .delete_product,
+            .get_collection,
+            .delete_collection,
+            .remove_collection_member,
+            .get_order,
+            .list_products,
+            .list_collections,
+            .list_orders,
+            .transfer_inventory,
+            => false,
+        };
+    }
+
+    /// Conservative threshold below MemoryStorage capacity. Leaves headroom
+    /// for the ~10% random messages that bypass gen_message's switch.
+    fn capacity_threshold(comptime capacity: u32) u32 {
+        return capacity - capacity / 8;
     }
 
     /// Validate the response and update the model.
@@ -151,8 +169,6 @@ pub const Auditor = struct {
         self.products[slot] = expected;
         self.product_count += 1;
 
-        // Update ID pools.
-        self.total_products_created += 1;
         if (self.product_id_count < id_pool_capacity) {
             self.product_ids[self.product_id_count] = input.id;
             self.product_id_count += 1;
@@ -318,8 +334,6 @@ pub const Auditor = struct {
         self.orders[order_slot] = result;
         self.order_count += 1;
 
-        // Update ID pools.
-        self.total_orders_created += 1;
         if (self.order_id_count < id_pool_capacity) {
             self.order_ids[self.order_id_count] = order.id;
             self.order_id_count += 1;
@@ -365,8 +379,6 @@ pub const Auditor = struct {
         self.collections[slot] = input;
         self.collection_count += 1;
 
-        // Update ID pools.
-        self.total_collections_created += 1;
         if (self.collection_id_count < id_pool_capacity) {
             self.collection_ids[self.collection_id_count] = input.id;
             self.collection_id_count += 1;
@@ -442,7 +454,6 @@ pub const Auditor = struct {
             self.memberships[slot] = .{ .collection_id = collection_id, .product_id = product_id };
             self.membership_count += 1;
         }
-        self.total_memberships_created += 1;
     }
 
     fn on_remove_member(self: *Auditor, collection_id: u128, product_id: u128, resp: message.MessageResponse) void {
@@ -459,7 +470,6 @@ pub const Auditor = struct {
         assert(resp.status == .ok);
         self.memberships[m_idx] = null;
         self.membership_count -= 1;
-        if (self.total_memberships_created > 0) self.total_memberships_created -= 1;
     }
 
     // =================================================================

@@ -20,13 +20,6 @@ const log = std.log.scoped(.fuzz);
 
 pub const id_pool_capacity = 64;
 
-/// Conservative threshold below MemoryStorage capacity. Leaves headroom for
-/// the ~10% random messages that bypass the gen_message switch — those can
-/// attempt creates even when we're near capacity.
-fn capacity_threshold(comptime capacity: u32) u32 {
-    return capacity - capacity / 8;
-}
-
 /// Generate a random number, biased towards all bit 'edges' of T. That is,
 /// given a u64, it's very likely to not only get 0 or maxInt(u64), but also
 /// values around maxInt(u63), maxInt(u62), ..., maxInt(u1).
@@ -95,6 +88,8 @@ pub fn main(allocator: std.mem.Allocator, args: FuzzArgs) !void {
 
         log.debug("Running fuzz_ops[{}/{}] == {s}", .{ event_i, events_max, @tagName(operation) });
 
+        if (auditor.at_capacity(operation)) continue;
+
         const msg = gen_message(&prng, operation, auditor.id_pools()) orelse continue;
 
         // Gate: skip invalid inputs — matches TB's input_valid pattern.
@@ -142,28 +137,12 @@ pub const IdPools = struct {
     product_ids: []const u128,
     collection_ids: []const u128,
     order_ids: []const u128,
-    total_products_created: u32,
-    total_collections_created: u32,
-    total_orders_created: u32,
-    total_memberships: u32,
 };
 
 /// Generate a Message for the given operation, or null if prerequisites
 /// aren't met (e.g., transfer_inventory needs 2 products).
 /// Sometimes generates intentionally invalid messages to exercise input_valid.
 pub fn gen_message(prng: *PRNG, operation: message.Operation, pools: IdPools) ?message.Message {
-    // Capacity checks must run before the random message path — random
-    // messages bypass the switch but can still trigger storage-full errors
-    // in MemoryStorage that SqliteStorage won't hit. Thresholds derived from
-    // MemoryStorage constants with headroom for random message attempts.
-    switch (operation) {
-        .create_product => if (pools.total_products_created >= capacity_threshold(MemoryStorage.product_capacity)) return null,
-        .create_collection => if (pools.total_collections_created >= capacity_threshold(MemoryStorage.collection_capacity)) return null,
-        .create_order => if (pools.total_orders_created >= capacity_threshold(MemoryStorage.order_capacity)) return null,
-        .add_collection_member => if (pools.total_memberships >= capacity_threshold(MemoryStorage.membership_capacity)) return null,
-        else => {},
-    }
-
     // ~10% chance: generate a random message with correct operation tag but
     // random fields — exercises the input_valid boundary.
     if (prng.chance(PRNG.ratio(1, 10))) {
