@@ -156,6 +156,10 @@ pub fn ServerType(comptime IO: type, comptime Storage: type) type {
         fn process_inbox(server: *Server) void {
             var json_buf: [http.response_body_max]u8 = undefined;
 
+            // Set wall-clock time for this batch — all operations in the tick
+            // see the same timestamp.
+            server.state_machine.set_time(server.time.realtime());
+
             // Wrap all writes in a single transaction so the tick pays one
             // fsync instead of one per write. Reads are unaffected (WAL mode).
             // If we crash mid-tick, no responses have been sent yet (flush_outbox

@@ -106,6 +106,7 @@ pub const Auditor = struct {
             .delete_collection,
             .remove_collection_member,
             .get_order,
+            .complete_order,
             .list_products,
             .list_collections,
             .list_orders,
@@ -135,6 +136,7 @@ pub const Auditor = struct {
             .delete_product => self.on_delete_product(msg.id, resp),
             .transfer_inventory => self.on_transfer_inventory(msg.id, msg.event.transfer, resp),
             .create_order => self.on_create_order(msg.event.order, resp),
+            .complete_order => self.on_complete_order(msg.id, msg.event.completion, resp),
             .get_order => self.on_get_order(msg.id, resp),
             .create_collection => self.on_create_collection(msg.event.collection, resp),
             .get_collection => self.on_get_collection(msg.id, resp),
@@ -328,6 +330,8 @@ pub const Auditor = struct {
         }
 
         assert(result.total_cents == expected_total);
+        assert(result.status == .pending);
+        assert(result.timeout_at > 0);
 
         // Add order to model.
         const order_slot = self.find_empty_order_slot();
@@ -337,6 +341,58 @@ pub const Auditor = struct {
         if (self.order_id_count < id_pool_capacity) {
             self.order_ids[self.order_id_count] = order.id;
             self.order_id_count += 1;
+        }
+    }
+
+    fn on_complete_order(self: *Auditor, id: u128, completion: message.OrderCompletion, resp: message.MessageResponse) void {
+        const idx = self.find_order(id) orelse {
+            assert(resp.status == .not_found);
+            return;
+        };
+
+        var order = self.orders[idx].?;
+
+        if (order.status != .pending) {
+            assert(resp.status == .order_not_pending);
+            return;
+        }
+
+        // We can't check timeout precisely because the fuzz doesn't
+        // control time deterministically vs the state machine's `now`.
+        // Accept ok, order_expired, or order_not_pending.
+        if (resp.status == .order_expired) {
+            order.status = .failed;
+            self.orders[idx] = order;
+            // Restore inventory in model.
+            for (order.items[0..order.items_len]) |item| {
+                if (self.find_product(item.product_id)) |pidx| {
+                    var p = self.products[pidx].?;
+                    p.inventory += item.quantity;
+                    self.products[pidx] = p;
+                }
+            }
+            return;
+        }
+
+        assert(resp.status == .ok);
+
+        switch (completion.result) {
+            .confirmed => {
+                order.status = .confirmed;
+                self.orders[idx] = order;
+            },
+            .failed => {
+                order.status = .failed;
+                self.orders[idx] = order;
+                // Restore inventory in model.
+                for (order.items[0..order.items_len]) |item| {
+                    if (self.find_product(item.product_id)) |pidx| {
+                        var p = self.products[pidx].?;
+                        p.inventory += item.quantity;
+                        self.products[pidx] = p;
+                    }
+                }
+            },
         }
     }
 

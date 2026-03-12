@@ -21,6 +21,21 @@ pub fn build(b: *std.Build) void {
     const run_step = b.step("run", "Run the server");
     run_step.dependOn(&run_cmd.step);
 
+    // --- Worker executable ---
+    const worker_exe = b.addExecutable(.{
+        .name = "tiger-worker",
+        .root_source_file = b.path("worker.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    b.installArtifact(worker_exe);
+
+    const worker_cmd = b.addRunArtifact(worker_exe);
+    worker_cmd.step.dependOn(b.getInstallStep());
+    if (b.args) |args| worker_cmd.addArgs(args);
+    const worker_step = b.step("run-worker", "Run the worker process");
+    worker_step.dependOn(&worker_cmd.step);
+
     // --- Simulation tests ---
     const sim_tests = b.addTest(.{
         .root_source_file = b.path("sim.zig"),

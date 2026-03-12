@@ -32,6 +32,7 @@ pub const SqliteStorage = struct {
     stmt_get_order: *c.sqlite3_stmt,
     stmt_get_order_items: *c.sqlite3_stmt,
     stmt_list_orders: *c.sqlite3_stmt,
+    stmt_update_order_status: *c.sqlite3_stmt,
 
     pub fn init(path: [*:0]const u8) !SqliteStorage {
         var db: ?*c.sqlite3 = null;
@@ -73,7 +74,9 @@ pub const SqliteStorage = struct {
         exec(real_db, "CREATE TABLE IF NOT EXISTS orders (" ++
             "id BLOB(16) PRIMARY KEY," ++
             "total_cents INTEGER NOT NULL," ++
-            "items_len INTEGER NOT NULL" ++
+            "items_len INTEGER NOT NULL," ++
+            "status INTEGER NOT NULL DEFAULT 1," ++
+            "timeout_at INTEGER NOT NULL DEFAULT 0" ++
             ");");
 
         exec(real_db, "CREATE TABLE IF NOT EXISTS order_items (" ++
@@ -138,19 +141,22 @@ pub const SqliteStorage = struct {
 
         // Prepare order statements.
         const stmt_put_order = prepare(real_db,
-            "INSERT INTO orders (id, total_cents, items_len) VALUES (?1, ?2, ?3);",
+            "INSERT INTO orders (id, total_cents, items_len, status, timeout_at) VALUES (?1, ?2, ?3, ?4, ?5);",
         );
         const stmt_put_order_item = prepare(real_db,
             "INSERT INTO order_items (order_id, product_id, name, quantity, price_cents, line_total_cents) VALUES (?1, ?2, ?3, ?4, ?5, ?6);",
         );
         const stmt_get_order = prepare(real_db,
-            "SELECT id, total_cents, items_len FROM orders WHERE id = ?1;",
+            "SELECT id, total_cents, items_len, status, timeout_at FROM orders WHERE id = ?1;",
         );
         const stmt_get_order_items = prepare(real_db,
             "SELECT product_id, name, quantity, price_cents, line_total_cents FROM order_items WHERE order_id = ?1 ORDER BY rowid;",
         );
         const stmt_list_orders = prepare(real_db,
-            "SELECT id, total_cents, items_len FROM orders WHERE id > ?1 ORDER BY id LIMIT ?2;",
+            "SELECT id, total_cents, items_len, status, timeout_at FROM orders WHERE id > ?1 ORDER BY id LIMIT ?2;",
+        );
+        const stmt_update_order_status = prepare(real_db,
+            "UPDATE orders SET status = ?2 WHERE id = ?1;",
         );
 
         log.info("storage initialized: {s}", .{path});
@@ -175,6 +181,7 @@ pub const SqliteStorage = struct {
             .stmt_get_order = stmt_get_order,
             .stmt_get_order_items = stmt_get_order_items,
             .stmt_list_orders = stmt_list_orders,
+            .stmt_update_order_status = stmt_update_order_status,
         };
     }
 
@@ -205,6 +212,7 @@ pub const SqliteStorage = struct {
         _ = c.sqlite3_finalize(self.stmt_get_order);
         _ = c.sqlite3_finalize(self.stmt_get_order_items);
         _ = c.sqlite3_finalize(self.stmt_list_orders);
+        _ = c.sqlite3_finalize(self.stmt_update_order_status);
         _ = c.sqlite3_close(self.db);
     }
 
@@ -467,6 +475,8 @@ pub const SqliteStorage = struct {
             bind_uuid(stmt, 1, order.id);
             _ = c.sqlite3_bind_int64(stmt, 2, @intCast(order.total_cents));
             _ = c.sqlite3_bind_int(stmt, 3, @intCast(order.items_len));
+            _ = c.sqlite3_bind_int(stmt, 4, @intFromEnum(order.status));
+            _ = c.sqlite3_bind_int64(stmt, 5, @intCast(order.timeout_at));
             switch (step_result(stmt)) {
                 .done => {},
                 .row => unreachable,
@@ -510,6 +520,8 @@ pub const SqliteStorage = struct {
                     out.id = std.mem.readInt(u128, id_blob[0..16], .big);
                     out.total_cents = @intCast(c.sqlite3_column_int64(stmt, 1));
                     out.items_len = @intCast(c.sqlite3_column_int(stmt, 2));
+                    out.status = @enumFromInt(c.sqlite3_column_int(stmt, 3));
+                    out.timeout_at = @intCast(c.sqlite3_column_int64(stmt, 4));
                 },
                 .done => return .not_found,
                 .busy => return .busy,
@@ -541,6 +553,24 @@ pub const SqliteStorage = struct {
         return .ok;
     }
 
+    pub fn update_order_status(self: *SqliteStorage, order: *const message.OrderResult) StorageResult {
+        const stmt = self.stmt_update_order_status;
+        defer reset_stmt(stmt);
+
+        bind_uuid(stmt, 1, order.id);
+        _ = c.sqlite3_bind_int(stmt, 2, @intFromEnum(order.status));
+        return switch (step_result(stmt)) {
+            .done => {
+                if (c.sqlite3_changes(self.db) == 0) return .not_found;
+                return .ok;
+            },
+            .row => unreachable,
+            .busy => .busy,
+            .err => .err,
+            .corruption => .corruption,
+        };
+    }
+
     pub fn list_orders(self: *SqliteStorage, out: *[message.list_max]message.OrderSummary, out_len: *u32, cursor: u128) StorageResult {
         const stmt = self.stmt_list_orders;
         defer reset_stmt(stmt);
@@ -558,6 +588,8 @@ pub const SqliteStorage = struct {
                     out[out_len.*].id = std.mem.readInt(u128, id_blob[0..16], .big);
                     out[out_len.*].total_cents = @intCast(c.sqlite3_column_int64(stmt, 1));
                     out[out_len.*].items_len = @intCast(c.sqlite3_column_int(stmt, 2));
+                    out[out_len.*].status = @enumFromInt(c.sqlite3_column_int(stmt, 3));
+                    out[out_len.*].timeout_at = @intCast(c.sqlite3_column_int64(stmt, 4));
                     out_len.* += 1;
                 },
                 .done => return .ok,
@@ -750,6 +782,8 @@ test "order items preserve insertion order" {
     order.id = 1;
     order.items_len = 3;
     order.total_cents = 600;
+    order.status = .pending;
+    order.timeout_at = 1_700_000_060;
     const ids = [3]u128{ 0xff, 0x80, 0x01 };
     for (ids, 0..) |pid, i| {
         order.items[i] = std.mem.zeroes(message.OrderResultItem);

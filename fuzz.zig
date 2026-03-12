@@ -71,6 +71,7 @@ pub fn main(allocator: std.mem.Allocator, args: FuzzArgs) !void {
     });
 
     var sm = StateMachine.init(&storage, false);
+    sm.now = 1_700_000_000;
 
     // Auditor: independent reference model that validates every response.
     // Tracks entity state and provides ID pools for message generation.
@@ -85,6 +86,9 @@ pub fn main(allocator: std.mem.Allocator, args: FuzzArgs) !void {
     var features = FeatureCoverage{};
 
     for (0..events_max) |event_i| {
+        // Advance time by a random amount each iteration to exercise
+        // order timeout paths. ~1-5 seconds per tick.
+        sm.now += @intCast(prng.range_inclusive(u32, 1, 5));
         const operation = prng.enum_weighted(message.Operation, op_weights);
 
         log.debug("Running fuzz_ops[{}/{}] == {s}", .{ event_i, events_max, @tagName(operation) });
@@ -258,6 +262,18 @@ pub fn gen_message(prng: *PRNG, operation: message.Operation, pools: IdPools) ?m
                 .event = .{ .order = gen_order(prng, pools.product_ids) },
             };
         },
+        .complete_order => blk: {
+            if (pools.order_ids.len == 0) return null;
+            const result: message.OrderCompletion.OrderCompletionResult = if (prng.boolean()) .confirmed else .failed;
+            break :blk .{
+                .operation = .complete_order,
+                .id = pick_or_random_id(prng, pools.order_ids),
+                .event = .{ .completion = .{
+                    .result = result,
+                    .reserved = .{0} ** 15,
+                } },
+            };
+        },
         .get_order => .{
             .operation = .get_order,
             .id = pick_or_random_id(prng, pools.order_ids),
@@ -421,6 +437,10 @@ pub fn gen_random_message(prng: *PRNG, operation: message.Operation) message.Mes
             .target_id = prng.int(u128),
             .quantity = prng.int(u32),
             .reserved = .{0} ** 12,
+        } },
+        .completion => .{ .completion = .{
+            .result = prng.enum_uniform(message.OrderCompletion.OrderCompletionResult),
+            .reserved = .{0} ** 15,
         } },
         .member_id => .{ .member_id = prng.int(u128) },
         .list => .{ .list = blk: {

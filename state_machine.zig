@@ -23,6 +23,10 @@ pub fn StateMachineType(comptime Storage: type) type {
         storage: *Storage,
         tracer: Tracer,
 
+        /// Wall-clock time (seconds since epoch). Set by the server before
+        /// each process_inbox call. Used for order timeout_at.
+        now: i64,
+
         // Prefetch cache — populated by prefetch(), consumed by commit().
         //
         // Two product caches for different access patterns:
@@ -42,6 +46,7 @@ pub fn StateMachineType(comptime Storage: type) type {
             return .{
                 .storage = storage,
                 .tracer = Tracer.init(log_trace),
+                .now = 0,
                 .prefetch_product = null,
                 .prefetch_product_list = .{ .items = undefined, .len = 0 },
                 .prefetch_products = [_]?message.Product{null} ** message.order_items_max,
@@ -96,6 +101,11 @@ pub fn StateMachineType(comptime Storage: type) type {
                         if (item.product_id == 0) return false;
                         if (item.quantity == 0) return false;
                     }
+                },
+                .complete_order => {
+                    const comp = msg.event.completion;
+                    if (msg.id == 0) return false;
+                    _ = std.meta.intToEnum(message.OrderCompletion.OrderCompletionResult, @intFromEnum(comp.result)) catch return false;
                 },
                 .get_product,
                 .get_product_inventory,
@@ -172,7 +182,7 @@ pub fn StateMachineType(comptime Storage: type) type {
                     break :blk .ok;
                 },
                 .remove_collection_member => self.prefetch_collection_read(msg.id),
-                .get_order => self.prefetch_order_read(msg.id),
+                .get_order, .complete_order => self.prefetch_order_read(msg.id),
                 .list_orders => self.prefetch_list_all_orders(msg.event.list),
                 .transfer_inventory => blk: {
                     const transfer = msg.event.transfer;
@@ -203,6 +213,13 @@ pub fn StateMachineType(comptime Storage: type) type {
             }
 
             return true;
+        }
+
+        /// Set wall-clock time for this batch. Called by the server before
+        /// process_inbox so all operations in the tick see the same timestamp.
+        pub fn set_time(self: *StateMachine, now: i64) void {
+            assert(now > 0);
+            self.now = now;
         }
 
         /// Transaction boundary for tick-level batching. The server wraps
@@ -239,6 +256,8 @@ pub fn StateMachineType(comptime Storage: type) type {
                 .storage_error => .requests_storage_error,
                 .insufficient_inventory => .requests_insufficient_inventory,
                 .version_conflict => .requests_version_conflict,
+                .order_expired => .requests_order_expired,
+                .order_not_pending => .requests_order_not_pending,
             }, 1);
 
             return resp;
@@ -297,6 +316,12 @@ pub fn StateMachineType(comptime Storage: type) type {
 
                 .create_order => self.execute_create_order(
                     msg.event.unwrap(message.OrderRequest),
+                    result,
+                ),
+
+                .complete_order => self.execute_complete_order(
+                    msg.id,
+                    msg.event.unwrap(message.OrderCompletion),
                     result,
                 ),
             };
@@ -507,6 +532,9 @@ pub fn StateMachineType(comptime Storage: type) type {
             var order_result = std.mem.zeroes(message.OrderResult);
             order_result.id = order.id;
             order_result.items_len = order.items_len;
+            order_result.status = .pending;
+            assert(self.now > 0);
+            order_result.timeout_at = @intCast(self.now + message.order_timeout_seconds);
 
             for (order.items_slice(), 0..) |item, i| {
                 var product = self.prefetch_find(item.product_id).?;
@@ -524,10 +552,61 @@ pub fn StateMachineType(comptime Storage: type) type {
                 order_result.total_cents +|= line_total;
             }
 
-            // Persist the order.
+            // Persist the order as pending — the worker will complete it.
             assert(self.storage.put_order(&order_result) == .ok);
 
             return .{ .status = .ok, .result = .{ .order = order_result } };
+        }
+
+        /// Complete a pending order — two-phase commit (phase 2).
+        /// The worker calls this after the external API call succeeds or fails.
+        /// On failure, restores reserved inventory.
+        fn execute_complete_order(self: *StateMachine, id: u128, completion: message.OrderCompletion, result: StorageResult) message.MessageResponse {
+            if (result == .not_found) return message.MessageResponse.not_found;
+            assert(result == .ok);
+
+            var order = self.prefetch_order.?;
+            assert(order.id == id);
+
+            // Only pending orders can be completed.
+            if (order.status != .pending) {
+                return .{ .status = .order_not_pending, .result = .{ .empty = {} } };
+            }
+
+            // Check timeout — if expired, reject and restore inventory.
+            assert(self.now > 0);
+            if (self.now >= order.timeout_at) {
+                order.status = .failed;
+                assert(self.storage.update_order_status(&order) == .ok);
+                self.restore_inventory(&order);
+                return .{ .status = .order_expired, .result = .{ .empty = {} } };
+            }
+
+            switch (completion.result) {
+                .confirmed => {
+                    order.status = .confirmed;
+                    assert(self.storage.update_order_status(&order) == .ok);
+                },
+                .failed => {
+                    order.status = .failed;
+                    assert(self.storage.update_order_status(&order) == .ok);
+                    self.restore_inventory(&order);
+                },
+            }
+
+            return .{ .status = .ok, .result = .{ .order = order } };
+        }
+
+        /// Restore inventory for all items in a failed/expired order.
+        fn restore_inventory(self: *StateMachine, order: *const message.OrderResult) void {
+            for (order.items[0..order.items_len]) |item| {
+                var product: message.Product = undefined;
+                const r = self.storage.get(item.product_id, &product);
+                // Product must exist — it was validated at create_order time.
+                assert(r == .ok);
+                product.inventory += item.quantity;
+                assert(self.storage.update(product.id, &product) == .ok);
+            }
         }
 
         /// Commit a storage write and translate the result to a response.
@@ -950,6 +1029,16 @@ pub const MemoryStorage = struct {
         return .not_found;
     }
 
+    pub fn update_order_status(self: *MemoryStorage, order: *const message.OrderResult) StorageResult {
+        for (self.orders) |*entry| {
+            if (entry.occupied and entry.order.id == order.id) {
+                entry.order.status = order.status;
+                return .ok;
+            }
+        }
+        return .not_found;
+    }
+
     pub fn list_orders(self: *MemoryStorage, out: *[message.list_max]message.OrderSummary, out_len: *u32, cursor: u128) StorageResult {
         if (self.fault()) |f| return f;
         out_len.* = 0;
@@ -960,6 +1049,8 @@ pub const MemoryStorage = struct {
             summary.id = entry.order.id;
             summary.total_cents = entry.order.total_cents;
             summary.items_len = entry.order.items_len;
+            summary.status = entry.order.status;
+            summary.timeout_at = entry.order.timeout_at;
             insert_sorted(message.OrderSummary, out, out_len, summary);
         }
         return .ok;
@@ -1045,6 +1136,7 @@ fn list_params_price(price_min: u32, price_max: u32) message.ListParams {
 }
 
 fn test_execute(sm: *TestStateMachine, msg: message.Message) message.MessageResponse {
+    if (sm.now == 0) sm.now = 1_700_000_000;
     assert(sm.prefetch(msg));
     return sm.commit(msg);
 }

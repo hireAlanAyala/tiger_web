@@ -621,6 +621,8 @@ fn gen_order_result(prng: *PRNG) message.OrderResult {
     order.id = prng.int(u128) | 1;
     order.items_len = prng.range_inclusive(u8, 1, message.order_items_max);
     order.total_cents = prng.int(u64);
+    order.status = prng.enum_uniform(message.OrderStatus);
+    order.timeout_at = prng.int(u64);
     for (order.items[0..order.items_len]) |*item| {
         item.* = std.mem.zeroes(message.OrderResultItem);
         item.product_id = prng.int(u128) | 1;
@@ -645,6 +647,8 @@ fn gen_order_summary_list(prng: *PRNG) message.OrderSummaryList {
         o.id = prng.int(u128) | 1;
         o.total_cents = prng.int(u64);
         o.items_len = prng.range_inclusive(u8, 1, message.order_items_max);
+        o.status = prng.enum_uniform(message.OrderStatus);
+        o.timeout_at = prng.int(u64);
     }
     return list;
 }

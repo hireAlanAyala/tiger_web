@@ -205,6 +205,17 @@ fn translate_orders(method: http.Method, seg: PathSegments, body: []const u8, li
             }
         },
         .post => {
+            // POST /orders/:id/complete — two-phase completion
+            if (seg.has_id and seg.sub_resource.len > 0 and std.mem.eql(u8, seg.sub_resource, "complete")) {
+                if (body.len == 0) return null;
+                const completion = parse_completion_json(body) orelse return null;
+                return .{
+                    .operation = .complete_order,
+                    .id = seg.id,
+                    .event = .{ .completion = completion },
+                };
+            }
+            // POST /orders — create order
             if (seg.has_id) return null;
             if (body.len == 0) return null;
             const order = parse_order_json(body) orelse return null;
@@ -216,6 +227,24 @@ fn translate_orders(method: http.Method, seg: PathSegments, body: []const u8, li
         },
         else => return null,
     }
+}
+
+/// Parse a JSON body into an OrderCompletion.
+/// Expected format: {"result":"confirmed"} or {"result":"failed"}
+fn parse_completion_json(body: []const u8) ?message.OrderCompletion {
+    const result_str = json_string_field(body, "result") orelse return null;
+    const result: message.OrderCompletion.OrderCompletionResult =
+        if (std.mem.eql(u8, result_str, "confirmed"))
+            .confirmed
+        else if (std.mem.eql(u8, result_str, "failed"))
+            .failed
+        else
+            return null;
+
+    return .{
+        .result = result,
+        .reserved = .{0} ** 15,
+    };
 }
 
 /// Parse a JSON body into an OrderRequest.
@@ -360,6 +389,14 @@ pub fn encode_response_json(buf: []u8, resp: message.MessageResponse) []const u8
             w.raw("{\"error\":\"service unavailable\"}");
             return buf[0..w.pos];
         },
+        .order_expired => {
+            w.raw("{\"error\":\"order_expired\"}");
+            return buf[0..w.pos];
+        },
+        .order_not_pending => {
+            w.raw("{\"error\":\"order_not_pending\"}");
+            return buf[0..w.pos];
+        },
         .ok => {},
     }
 
@@ -409,7 +446,11 @@ pub fn encode_response_json(buf: []u8, resp: message.MessageResponse) []const u8
         .order => |*o| {
             w.raw("{\"id\":\"");
             w.write_uuid(o.id);
-            w.raw("\",\"items\":[");
+            w.raw("\",\"status\":\"");
+            w.raw(order_status_string(o.status));
+            w.raw("\",\"timeout_at\":");
+            w.write_u64(o.timeout_at);
+            w.raw(",\"items\":[");
             for (o.items[0..o.items_len], 0..) |*item, i| {
                 if (i > 0) w.raw(",");
                 w.raw("{\"product_id\":\"");
@@ -434,6 +475,8 @@ pub fn encode_response_json(buf: []u8, resp: message.MessageResponse) []const u8
                 if (i > 0) w.raw(",");
                 w.raw("{\"id\":\"");
                 w.write_uuid(o.id);
+                w.raw("\",\"status\":\"");
+                w.raw(order_status_string(o.status));
                 w.raw("\",\"total_cents\":");
                 w.write_u64(o.total_cents);
                 w.raw(",\"items_count\":");
@@ -451,6 +494,14 @@ pub fn encode_response_json(buf: []u8, resp: message.MessageResponse) []const u8
 }
 
 /// Write ,"next_cursor":"<uuid>" if the page is full, or ,"next_cursor":null otherwise.
+fn order_status_string(status: message.OrderStatus) []const u8 {
+    return switch (status) {
+        .pending => "pending",
+        .confirmed => "confirmed",
+        .failed => "failed",
+    };
+}
+
 fn write_next_cursor(w: *JsonWriter, last_id: u128, len: u32) void {
     if (len == message.list_max) {
         w.raw(",\"next_cursor\":\"");
@@ -1065,6 +1116,8 @@ test "encode_response_json — order" {
     order_result.id = 0xeeee0000000000000000000000000001;
     order_result.items_len = 1;
     order_result.total_cents = 1998;
+    order_result.status = .pending;
+    order_result.timeout_at = 1700000060;
     order_result.items[0] = std.mem.zeroes(message.OrderResultItem);
     order_result.items[0].product_id = test_uuid;
     order_result.items[0].name_len = 6;

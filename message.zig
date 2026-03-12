@@ -20,6 +20,8 @@ pub const Status = enum(u8) {
     // Business logic errors — one per failure reason.
     insufficient_inventory = 10,
     version_conflict = 11,
+    order_expired = 12,
+    order_not_pending = 13,
 };
 
 /// Flat operation enum — encodes entity type AND action in a single tag,
@@ -41,6 +43,7 @@ pub const Operation = enum(u8) {
     create_order = 14,
     get_order = 15,
     list_orders = 16,
+    complete_order = 17,
 
     // Collections
     create_collection = 7,
@@ -60,6 +63,7 @@ pub const Operation = enum(u8) {
             .add_collection_member, .remove_collection_member => u128,
             .transfer_inventory => InventoryTransfer,
             .create_order => OrderRequest,
+            .complete_order => OrderCompletion,
             .list_products,
             .list_collections,
             .list_orders,
@@ -86,6 +90,7 @@ pub const Operation = enum(u8) {
                 u128 => .member_id,
                 InventoryTransfer => .transfer,
                 OrderRequest => .order,
+                OrderCompletion => .completion,
                 ListParams => .list,
                 void => .none,
                 else => @compileError("unhandled EventType"),
@@ -176,6 +181,16 @@ pub const InventoryTransfer = extern struct {
     }
 };
 
+/// Order status — two-phase lifecycle matching TigerBeetle's pending transfers.
+pub const OrderStatus = enum(u8) {
+    pending = 1,
+    confirmed = 2,
+    failed = 3,
+};
+
+/// Default timeout for pending orders (seconds).
+pub const order_timeout_seconds = 60;
+
 /// Maximum number of line items in a single order.
 pub const order_items_max = 20;
 
@@ -209,6 +224,23 @@ pub const OrderRequest = extern struct {
     }
 };
 
+/// Completion event for two-phase orders — the worker posts this after
+/// the external API call succeeds or fails.
+pub const OrderCompletion = extern struct {
+    result: OrderCompletionResult,
+    reserved: [15]u8,
+
+    pub const OrderCompletionResult = enum(u8) {
+        confirmed = 1,
+        failed = 2,
+    };
+
+    comptime {
+        assert(stdx.no_padding(OrderCompletion));
+        assert(@sizeOf(OrderCompletion) == 16);
+    }
+};
+
 /// A single line item in an order response — includes resolved product info.
 pub const OrderResultItem = extern struct {
     product_id: u128,
@@ -234,8 +266,10 @@ pub const OrderResult = extern struct {
     id: u128,
     items: [order_items_max]OrderResultItem,
     total_cents: u64,
+    timeout_at: u64,
     items_len: u8,
-    reserved: [7]u8,
+    status: OrderStatus,
+    reserved: [14]u8,
 
     comptime {
         assert(stdx.no_padding(OrderResult));
@@ -250,12 +284,14 @@ pub const OrderResult = extern struct {
 pub const OrderSummary = extern struct {
     id: u128,
     total_cents: u64,
+    timeout_at: u64,
     items_len: u8,
-    reserved: [7]u8,
+    status: OrderStatus,
+    reserved: [14]u8,
 
     comptime {
         assert(stdx.no_padding(OrderSummary));
-        assert(@sizeOf(OrderSummary) == 32);
+        assert(@sizeOf(OrderSummary) == 48);
     }
 };
 
@@ -298,6 +334,7 @@ pub const Event = union(enum) {
     member_id: u128, // product_id for add/remove member
     transfer: InventoryTransfer,
     order: OrderRequest,
+    completion: OrderCompletion,
     list: ListParams,
     none: void,
 
@@ -313,6 +350,7 @@ pub const Event = union(enum) {
             u128 => "member_id",
             InventoryTransfer => "transfer",
             OrderRequest => "order",
+            OrderCompletion => "completion",
             ListParams => "list",
             void => "none",
             else => @compileError("Event.unwrap: unhandled type"),

@@ -40,7 +40,9 @@ pub fn main(allocator: std.mem.Allocator, args: FuzzArgs) !void {
     defer sql_storage.deinit();
 
     var mem_sm = MemSM.init(&mem_storage, false);
+    mem_sm.now = 1_700_000_000;
     var sql_sm = SqlSM.init(&sql_storage, false);
+    sql_sm.now = 1_700_000_000;
 
     // Auditor: third independent reference model — pure-logic state
     // tracking. Validates both backends against predicted results.
@@ -53,6 +55,11 @@ pub fn main(allocator: std.mem.Allocator, args: FuzzArgs) !void {
     var features = gen.FeatureCoverage{};
 
     for (0..events_max) |event_i| {
+        // Advance time identically on both backends.
+        const dt: i64 = @intCast(prng.range_inclusive(u32, 1, 5));
+        mem_sm.now += dt;
+        sql_sm.now += dt;
+
         const operation = prng.enum_weighted(message.Operation, op_weights);
 
         log.debug("Running fuzz_ops[{}/{}] == {s}", .{ event_i, events_max, @tagName(operation) });

@@ -152,6 +152,8 @@ pub fn encode_json_response(buf: []u8, status: message.Status, json_body: []cons
         .storage_error => "HTTP/1.1 503 Service Unavailable\r\n",
         .insufficient_inventory => "HTTP/1.1 409 Conflict\r\n",
         .version_conflict => "HTTP/1.1 409 Conflict\r\n",
+        .order_expired => "HTTP/1.1 410 Gone\r\n",
+        .order_not_pending => "HTTP/1.1 409 Conflict\r\n",
     };
 
     var pos: usize = 0;
