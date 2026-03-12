@@ -205,9 +205,20 @@ pub fn StateMachineType(comptime Storage: type) type {
             return true;
         }
 
+        /// Transaction boundary for tick-level batching. The server wraps
+        /// the entire process_inbox loop in begin_batch/commit_batch so all
+        /// writes in a tick share one SQLite transaction (one fsync).
+        pub fn begin_batch(self: *StateMachine) void {
+            self.storage.begin();
+        }
+
+        pub fn commit_batch(self: *StateMachine) void {
+            self.storage.commit();
+        }
+
         /// Phase 2: commit — single entry point for the execute phase.
-        /// Handles cross-cutting concerns (transaction wrapping, status
-        /// counting) so individual handlers don't have to.
+        /// Handles cross-cutting concerns (status counting) so individual
+        /// handlers don't have to.
         /// Follows TigerBeetle's commit() pattern. Must only be called
         /// after prefetch() returned true.
         pub fn commit(self: *StateMachine, msg: message.Message) message.MessageResponse {
@@ -217,13 +228,8 @@ pub fn StateMachineType(comptime Storage: type) type {
             const resp = if (result == .err)
                 // Storage read error — return 503 regardless of operation.
                 message.MessageResponse.storage_error
-            else resp: {
-                // Wrap the execute phase in a transaction so multi-write
-                // operations (transfer_inventory, delete_collection) are atomic.
-                self.storage.begin();
-                defer self.storage.commit();
-                break :resp self.execute(msg, result);
-            };
+            else
+                self.execute(msg, result);
 
             // Cross-cutting: count every response status. No handler opts
             // in or out — the commit loop guarantees it.

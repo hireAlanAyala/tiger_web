@@ -156,6 +156,13 @@ pub fn ServerType(comptime IO: type, comptime Storage: type) type {
         fn process_inbox(server: *Server) void {
             var json_buf: [http.response_body_max]u8 = undefined;
 
+            // Wrap all writes in a single transaction so the tick pays one
+            // fsync instead of one per write. Reads are unaffected (WAL mode).
+            // If we crash mid-tick, no responses have been sent yet (flush_outbox
+            // runs after process_inbox), so clients see a disconnect and retry.
+            server.state_machine.begin_batch();
+            defer server.state_machine.commit_batch();
+
             for (server.connections) |*conn| {
                 if (conn.state != .ready) continue;
 
