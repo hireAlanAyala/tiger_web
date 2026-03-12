@@ -580,7 +580,8 @@ test "deterministic replay — same seed same result" {
         defer storage.deinit(std.testing.allocator);
         var sm = StateMachine.init(&storage, false);
         var time_sim = TimeSim{};
-        var server = Server.init(&sim_io, &sm, 1, time_sim.time());
+        var server = try Server.init(std.testing.allocator, &sim_io, &sm, 1, time_sim.time());
+        defer server.deinit(std.testing.allocator);
 
         sim_io.connect_client(0);
         sim_io.inject_post(0, "/products",
@@ -607,7 +608,8 @@ test "pipelining — back-to-back requests on one connection" {
     defer storage.deinit(std.testing.allocator);
     var sm = StateMachine.init(&storage, false);
     var time_sim = TimeSim{};
-    var server = Server.init(&sim_io, &sm, 1, time_sim.time());
+    var server = try Server.init(std.testing.allocator, &sim_io, &sm, 1, time_sim.time());
+    defer server.deinit(std.testing.allocator);
 
     sim_io.connect_client(0);
     run_ticks(&server, &sim_io, 10);
@@ -637,7 +639,8 @@ test "connection drops and reconnects — state machine survives" {
     defer storage.deinit(std.testing.allocator);
     var sm = StateMachine.init(&storage, false);
     var time_sim = TimeSim{};
-    var server = Server.init(&sim_io, &sm, 1, time_sim.time());
+    var server = try Server.init(std.testing.allocator, &sim_io, &sm, 1, time_sim.time());
+    defer server.deinit(std.testing.allocator);
 
     sim_io.connect_client(0);
     run_ticks(&server, &sim_io, 10);
@@ -673,7 +676,8 @@ test "timeout — partial request triggers close" {
     defer storage.deinit(std.testing.allocator);
     var sm = StateMachine.init(&storage, false);
     var time_sim = TimeSim{};
-    var server = Server.init(&sim_io, &sm, 1, time_sim.time());
+    var server = try Server.init(std.testing.allocator, &sim_io, &sm, 1, time_sim.time());
+    defer server.deinit(std.testing.allocator);
 
     sim_io.connect_client(0);
     run_ticks(&server, &sim_io, 10);
@@ -684,8 +688,8 @@ test "timeout — partial request triggers close" {
 
     // Connection should still be alive before timeout.
     var found_receiving = false;
-    for (&server.connections, server.connections_busy) |*conn, busy| {
-        if (busy and conn.state == .receiving) {
+    for (server.connections) |*conn| {
+        if (conn.state == .receiving) {
             found_receiving = true;
             break;
         }
@@ -702,8 +706,8 @@ test "timeout — partial request triggers close" {
 
     // After timeout, the receiving connection should be freed.
     var any_active = false;
-    for (&server.connections, server.connections_busy) |*conn, busy| {
-        if (busy and conn.state != .free and conn.state != .accepting) {
+    for (server.connections) |*conn| {
+        if (conn.state != .free and conn.state != .accepting) {
             any_active = true;
             break;
         }
@@ -721,7 +725,8 @@ test "mark: disconnect triggers recv peer closed" {
     defer storage.deinit(std.testing.allocator);
     var sm = StateMachine.init(&storage, false);
     var time_sim = TimeSim{};
-    var server = Server.init(&sim_io, &sm, 1, time_sim.time());
+    var server = try Server.init(std.testing.allocator, &sim_io, &sm, 1, time_sim.time());
+    defer server.deinit(std.testing.allocator);
 
     sim_io.connect_client(0);
     run_ticks(&server, &sim_io, 10);
@@ -738,7 +743,8 @@ test "mark: send fault triggers send error" {
     defer storage.deinit(std.testing.allocator);
     var sm = StateMachine.init(&storage, false);
     var time_sim = TimeSim{};
-    var server = Server.init(&sim_io, &sm, 1, time_sim.time());
+    var server = try Server.init(std.testing.allocator, &sim_io, &sm, 1, time_sim.time());
+    defer server.deinit(std.testing.allocator);
 
     sim_io.connect_client(0);
     run_ticks(&server, &sim_io, 10);
@@ -765,7 +771,8 @@ test "mark: idle connection triggers timeout" {
     defer storage.deinit(std.testing.allocator);
     var sm = StateMachine.init(&storage, false);
     var time_sim = TimeSim{};
-    var server = Server.init(&sim_io, &sm, 1, time_sim.time());
+    var server = try Server.init(std.testing.allocator, &sim_io, &sm, 1, time_sim.time());
+    defer server.deinit(std.testing.allocator);
 
     sim_io.connect_client(0);
     run_ticks(&server, &sim_io, 10);
@@ -790,7 +797,8 @@ test "mark: garbage bytes trigger invalid HTTP" {
     defer storage.deinit(std.testing.allocator);
     var sm = StateMachine.init(&storage, false);
     var time_sim = TimeSim{};
-    var server = Server.init(&sim_io, &sm, 1, time_sim.time());
+    var server = try Server.init(std.testing.allocator, &sim_io, &sm, 1, time_sim.time());
+    defer server.deinit(std.testing.allocator);
 
     sim_io.connect_client(0);
     run_ticks(&server, &sim_io, 10);
@@ -807,7 +815,8 @@ test "mark: unknown route triggers unmapped request" {
     defer storage.deinit(std.testing.allocator);
     var sm = StateMachine.init(&storage, false);
     var time_sim = TimeSim{};
-    var server = Server.init(&sim_io, &sm, 1, time_sim.time());
+    var server = try Server.init(std.testing.allocator, &sim_io, &sm, 1, time_sim.time());
+    defer server.deinit(std.testing.allocator);
 
     sim_io.connect_client(0);
     run_ticks(&server, &sim_io, 10);
@@ -835,7 +844,8 @@ test "mark: accept failure logs warning" {
     defer storage.deinit(std.testing.allocator);
     var sm = StateMachine.init(&storage, false);
     var time_sim = TimeSim{};
-    var server = Server.init(&sim_io, &sm, 1, time_sim.time());
+    var server = try Server.init(std.testing.allocator, &sim_io, &sm, 1, time_sim.time());
+    defer server.deinit(std.testing.allocator);
 
     // 100% accept fault — every accept attempt fails.
     sim_io.accept_fault_probability = PRNG.ratio(1, 1);
@@ -855,7 +865,8 @@ test "storage busy fault — prefetch retries next tick then succeeds" {
     defer storage.deinit(std.testing.allocator);
     var sm = StateMachine.init(&storage, false);
     var time_sim = TimeSim{};
-    var server = Server.init(&sim_io, &sm, 1, time_sim.time());
+    var server = try Server.init(std.testing.allocator, &sim_io, &sm, 1, time_sim.time());
+    defer server.deinit(std.testing.allocator);
 
     // Create a product first (no faults).
     sim_io.connect_client(0);
@@ -895,7 +906,8 @@ test "storage err fault — returns 503" {
     defer storage.deinit(std.testing.allocator);
     var sm = StateMachine.init(&storage, false);
     var time_sim = TimeSim{};
-    var server = Server.init(&sim_io, &sm, 1, time_sim.time());
+    var server = try Server.init(std.testing.allocator, &sim_io, &sm, 1, time_sim.time());
+    defer server.deinit(std.testing.allocator);
 
     sim_io.connect_client(0);
     run_ticks(&server, &sim_io, 10);
@@ -919,7 +931,8 @@ test "concurrent connections — busy client deferred, ready client served" {
     defer storage.deinit(std.testing.allocator);
     var sm = StateMachine.init(&storage, false);
     var time_sim = TimeSim{};
-    var server = Server.init(&sim_io, &sm, 2, time_sim.time());
+    var server = try Server.init(std.testing.allocator, &sim_io, &sm, 2, time_sim.time());
+    defer server.deinit(std.testing.allocator);
 
     // Connect two clients and let them establish.
     sim_io.connect_client(0);
@@ -962,7 +975,8 @@ test "interleaved writes — update and delete same entity across connections" {
     defer storage.deinit(std.testing.allocator);
     var sm = StateMachine.init(&storage, false);
     var time_sim = TimeSim{};
-    var server = Server.init(&sim_io, &sm, 2, time_sim.time());
+    var server = try Server.init(std.testing.allocator, &sim_io, &sm, 2, time_sim.time());
+    defer server.deinit(std.testing.allocator);
 
     // Connect two clients and let them establish.
     sim_io.connect_client(0);
@@ -1581,7 +1595,8 @@ fn run_fuzz(seed: u64) !void {
     storage.prng = PRNG.from_seed(prng.int(u64));
     var sm = StateMachine.init(&storage, false);
     var time_sim = TimeSim{};
-    var server = Server.init(&sim_io, &sm, 1, time_sim.time());
+    var server = try Server.init(std.testing.allocator, &sim_io, &sm, 1, time_sim.time());
+    defer server.deinit(std.testing.allocator);
 
     var fuzzer = Fuzzer.init();
 

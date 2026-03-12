@@ -24,7 +24,11 @@ pub fn ServerType(comptime IO: type, comptime Storage: type) type {
     return struct {
         const Server = @This();
 
-        pub const max_connections = 32;
+        pub const max_connections = 128;
+
+        comptime {
+            assert(max_connections <= std.math.maxInt(u32));
+        }
 
         io: *IO,
         state_machine: *StateMachine,
@@ -32,10 +36,10 @@ pub fn ServerType(comptime IO: type, comptime Storage: type) type {
 
         listen_fd: IO.fd_t,
         accept_completion: IO.Completion,
-        accepting: bool,
+        accept_connection: ?*Connection,
 
-        connections: [max_connections]Connection,
-        connections_busy: [max_connections]bool,
+        connections: []Connection,
+        connections_used: u32,
 
         tick_count: u32,
 
@@ -45,25 +49,36 @@ pub fn ServerType(comptime IO: type, comptime Storage: type) type {
         /// 30 seconds at 10ms/tick.
         pub const request_timeout_ticks = 3000;
 
-        /// Initialize the server. Binds and listens on the given address.
-        pub fn init(io: *IO, state_machine: *StateMachine, listen_fd: IO.fd_t, time: Time) Server {
-            var server = Server{
+        /// Initialize the server. Allocates the connection pool on the heap.
+        pub fn init(allocator: std.mem.Allocator, io: *IO, state_machine: *StateMachine, listen_fd: IO.fd_t, time: Time) !Server {
+            const connections = try allocator.alloc(Connection, max_connections);
+            errdefer allocator.free(connections);
+
+            for (connections) |*conn| {
+                conn.* = Connection.init_free();
+            }
+
+            return Server{
                 .io = io,
                 .state_machine = state_machine,
                 .time = time,
                 .listen_fd = listen_fd,
                 .accept_completion = .{},
-                .accepting = false,
-                .connections = undefined,
-                .connections_busy = [_]bool{false} ** max_connections,
+                .accept_connection = null,
+                .connections = connections,
+                .connections_used = 0,
                 .tick_count = 0,
             };
+        }
 
-            for (&server.connections) |*conn| {
-                conn.* = Connection.init_free();
+        pub fn deinit(server: *Server, allocator: std.mem.Allocator) void {
+            for (server.connections) |*conn| {
+                if (conn.fd > 0) {
+                    server.io.close(conn.fd);
+                }
             }
-
-            return server;
+            allocator.free(server.connections);
+            server.* = undefined;
         }
 
         /// One tick of the server. Called from the main event loop.
@@ -89,13 +104,17 @@ pub fn ServerType(comptime IO: type, comptime Storage: type) type {
         // --- Accept ---
 
         fn maybe_accept(server: *Server) void {
-            if (server.accepting) return;
+            if (server.accept_connection != null) return;
 
             // All slots may be busy under load.
-            const slot = server.acquire_slot() orelse return;
-            server.connections[slot].set_accepting();
-            server.connections_busy[slot] = true;
-            server.accepting = true;
+            if (server.connections_used == server.connections.len) return;
+
+            server.accept_connection = for (server.connections) |*conn| {
+                if (conn.state == .free) {
+                    conn.set_accepting();
+                    break conn;
+                }
+            } else unreachable;
 
             server.io.accept(
                 server.listen_fd,
@@ -107,22 +126,26 @@ pub fn ServerType(comptime IO: type, comptime Storage: type) type {
 
         fn accept_callback(ctx: *anyopaque, result: i32) void {
             const server: *Server = @ptrCast(@alignCast(ctx));
-            server.accepting = false;
 
-            // Find the connection in accepting state — must exist if accepting was true.
-            const slot = server.find_accepting_slot() orelse unreachable;
+            assert(server.accept_connection != null);
+            const conn = server.accept_connection.?;
+            server.accept_connection = null;
+
+            assert(conn.fd == 0);
+            assert(conn.state == .accepting);
+            defer assert(conn.state == .receiving or conn.state == .free);
 
             // Accept may fail due to resource exhaustion or client abort.
             maybe(result < 0);
             if (result < 0) {
                 log.mark.warn("accept failed: result={d}", .{result});
-                server.connections[slot].on_accept_error();
-                server.connections_busy[slot] = false;
+                conn.on_accept_error();
                 return;
             }
 
-            server.connections[slot].on_accept(server.io, result, server.tick_count);
-            log.debug("accepted connection fd={d} slot={d}", .{ result, slot });
+            conn.on_accept(server.io, result, server.tick_count);
+            server.connections_used += 1;
+            log.debug("accepted connection fd={d}", .{result});
         }
 
         // --- Inbox: process ready requests ---
@@ -130,8 +153,7 @@ pub fn ServerType(comptime IO: type, comptime Storage: type) type {
         fn process_inbox(server: *Server) void {
             var json_buf: [http.response_body_max]u8 = undefined;
 
-            for (&server.connections, &server.connections_busy) |*conn, busy| {
-                if (!busy) continue;
+            for (server.connections) |*conn| {
                 if (conn.state != .ready) continue;
 
                 // Re-parse HTTP from recv_buf. Deterministic — same bytes, same result.
@@ -193,8 +215,8 @@ pub fn ServerType(comptime IO: type, comptime Storage: type) type {
             var connections_receiving: u32 = 0;
             var connections_ready: u32 = 0;
             var connections_sending: u32 = 0;
-            for (&server.connections, server.connections_busy) |*conn, busy| {
-                if (!busy) continue;
+            for (server.connections) |*conn| {
+                if (conn.state == .free) continue;
                 connections_active += 1;
                 switch (conn.state) {
                     .receiving => connections_receiving += 1,
@@ -214,8 +236,7 @@ pub fn ServerType(comptime IO: type, comptime Storage: type) type {
         // --- Outbox: send pending responses ---
 
         fn flush_outbox(server: *Server) void {
-            for (&server.connections, &server.connections_busy) |*conn, busy| {
-                if (!busy) continue;
+            for (server.connections) |*conn| {
                 if (conn.state != .sending) continue;
                 // Don't re-submit if a send is already in-flight.
                 if (conn.send_completion.operation != .none) continue;
@@ -228,8 +249,8 @@ pub fn ServerType(comptime IO: type, comptime Storage: type) type {
         // --- Continue receiving on connections that need more bytes ---
 
         fn continue_receives(server: *Server) void {
-            for (&server.connections, &server.connections_busy) |*conn, busy| {
-                if (!busy) continue;
+            for (server.connections) |*conn| {
+                if (conn.state == .free) continue;
                 conn.continue_recv(server.io);
             }
         }
@@ -237,15 +258,14 @@ pub fn ServerType(comptime IO: type, comptime Storage: type) type {
         // --- Close dead connections ---
 
         fn close_dead(server: *Server) void {
-            for (&server.connections, &server.connections_busy) |*conn, *busy| {
-                if (!busy.*) continue;
+            for (server.connections) |*conn| {
                 if (conn.state != .closing) continue;
                 assert(conn.fd > 0);
 
                 log.debug("closing connection fd={d}", .{conn.fd});
                 server.io.close(conn.fd);
                 conn.* = Connection.init_free();
-                busy.* = false;
+                server.connections_used -= 1;
             }
         }
 
@@ -253,8 +273,8 @@ pub fn ServerType(comptime IO: type, comptime Storage: type) type {
 
         /// Update last_activity_tick for connections that signaled activity via callbacks.
         fn update_activity(server: *Server) void {
-            for (&server.connections, &server.connections_busy) |*conn, busy| {
-                if (!busy) continue;
+            for (server.connections) |*conn| {
+                if (conn.state == .free) continue;
                 if (conn.recv_activity or conn.send_activity) {
                     conn.last_activity_tick = server.tick_count;
                     conn.recv_activity = false;
@@ -266,8 +286,7 @@ pub fn ServerType(comptime IO: type, comptime Storage: type) type {
         // --- Timeout idle connections ---
 
         fn timeout_idle(server: *Server) void {
-            for (&server.connections, &server.connections_busy) |*conn, busy| {
-                if (!busy) continue;
+            for (server.connections) |*conn| {
                 if (conn.state == .free or conn.state == .accepting or conn.state == .closing) continue;
                 if (conn.check_timeout(server.tick_count, request_timeout_ticks)) {
                     log.mark.debug("connection timed out fd={d}", .{conn.fd});
@@ -276,48 +295,28 @@ pub fn ServerType(comptime IO: type, comptime Storage: type) type {
             }
         }
 
-        // --- Slot management ---
-
-        fn acquire_slot(server: *Server) ?usize {
-            for (server.connections_busy, 0..) |busy, i| {
-                if (!busy) {
-                    assert(server.connections[i].state == .free);
-                    return i;
-                }
-            }
-            return null;
-        }
-
-        fn find_accepting_slot(server: *Server) ?usize {
-            for (&server.connections, server.connections_busy, 0..) |*conn, busy, i| {
-                if (busy and conn.state == .accepting) return i;
-            }
-            return null;
-        }
-
         /// Cross-check structural invariants after every tick.
         /// Connection-level invariants are checked by Connection.invariants().
-        /// Server checks cross-connection invariants: busy/state agreement and accept count.
         fn invariants(server: *Server) void {
             var accepting_count: u32 = 0;
+            var active_count: u32 = 0;
 
-            for (&server.connections, server.connections_busy) |*conn, busy| {
-                // busy and state must agree.
-                if (!busy) {
-                    assert(conn.state == .free);
-                } else {
-                    assert(conn.state != .free);
-                }
-
-                // Per-connection internal consistency.
+            for (server.connections) |*conn| {
                 conn.invariants();
 
-                if (conn.state == .accepting) accepting_count += 1;
+                if (conn.state == .accepting) {
+                    accepting_count += 1;
+                } else if (conn.state != .free) {
+                    active_count += 1;
+                }
             }
+
+            // connections_used counts active connections (not accepting).
+            assert(server.connections_used == active_count);
 
             // At most one connection can be in accepting state.
             assert(accepting_count <= 1);
-            if (server.accepting) {
+            if (server.accept_connection != null) {
                 assert(accepting_count == 1);
             }
         }

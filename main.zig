@@ -55,7 +55,7 @@ pub fn main() !void {
     const listen_fd = try IO.open_listener(address);
 
     var time_real = TimeReal{};
-    var server = Server.init(&io, &sm, listen_fd, time_real.time());
+    var server = try Server.init(std.heap.page_allocator, &io, &sm, listen_fd, time_real.time());
 
     log.info("storage=sqlite tick_interval={d}ms connections={d}", .{
         tick_ns / std.time.ns_per_ms,
