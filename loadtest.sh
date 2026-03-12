@@ -77,10 +77,33 @@ bench_list() {
     done
 }
 
+bench_update() {
+    # Update a known product repeatedly. version=0 bypasses optimistic concurrency.
+    ID=$(printf '%032x' 1001)
+    echo ""
+    echo "=== PUT /products/$ID (update) ==="
+    echo ""
+    printf "%-12s  %-10s  %-12s\n" "Concurrency" "Req/sec" "Avg Latency"
+    printf "%-12s  %-10s  %-12s\n" "-----------" "-------" "-----------"
+    BODY="{\"name\":\"Updated\",\"price_cents\":1234,\"version\":0}"
+    for c in $CONCURRENCY_LEVELS; do
+        result=$(hey -n $((c * 1000)) -c "$c" \
+            -m PUT \
+            -H "$AUTH_HEADER" \
+            -H "Content-Type: application/json" \
+            -d "$BODY" \
+            "$HOST/products/$ID" 2>&1)
+        rps=$(echo "$result" | grep "Requests/sec:" | awk '{print $2}')
+        avg=$(echo "$result" | grep "Average:" | head -1 | awk '{printf "%.1fms", $2 * 1000}')
+        printf "%-12s  %-10s  %-12s\n" "$c" "$rps" "$avg"
+    done
+}
+
 case "${1:-all}" in
-    seed) seed ;;
-    get)  bench_get ;;
-    list) bench_list ;;
-    all)  seed; bench_get; bench_list ;;
-    *)    echo "Usage: $0 {seed|get|list|all}"; exit 1 ;;
+    seed)   seed ;;
+    get)    bench_get ;;
+    list)   bench_list ;;
+    update) bench_update ;;
+    all)    seed; bench_get; bench_list; bench_update ;;
+    *)      echo "Usage: $0 {seed|get|list|update|all}"; exit 1 ;;
 esac
