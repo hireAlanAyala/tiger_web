@@ -80,4 +80,30 @@ pub fn build(b: *std.Build) void {
     storage_test.linkSystemLibrary("sqlite3");
     storage_test.linkLibC();
     unit_test_step.dependOn(&b.addRunArtifact(storage_test).step);
+
+    // --- Benchmark (smoke mode as part of unit-test, real via bench step) ---
+    const bench_smoke_options = b.addOptions();
+    bench_smoke_options.addOption(bool, "benchmark", false);
+
+    const bench_smoke = b.addTest(.{
+        .root_source_file = b.path("state_machine_benchmark.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    bench_smoke.root_module.addOptions("bench_options", bench_smoke_options);
+    unit_test_step.dependOn(&b.addRunArtifact(bench_smoke).step);
+
+    const bench_real_options = b.addOptions();
+    bench_real_options.addOption(bool, "benchmark", true);
+
+    const bench_real = b.addTest(.{
+        .root_source_file = b.path("state_machine_benchmark.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    bench_real.root_module.addOptions("bench_options", bench_real_options);
+    const bench_run = b.addRunArtifact(bench_real);
+    bench_run.has_side_effects = true;
+    const bench_step = b.step("bench", "Run state machine benchmark");
+    bench_step.dependOn(&bench_run.step);
 }

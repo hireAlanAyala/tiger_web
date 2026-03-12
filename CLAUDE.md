@@ -15,6 +15,7 @@ sh zig/download.sh          # one-time: download Zig 0.14.1
 ./zig/zig build fuzz -- state_machine 12345        # specific seed
 ./zig/zig build fuzz -- --events-max=1000 state_machine  # with options
 ./zig/zig build fuzz -- smoke                      # all fuzzers, small event counts
+./zig/zig build bench           # state machine benchmark (real measurements)
 ```
 
 ## Architecture
@@ -48,6 +49,8 @@ http.zig → codec.zig → message.zig → state_machine.zig → storage
 | `storage_fuzz.zig` | Storage equivalence fuzzer — runs MemoryStorage vs SqliteStorage vs Auditor, asserts agreement |
 | `stdx.zig` | Ported from TB's stdx — `no_padding`, `equal_bytes`, `has_unique_representation` |
 | `prng.zig` | Xoshiro256++ PRNG with Ratio, Combination, Reservoir — matches TigerBeetle's stdx.PRNG |
+| `bench.zig` | Micro benchmarking harness — smoke/benchmark dual mode, matches TB's testing/bench.zig |
+| `state_machine_benchmark.zig` | State machine benchmark — per-operation prefetch/commit throughput, regression detector |
 | `flags.zig` | CLI argument parser — struct-driven `--key=value` parsing, ported from TigerBeetle's stdx/flags.zig |
 
 ## Conventions
