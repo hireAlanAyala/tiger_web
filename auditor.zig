@@ -107,6 +107,7 @@ pub const Auditor = struct {
             .remove_collection_member,
             .get_order,
             .complete_order,
+            .cancel_order,
             .list_products,
             .list_collections,
             .list_orders,
@@ -137,6 +138,7 @@ pub const Auditor = struct {
             .transfer_inventory => self.on_transfer_inventory(msg.id, msg.event.transfer, resp),
             .create_order => self.on_create_order(msg.event.order, resp),
             .complete_order => self.on_complete_order(msg.id, msg.event.completion, resp),
+            .cancel_order => self.on_cancel_order(msg.id, resp),
             .get_order => self.on_get_order(msg.id, resp),
             .create_collection => self.on_create_collection(msg.event.collection, resp),
             .get_collection => self.on_get_collection(msg.id, resp),
@@ -353,6 +355,15 @@ pub const Auditor = struct {
         var order = self.orders[idx].?;
 
         if (order.status != .pending) {
+            // Idempotent: matching terminal state returns OK.
+            if (order.status == .confirmed and completion.result == .confirmed) {
+                assert(resp.status == .ok);
+                return;
+            }
+            if (order.status == .failed and completion.result == .failed) {
+                assert(resp.status == .ok);
+                return;
+            }
             assert(resp.status == .order_not_pending);
             return;
         }
@@ -379,6 +390,8 @@ pub const Auditor = struct {
         switch (completion.result) {
             .confirmed => {
                 order.status = .confirmed;
+                order.payment_ref = completion.payment_ref;
+                order.payment_ref_len = completion.payment_ref_len;
                 self.orders[idx] = order;
             },
             .failed => {
@@ -393,6 +406,34 @@ pub const Auditor = struct {
                     }
                 }
             },
+        }
+    }
+
+    fn on_cancel_order(self: *Auditor, id: u128, resp: message.MessageResponse) void {
+        const idx = self.find_order(id) orelse {
+            assert(resp.status == .not_found);
+            return;
+        };
+
+        var order = self.orders[idx].?;
+
+        if (order.status != .pending) {
+            assert(resp.status == .order_not_pending);
+            return;
+        }
+
+        assert(resp.status == .ok);
+
+        order.status = .cancelled;
+        self.orders[idx] = order;
+
+        // Restore inventory in model.
+        for (order.items[0..order.items_len]) |item| {
+            if (self.find_product(item.product_id)) |pidx| {
+                var p = self.products[pidx].?;
+                p.inventory += item.quantity;
+                self.products[pidx] = p;
+            }
         }
     }
 

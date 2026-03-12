@@ -215,6 +215,14 @@ fn translate_orders(method: http.Method, seg: PathSegments, body: []const u8, li
                     .event = .{ .completion = completion },
                 };
             }
+            // POST /orders/:id/cancel — client cancellation
+            if (seg.has_id and seg.sub_resource.len > 0 and std.mem.eql(u8, seg.sub_resource, "cancel")) {
+                return .{
+                    .operation = .cancel_order,
+                    .id = seg.id,
+                    .event = .{ .none = {} },
+                };
+            }
             // POST /orders — create order
             if (seg.has_id) return null;
             if (body.len == 0) return null;
@@ -230,7 +238,7 @@ fn translate_orders(method: http.Method, seg: PathSegments, body: []const u8, li
 }
 
 /// Parse a JSON body into an OrderCompletion.
-/// Expected format: {"result":"confirmed"} or {"result":"failed"}
+/// Expected format: {"result":"confirmed","payment_ref":"ch_xxx"} or {"result":"failed"}
 fn parse_completion_json(body: []const u8) ?message.OrderCompletion {
     const result_str = json_string_field(body, "result") orelse return null;
     const result: message.OrderCompletion.OrderCompletionResult =
@@ -241,10 +249,18 @@ fn parse_completion_json(body: []const u8) ?message.OrderCompletion {
         else
             return null;
 
-    return .{
-        .result = result,
-        .reserved = .{0} ** 15,
-    };
+    var completion = std.mem.zeroes(message.OrderCompletion);
+    completion.result = result;
+
+    // Optional payment_ref — typically present on confirmed completions.
+    if (json_string_field(body, "payment_ref")) |ref| {
+        if (ref.len > 0 and ref.len <= message.payment_ref_max) {
+            @memcpy(completion.payment_ref[0..ref.len], ref);
+            completion.payment_ref_len = @intCast(ref.len);
+        }
+    }
+
+    return completion;
 }
 
 /// Parse a JSON body into an OrderRequest.
@@ -467,6 +483,11 @@ pub fn encode_response_json(buf: []u8, resp: message.MessageResponse) []const u8
             }
             w.raw("],\"total_cents\":");
             w.write_u64(o.total_cents);
+            if (o.payment_ref_len > 0) {
+                w.raw(",\"payment_ref\":\"");
+                w.raw(o.payment_ref_slice());
+                w.raw("\"");
+            }
             w.raw("}");
         },
         .order_list => |*l| {
@@ -499,6 +520,7 @@ fn order_status_string(status: message.OrderStatus) []const u8 {
         .pending => "pending",
         .confirmed => "confirmed",
         .failed => "failed",
+        .cancelled => "cancelled",
     };
 }
 

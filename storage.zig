@@ -32,7 +32,7 @@ pub const SqliteStorage = struct {
     stmt_get_order: *c.sqlite3_stmt,
     stmt_get_order_items: *c.sqlite3_stmt,
     stmt_list_orders: *c.sqlite3_stmt,
-    stmt_update_order_status: *c.sqlite3_stmt,
+    stmt_update_order_completion: *c.sqlite3_stmt,
 
     pub fn init(path: [*:0]const u8) !SqliteStorage {
         var db: ?*c.sqlite3 = null;
@@ -76,7 +76,8 @@ pub const SqliteStorage = struct {
             "total_cents INTEGER NOT NULL," ++
             "items_len INTEGER NOT NULL," ++
             "status INTEGER NOT NULL DEFAULT 1," ++
-            "timeout_at INTEGER NOT NULL DEFAULT 0" ++
+            "timeout_at INTEGER NOT NULL DEFAULT 0," ++
+            "payment_ref TEXT NOT NULL DEFAULT ''" ++
             ");");
 
         exec(real_db, "CREATE TABLE IF NOT EXISTS order_items (" ++
@@ -147,16 +148,16 @@ pub const SqliteStorage = struct {
             "INSERT INTO order_items (order_id, product_id, name, quantity, price_cents, line_total_cents) VALUES (?1, ?2, ?3, ?4, ?5, ?6);",
         );
         const stmt_get_order = prepare(real_db,
-            "SELECT id, total_cents, items_len, status, timeout_at FROM orders WHERE id = ?1;",
+            "SELECT id, total_cents, items_len, status, timeout_at, payment_ref FROM orders WHERE id = ?1;",
         );
         const stmt_get_order_items = prepare(real_db,
             "SELECT product_id, name, quantity, price_cents, line_total_cents FROM order_items WHERE order_id = ?1 ORDER BY rowid;",
         );
         const stmt_list_orders = prepare(real_db,
-            "SELECT id, total_cents, items_len, status, timeout_at FROM orders WHERE id > ?1 ORDER BY id LIMIT ?2;",
+            "SELECT id, total_cents, items_len, status, timeout_at, payment_ref FROM orders WHERE id > ?1 ORDER BY id LIMIT ?2;",
         );
-        const stmt_update_order_status = prepare(real_db,
-            "UPDATE orders SET status = ?2 WHERE id = ?1;",
+        const stmt_update_order_completion = prepare(real_db,
+            "UPDATE orders SET status = ?2, payment_ref = ?3 WHERE id = ?1;",
         );
 
         log.info("storage initialized: {s}", .{path});
@@ -181,7 +182,7 @@ pub const SqliteStorage = struct {
             .stmt_get_order = stmt_get_order,
             .stmt_get_order_items = stmt_get_order_items,
             .stmt_list_orders = stmt_list_orders,
-            .stmt_update_order_status = stmt_update_order_status,
+            .stmt_update_order_completion = stmt_update_order_completion,
         };
     }
 
@@ -212,7 +213,7 @@ pub const SqliteStorage = struct {
         _ = c.sqlite3_finalize(self.stmt_get_order);
         _ = c.sqlite3_finalize(self.stmt_get_order_items);
         _ = c.sqlite3_finalize(self.stmt_list_orders);
-        _ = c.sqlite3_finalize(self.stmt_update_order_status);
+        _ = c.sqlite3_finalize(self.stmt_update_order_completion);
         _ = c.sqlite3_close(self.db);
     }
 
@@ -522,6 +523,12 @@ pub const SqliteStorage = struct {
                     out.items_len = @intCast(c.sqlite3_column_int(stmt, 2));
                     out.status = @enumFromInt(c.sqlite3_column_int(stmt, 3));
                     out.timeout_at = @intCast(c.sqlite3_column_int64(stmt, 4));
+                    const ref_ptr = c.sqlite3_column_text(stmt, 5);
+                    const ref_len: u8 = @intCast(c.sqlite3_column_bytes(stmt, 5));
+                    if (ref_len > 0 and ref_len <= message.payment_ref_max) {
+                        @memcpy(out.payment_ref[0..ref_len], ref_ptr[0..ref_len]);
+                        out.payment_ref_len = ref_len;
+                    }
                 },
                 .done => return .not_found,
                 .busy => return .busy,
@@ -553,12 +560,13 @@ pub const SqliteStorage = struct {
         return .ok;
     }
 
-    pub fn update_order_status(self: *SqliteStorage, order: *const message.OrderResult) StorageResult {
-        const stmt = self.stmt_update_order_status;
+    pub fn update_order_completion(self: *SqliteStorage, order: *const message.OrderResult) StorageResult {
+        const stmt = self.stmt_update_order_completion;
         defer reset_stmt(stmt);
 
         bind_uuid(stmt, 1, order.id);
         _ = c.sqlite3_bind_int(stmt, 2, @intFromEnum(order.status));
+        _ = c.sqlite3_bind_text(stmt, 3, @ptrCast(order.payment_ref[0..order.payment_ref_len]), @intCast(order.payment_ref_len), null);
         return switch (step_result(stmt)) {
             .done => {
                 if (c.sqlite3_changes(self.db) == 0) return .not_found;
@@ -590,6 +598,12 @@ pub const SqliteStorage = struct {
                     out[out_len.*].items_len = @intCast(c.sqlite3_column_int(stmt, 2));
                     out[out_len.*].status = @enumFromInt(c.sqlite3_column_int(stmt, 3));
                     out[out_len.*].timeout_at = @intCast(c.sqlite3_column_int64(stmt, 4));
+                    const ref_ptr = c.sqlite3_column_text(stmt, 5);
+                    const ref_len: u8 = @intCast(c.sqlite3_column_bytes(stmt, 5));
+                    if (ref_len > 0 and ref_len <= message.payment_ref_max) {
+                        @memcpy(out[out_len.*].payment_ref[0..ref_len], ref_ptr[0..ref_len]);
+                        out[out_len.*].payment_ref_len = ref_len;
+                    }
                     out_len.* += 1;
                 },
                 .done => return .ok,

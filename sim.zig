@@ -1026,6 +1026,329 @@ test "interleaved writes — update and delete same entity across connections" {
 }
 
 // =====================================================================
+// Two-phase order completion — full-stack sim tests
+// =====================================================================
+
+const test_product_uuid = "aabbccdd11223344aabbccdd11220001";
+const test_order_uuid = "eeddccbb11223344eeddccbb11220001";
+
+test "two-phase order — create on client 0, complete on client 1" {
+    var sim_io = SimIO.init(0xe001);
+    var storage = try MemoryStorage.init(std.testing.allocator);
+    defer storage.deinit(std.testing.allocator);
+    var sm = StateMachine.init(&storage, false);
+    var time_sim = TimeSim{};
+    var server = try Server.init(std.testing.allocator, &sim_io, &sm, 2, time_sim.time(), test_key);
+    defer server.deinit(std.testing.allocator);
+
+    sim_io.connect_client(0);
+    sim_io.connect_client(1);
+    run_ticks(&server, &sim_io, 10);
+
+    // Create a product.
+    sim_io.inject_post(0, "/products",
+        "{\"id\":\"" ++ test_product_uuid ++ "\",\"name\":\"Widget\",\"price_cents\":1000,\"inventory\":50}",
+    );
+    _ = run_until_response(&server, &sim_io, 0, 500) orelse return error.TestUnexpectedResult;
+    sim_io.clear_response(0);
+
+    // Client 0 creates an order.
+    sim_io.inject_post(0, "/orders",
+        "{\"id\":\"" ++ test_order_uuid ++ "\",\"items\":[{\"product_id\":\"" ++ test_product_uuid ++ "\",\"quantity\":5}]}",
+    );
+    const create_resp = run_until_response(&server, &sim_io, 0, 500) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(create_resp.status_code, 200);
+    try std.testing.expect(json_contains(create_resp.body, "\"status\":\"pending\""));
+    sim_io.clear_response(0);
+
+    // Client 1 (the "worker") completes the order.
+    sim_io.inject_post(1, "/orders/" ++ test_order_uuid ++ "/complete",
+        "{\"result\":\"confirmed\"}",
+    );
+    const complete_resp = run_until_response(&server, &sim_io, 1, 500) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(complete_resp.status_code, 200);
+    try std.testing.expect(json_contains(complete_resp.body, "\"status\":\"confirmed\""));
+    sim_io.clear_response(1);
+
+    // Verify inventory stayed decremented (confirmed = keep reservation).
+    sim_io.inject_get(0, "/products/" ++ test_product_uuid ++ "/inventory");
+    const inv_resp = run_until_response(&server, &sim_io, 0, 500) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(inv_resp.status_code, 200);
+    try std.testing.expect(json_contains(inv_resp.body, "\"inventory\":45"));
+}
+
+test "two-phase order — failed completion restores inventory" {
+    var sim_io = SimIO.init(0xe002);
+    var storage = try MemoryStorage.init(std.testing.allocator);
+    defer storage.deinit(std.testing.allocator);
+    var sm = StateMachine.init(&storage, false);
+    var time_sim = TimeSim{};
+    var server = try Server.init(std.testing.allocator, &sim_io, &sm, 2, time_sim.time(), test_key);
+    defer server.deinit(std.testing.allocator);
+
+    sim_io.connect_client(0);
+    sim_io.connect_client(1);
+    run_ticks(&server, &sim_io, 10);
+
+    sim_io.inject_post(0, "/products",
+        "{\"id\":\"" ++ test_product_uuid ++ "\",\"name\":\"Widget\",\"price_cents\":1000,\"inventory\":50}",
+    );
+    _ = run_until_response(&server, &sim_io, 0, 500) orelse return error.TestUnexpectedResult;
+    sim_io.clear_response(0);
+
+    sim_io.inject_post(0, "/orders",
+        "{\"id\":\"" ++ test_order_uuid ++ "\",\"items\":[{\"product_id\":\"" ++ test_product_uuid ++ "\",\"quantity\":10}]}",
+    );
+    _ = run_until_response(&server, &sim_io, 0, 500) orelse return error.TestUnexpectedResult;
+    sim_io.clear_response(0);
+
+    // Worker reports failure.
+    sim_io.inject_post(1, "/orders/" ++ test_order_uuid ++ "/complete",
+        "{\"result\":\"failed\"}",
+    );
+    const resp = run_until_response(&server, &sim_io, 1, 500) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(resp.status_code, 200);
+    try std.testing.expect(json_contains(resp.body, "\"status\":\"failed\""));
+    sim_io.clear_response(1);
+
+    // Inventory restored.
+    sim_io.inject_get(0, "/products/" ++ test_product_uuid ++ "/inventory");
+    const inv_resp = run_until_response(&server, &sim_io, 0, 500) orelse return error.TestUnexpectedResult;
+    try std.testing.expect(json_contains(inv_resp.body, "\"inventory\":50"));
+}
+
+test "two-phase order — completion after timeout expires" {
+    var sim_io = SimIO.init(0xe003);
+    var storage = try MemoryStorage.init(std.testing.allocator);
+    defer storage.deinit(std.testing.allocator);
+    var sm = StateMachine.init(&storage, false);
+    var time_sim = TimeSim{};
+    var server = try Server.init(std.testing.allocator, &sim_io, &sm, 2, time_sim.time(), test_key);
+    defer server.deinit(std.testing.allocator);
+
+    sim_io.connect_client(0);
+    sim_io.connect_client(1);
+    run_ticks(&server, &sim_io, 10);
+
+    sim_io.inject_post(0, "/products",
+        "{\"id\":\"" ++ test_product_uuid ++ "\",\"name\":\"Widget\",\"price_cents\":1000,\"inventory\":50}",
+    );
+    _ = run_until_response(&server, &sim_io, 0, 500) orelse return error.TestUnexpectedResult;
+    sim_io.clear_response(0);
+
+    sim_io.inject_post(0, "/orders",
+        "{\"id\":\"" ++ test_order_uuid ++ "\",\"items\":[{\"product_id\":\"" ++ test_product_uuid ++ "\",\"quantity\":10}]}",
+    );
+    _ = run_until_response(&server, &sim_io, 0, 500) orelse return error.TestUnexpectedResult;
+    sim_io.clear_response(0);
+
+    // Advance time past the order timeout.
+    time_sim.advance(message.order_timeout_seconds + 1);
+
+    // Worker tries to complete — should get 410 (order_expired).
+    sim_io.inject_post(1, "/orders/" ++ test_order_uuid ++ "/complete",
+        "{\"result\":\"confirmed\"}",
+    );
+    const resp = run_until_response(&server, &sim_io, 1, 500) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(resp.status_code, 410);
+    sim_io.clear_response(1);
+
+    // Inventory restored because the order expired.
+    sim_io.inject_get(0, "/products/" ++ test_product_uuid ++ "/inventory");
+    const inv_resp = run_until_response(&server, &sim_io, 0, 500) orelse return error.TestUnexpectedResult;
+    try std.testing.expect(json_contains(inv_resp.body, "\"inventory\":50"));
+}
+
+test "two-phase order — idempotent same-result retry" {
+    var sim_io = SimIO.init(0xe004);
+    var storage = try MemoryStorage.init(std.testing.allocator);
+    defer storage.deinit(std.testing.allocator);
+    var sm = StateMachine.init(&storage, false);
+    var time_sim = TimeSim{};
+    var server = try Server.init(std.testing.allocator, &sim_io, &sm, 2, time_sim.time(), test_key);
+    defer server.deinit(std.testing.allocator);
+
+    sim_io.connect_client(0);
+    sim_io.connect_client(1);
+    run_ticks(&server, &sim_io, 10);
+
+    sim_io.inject_post(0, "/products",
+        "{\"id\":\"" ++ test_product_uuid ++ "\",\"name\":\"Widget\",\"price_cents\":1000,\"inventory\":50}",
+    );
+    _ = run_until_response(&server, &sim_io, 0, 500) orelse return error.TestUnexpectedResult;
+    sim_io.clear_response(0);
+
+    sim_io.inject_post(0, "/orders",
+        "{\"id\":\"" ++ test_order_uuid ++ "\",\"items\":[{\"product_id\":\"" ++ test_product_uuid ++ "\",\"quantity\":5}]}",
+    );
+    _ = run_until_response(&server, &sim_io, 0, 500) orelse return error.TestUnexpectedResult;
+    sim_io.clear_response(0);
+
+    // First completion succeeds.
+    sim_io.inject_post(1, "/orders/" ++ test_order_uuid ++ "/complete",
+        "{\"result\":\"confirmed\"}",
+    );
+    const resp1 = run_until_response(&server, &sim_io, 1, 500) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(resp1.status_code, 200);
+    sim_io.clear_response(1);
+
+    // Same-result retry is idempotent — returns OK (worker crash recovery).
+    sim_io.inject_post(1, "/orders/" ++ test_order_uuid ++ "/complete",
+        "{\"result\":\"confirmed\"}",
+    );
+    const resp2 = run_until_response(&server, &sim_io, 1, 500) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(resp2.status_code, 200);
+    sim_io.clear_response(1);
+
+    // Inventory unchanged by idempotent retry.
+    sim_io.inject_get(0, "/products/" ++ test_product_uuid ++ "/inventory");
+    const inv_resp = run_until_response(&server, &sim_io, 0, 500) orelse return error.TestUnexpectedResult;
+    try std.testing.expect(json_contains(inv_resp.body, "\"inventory\":45"));
+}
+
+test "two-phase order — poll pending then complete (worker pattern)" {
+    var sim_io = SimIO.init(0xe005);
+    var storage = try MemoryStorage.init(std.testing.allocator);
+    defer storage.deinit(std.testing.allocator);
+    var sm = StateMachine.init(&storage, false);
+    var time_sim = TimeSim{};
+    var server = try Server.init(std.testing.allocator, &sim_io, &sm, 2, time_sim.time(), test_key);
+    defer server.deinit(std.testing.allocator);
+
+    sim_io.connect_client(0);
+    sim_io.connect_client(1);
+    run_ticks(&server, &sim_io, 10);
+
+    sim_io.inject_post(0, "/products",
+        "{\"id\":\"" ++ test_product_uuid ++ "\",\"name\":\"Widget\",\"price_cents\":1000,\"inventory\":50}",
+    );
+    _ = run_until_response(&server, &sim_io, 0, 500) orelse return error.TestUnexpectedResult;
+    sim_io.clear_response(0);
+
+    sim_io.inject_post(0, "/orders",
+        "{\"id\":\"" ++ test_order_uuid ++ "\",\"items\":[{\"product_id\":\"" ++ test_product_uuid ++ "\",\"quantity\":3}]}",
+    );
+    _ = run_until_response(&server, &sim_io, 0, 500) orelse return error.TestUnexpectedResult;
+    sim_io.clear_response(0);
+
+    // Worker polls GET /orders — should see the pending order.
+    sim_io.inject_get(1, "/orders");
+    const list_resp = run_until_response(&server, &sim_io, 1, 500) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(list_resp.status_code, 200);
+    try std.testing.expect(json_contains(list_resp.body, "\"status\":\"pending\""));
+    try std.testing.expect(json_contains(list_resp.body, test_order_uuid));
+    sim_io.clear_response(1);
+
+    // Worker completes.
+    sim_io.inject_post(1, "/orders/" ++ test_order_uuid ++ "/complete",
+        "{\"result\":\"confirmed\"}",
+    );
+    _ = run_until_response(&server, &sim_io, 1, 500) orelse return error.TestUnexpectedResult;
+    sim_io.clear_response(1);
+
+    // Worker polls again — order should now be confirmed, not pending.
+    sim_io.inject_get(1, "/orders");
+    const list_resp2 = run_until_response(&server, &sim_io, 1, 500) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(list_resp2.status_code, 200);
+    try std.testing.expect(json_contains(list_resp2.body, "\"status\":\"confirmed\""));
+}
+
+// =====================================================================
+// Cancel order — full-stack sim tests
+// =====================================================================
+
+test "cancel order — client cancels, worker completion rejected" {
+    var sim_io = SimIO.init(0xe010);
+    var storage = try MemoryStorage.init(std.testing.allocator);
+    defer storage.deinit(std.testing.allocator);
+    var sm = StateMachine.init(&storage, false);
+    var time_sim = TimeSim{};
+    var server = try Server.init(std.testing.allocator, &sim_io, &sm, 2, time_sim.time(), test_key);
+    defer server.deinit(std.testing.allocator);
+
+    sim_io.connect_client(0);
+    sim_io.connect_client(1);
+    run_ticks(&server, &sim_io, 10);
+
+    // Setup: product + order.
+    sim_io.inject_post(0, "/products",
+        "{\"id\":\"" ++ test_product_uuid ++ "\",\"name\":\"Widget\",\"price_cents\":1000,\"inventory\":50}",
+    );
+    _ = run_until_response(&server, &sim_io, 0, 500) orelse return error.TestUnexpectedResult;
+    sim_io.clear_response(0);
+
+    sim_io.inject_post(0, "/orders",
+        "{\"id\":\"" ++ test_order_uuid ++ "\",\"items\":[{\"product_id\":\"" ++ test_product_uuid ++ "\",\"quantity\":10}]}",
+    );
+    _ = run_until_response(&server, &sim_io, 0, 500) orelse return error.TestUnexpectedResult;
+    sim_io.clear_response(0);
+
+    // Client cancels.
+    sim_io.inject_post(0, "/orders/" ++ test_order_uuid ++ "/cancel", "");
+    const cancel_resp = run_until_response(&server, &sim_io, 0, 500) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(cancel_resp.status_code, 200);
+    try std.testing.expect(json_contains(cancel_resp.body, "\"status\":\"cancelled\""));
+    sim_io.clear_response(0);
+
+    // Worker tries to complete — rejected.
+    sim_io.inject_post(1, "/orders/" ++ test_order_uuid ++ "/complete",
+        "{\"result\":\"confirmed\"}",
+    );
+    const complete_resp = run_until_response(&server, &sim_io, 1, 500) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(complete_resp.status_code, 409);
+    sim_io.clear_response(1);
+
+    // Inventory fully restored.
+    sim_io.inject_get(0, "/products/" ++ test_product_uuid ++ "/inventory");
+    const inv_resp = run_until_response(&server, &sim_io, 0, 500) orelse return error.TestUnexpectedResult;
+    try std.testing.expect(json_contains(inv_resp.body, "\"inventory\":50"));
+}
+
+test "cancel order — cancel already confirmed is rejected" {
+    var sim_io = SimIO.init(0xe011);
+    var storage = try MemoryStorage.init(std.testing.allocator);
+    defer storage.deinit(std.testing.allocator);
+    var sm = StateMachine.init(&storage, false);
+    var time_sim = TimeSim{};
+    var server = try Server.init(std.testing.allocator, &sim_io, &sm, 2, time_sim.time(), test_key);
+    defer server.deinit(std.testing.allocator);
+
+    sim_io.connect_client(0);
+    sim_io.connect_client(1);
+    run_ticks(&server, &sim_io, 10);
+
+    sim_io.inject_post(0, "/products",
+        "{\"id\":\"" ++ test_product_uuid ++ "\",\"name\":\"Widget\",\"price_cents\":1000,\"inventory\":50}",
+    );
+    _ = run_until_response(&server, &sim_io, 0, 500) orelse return error.TestUnexpectedResult;
+    sim_io.clear_response(0);
+
+    sim_io.inject_post(0, "/orders",
+        "{\"id\":\"" ++ test_order_uuid ++ "\",\"items\":[{\"product_id\":\"" ++ test_product_uuid ++ "\",\"quantity\":5}]}",
+    );
+    _ = run_until_response(&server, &sim_io, 0, 500) orelse return error.TestUnexpectedResult;
+    sim_io.clear_response(0);
+
+    // Worker completes first.
+    sim_io.inject_post(1, "/orders/" ++ test_order_uuid ++ "/complete",
+        "{\"result\":\"confirmed\"}",
+    );
+    _ = run_until_response(&server, &sim_io, 1, 500) orelse return error.TestUnexpectedResult;
+    sim_io.clear_response(1);
+
+    // Client tries to cancel — too late.
+    sim_io.inject_post(0, "/orders/" ++ test_order_uuid ++ "/cancel", "");
+    const cancel_resp = run_until_response(&server, &sim_io, 0, 500) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(cancel_resp.status_code, 409);
+    sim_io.clear_response(0);
+
+    // Inventory stays at confirmed level.
+    sim_io.inject_get(0, "/products/" ++ test_product_uuid ++ "/inventory");
+    const inv_resp = run_until_response(&server, &sim_io, 0, 500) orelse return error.TestUnexpectedResult;
+    try std.testing.expect(json_contains(inv_resp.body, "\"inventory\":45"));
+}
+
+// =====================================================================
 // PRNG-driven fuzzer — exercises the full stack with random operations
 // =====================================================================
 
@@ -1048,6 +1371,8 @@ const FuzzAction = enum {
     add_member,
     remove_member,
     create_order,
+    complete_order,
+    cancel_order,
     get_order,
     list_orders,
     toggle_faults,
@@ -1106,6 +1431,8 @@ const Fuzzer = struct {
             .add_member => self.step_add_member(prng, io, server),
             .remove_member => self.step_remove_member(prng, io, server),
             .create_order => self.step_create_order(prng, io, server),
+            .complete_order => self.step_complete_order(prng, io, server),
+            .cancel_order => self.step_cancel_order(prng, io, server),
             .get_order => self.step_get_order(prng, io, server),
             .list_orders => self.step_list_orders(prng, io, server),
             .toggle_faults => self.step_toggle_faults(prng, io, storage),
@@ -1335,6 +1662,38 @@ const Fuzzer = struct {
                 self.order_count += 1;
             }
         }
+        io.clear_response(client);
+    }
+
+    fn step_complete_order(self: *Fuzzer, prng: *PRNG, io: *SimIO, server: *Server) void {
+        self.ensure_connected(io, server);
+        const client = self.pick_connected(prng);
+        const id = self.pick_order_id(prng);
+        const path = path_with_id_suffix(&self.path_buf, "/orders/", id, "/complete");
+        const confirmed = prng.boolean();
+        var w = BufWriter{ .buf = &self.body_buf };
+        w.raw("{\"result\":\"");
+        w.raw(if (confirmed) "confirmed" else "failed");
+        w.raw("\"");
+        // ~50% chance of including payment_ref on confirmed.
+        if (confirmed and prng.boolean()) {
+            w.raw(",\"payment_ref\":\"ch_test_");
+            w.num(prng.int(u32));
+            w.raw("\"");
+        }
+        w.raw("}");
+        io.inject_post(client, path, w.slice());
+        _ = run_until_response(server, io, client, 300);
+        io.clear_response(client);
+    }
+
+    fn step_cancel_order(self: *Fuzzer, prng: *PRNG, io: *SimIO, server: *Server) void {
+        self.ensure_connected(io, server);
+        const client = self.pick_connected(prng);
+        const id = self.pick_order_id(prng);
+        const path = path_with_id_suffix(&self.path_buf, "/orders/", id, "/cancel");
+        io.inject_post(client, path, "");
+        _ = run_until_response(server, io, client, 300);
         io.clear_response(client);
     }
 

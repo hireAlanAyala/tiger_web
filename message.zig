@@ -44,6 +44,7 @@ pub const Operation = enum(u8) {
     get_order = 15,
     list_orders = 16,
     complete_order = 17,
+    cancel_order = 18,
 
     // Collections
     create_collection = 7,
@@ -72,6 +73,7 @@ pub const Operation = enum(u8) {
             .delete_product,
             .get_product_inventory,
             .get_order,
+            .cancel_order,
             .get_collection,
             .delete_collection,
             => void,
@@ -186,6 +188,7 @@ pub const OrderStatus = enum(u8) {
     pending = 1,
     confirmed = 2,
     failed = 3,
+    cancelled = 4,
 };
 
 /// Default timeout for pending orders (seconds).
@@ -224,11 +227,16 @@ pub const OrderRequest = extern struct {
     }
 };
 
+pub const payment_ref_max = 64;
+
 /// Completion event for two-phase orders — the worker posts this after
-/// the external API call succeeds or fails.
+/// the external API call succeeds or fails. On confirmation, may carry
+/// an external payment reference (e.g., Stripe charge ID).
 pub const OrderCompletion = extern struct {
+    payment_ref: [payment_ref_max]u8,
     result: OrderCompletionResult,
-    reserved: [15]u8,
+    payment_ref_len: u8,
+    reserved: [14]u8,
 
     pub const OrderCompletionResult = enum(u8) {
         confirmed = 1,
@@ -237,7 +245,11 @@ pub const OrderCompletion = extern struct {
 
     comptime {
         assert(stdx.no_padding(OrderCompletion));
-        assert(@sizeOf(OrderCompletion) == 16);
+        assert(@sizeOf(OrderCompletion) == 80);
+    }
+
+    pub fn payment_ref_slice(self: *const OrderCompletion) []const u8 {
+        return self.payment_ref[0..self.payment_ref_len];
     }
 };
 
@@ -265,11 +277,13 @@ pub const OrderResultItem = extern struct {
 pub const OrderResult = extern struct {
     id: u128,
     items: [order_items_max]OrderResultItem,
+    payment_ref: [payment_ref_max]u8,
     total_cents: u64,
     timeout_at: u64,
     items_len: u8,
     status: OrderStatus,
-    reserved: [14]u8,
+    payment_ref_len: u8,
+    reserved: [13]u8,
 
     comptime {
         assert(stdx.no_padding(OrderResult));
@@ -278,20 +292,29 @@ pub const OrderResult = extern struct {
     pub fn items_slice(self: *const OrderResult) []const OrderResultItem {
         return self.items[0..self.items_len];
     }
+
+    pub fn payment_ref_slice(self: *const OrderResult) []const u8 {
+        return self.payment_ref[0..self.payment_ref_len];
+    }
 };
 
 /// Order summary for list responses — header only, no line items.
 pub const OrderSummary = extern struct {
     id: u128,
+    payment_ref: [payment_ref_max]u8,
     total_cents: u64,
     timeout_at: u64,
     items_len: u8,
     status: OrderStatus,
-    reserved: [14]u8,
+    payment_ref_len: u8,
+    reserved: [13]u8,
 
     comptime {
         assert(stdx.no_padding(OrderSummary));
-        assert(@sizeOf(OrderSummary) == 48);
+    }
+
+    pub fn payment_ref_slice(self: *const OrderSummary) []const u8 {
+        return self.payment_ref[0..self.payment_ref_len];
     }
 };
 

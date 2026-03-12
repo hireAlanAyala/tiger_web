@@ -265,14 +265,25 @@ pub fn gen_message(prng: *PRNG, operation: message.Operation, pools: IdPools) ?m
         .complete_order => blk: {
             if (pools.order_ids.len == 0) return null;
             const result: message.OrderCompletion.OrderCompletionResult = if (prng.boolean()) .confirmed else .failed;
+            var completion = std.mem.zeroes(message.OrderCompletion);
+            completion.result = result;
+            // ~50% chance of including a payment ref on confirmed completions.
+            if (result == .confirmed and prng.boolean()) {
+                completion.payment_ref_len = prng.range_inclusive(u8, 1, message.payment_ref_max);
+                for (completion.payment_ref[0..completion.payment_ref_len]) |*byte| {
+                    byte.* = 'a' + @as(u8, @intCast(prng.int_inclusive(u8, 25)));
+                }
+            }
             break :blk .{
                 .operation = .complete_order,
                 .id = pick_or_random_id(prng, pools.order_ids),
-                .event = .{ .completion = .{
-                    .result = result,
-                    .reserved = .{0} ** 15,
-                } },
+                .event = .{ .completion = completion },
             };
+        },
+        .cancel_order => .{
+            .operation = .cancel_order,
+            .id = pick_or_random_id(prng, pools.order_ids),
+            .event = .{ .none = {} },
         },
         .get_order => .{
             .operation = .get_order,
@@ -438,9 +449,12 @@ pub fn gen_random_message(prng: *PRNG, operation: message.Operation) message.Mes
             .quantity = prng.int(u32),
             .reserved = .{0} ** 12,
         } },
-        .completion => .{ .completion = .{
-            .result = prng.enum_uniform(message.OrderCompletion.OrderCompletionResult),
-            .reserved = .{0} ** 15,
+        .completion => .{ .completion = blk: {
+            var comp = std.mem.zeroes(message.OrderCompletion);
+            comp.result = prng.enum_uniform(message.OrderCompletion.OrderCompletionResult);
+            comp.payment_ref_len = prng.int(u8);
+            prng.fill(&comp.payment_ref);
+            break :blk comp;
         } },
         .member_id => .{ .member_id = prng.int(u128) },
         .list => .{ .list = blk: {

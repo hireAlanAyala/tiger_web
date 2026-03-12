@@ -106,6 +106,10 @@ pub fn StateMachineType(comptime Storage: type) type {
                     const comp = msg.event.completion;
                     if (msg.id == 0) return false;
                     _ = std.meta.intToEnum(message.OrderCompletion.OrderCompletionResult, @intFromEnum(comp.result)) catch return false;
+                    if (comp.payment_ref_len > message.payment_ref_max) return false;
+                },
+                .cancel_order => {
+                    if (msg.id == 0) return false;
                 },
                 .get_product,
                 .get_product_inventory,
@@ -182,7 +186,7 @@ pub fn StateMachineType(comptime Storage: type) type {
                     break :blk .ok;
                 },
                 .remove_collection_member => self.prefetch_collection_read(msg.id),
-                .get_order, .complete_order => self.prefetch_order_read(msg.id),
+                .get_order, .complete_order, .cancel_order => self.prefetch_order_read(msg.id),
                 .list_orders => self.prefetch_list_all_orders(msg.event.list),
                 .transfer_inventory => blk: {
                     const transfer = msg.event.transfer;
@@ -324,6 +328,8 @@ pub fn StateMachineType(comptime Storage: type) type {
                     msg.event.unwrap(message.OrderCompletion),
                     result,
                 ),
+
+                .cancel_order => self.execute_cancel_order(msg.id, result),
             };
         }
 
@@ -568,6 +574,13 @@ pub fn StateMachineType(comptime Storage: type) type {
             var order = self.prefetch_order.?;
             assert(order.id == id);
 
+            // Idempotent: if order already matches the requested terminal state,
+            // return OK without modification. Handles worker retry after crash.
+            if (order.status == .confirmed and completion.result == .confirmed)
+                return .{ .status = .ok, .result = .{ .order = order } };
+            if (order.status == .failed and completion.result == .failed)
+                return .{ .status = .ok, .result = .{ .order = order } };
+
             // Only pending orders can be completed.
             if (order.status != .pending) {
                 return .{ .status = .order_not_pending, .result = .{ .empty = {} } };
@@ -577,7 +590,7 @@ pub fn StateMachineType(comptime Storage: type) type {
             assert(self.now > 0);
             if (self.now >= order.timeout_at) {
                 order.status = .failed;
-                assert(self.storage.update_order_status(&order) == .ok);
+                assert(self.storage.update_order_completion(&order) == .ok);
                 self.restore_inventory(&order);
                 return .{ .status = .order_expired, .result = .{ .empty = {} } };
             }
@@ -585,14 +598,36 @@ pub fn StateMachineType(comptime Storage: type) type {
             switch (completion.result) {
                 .confirmed => {
                     order.status = .confirmed;
-                    assert(self.storage.update_order_status(&order) == .ok);
+                    order.payment_ref = completion.payment_ref;
+                    order.payment_ref_len = completion.payment_ref_len;
+                    assert(self.storage.update_order_completion(&order) == .ok);
                 },
                 .failed => {
                     order.status = .failed;
-                    assert(self.storage.update_order_status(&order) == .ok);
+                    assert(self.storage.update_order_completion(&order) == .ok);
                     self.restore_inventory(&order);
                 },
             }
+
+            return .{ .status = .ok, .result = .{ .order = order } };
+        }
+
+        /// Cancel a pending order — client-initiated abort.
+        /// Restores reserved inventory, same as a failed completion.
+        fn execute_cancel_order(self: *StateMachine, id: u128, result: StorageResult) message.MessageResponse {
+            if (result == .not_found) return message.MessageResponse.not_found;
+            assert(result == .ok);
+
+            var order = self.prefetch_order.?;
+            assert(order.id == id);
+
+            if (order.status != .pending) {
+                return .{ .status = .order_not_pending, .result = .{ .empty = {} } };
+            }
+
+            order.status = .cancelled;
+            assert(self.storage.update_order_completion(&order) == .ok);
+            self.restore_inventory(&order);
 
             return .{ .status = .ok, .result = .{ .order = order } };
         }
@@ -1029,10 +1064,12 @@ pub const MemoryStorage = struct {
         return .not_found;
     }
 
-    pub fn update_order_status(self: *MemoryStorage, order: *const message.OrderResult) StorageResult {
+    pub fn update_order_completion(self: *MemoryStorage, order: *const message.OrderResult) StorageResult {
         for (self.orders) |*entry| {
             if (entry.occupied and entry.order.id == order.id) {
                 entry.order.status = order.status;
+                entry.order.payment_ref = order.payment_ref;
+                entry.order.payment_ref_len = order.payment_ref_len;
                 return .ok;
             }
         }
@@ -1051,6 +1088,8 @@ pub const MemoryStorage = struct {
             summary.items_len = entry.order.items_len;
             summary.status = entry.order.status;
             summary.timeout_at = entry.order.timeout_at;
+            summary.payment_ref = entry.order.payment_ref;
+            summary.payment_ref_len = entry.order.payment_ref_len;
             insert_sorted(message.OrderSummary, out, out_len, summary);
         }
         return .ok;
@@ -2491,6 +2530,42 @@ const TestEnv = struct {
         if (expect.total) |v| try std.testing.expectEqual(v, resp.result.order.total_cents);
     }
 
+    fn cancel_order(self: *TestEnv, id: u128) message.MessageResponse {
+        return test_execute(&self.sm, .{
+            .operation = .cancel_order,
+            .id = id,
+            .event = .{ .none = {} },
+        });
+    }
+
+    fn complete_order(self: *TestEnv, id: u128, result: message.OrderCompletion.OrderCompletionResult) message.MessageResponse {
+        return self.complete_order_with_ref(id, result, "");
+    }
+
+    fn complete_order_with_ref(self: *TestEnv, id: u128, result: message.OrderCompletion.OrderCompletionResult, ref: []const u8) message.MessageResponse {
+        var completion = std.mem.zeroes(message.OrderCompletion);
+        completion.result = result;
+        if (ref.len > 0) {
+            @memcpy(completion.payment_ref[0..ref.len], ref);
+            completion.payment_ref_len = @intCast(ref.len);
+        }
+        return test_execute(&self.sm, .{
+            .operation = .complete_order,
+            .id = id,
+            .event = .{ .completion = completion },
+        });
+    }
+
+    fn expect_order_status(self: *TestEnv, id: u128, expected_status: message.OrderStatus) !void {
+        const resp = test_execute(&self.sm, .{
+            .operation = .get_order,
+            .id = id,
+            .event = .{ .none = {} },
+        });
+        try std.testing.expectEqual(message.Status.ok, resp.status);
+        try std.testing.expectEqual(expected_status, resp.result.order.status);
+    }
+
     fn expect_order_count(self: *TestEnv, expected: u32) !void {
         const resp = test_execute(&self.sm, .{
             .operation = .list_orders,
@@ -2730,4 +2805,217 @@ test "cross-entity scenario" {
 
     try env.expect_product(1, .{ .price = 999 });
     try env.expect_order(1, .{ .total = 3995 });
+}
+
+// =====================================================================
+// Two-phase order completion tests
+// =====================================================================
+
+test "complete order — confirmed keeps inventory decremented" {
+    var env: TestEnv = undefined;
+    try env.init();
+    defer env.deinit();
+
+    env.create_product(.{ .id = 1, .name = "Widget", .price = 1000, .inventory = 50 });
+
+    const order = try env.create_order(1, &.{
+        .{ .product_id = 1, .quantity = 5, .reserved = .{0} ** 12 },
+    });
+    try std.testing.expectEqual(order.status, .pending);
+    try env.expect_inventory(1, 45);
+
+    const resp = env.complete_order(1, .confirmed);
+    try std.testing.expectEqual(resp.status, .ok);
+    try std.testing.expectEqual(resp.result.order.status, .confirmed);
+
+    // Inventory stays decremented after confirmation.
+    try env.expect_inventory(1, 45);
+}
+
+test "complete order — failed restores inventory" {
+    var env: TestEnv = undefined;
+    try env.init();
+    defer env.deinit();
+
+    env.create_product(.{ .id = 1, .name = "Widget", .price = 1000, .inventory = 50 });
+    env.create_product(.{ .id = 2, .name = "Gadget", .price = 2000, .inventory = 30 });
+
+    _ = try env.create_order(1, &.{
+        .{ .product_id = 1, .quantity = 5, .reserved = .{0} ** 12 },
+        .{ .product_id = 2, .quantity = 3, .reserved = .{0} ** 12 },
+    });
+    try env.expect_inventory(1, 45);
+    try env.expect_inventory(2, 27);
+
+    const resp = env.complete_order(1, .failed);
+    try std.testing.expectEqual(resp.status, .ok);
+    try std.testing.expectEqual(resp.result.order.status, .failed);
+
+    // Inventory restored on failure.
+    try env.expect_inventory(1, 50);
+    try env.expect_inventory(2, 30);
+}
+
+test "complete order — idempotent same-result retry" {
+    var env: TestEnv = undefined;
+    try env.init();
+    defer env.deinit();
+
+    env.create_product(.{ .id = 1, .name = "Widget", .price = 1000, .inventory = 50 });
+
+    _ = try env.create_order(1, &.{
+        .{ .product_id = 1, .quantity = 5, .reserved = .{0} ** 12 },
+    });
+
+    const resp1 = env.complete_order(1, .confirmed);
+    try std.testing.expectEqual(resp1.status, .ok);
+
+    // Same-result retry is idempotent — returns OK (worker crash recovery).
+    const resp2 = env.complete_order(1, .confirmed);
+    try std.testing.expectEqual(resp2.status, .ok);
+
+    // Inventory unchanged by idempotent retry.
+    try env.expect_inventory(1, 45);
+}
+
+test "complete order — not found" {
+    var env: TestEnv = undefined;
+    try env.init();
+    defer env.deinit();
+
+    const resp = env.complete_order(99, .confirmed);
+    try std.testing.expectEqual(resp.status, .not_found);
+}
+
+test "complete order — expired restores inventory" {
+    var env: TestEnv = undefined;
+    try env.init();
+    defer env.deinit();
+
+    env.create_product(.{ .id = 1, .name = "Widget", .price = 1000, .inventory = 50 });
+
+    _ = try env.create_order(1, &.{
+        .{ .product_id = 1, .quantity = 10, .reserved = .{0} ** 12 },
+    });
+    try env.expect_inventory(1, 40);
+
+    // Advance time past the order timeout.
+    env.sm.now += message.order_timeout_seconds + 1;
+
+    const resp = env.complete_order(1, .confirmed);
+    try std.testing.expectEqual(resp.status, .order_expired);
+
+    // Inventory restored because the order expired.
+    try env.expect_inventory(1, 50);
+    try env.expect_order_status(1, .failed);
+}
+
+test "cancel order — restores inventory" {
+    var env: TestEnv = undefined;
+    try env.init();
+    defer env.deinit();
+
+    env.create_product(.{ .id = 1, .name = "Widget", .price = 1000, .inventory = 50 });
+
+    _ = try env.create_order(1, &.{
+        .{ .product_id = 1, .quantity = 10, .reserved = .{0} ** 12 },
+    });
+    try env.expect_inventory(1, 40);
+
+    const resp = env.cancel_order(1);
+    try std.testing.expectEqual(resp.status, .ok);
+    try std.testing.expectEqual(resp.result.order.status, .cancelled);
+
+    try env.expect_inventory(1, 50);
+}
+
+test "cancel order — not found" {
+    var env: TestEnv = undefined;
+    try env.init();
+    defer env.deinit();
+
+    const resp = env.cancel_order(99);
+    try std.testing.expectEqual(resp.status, .not_found);
+}
+
+test "cancel order — already confirmed" {
+    var env: TestEnv = undefined;
+    try env.init();
+    defer env.deinit();
+
+    env.create_product(.{ .id = 1, .name = "Widget", .price = 1000, .inventory = 50 });
+
+    _ = try env.create_order(1, &.{
+        .{ .product_id = 1, .quantity = 5, .reserved = .{0} ** 12 },
+    });
+
+    _ = env.complete_order(1, .confirmed);
+
+    const resp = env.cancel_order(1);
+    try std.testing.expectEqual(resp.status, .order_not_pending);
+
+    // Inventory unchanged — no double-restore.
+    try env.expect_inventory(1, 45);
+}
+
+test "cancel order — double cancel rejected" {
+    var env: TestEnv = undefined;
+    try env.init();
+    defer env.deinit();
+
+    env.create_product(.{ .id = 1, .name = "Widget", .price = 1000, .inventory = 50 });
+
+    _ = try env.create_order(1, &.{
+        .{ .product_id = 1, .quantity = 10, .reserved = .{0} ** 12 },
+    });
+
+    const resp1 = env.cancel_order(1);
+    try std.testing.expectEqual(resp1.status, .ok);
+
+    const resp2 = env.cancel_order(1);
+    try std.testing.expectEqual(resp2.status, .order_not_pending);
+
+    try env.expect_inventory(1, 50);
+}
+
+test "complete order after cancel — rejected" {
+    var env: TestEnv = undefined;
+    try env.init();
+    defer env.deinit();
+
+    env.create_product(.{ .id = 1, .name = "Widget", .price = 1000, .inventory = 50 });
+
+    _ = try env.create_order(1, &.{
+        .{ .product_id = 1, .quantity = 10, .reserved = .{0} ** 12 },
+    });
+
+    _ = env.cancel_order(1);
+
+    // Worker returns — but order is already cancelled.
+    const resp = env.complete_order(1, .confirmed);
+    try std.testing.expectEqual(resp.status, .order_not_pending);
+
+    // Inventory fully restored from cancel, not double-restored.
+    try env.expect_inventory(1, 50);
+}
+
+test "complete order — failed after confirmed is rejected" {
+    var env: TestEnv = undefined;
+    try env.init();
+    defer env.deinit();
+
+    env.create_product(.{ .id = 1, .name = "Widget", .price = 1000, .inventory = 50 });
+
+    _ = try env.create_order(1, &.{
+        .{ .product_id = 1, .quantity = 5, .reserved = .{0} ** 12 },
+    });
+
+    _ = env.complete_order(1, .confirmed);
+
+    // Try to fail an already-confirmed order.
+    const resp = env.complete_order(1, .failed);
+    try std.testing.expectEqual(resp.status, .order_not_pending);
+
+    // Inventory stays at confirmed level — no double-restore.
+    try env.expect_inventory(1, 45);
 }
