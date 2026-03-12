@@ -22,6 +22,93 @@ comptime {
     assert(secret_key.len == HmacSha256.key_length);
 }
 
+/// Fixed-size cache of recently verified tokens. Owned by the server,
+/// passed explicitly — no globals. Avoids repeated HMAC-SHA256 for the
+/// same token across requests within a tick or across ticks.
+pub const TokenCache = struct {
+    const cache_size = 256;
+
+    comptime {
+        assert(cache_size > 0);
+        assert(std.math.isPowerOfTwo(cache_size));
+    }
+
+    const Entry = struct {
+        sig_hash: u64 = 0,
+        sig_bytes: [HmacSha256.mac_length]u8 = [_]u8{0} ** HmacSha256.mac_length,
+        sub: u128 = 0,
+        exp: u64 = 0,
+    };
+
+    entries: [cache_size]Entry = [_]Entry{.{}} ** cache_size,
+    next: u8 = 0,
+
+    /// Verify with cache. On hit, skips the HMAC and returns the cached subject.
+    /// On miss, falls through to full verify and inserts into the ring.
+    pub fn verify_cached(cache: *TokenCache, token: []const u8, now: i64) ?u128 {
+        const hash = std.hash.Wyhash.hash(0, token);
+
+        // Decode the signature from the token for exact comparison.
+        const sig_bytes = extract_sig(token) orelse return verify(token, now);
+
+        // Scan the ring for a matching entry.
+        for (&cache.entries) |*entry| {
+            if (entry.sig_hash != hash) continue;
+            // Hash matched — compare full signature to rule out collisions.
+            if (!std.mem.eql(u8, &entry.sig_bytes, &sig_bytes)) continue;
+
+            // Cache hit — check expiry.
+            if (now >= entry.exp) {
+                entry.* = .{};
+                break;
+            }
+            return entry.sub;
+        }
+
+        // Cache miss — full verify.
+        const sub = verify(token, now) orelse return null;
+
+        // Insert at next ring position, overwriting the oldest entry.
+        cache.entries[cache.next] = .{
+            .sig_hash = hash,
+            .sig_bytes = sig_bytes,
+            .sub = sub,
+            .exp = parse_exp_from_token(token) orelse return sub,
+        };
+        cache.next +%= 1;
+
+        return sub;
+    }
+
+    /// Extract and decode the base64url signature from a JWT.
+    fn extract_sig(token: []const u8) ?[HmacSha256.mac_length]u8 {
+        // Find the last '.'.
+        const last_dot = std.mem.lastIndexOf(u8, token, ".") orelse return null;
+        const sig_b64 = token[last_dot + 1 ..];
+        if (sig_b64.len != sig_encoded_len) return null;
+
+        var sig: [HmacSha256.mac_length]u8 = undefined;
+        base64url.Decoder.decode(&sig, sig_b64) catch return null;
+        return sig;
+    }
+};
+
+/// Extract the exp claim from a token without full verification.
+/// Used by the cache to store expiry after verify has already validated.
+fn parse_exp_from_token(token: []const u8) ?u64 {
+    const dot1 = std.mem.indexOf(u8, token, ".") orelse return null;
+    const rest = token[dot1 + 1 ..];
+    const dot2 = std.mem.indexOf(u8, rest, ".") orelse return null;
+    const payload_b64 = rest[0..dot2];
+
+    const payload_decoded_len = base64url.Decoder.calcSizeForSlice(payload_b64) catch return null;
+    var payload_buf: [256]u8 = undefined;
+    if (payload_decoded_len > payload_buf.len) return null;
+    base64url.Decoder.decode(payload_buf[0..payload_decoded_len], payload_b64) catch return null;
+
+    return parse_int_claim(u64, payload_buf[0..payload_decoded_len], "\"exp\":");
+}
+
 /// Verify a JWT bearer token. Returns the subject (user ID) if valid, null otherwise.
 /// Pure function — no IO, no side effects. Caller provides wall-clock time.
 pub fn verify(token: []const u8, now: i64) ?u128 {
@@ -224,4 +311,91 @@ test "large user ID round-trip" {
     const token = sign(&buf, big_id, 1_700_100_000);
     const sub = verify(token, 1_700_000_000);
     try std.testing.expectEqual(sub.?, big_id);
+}
+
+test "token cache: hit avoids re-verify" {
+    var cache: TokenCache = .{};
+    var buf: [token_max]u8 = undefined;
+    const token = sign(&buf, 42, 1_700_100_000);
+
+    // First call — cache miss, full verify.
+    const sub1 = cache.verify_cached(token, 1_700_000_000);
+    try std.testing.expectEqual(sub1.?, 42);
+
+    // Second call — cache hit, same result.
+    const sub2 = cache.verify_cached(token, 1_700_000_000);
+    try std.testing.expectEqual(sub2.?, 42);
+}
+
+test "token cache: expired token evicted on hit" {
+    var cache: TokenCache = .{};
+    var buf: [token_max]u8 = undefined;
+    const token = sign(&buf, 42, 1_700_100_000);
+
+    // Verify while valid — populates cache.
+    const sub1 = cache.verify_cached(token, 1_700_000_000);
+    try std.testing.expectEqual(sub1.?, 42);
+
+    // Now expired — cache hit should detect expiry and reject.
+    try std.testing.expect(cache.verify_cached(token, 1_700_200_000) == null);
+}
+
+test "token cache: different tokens cached independently" {
+    var cache: TokenCache = .{};
+    var buf1: [token_max]u8 = undefined;
+    var buf2: [token_max]u8 = undefined;
+    const t1 = sign(&buf1, 42, 1_700_100_000);
+    const t2 = sign(&buf2, 99, 1_700_100_000);
+
+    try std.testing.expectEqual(cache.verify_cached(t1, 1_700_000_000).?, 42);
+    try std.testing.expectEqual(cache.verify_cached(t2, 1_700_000_000).?, 99);
+    // Both still cached.
+    try std.testing.expectEqual(cache.verify_cached(t1, 1_700_000_000).?, 42);
+    try std.testing.expectEqual(cache.verify_cached(t2, 1_700_000_000).?, 99);
+}
+
+test "token cache: invalid token not cached" {
+    var cache: TokenCache = .{};
+    try std.testing.expect(cache.verify_cached("garbage", 1_700_000_000) == null);
+    // Cache should still be empty — next slot not advanced.
+    try std.testing.expectEqual(cache.next, 0);
+}
+
+test "token cache: hash collision does not return wrong user" {
+    var cache: TokenCache = .{};
+    var buf1: [token_max]u8 = undefined;
+    var buf2: [token_max]u8 = undefined;
+    const t1 = sign(&buf1, 42, 1_700_100_000);
+    const t2 = sign(&buf2, 99, 1_700_100_000);
+
+    // Populate cache with user 42's token.
+    try std.testing.expectEqual(cache.verify_cached(t1, 1_700_000_000).?, 42);
+
+    // Forge a collision: overwrite the cached hash with t2's hash,
+    // but keep t1's signature bytes. A lookup for t2 should NOT
+    // return user 42 because the signature bytes won't match.
+    const t2_hash = std.hash.Wyhash.hash(0, t2);
+    cache.entries[0].sig_hash = t2_hash;
+
+    // Lookup t2 — hash matches the forged entry, but sig_bytes differ.
+    // Should fall through to full verify and return 99.
+    try std.testing.expectEqual(cache.verify_cached(t2, 1_700_000_000).?, 99);
+}
+
+test "token cache: ring wraps and overwrites oldest" {
+    var cache: TokenCache = .{};
+    var buf: [token_max]u8 = undefined;
+
+    // Fill the entire cache.
+    for (0..TokenCache.cache_size) |i| {
+        const id: u128 = @intCast(i + 1);
+        const token = sign(&buf, id, 1_700_100_000);
+        try std.testing.expectEqual(cache.verify_cached(token, 1_700_000_000).?, id);
+    }
+    try std.testing.expectEqual(cache.next, 0); // wrapped
+
+    // Insert one more — should overwrite slot 0.
+    const new_token = sign(&buf, 999, 1_700_100_000);
+    try std.testing.expectEqual(cache.verify_cached(new_token, 1_700_000_000).?, 999);
+    try std.testing.expectEqual(cache.next, 1);
 }

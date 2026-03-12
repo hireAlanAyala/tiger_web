@@ -41,6 +41,8 @@ pub fn ServerType(comptime IO: type, comptime Storage: type) type {
         connections: []Connection,
         connections_used: u32,
 
+        token_cache: auth.TokenCache,
+
         tick_count: u32,
 
         /// Log metrics every 10,000 ticks (~100s at 10ms/tick).
@@ -67,6 +69,7 @@ pub fn ServerType(comptime IO: type, comptime Storage: type) type {
                 .accept_connection = null,
                 .connections = connections,
                 .connections_used = 0,
+                .token_cache = .{},
                 .tick_count = 0,
             };
         }
@@ -175,7 +178,7 @@ pub fn ServerType(comptime IO: type, comptime Storage: type) type {
                     conn.set_response(http.encode_401_response(&conn.send_buf));
                     continue;
                 };
-                if (auth.verify(token, server.time.realtime()) == null) {
+                if (server.token_cache.verify_cached(token, server.time.realtime()) == null) {
                     log.mark.warn("auth: invalid token fd={d}", .{conn.fd});
                     conn.set_response(http.encode_401_response(&conn.send_buf));
                     continue;
