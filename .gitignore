@@ -1,3 +1,4 @@
+dev.env
 .claude/
 .zig-cache/
 zig-out/

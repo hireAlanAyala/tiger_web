@@ -7,7 +7,7 @@ const log = std.log.scoped(.worker);
 /// external service ↔ HTTP client.
 ///
 /// Usage:
-///   ./zig/zig build run-worker
+///   TOKEN=<jwt> ./zig/zig build run-worker
 ///   ./zig/zig build run-worker -- --port=3001 --delay-ms=2000
 
 pub fn main() !void {
@@ -20,7 +20,7 @@ pub fn main() !void {
     });
 
     if (cli.token.len == 0) {
-        log.err("TOKEN env var not set. Generate one from testgraph.html or set TOKEN=<jwt>", .{});
+        log.err("TOKEN not set", .{});
         std.process.exit(1);
     }
 

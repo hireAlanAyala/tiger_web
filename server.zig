@@ -41,6 +41,7 @@ pub fn ServerType(comptime IO: type, comptime Storage: type) type {
         connections: []Connection,
         connections_used: u32,
 
+        secret_key: *const [auth.key_length]u8,
         token_cache: auth.TokenCache,
 
         tick_count: u32,
@@ -52,7 +53,7 @@ pub fn ServerType(comptime IO: type, comptime Storage: type) type {
         pub const request_timeout_ticks = 3000;
 
         /// Initialize the server. Allocates the connection pool on the heap.
-        pub fn init(allocator: std.mem.Allocator, io: *IO, state_machine: *StateMachine, listen_fd: IO.fd_t, time: Time) !Server {
+        pub fn init(allocator: std.mem.Allocator, io: *IO, state_machine: *StateMachine, listen_fd: IO.fd_t, time: Time, secret_key: *const [auth.key_length]u8) !Server {
             const connections = try allocator.alloc(Connection, max_connections);
             errdefer allocator.free(connections);
 
@@ -69,6 +70,7 @@ pub fn ServerType(comptime IO: type, comptime Storage: type) type {
                 .accept_connection = null,
                 .connections = connections,
                 .connections_used = 0,
+                .secret_key = secret_key,
                 .token_cache = .{},
                 .tick_count = 0,
             };
@@ -189,7 +191,7 @@ pub fn ServerType(comptime IO: type, comptime Storage: type) type {
                     conn.set_response(http.encode_401_response(&conn.send_buf));
                     continue;
                 };
-                if (server.token_cache.verify_cached(token, server.time.realtime()) == null) {
+                if (server.token_cache.verify_cached(token, server.time.realtime(), server.secret_key) == null) {
                     log.mark.warn("auth: invalid token fd={d}", .{conn.fd});
                     conn.set_response(http.encode_401_response(&conn.send_buf));
                     continue;

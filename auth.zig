@@ -14,13 +14,7 @@ const sig_encoded_len = base64url.Encoder.calcSize(HmacSha256.mac_length);
 /// Fixed base64url-encoded header: {"alg":"HS256","typ":"JWT"}
 const header_b64 = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9";
 
-/// Server secret key. In production, load from config or environment.
-/// 32 bytes — matches HMAC-SHA256 recommended key length.
-const secret_key = "tiger-web-secret-key-change-me!!";
-
-comptime {
-    assert(secret_key.len == HmacSha256.key_length);
-}
+pub const key_length = HmacSha256.key_length;
 
 /// Fixed-size cache of recently verified tokens. Owned by the server,
 /// passed explicitly — no globals. Avoids repeated HMAC-SHA256 for the
@@ -45,11 +39,11 @@ pub const TokenCache = struct {
 
     /// Verify with cache. On hit, skips the HMAC and returns the cached subject.
     /// On miss, falls through to full verify and inserts into the ring.
-    pub fn verify_cached(cache: *TokenCache, token: []const u8, now: i64) ?u128 {
+    pub fn verify_cached(cache: *TokenCache, token: []const u8, now: i64, key: *const [key_length]u8) ?u128 {
         const hash = std.hash.Wyhash.hash(0, token);
 
         // Decode the signature from the token for exact comparison.
-        const sig_bytes = extract_sig(token) orelse return verify(token, now);
+        const sig_bytes = extract_sig(token) orelse return verify(token, now, key);
 
         // Scan the ring for a matching entry.
         for (&cache.entries) |*entry| {
@@ -66,7 +60,7 @@ pub const TokenCache = struct {
         }
 
         // Cache miss — full verify.
-        const sub = verify(token, now) orelse return null;
+        const sub = verify(token, now, key) orelse return null;
 
         // Insert at next ring position, overwriting the oldest entry.
         cache.entries[cache.next] = .{
@@ -111,7 +105,7 @@ fn parse_exp_from_token(token: []const u8) ?u64 {
 
 /// Verify a JWT bearer token. Returns the subject (user ID) if valid, null otherwise.
 /// Pure function — no IO, no side effects. Caller provides wall-clock time.
-pub fn verify(token: []const u8, now: i64) ?u128 {
+pub fn verify(token: []const u8, now: i64, key: *const [key_length]u8) ?u128 {
     if (token.len == 0) return null;
     if (token.len > token_max) return null;
 
@@ -126,7 +120,7 @@ pub fn verify(token: []const u8, now: i64) ?u128 {
 
     // Verify signature — recompute HMAC and compare.
     var expected_sig: [HmacSha256.mac_length]u8 = undefined;
-    HmacSha256.create(&expected_sig, signed_data, secret_key);
+    HmacSha256.create(&expected_sig, signed_data, key);
 
     if (sig_b64.len != sig_encoded_len) return null;
     var actual_sig: [HmacSha256.mac_length]u8 = undefined;
@@ -155,7 +149,7 @@ pub fn verify(token: []const u8, now: i64) ?u128 {
 
 /// Create a signed JWT for the given user ID and expiry time.
 /// Returns the token as a slice into the provided buffer.
-pub fn sign(buf: *[token_max]u8, sub: u128, exp: i64) []const u8 {
+pub fn sign(buf: *[token_max]u8, sub: u128, exp: i64, key: *const [key_length]u8) []const u8 {
     assert(sub > 0);
     assert(exp > 0);
     var pos: usize = 0;
@@ -188,7 +182,7 @@ pub fn sign(buf: *[token_max]u8, sub: u128, exp: i64) []const u8 {
     // Sign header.payload.
     const signed_data = buf[0..pos];
     var sig: [HmacSha256.mac_length]u8 = undefined;
-    HmacSha256.create(&sig, signed_data, secret_key);
+    HmacSha256.create(&sig, signed_data, key);
 
     buf[pos] = '.';
     pos += 1;
@@ -255,108 +249,110 @@ fn format_i64(buf: []u8, offset: usize, val: i64) usize {
 // Tests
 // =====================================================================
 
+const test_key: *const [key_length]u8 = "tiger-web-test-key-0123456789ab!";
+
 test "sign and verify round-trip" {
     var buf: [token_max]u8 = undefined;
-    const token = sign(&buf, 42, 1_700_100_000);
-    const sub = verify(token, 1_700_000_000);
+    const token = sign(&buf, 42, 1_700_100_000, test_key);
+    const sub = verify(token, 1_700_000_000, test_key);
     try std.testing.expectEqual(sub.?, 42);
 }
 
 test "verify rejects expired token" {
     var buf: [token_max]u8 = undefined;
-    const token = sign(&buf, 42, 1_700_000_000);
+    const token = sign(&buf, 42, 1_700_000_000, test_key);
     // now == exp → expired (now >= exp)
-    try std.testing.expect(verify(token, 1_700_000_000) == null);
+    try std.testing.expect(verify(token, 1_700_000_000, test_key) == null);
     // now > exp → expired
-    try std.testing.expect(verify(token, 1_700_100_000) == null);
+    try std.testing.expect(verify(token, 1_700_100_000, test_key) == null);
 }
 
 test "verify rejects tampered token" {
     var buf: [token_max]u8 = undefined;
-    const token = sign(&buf, 42, 1_700_100_000);
+    const token = sign(&buf, 42, 1_700_100_000, test_key);
     // Copy to mutable buffer and tamper with one byte in the payload.
     var tampered: [token_max]u8 = undefined;
     @memcpy(tampered[0..token.len], token);
     // Find a byte in the payload section and flip it.
     const dot1 = std.mem.indexOf(u8, token, ".").?;
     tampered[dot1 + 2] ^= 0x01;
-    try std.testing.expect(verify(tampered[0..token.len], 1_700_000_000) == null);
+    try std.testing.expect(verify(tampered[0..token.len], 1_700_000_000, test_key) == null);
 }
 
 test "verify rejects empty and garbage" {
-    try std.testing.expect(verify("", 1_700_000_000) == null);
-    try std.testing.expect(verify("not.a.jwt", 1_700_000_000) == null);
-    try std.testing.expect(verify("a.b.c", 1_700_000_000) == null);
-    try std.testing.expect(verify("....", 1_700_000_000) == null);
+    try std.testing.expect(verify("", 1_700_000_000, test_key) == null);
+    try std.testing.expect(verify("not.a.jwt", 1_700_000_000, test_key) == null);
+    try std.testing.expect(verify("a.b.c", 1_700_000_000, test_key) == null);
+    try std.testing.expect(verify("....", 1_700_000_000, test_key) == null);
 }
 
 test "verify rejects truncated signature" {
     var buf: [token_max]u8 = undefined;
-    const token = sign(&buf, 42, 1_700_100_000);
+    const token = sign(&buf, 42, 1_700_100_000, test_key);
     // Truncate the last byte.
-    try std.testing.expect(verify(token[0 .. token.len - 1], 1_700_000_000) == null);
+    try std.testing.expect(verify(token[0 .. token.len - 1], 1_700_000_000, test_key) == null);
 }
 
 test "sign produces consistent tokens for same input" {
     var buf1: [token_max]u8 = undefined;
     var buf2: [token_max]u8 = undefined;
-    const t1 = sign(&buf1, 99, 1_700_200_000);
-    const t2 = sign(&buf2, 99, 1_700_200_000);
+    const t1 = sign(&buf1, 99, 1_700_200_000, test_key);
+    const t2 = sign(&buf2, 99, 1_700_200_000, test_key);
     try std.testing.expectEqualSlices(u8, t1, t2);
 }
 
 test "large user ID round-trip" {
     var buf: [token_max]u8 = undefined;
     const big_id: u128 = 340_282_366_920_938_463_463_374_607_431_768_211_455; // u128 max
-    const token = sign(&buf, big_id, 1_700_100_000);
-    const sub = verify(token, 1_700_000_000);
+    const token = sign(&buf, big_id, 1_700_100_000, test_key);
+    const sub = verify(token, 1_700_000_000, test_key);
     try std.testing.expectEqual(sub.?, big_id);
 }
 
 test "token cache: hit avoids re-verify" {
     var cache: TokenCache = .{};
     var buf: [token_max]u8 = undefined;
-    const token = sign(&buf, 42, 1_700_100_000);
+    const token = sign(&buf, 42, 1_700_100_000, test_key);
 
     // First call — cache miss, full verify.
-    const sub1 = cache.verify_cached(token, 1_700_000_000);
+    const sub1 = cache.verify_cached(token, 1_700_000_000, test_key);
     try std.testing.expectEqual(sub1.?, 42);
 
     // Second call — cache hit, same result.
-    const sub2 = cache.verify_cached(token, 1_700_000_000);
+    const sub2 = cache.verify_cached(token, 1_700_000_000, test_key);
     try std.testing.expectEqual(sub2.?, 42);
 }
 
 test "token cache: expired token evicted on hit" {
     var cache: TokenCache = .{};
     var buf: [token_max]u8 = undefined;
-    const token = sign(&buf, 42, 1_700_100_000);
+    const token = sign(&buf, 42, 1_700_100_000, test_key);
 
     // Verify while valid — populates cache.
-    const sub1 = cache.verify_cached(token, 1_700_000_000);
+    const sub1 = cache.verify_cached(token, 1_700_000_000, test_key);
     try std.testing.expectEqual(sub1.?, 42);
 
     // Now expired — cache hit should detect expiry and reject.
-    try std.testing.expect(cache.verify_cached(token, 1_700_200_000) == null);
+    try std.testing.expect(cache.verify_cached(token, 1_700_200_000, test_key) == null);
 }
 
 test "token cache: different tokens cached independently" {
     var cache: TokenCache = .{};
     var buf1: [token_max]u8 = undefined;
     var buf2: [token_max]u8 = undefined;
-    const t1 = sign(&buf1, 42, 1_700_100_000);
-    const t2 = sign(&buf2, 99, 1_700_100_000);
+    const t1 = sign(&buf1, 42, 1_700_100_000, test_key);
+    const t2 = sign(&buf2, 99, 1_700_100_000, test_key);
 
-    try std.testing.expectEqual(cache.verify_cached(t1, 1_700_000_000).?, 42);
-    try std.testing.expectEqual(cache.verify_cached(t2, 1_700_000_000).?, 99);
+    try std.testing.expectEqual(cache.verify_cached(t1, 1_700_000_000, test_key).?, 42);
+    try std.testing.expectEqual(cache.verify_cached(t2, 1_700_000_000, test_key).?, 99);
     // Both still cached.
-    try std.testing.expectEqual(cache.verify_cached(t1, 1_700_000_000).?, 42);
-    try std.testing.expectEqual(cache.verify_cached(t2, 1_700_000_000).?, 99);
+    try std.testing.expectEqual(cache.verify_cached(t1, 1_700_000_000, test_key).?, 42);
+    try std.testing.expectEqual(cache.verify_cached(t2, 1_700_000_000, test_key).?, 99);
 }
 
 test "token cache: invalid token not cached" {
     var cache: TokenCache = .{};
-    try std.testing.expect(cache.verify_cached("garbage", 1_700_000_000) == null);
+    try std.testing.expect(cache.verify_cached("garbage", 1_700_000_000, test_key) == null);
     // Cache should still be empty — next slot not advanced.
     try std.testing.expectEqual(cache.next, 0);
 }
@@ -365,11 +361,11 @@ test "token cache: hash collision does not return wrong user" {
     var cache: TokenCache = .{};
     var buf1: [token_max]u8 = undefined;
     var buf2: [token_max]u8 = undefined;
-    const t1 = sign(&buf1, 42, 1_700_100_000);
-    const t2 = sign(&buf2, 99, 1_700_100_000);
+    const t1 = sign(&buf1, 42, 1_700_100_000, test_key);
+    const t2 = sign(&buf2, 99, 1_700_100_000, test_key);
 
     // Populate cache with user 42's token.
-    try std.testing.expectEqual(cache.verify_cached(t1, 1_700_000_000).?, 42);
+    try std.testing.expectEqual(cache.verify_cached(t1, 1_700_000_000, test_key).?, 42);
 
     // Forge a collision: overwrite the cached hash with t2's hash,
     // but keep t1's signature bytes. A lookup for t2 should NOT
@@ -379,7 +375,7 @@ test "token cache: hash collision does not return wrong user" {
 
     // Lookup t2 — hash matches the forged entry, but sig_bytes differ.
     // Should fall through to full verify and return 99.
-    try std.testing.expectEqual(cache.verify_cached(t2, 1_700_000_000).?, 99);
+    try std.testing.expectEqual(cache.verify_cached(t2, 1_700_000_000, test_key).?, 99);
 }
 
 test "token cache: ring wraps and overwrites oldest" {
@@ -389,13 +385,13 @@ test "token cache: ring wraps and overwrites oldest" {
     // Fill the entire cache.
     for (0..TokenCache.cache_size) |i| {
         const id: u128 = @intCast(i + 1);
-        const token = sign(&buf, id, 1_700_100_000);
-        try std.testing.expectEqual(cache.verify_cached(token, 1_700_000_000).?, id);
+        const token = sign(&buf, id, 1_700_100_000, test_key);
+        try std.testing.expectEqual(cache.verify_cached(token, 1_700_000_000, test_key).?, id);
     }
     try std.testing.expectEqual(cache.next, 0); // wrapped
 
     // Insert one more — should overwrite slot 0.
-    const new_token = sign(&buf, 999, 1_700_100_000);
-    try std.testing.expectEqual(cache.verify_cached(new_token, 1_700_000_000).?, 999);
+    const new_token = sign(&buf, 999, 1_700_100_000, test_key);
+    try std.testing.expectEqual(cache.verify_cached(new_token, 1_700_000_000, test_key).?, 999);
     try std.testing.expectEqual(cache.next, 1);
 }

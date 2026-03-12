@@ -6,7 +6,16 @@ Ecommerce HTTP server built in Zig, following TigerBeetle conventions.
 
 ```bash
 sh zig/download.sh          # one-time: download Zig 0.14.1
-./zig/zig build run          # run the server (default port 3000)
+
+# First-time setup — create dev.env (gitignored):
+cat > dev.env << 'EOF'
+export SECRET_KEY="tiger-web-test-key-0123456789ab!"
+export TOKEN="eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOjEsImV4cCI6MjE0NTkxNjgwMH0.ulNOjuMyYo5tT5gG78pG6HvyCZm4Gs7azogXTvz-VgY"
+EOF
+
+source dev.env                              # load SECRET_KEY and TOKEN
+./zig/zig build run                         # run the server (default port 3000)
+TOKEN=$TOKEN ./zig/zig build run-worker     # run the worker (polls server)
 ./zig/zig build run -- --log-debug          # enable debug log output
 ./zig/zig build run -- --log-debug --log-trace  # per-request trace logs
 ./zig/zig build unit-test    # unit tests (message, state_machine, http, marks, codec)

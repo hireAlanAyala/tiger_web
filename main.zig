@@ -5,6 +5,8 @@ const SqliteStorage = @import("storage.zig").SqliteStorage;
 const StateMachine = state_machine.StateMachineType(SqliteStorage);
 const ServerType = @import("server.zig").ServerType;
 const TimeReal = @import("time.zig").TimeReal;
+const auth = @import("auth.zig");
+const flags = @import("flags.zig");
 
 const Server = ServerType(IO, SqliteStorage);
 const marks = @import("marks.zig");
@@ -34,7 +36,8 @@ pub const std_options: std.Options = .{
 };
 
 pub fn main() !void {
-    const cli = parseCli();
+    var args = std.process.args();
+    const cli = flags.parse(&args, CliArgs);
 
     if (cli.log_trace and !cli.log_debug) {
         log.err("--log-debug must be provided when using --log-trace", .{});
@@ -42,6 +45,16 @@ pub fn main() !void {
     }
 
     log_level_runtime = if (cli.log_debug) .debug else .info;
+
+    const secret_env = std.posix.getenv("SECRET_KEY") orelse {
+        log.err("SECRET_KEY not set", .{});
+        std.process.exit(1);
+    };
+    if (secret_env.len != auth.key_length) {
+        log.err("SECRET_KEY must be exactly {d} bytes, got {d}", .{ auth.key_length, secret_env.len });
+        std.process.exit(1);
+    }
+    const secret_key: *const [auth.key_length]u8 = secret_env[0..auth.key_length];
 
     const address = try std.net.Address.parseIp4("0.0.0.0", cli.port);
 
@@ -55,7 +68,7 @@ pub fn main() !void {
     const listen_fd = try IO.open_listener(address);
 
     var time_real = TimeReal{};
-    var server = try Server.init(std.heap.page_allocator, &io, &sm, listen_fd, time_real.time());
+    var server = try Server.init(std.heap.page_allocator, &io, &sm, listen_fd, time_real.time(), secret_key);
 
     log.info("storage=sqlite tick_interval={d}ms connections={d}", .{
         tick_ns / std.time.ns_per_ms,
@@ -71,32 +84,8 @@ pub fn main() !void {
     }
 }
 
-const Cli = struct {
-    port: u16,
-    log_debug: bool,
-    log_trace: bool,
+const CliArgs = struct {
+    port: u16 = 3000,
+    log_debug: bool = false,
+    log_trace: bool = false,
 };
-
-fn parseCli() Cli {
-    var result = Cli{
-        .port = 3000,
-        .log_debug = false,
-        .log_trace = false,
-    };
-
-    var args = std.process.args();
-    _ = args.skip(); // program name
-
-    while (args.next()) |arg| {
-        if (std.mem.startsWith(u8, arg, "--port=")) {
-            const port_str = arg["--port=".len..];
-            result.port = std.fmt.parseInt(u16, port_str, 10) catch 3000;
-        } else if (std.mem.eql(u8, arg, "--log-debug")) {
-            result.log_debug = true;
-        } else if (std.mem.eql(u8, arg, "--log-trace")) {
-            result.log_trace = true;
-        }
-    }
-
-    return result;
-}
