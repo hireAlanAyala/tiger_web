@@ -61,7 +61,7 @@ pub fn main() !void {
     var io = try IO.init();
     defer io.deinit();
 
-    var storage = try SqliteStorage.init("tiger_web.db");
+    var storage = try SqliteStorage.init(cli.db.ptr);
     defer storage.deinit();
     var sm = StateMachine.init(&storage, cli.log_trace);
 
@@ -86,6 +86,7 @@ pub fn main() !void {
 
 const CliArgs = struct {
     port: u16 = 3000,
+    db: [:0]const u8 = "tiger_web.db",
     log_debug: bool = false,
     log_trace: bool = false,
 };
