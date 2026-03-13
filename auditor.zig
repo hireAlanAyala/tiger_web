@@ -109,6 +109,7 @@ pub const Auditor = struct {
             .complete_order,
             .cancel_order,
             .list_products,
+            .search_products,
             .list_collections,
             .list_orders,
             .transfer_inventory,
@@ -146,6 +147,7 @@ pub const Auditor = struct {
             .add_collection_member => self.on_add_member(msg.id, msg.event.member_id, resp),
             .remove_collection_member => self.on_remove_member(msg.id, msg.event.member_id, resp),
             .list_products => self.on_list_products(resp),
+            .search_products => self.on_search_products(resp),
             .list_collections => self.on_list_collections(resp),
             .list_orders => self.on_list_orders(resp),
         }
@@ -581,6 +583,19 @@ pub const Auditor = struct {
             const idx = self.find_product(p.id) orelse {
                 std.debug.panic("list returned unknown product id={}", .{p.id});
             };
+            assert_product_equal(&self.products[idx].?, p);
+        }
+    }
+
+    fn on_search_products(self: *const Auditor, resp: message.MessageResponse) void {
+        assert(resp.status == .ok);
+        const list = resp.result.product_list;
+        // Validate all returned products exist in the model and are active.
+        for (list.items[0..list.len]) |*p| {
+            const idx = self.find_product(p.id) orelse {
+                std.debug.panic("search returned unknown product id={}", .{p.id});
+            };
+            assert(self.products[idx].?.flags.active);
             assert_product_equal(&self.products[idx].?, p);
         }
     }

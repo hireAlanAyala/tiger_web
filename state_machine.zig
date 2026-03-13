@@ -111,6 +111,14 @@ pub fn StateMachineType(comptime Storage: type) type {
                 .cancel_order => {
                     if (msg.id == 0) return false;
                 },
+                .search_products => {
+                    const sq = msg.event.search;
+                    if (sq.query_len == 0 or sq.query_len > message.search_query_max) return false;
+                    if (!std.unicode.utf8ValidateSlice(sq.query[0..sq.query_len])) return false;
+                    for (sq.query[0..sq.query_len]) |b| {
+                        if (b == 0) return false;
+                    }
+                },
                 .get_product,
                 .get_product_inventory,
                 .delete_product,
@@ -186,6 +194,7 @@ pub fn StateMachineType(comptime Storage: type) type {
                     break :blk .ok;
                 },
                 .remove_collection_member => self.prefetch_collection_read(msg.id),
+                .search_products => self.prefetch_search_products(msg.event.search),
                 .get_order, .complete_order, .cancel_order => self.prefetch_order_read(msg.id),
                 .list_orders => self.prefetch_list_all_orders(msg.event.list),
                 .transfer_inventory => blk: {
@@ -279,6 +288,7 @@ pub fn StateMachineType(comptime Storage: type) type {
                 inline .list_products,
                 .list_collections,
                 .list_orders,
+                .search_products,
                 => |comptime_op| self.execute_list(comptime_op, result),
 
                 inline .create_product,
@@ -368,13 +378,13 @@ pub fn StateMachineType(comptime Storage: type) type {
         }
 
         /// List pattern: return cached list.
-        /// Shared by list_products, list_collections, list_orders.
+        /// Shared by list_products, list_collections, list_orders, search_products.
         fn execute_list(self: *StateMachine, comptime op: message.Operation, result: StorageResult) message.MessageResponse {
             assert(result == .ok);
             return .{
                 .status = .ok,
                 .result = switch (op) {
-                    .list_products => .{ .product_list = self.prefetch_product_list },
+                    .list_products, .search_products => .{ .product_list = self.prefetch_product_list },
                     .list_collections => .{ .collection_list = self.prefetch_collection_list },
                     .list_orders => .{ .order_list = self.prefetch_order_list },
                     else => unreachable,
@@ -695,6 +705,10 @@ pub fn StateMachineType(comptime Storage: type) type {
             return self.storage.list(&self.prefetch_product_list.items, &self.prefetch_product_list.len, params);
         }
 
+        fn prefetch_search_products(self: *StateMachine, query: message.SearchQuery) StorageResult {
+            return self.storage.search(&self.prefetch_product_list.items, &self.prefetch_product_list.len, query);
+        }
+
         /// Multi-key prefetch: read N products by ID into the keyed cache.
         /// Execute retrieves them via prefetch_find(id), not by position.
         fn prefetch_multi(self: *StateMachine, ids: []const u128) StorageResult {
@@ -916,6 +930,47 @@ pub const MemoryStorage = struct {
             insert_sorted(message.Product, out, out_len, entry.product);
         }
         return .ok;
+    }
+
+    pub fn search(self: *MemoryStorage, out: *[message.list_max]message.Product, out_len: *u32, query: message.SearchQuery) StorageResult {
+        if (self.fault()) |f| return f;
+        out_len.* = 0;
+        const q = query.query[0..query.query_len];
+        for (self.products) |*entry| {
+            if (!entry.occupied) continue;
+            if (!entry.product.flags.active) continue;
+            // Substring match on name or description.
+            if (contains_substr(entry.product.name[0..entry.product.name_len], q) or
+                contains_substr(entry.product.description[0..entry.product.description_len], q))
+            {
+                insert_sorted(message.Product, out, out_len, entry.product);
+            }
+        }
+        return .ok;
+    }
+
+    fn contains_substr(haystack: []const u8, needle: []const u8) bool {
+        if (needle.len == 0) return true;
+        if (needle.len > haystack.len) return false;
+        // Case-insensitive substring search.
+        var i: usize = 0;
+        while (i + needle.len <= haystack.len) : (i += 1) {
+            var match = true;
+            for (0..needle.len) |j| {
+                const h = ascii_lower(haystack[i + j]);
+                const n = ascii_lower(needle[j]);
+                if (h != n) {
+                    match = false;
+                    break;
+                }
+            }
+            if (match) return true;
+        }
+        return false;
+    }
+
+    fn ascii_lower(ch: u8) u8 {
+        return if (ch >= 'A' and ch <= 'Z') ch + 32 else ch;
     }
 
     fn match_product_filters(product: *const message.Product, params: message.ListParams) bool {
@@ -3018,4 +3073,100 @@ test "complete order — failed after confirmed is rejected" {
 
     // Inventory stays at confirmed level — no double-restore.
     try env.expect_inventory(1, 45);
+}
+
+// =====================================================================
+// Search tests
+// =====================================================================
+
+fn search_products(sm: *TestStateMachine, query: []const u8) message.MessageResponse {
+    var sq = std.mem.zeroes(message.SearchQuery);
+    @memcpy(sq.query[0..query.len], query);
+    sq.query_len = @intCast(query.len);
+    return test_execute(sm, .{
+        .operation = .search_products,
+        .id = 0,
+        .event = .{ .search = sq },
+    });
+}
+
+test "search products — matches name" {
+    var env: TestEnv = undefined;
+    try env.init();
+    defer env.deinit();
+
+    env.create_product(.{ .id = 1, .name = "Widget", .price = 1000 });
+    env.create_product(.{ .id = 2, .name = "Gadget", .price = 2000 });
+    env.create_product(.{ .id = 3, .name = "Super Widget Pro", .price = 3000 });
+
+    const resp = search_products(&env.sm, "widget");
+    try std.testing.expectEqual(resp.status, .ok);
+    const list = resp.result.product_list;
+    try std.testing.expectEqual(list.len, 2);
+}
+
+test "search products — matches description" {
+    var env: TestEnv = undefined;
+    try env.init();
+    defer env.deinit();
+
+    var p = make_test_product(1, "Shirt", 2000);
+    const desc = "A comfortable cotton shirt";
+    @memcpy(p.description[0..desc.len], desc);
+    p.description_len = desc.len;
+    const resp1 = test_execute(&env.sm, .{
+        .operation = .create_product,
+        .id = 0,
+        .event = .{ .product = p },
+    });
+    assert(resp1.status == .ok);
+
+    const resp = search_products(&env.sm, "cotton");
+    try std.testing.expectEqual(resp.status, .ok);
+    try std.testing.expectEqual(resp.result.product_list.len, 1);
+}
+
+test "search products — excludes inactive" {
+    var env: TestEnv = undefined;
+    try env.init();
+    defer env.deinit();
+
+    env.create_product(.{ .id = 1, .name = "Active Widget", .price = 1000 });
+    env.create_product(.{ .id = 2, .name = "Deleted Widget", .price = 2000 });
+
+    // Soft delete product 2.
+    _ = test_execute(&env.sm, .{
+        .operation = .delete_product,
+        .id = 2,
+        .event = .{ .none = {} },
+    });
+
+    const resp = search_products(&env.sm, "widget");
+    try std.testing.expectEqual(resp.status, .ok);
+    try std.testing.expectEqual(resp.result.product_list.len, 1);
+    try std.testing.expectEqual(resp.result.product_list.items[0].id, 1);
+}
+
+test "search products — no results" {
+    var env: TestEnv = undefined;
+    try env.init();
+    defer env.deinit();
+
+    env.create_product(.{ .id = 1, .name = "Widget", .price = 1000 });
+
+    const resp = search_products(&env.sm, "nonexistent");
+    try std.testing.expectEqual(resp.status, .ok);
+    try std.testing.expectEqual(resp.result.product_list.len, 0);
+}
+
+test "search products — case insensitive" {
+    var env: TestEnv = undefined;
+    try env.init();
+    defer env.deinit();
+
+    env.create_product(.{ .id = 1, .name = "Widget", .price = 1000 });
+
+    const resp = search_products(&env.sm, "WIDGET");
+    try std.testing.expectEqual(resp.status, .ok);
+    try std.testing.expectEqual(resp.result.product_list.len, 1);
 }

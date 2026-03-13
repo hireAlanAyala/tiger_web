@@ -29,7 +29,7 @@ pub fn translate(method: http.Method, raw_path: []const u8, body: []const u8) ?m
 
     // Match resource and resolve to flat operation.
     return if (std.mem.eql(u8, segments.collection, "products"))
-        translate_products(method, segments, body, list_params, has_active_param)
+        translate_products(method, segments, body, list_params, has_active_param, query_string)
     else if (std.mem.eql(u8, segments.collection, "collections"))
         translate_collections(method, segments, body, list_params)
     else if (std.mem.eql(u8, segments.collection, "orders"))
@@ -82,7 +82,7 @@ fn split_path(path: []const u8) ?PathSegments {
     };
 }
 
-fn translate_products(method: http.Method, seg: PathSegments, body: []const u8, list_params: message.ListParams, has_active_param: bool) ?message.Message {
+fn translate_products(method: http.Method, seg: PathSegments, body: []const u8, list_params: message.ListParams, has_active_param: bool, query_string: []const u8) ?message.Message {
     // POST /products/:id/transfer-inventory/:target_id — uses sub_id for target.
     if (seg.has_id and seg.sub_resource.len > 0 and method == .post) {
         if (std.mem.eql(u8, seg.sub_resource, "transfer-inventory") and seg.has_sub_id) {
@@ -110,7 +110,12 @@ fn translate_products(method: http.Method, seg: PathSegments, body: []const u8, 
                 if (std.mem.eql(u8, seg.sub_resource, "inventory")) break :blk .get_product_inventory;
                 return null;
             }
-            break :blk if (seg.has_id) .get_product else .list_products;
+            if (!seg.has_id) {
+                // GET /products?q=... → full-text search.
+                if (query_param(query_string, "q")) |_| break :blk .search_products;
+                break :blk .list_products;
+            }
+            break :blk .get_product;
         },
         .post => if (!seg.has_id) .create_product else return null,
         .put => if (seg.has_id and seg.id != 0) .update_product else return null,
@@ -119,6 +124,15 @@ fn translate_products(method: http.Method, seg: PathSegments, body: []const u8, 
     };
 
     switch (operation) {
+        .search_products => {
+            if (body.len != 0) return null;
+            const q = query_param(query_string, "q") orelse return null;
+            if (q.len == 0 or q.len > message.search_query_max) return null;
+            var sq = std.mem.zeroes(message.SearchQuery);
+            @memcpy(sq.query[0..q.len], q);
+            sq.query_len = @intCast(q.len);
+            return .{ .operation = .search_products, .id = 0, .event = .{ .search = sq } };
+        },
         .list_products => {
             if (body.len != 0) return null;
             var params = list_params;

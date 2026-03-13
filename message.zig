@@ -45,6 +45,7 @@ pub const Operation = enum(u8) {
     list_orders = 16,
     complete_order = 17,
     cancel_order = 18,
+    search_products = 19,
 
     // Collections
     create_collection = 7,
@@ -65,6 +66,7 @@ pub const Operation = enum(u8) {
             .transfer_inventory => InventoryTransfer,
             .create_order => OrderRequest,
             .complete_order => OrderCompletion,
+            .search_products => SearchQuery,
             .list_products,
             .list_collections,
             .list_orders,
@@ -93,6 +95,7 @@ pub const Operation = enum(u8) {
                 InventoryTransfer => .transfer,
                 OrderRequest => .order,
                 OrderCompletion => .completion,
+                SearchQuery => .search,
                 ListParams => .list,
                 void => .none,
                 else => @compileError("unhandled EventType"),
@@ -323,6 +326,26 @@ pub const OrderSummaryList = struct {
     len: u32,
 };
 
+pub const search_query_max = 128;
+
+/// Full-text search query for products.
+pub const SearchQuery = extern struct {
+    query: [search_query_max]u8,
+    query_len: u8,
+    reserved: [15]u8,
+
+    comptime {
+        assert(stdx.no_padding(SearchQuery));
+        assert(@sizeOf(SearchQuery) == 144);
+        assert(search_query_max > 0);
+        assert(search_query_max <= std.math.maxInt(u8));
+    }
+
+    pub fn query_slice(self: *const SearchQuery) []const u8 {
+        return self.query[0..self.query_len];
+    }
+};
+
 /// Parameters for list operations — pagination and filtering.
 pub const ListParams = extern struct {
     cursor: u128,
@@ -358,6 +381,7 @@ pub const Event = union(enum) {
     transfer: InventoryTransfer,
     order: OrderRequest,
     completion: OrderCompletion,
+    search: SearchQuery,
     list: ListParams,
     none: void,
 
@@ -374,6 +398,7 @@ pub const Event = union(enum) {
             InventoryTransfer => "transfer",
             OrderRequest => "order",
             OrderCompletion => "completion",
+            SearchQuery => "search",
             ListParams => "list",
             void => "none",
             else => @compileError("Event.unwrap: unhandled type"),

@@ -1375,6 +1375,7 @@ const FuzzAction = enum {
     cancel_order,
     get_order,
     list_orders,
+    search_products,
     toggle_faults,
 };
 
@@ -1435,6 +1436,7 @@ const Fuzzer = struct {
             .cancel_order => self.step_cancel_order(prng, io, server),
             .get_order => self.step_get_order(prng, io, server),
             .list_orders => self.step_list_orders(prng, io, server),
+            .search_products => self.step_search_products(prng, io, server),
             .toggle_faults => self.step_toggle_faults(prng, io, storage),
         }
     }
@@ -1503,6 +1505,17 @@ const Fuzzer = struct {
             3 => "/products?price_min=100&price_max=5000",
             else => unreachable,
         };
+        io.inject_get(client, path);
+        _ = run_until_response(server, io, client, 300);
+        io.clear_response(client);
+    }
+
+    fn step_search_products(self: *Fuzzer, prng: *PRNG, io: *SimIO, server: *Server) void {
+        self.ensure_connected(io, server);
+        const client = self.pick_connected(prng);
+        const queries = [_][]const u8{ "widget", "shirt", "a", "test", "pro" };
+        const q = queries[prng.int_inclusive(usize, queries.len - 1)];
+        const path = std.fmt.bufPrint(&self.path_buf, "/products?q={s}", .{q}) catch "/products?q=a";
         io.inject_get(client, path);
         _ = run_until_response(server, io, client, 300);
         io.clear_response(client);

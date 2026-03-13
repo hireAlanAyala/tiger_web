@@ -63,7 +63,6 @@ pub fn main(allocator: std.mem.Allocator, args: FuzzArgs) !void {
         const operation = prng.enum_weighted(message.Operation, op_weights);
 
         log.debug("Running fuzz_ops[{}/{}] == {s}", .{ event_i, events_max, @tagName(operation) });
-
         if (auditor.at_capacity(operation)) continue;
 
         const msg = gen.gen_message(&prng, operation, auditor.id_pools()) orelse continue;

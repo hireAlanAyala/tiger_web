@@ -285,6 +285,11 @@ pub fn gen_message(prng: *PRNG, operation: message.Operation, pools: IdPools) ?m
             .id = pick_or_random_id(prng, pools.order_ids),
             .event = .{ .none = {} },
         },
+        .search_products => .{
+            .operation = .search_products,
+            .id = 0,
+            .event = .{ .search = gen_search_query(prng) },
+        },
         .get_order => .{
             .operation = .get_order,
             .id = pick_or_random_id(prng, pools.order_ids),
@@ -339,6 +344,12 @@ pub fn pick_or_random_id(prng: *PRNG, pool: []const u128) u128 {
         return pool[prng.int_inclusive(usize, pool.len - 1)];
     }
     return prng.int(u128) | 1;
+}
+
+pub fn gen_search_query(prng: *PRNG) message.SearchQuery {
+    var sq = std.mem.zeroes(message.SearchQuery);
+    sq.query_len = @intCast(gen_utf8_text(prng, &sq.query, 1, message.search_query_max));
+    return sq;
 }
 
 pub fn gen_product(prng: *PRNG) message.Product {
@@ -455,6 +466,12 @@ pub fn gen_random_message(prng: *PRNG, operation: message.Operation) message.Mes
             comp.payment_ref_len = prng.int(u8);
             prng.fill(&comp.payment_ref);
             break :blk comp;
+        } },
+        .search => .{ .search = blk: {
+            var sq = std.mem.zeroes(message.SearchQuery);
+            sq.query_len = prng.int(u8);
+            prng.fill(&sq.query);
+            break :blk sq;
         } },
         .member_id => .{ .member_id = prng.int(u128) },
         .list => .{ .list = blk: {

@@ -33,6 +33,7 @@ pub const SqliteStorage = struct {
     stmt_get_order_items: *c.sqlite3_stmt,
     stmt_list_orders: *c.sqlite3_stmt,
     stmt_update_order_completion: *c.sqlite3_stmt,
+    stmt_search_products: *c.sqlite3_stmt,
 
     pub fn init(path: [*:0]const u8) !SqliteStorage {
         var db: ?*c.sqlite3 = null;
@@ -159,6 +160,13 @@ pub const SqliteStorage = struct {
         const stmt_update_order_completion = prepare(real_db,
             "UPDATE orders SET status = ?2, payment_ref = ?3 WHERE id = ?1;",
         );
+        const stmt_search_products = prepare(real_db,
+            "SELECT id, name, description, price_cents, inventory, version, active FROM products" ++
+            " WHERE active = 1" ++
+            " AND (instr(lower(name), lower(?1)) > 0 OR instr(lower(description), lower(?1)) > 0)" ++
+            " ORDER BY id" ++
+            " LIMIT ?2;",
+        );
 
         log.info("storage initialized: {s}", .{path});
 
@@ -183,6 +191,7 @@ pub const SqliteStorage = struct {
             .stmt_get_order_items = stmt_get_order_items,
             .stmt_list_orders = stmt_list_orders,
             .stmt_update_order_completion = stmt_update_order_completion,
+            .stmt_search_products = stmt_search_products,
         };
     }
 
@@ -214,6 +223,7 @@ pub const SqliteStorage = struct {
         _ = c.sqlite3_finalize(self.stmt_get_order_items);
         _ = c.sqlite3_finalize(self.stmt_list_orders);
         _ = c.sqlite3_finalize(self.stmt_update_order_completion);
+        _ = c.sqlite3_finalize(self.stmt_search_products);
         _ = c.sqlite3_close(self.db);
     }
 
@@ -312,6 +322,30 @@ pub const SqliteStorage = struct {
         } else {
             _ = c.sqlite3_bind_text(stmt, 6, "", 0, c.SQLITE_TRANSIENT);
         }
+        out_len.* = 0;
+
+        while (true) {
+            switch (step_result(stmt)) {
+                .row => {
+                    assert(out_len.* < message.list_max);
+                    read_product(stmt, &out[out_len.*]);
+                    out_len.* += 1;
+                },
+                .done => return .ok,
+                .busy => return .busy,
+                .err => return .err,
+                .corruption => return .corruption,
+            }
+        }
+    }
+
+    pub fn search(self: *SqliteStorage, out: *[message.list_max]message.Product, out_len: *u32, query: message.SearchQuery) StorageResult {
+        const stmt = self.stmt_search_products;
+        defer reset_stmt(stmt);
+
+        const q = query.query[0..query.query_len];
+        _ = c.sqlite3_bind_text(stmt, 1, q.ptr, @intCast(q.len), c.SQLITE_TRANSIENT);
+        _ = c.sqlite3_bind_int(stmt, 2, message.list_max);
         out_len.* = 0;
 
         while (true) {
