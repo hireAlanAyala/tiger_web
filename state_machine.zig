@@ -935,42 +935,14 @@ pub const MemoryStorage = struct {
     pub fn search(self: *MemoryStorage, out: *[message.list_max]message.Product, out_len: *u32, query: message.SearchQuery) StorageResult {
         if (self.fault()) |f| return f;
         out_len.* = 0;
-        const q = query.query[0..query.query_len];
         for (self.products) |*entry| {
             if (!entry.occupied) continue;
             if (!entry.product.flags.active) continue;
-            // Substring match on name or description.
-            if (contains_substr(entry.product.name[0..entry.product.name_len], q) or
-                contains_substr(entry.product.description[0..entry.product.description_len], q))
-            {
+            if (query.matches(&entry.product)) {
                 insert_sorted(message.Product, out, out_len, entry.product);
             }
         }
         return .ok;
-    }
-
-    fn contains_substr(haystack: []const u8, needle: []const u8) bool {
-        if (needle.len == 0) return true;
-        if (needle.len > haystack.len) return false;
-        // Case-insensitive substring search.
-        var i: usize = 0;
-        while (i + needle.len <= haystack.len) : (i += 1) {
-            var match = true;
-            for (0..needle.len) |j| {
-                const h = ascii_lower(haystack[i + j]);
-                const n = ascii_lower(needle[j]);
-                if (h != n) {
-                    match = false;
-                    break;
-                }
-            }
-            if (match) return true;
-        }
-        return false;
-    }
-
-    fn ascii_lower(ch: u8) u8 {
-        return if (ch >= 'A' and ch <= 'Z') ch + 32 else ch;
     }
 
     fn match_product_filters(product: *const message.Product, params: message.ListParams) bool {

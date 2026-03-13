@@ -211,7 +211,7 @@ const Cli = struct {
 fn parse_cli() Cli {
     var result = Cli{
         .port = 3000,
-        .poll_interval_ms = 2000,
+        .poll_interval_ms = 250,
         .delay_ms = 3000,
         .token = std.posix.getenv("TOKEN") orelse "",
     };

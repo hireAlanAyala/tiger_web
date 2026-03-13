@@ -344,6 +344,55 @@ pub const SearchQuery = extern struct {
     pub fn query_slice(self: *const SearchQuery) []const u8 {
         return self.query[0..self.query_len];
     }
+
+    /// Search spec: tokenize query into words (split on whitespace), product
+    /// matches if ALL words appear as case-insensitive ASCII substrings in
+    /// either name or description. Defined here so both storage backends
+    /// use identical semantics.
+    pub fn matches(self: *const SearchQuery, product: *const Product) bool {
+        const q = self.query[0..self.query_len];
+        const name = product.name[0..product.name_len];
+        const desc = product.description[0..product.description_len];
+
+        var pos: usize = 0;
+        var found_word = false;
+        while (pos < q.len) {
+            // Skip whitespace.
+            if (q[pos] == ' ') {
+                pos += 1;
+                continue;
+            }
+            // Find end of word.
+            const start = pos;
+            while (pos < q.len and q[pos] != ' ') : (pos += 1) {}
+            const word = q[start..pos];
+            found_word = true;
+            // Every word must appear in name or description.
+            if (!contains_substr(name, word) and !contains_substr(desc, word)) return false;
+        }
+        return found_word;
+    }
+
+    fn contains_substr(haystack: []const u8, needle: []const u8) bool {
+        if (needle.len == 0) return true;
+        if (needle.len > haystack.len) return false;
+        var i: usize = 0;
+        while (i + needle.len <= haystack.len) : (i += 1) {
+            var match = true;
+            for (0..needle.len) |j| {
+                if (ascii_lower(haystack[i + j]) != ascii_lower(needle[j])) {
+                    match = false;
+                    break;
+                }
+            }
+            if (match) return true;
+        }
+        return false;
+    }
+
+    fn ascii_lower(ch: u8) u8 {
+        return if (ch >= 'A' and ch <= 'Z') ch + 32 else ch;
+    }
 };
 
 /// Parameters for list operations — pagination and filtering.

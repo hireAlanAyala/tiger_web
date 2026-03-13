@@ -163,9 +163,7 @@ pub const SqliteStorage = struct {
         const stmt_search_products = prepare(real_db,
             "SELECT id, name, description, price_cents, inventory, version, active FROM products" ++
             " WHERE active = 1" ++
-            " AND (instr(lower(name), lower(?1)) > 0 OR instr(lower(description), lower(?1)) > 0)" ++
-            " ORDER BY id" ++
-            " LIMIT ?2;",
+            " ORDER BY id;",
         );
 
         log.info("storage initialized: {s}", .{path});
@@ -342,18 +340,17 @@ pub const SqliteStorage = struct {
     pub fn search(self: *SqliteStorage, out: *[message.list_max]message.Product, out_len: *u32, query: message.SearchQuery) StorageResult {
         const stmt = self.stmt_search_products;
         defer reset_stmt(stmt);
-
-        const q = query.query[0..query.query_len];
-        _ = c.sqlite3_bind_text(stmt, 1, q.ptr, @intCast(q.len), c.SQLITE_TRANSIENT);
-        _ = c.sqlite3_bind_int(stmt, 2, message.list_max);
         out_len.* = 0;
 
         while (true) {
             switch (step_result(stmt)) {
                 .row => {
-                    assert(out_len.* < message.list_max);
-                    read_product(stmt, &out[out_len.*]);
-                    out_len.* += 1;
+                    var product: message.Product = undefined;
+                    read_product(stmt, &product);
+                    if (query.matches(&product) and out_len.* < message.list_max) {
+                        out[out_len.*] = product;
+                        out_len.* += 1;
+                    }
                 },
                 .done => return .ok,
                 .busy => return .busy,
