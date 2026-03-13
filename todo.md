@@ -2,9 +2,6 @@ questions
 - would SSE connections count towards the connection slots?
 - put nginx in front of server?
 
-remaining patterns not yet exercised:
-- rate limiting — cross-cutting concern at the connection or commit loop layer
-
 search improvements (all inside SearchQuery.matches(), no external service):
 - prefix matching — "wid" matches "widget"
 - naive stemming — strip common suffixes (ing, ed, s, er) before matching
@@ -17,3 +14,9 @@ image processing design (decided):
 - state machine tracks job metadata (id, status, result) only
 - worker reads from filesystem, resizes, does domain logic (diff, color scan), posts result back
 - result is small (histogram, diff score, pixel count) — fits in fixed-size struct
+
+Migration
+you test it by running against a prod copy — that's the workflow.
+The migration arm (e.g., 1 => exec(db, "ALTER TABLE ...")) won't exist until you write your first real migration.
+Testing it now would mean testing a no-op. When you write a real migration,
+

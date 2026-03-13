@@ -50,46 +50,7 @@ pub const SqliteStorage = struct {
         // Busy timeout: 1 second.
         _ = c.sqlite3_busy_timeout(real_db, 1000);
 
-        // Create tables.
-        exec(real_db, "CREATE TABLE IF NOT EXISTS products (" ++
-            "id BLOB(16) PRIMARY KEY," ++
-            "name TEXT NOT NULL," ++
-            "description TEXT NOT NULL DEFAULT ''," ++
-            "price_cents INTEGER NOT NULL DEFAULT 0," ++
-            "inventory INTEGER NOT NULL DEFAULT 0," ++
-            "version INTEGER NOT NULL DEFAULT 1," ++
-            "active INTEGER NOT NULL DEFAULT 1" ++
-            ");");
-
-        exec(real_db, "CREATE TABLE IF NOT EXISTS collections (" ++
-            "id BLOB(16) PRIMARY KEY," ++
-            "name TEXT NOT NULL" ++
-            ");");
-
-        exec(real_db, "CREATE TABLE IF NOT EXISTS collection_members (" ++
-            "collection_id BLOB(16) NOT NULL," ++
-            "product_id BLOB(16) NOT NULL," ++
-            "PRIMARY KEY (collection_id, product_id)" ++
-            ");");
-
-        exec(real_db, "CREATE TABLE IF NOT EXISTS orders (" ++
-            "id BLOB(16) PRIMARY KEY," ++
-            "total_cents INTEGER NOT NULL," ++
-            "items_len INTEGER NOT NULL," ++
-            "status INTEGER NOT NULL DEFAULT 1," ++
-            "timeout_at INTEGER NOT NULL DEFAULT 0," ++
-            "payment_ref TEXT NOT NULL DEFAULT ''" ++
-            ");");
-
-        exec(real_db, "CREATE TABLE IF NOT EXISTS order_items (" ++
-            "order_id BLOB(16) NOT NULL," ++
-            "product_id BLOB(16) NOT NULL," ++
-            "name TEXT NOT NULL," ++
-            "quantity INTEGER NOT NULL," ++
-            "price_cents INTEGER NOT NULL," ++
-            "line_total_cents INTEGER NOT NULL," ++
-            "PRIMARY KEY (order_id, product_id)" ++
-            ");");
+        ensure_schema(real_db);
 
         // Prepare product statements.
         const stmt_get = prepare(real_db,
@@ -760,6 +721,82 @@ pub const SqliteStorage = struct {
         if (rc != c.SQLITE_OK) {
             @panic("sqlite3_exec failed");
         }
+    }
+
+    // =================================================================
+    // Schema versioning
+    // =================================================================
+
+    const schema_version: u32 = 1;
+
+    fn ensure_schema(db: *c.sqlite3) void {
+        const v = get_schema_version(db);
+        if (v > schema_version) @panic("database is from a newer version");
+        if (v < schema_version - 1) @panic("database is too old — deploy previous version first");
+
+        switch (v) {
+            0 => create_tables(db),
+            1 => {}, // Current.
+            else => unreachable,
+        }
+        set_schema_version(db, schema_version);
+    }
+
+    fn create_tables(db: *c.sqlite3) void {
+        exec(db, "CREATE TABLE products (" ++
+            "id BLOB(16) PRIMARY KEY," ++
+            "name TEXT NOT NULL," ++
+            "description TEXT NOT NULL DEFAULT ''," ++
+            "price_cents INTEGER NOT NULL DEFAULT 0," ++
+            "inventory INTEGER NOT NULL DEFAULT 0," ++
+            "version INTEGER NOT NULL DEFAULT 1," ++
+            "active INTEGER NOT NULL DEFAULT 1" ++
+            ");");
+
+        exec(db, "CREATE TABLE collections (" ++
+            "id BLOB(16) PRIMARY KEY," ++
+            "name TEXT NOT NULL" ++
+            ");");
+
+        exec(db, "CREATE TABLE collection_members (" ++
+            "collection_id BLOB(16) NOT NULL," ++
+            "product_id BLOB(16) NOT NULL," ++
+            "PRIMARY KEY (collection_id, product_id)" ++
+            ");");
+
+        exec(db, "CREATE TABLE orders (" ++
+            "id BLOB(16) PRIMARY KEY," ++
+            "total_cents INTEGER NOT NULL," ++
+            "items_len INTEGER NOT NULL," ++
+            "status INTEGER NOT NULL DEFAULT 1," ++
+            "timeout_at INTEGER NOT NULL DEFAULT 0," ++
+            "payment_ref TEXT NOT NULL DEFAULT ''" ++
+            ");");
+
+        exec(db, "CREATE TABLE order_items (" ++
+            "order_id BLOB(16) NOT NULL," ++
+            "product_id BLOB(16) NOT NULL," ++
+            "name TEXT NOT NULL," ++
+            "quantity INTEGER NOT NULL," ++
+            "price_cents INTEGER NOT NULL," ++
+            "line_total_cents INTEGER NOT NULL," ++
+            "PRIMARY KEY (order_id, product_id)" ++
+            ");");
+    }
+
+    fn get_schema_version(db: *c.sqlite3) u32 {
+        var stmt: ?*c.sqlite3_stmt = null;
+        const rc = c.sqlite3_prepare_v2(db, "PRAGMA user_version;", -1, &stmt, null);
+        if (rc != c.SQLITE_OK) @panic("PRAGMA user_version failed");
+        defer _ = c.sqlite3_finalize(stmt.?);
+        if (c.sqlite3_step(stmt.?) != c.SQLITE_ROW) @panic("PRAGMA user_version returned no row");
+        return @intCast(c.sqlite3_column_int(stmt.?, 0));
+    }
+
+    fn set_schema_version(db: *c.sqlite3, version: u32) void {
+        var buf: [64]u8 = undefined;
+        const sql = std.fmt.bufPrint(&buf, "PRAGMA user_version = {d};\x00", .{version}) catch unreachable;
+        exec(db, @ptrCast(sql.ptr));
     }
 };
 
