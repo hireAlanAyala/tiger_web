@@ -3,6 +3,8 @@ const assert = std.debug.assert;
 const message = @import("message.zig");
 const http = @import("http.zig");
 
+const log = std.log.scoped(.codec);
+
 /// Translate an HTTP method + path + body into a typed Message.
 /// Path format: /resource or /resource/:id or /resource/:id/sub/:sub_id
 /// Returns null if the request doesn't map to a valid operation.
@@ -35,7 +37,14 @@ pub fn translate(method: http.Method, raw_path: []const u8, body: []const u8) ?m
     else if (std.mem.eql(u8, segments.collection, "orders"))
         translate_orders(method, segments, body, list_params)
     else
-        null;
+        reject("unknown resource");
+}
+
+/// Log a debug message explaining why translate() rejected a request, then return null.
+/// Only visible with --log-debug. Zero cost in production (compiled but filtered at runtime).
+fn reject(comptime reason: []const u8) ?message.Message {
+    log.debug("translate: rejected: " ++ reason, .{});
+    return null;
 }
 
 const PathSegments = struct {
@@ -86,11 +95,11 @@ fn translate_products(method: http.Method, seg: PathSegments, body: []const u8, 
     // POST /products/:id/transfer-inventory/:target_id — uses sub_id for target.
     if (seg.has_id and seg.sub_resource.len > 0 and method == .post) {
         if (std.mem.eql(u8, seg.sub_resource, "transfer-inventory") and seg.has_sub_id) {
-            if (body.len == 0) return null;
-            const quantity = json_u32_field(body, "quantity") orelse return null;
-            if (quantity == 0) return null;
-            if (seg.id == 0 or seg.sub_id == 0) return null;
-            if (seg.id == seg.sub_id) return null;
+            if (body.len == 0) return reject("transfer_inventory: missing body");
+            const quantity = json_u32_field(body, "quantity") orelse return reject("transfer_inventory: missing or invalid quantity");
+            if (quantity == 0) return reject("transfer_inventory: quantity is zero");
+            if (seg.id == 0 or seg.sub_id == 0) return reject("transfer_inventory: invalid id in path");
+            if (seg.id == seg.sub_id) return reject("transfer_inventory: source and target are the same");
             return .{
                 .operation = .transfer_inventory,
                 .id = seg.id,
@@ -101,14 +110,14 @@ fn translate_products(method: http.Method, seg: PathSegments, body: []const u8, 
                 } },
             };
         }
-        return null;
+        return reject("products: unknown sub-resource for POST");
     }
 
     const operation: message.Operation = switch (method) {
         .get => blk: {
             if (seg.has_id and seg.sub_resource.len > 0) {
                 if (std.mem.eql(u8, seg.sub_resource, "inventory")) break :blk .get_product_inventory;
-                return null;
+                return reject("products: unknown sub-resource for GET");
             }
             if (!seg.has_id) {
                 // GET /products?q=... → full-text search.
@@ -117,24 +126,24 @@ fn translate_products(method: http.Method, seg: PathSegments, body: []const u8, 
             }
             break :blk .get_product;
         },
-        .post => if (!seg.has_id) .create_product else return null,
-        .put => if (seg.has_id and seg.id != 0) .update_product else return null,
-        .delete => if (seg.has_id) .delete_product else return null,
+        .post => if (!seg.has_id) .create_product else return reject("create_product: unexpected id in path"),
+        .put => if (seg.has_id and seg.id != 0) .update_product else return reject("update_product: missing or invalid id in path"),
+        .delete => if (seg.has_id) .delete_product else return reject("delete_product: missing id in path"),
         .options => return null,
     };
 
     switch (operation) {
         .search_products => {
-            if (body.len != 0) return null;
-            const q = query_param(query_string, "q") orelse return null;
-            if (q.len == 0 or q.len > message.search_query_max) return null;
+            if (body.len != 0) return reject("search_products: unexpected body");
+            const q = query_param(query_string, "q") orelse return reject("search_products: missing q param");
+            if (q.len == 0 or q.len > message.search_query_max) return reject("search_products: q empty or too long");
             var sq = std.mem.zeroes(message.SearchQuery);
             @memcpy(sq.query[0..q.len], q);
             sq.query_len = @intCast(q.len);
             return .{ .operation = .search_products, .id = 0, .event = .{ .search = sq } };
         },
         .list_products => {
-            if (body.len != 0) return null;
+            if (body.len != 0) return reject("list_products: unexpected body");
             var params = list_params;
             // Default to active_only — soft-deleted items hidden unless
             // the client explicitly passes ?active=false or ?active=all.
@@ -142,14 +151,14 @@ fn translate_products(method: http.Method, seg: PathSegments, body: []const u8, 
             return .{ .operation = operation, .id = 0, .event = .{ .list = params } };
         },
         .get_product, .delete_product, .get_product_inventory => {
-            if (body.len != 0) return null;
+            if (body.len != 0) return reject("get/delete product: unexpected body");
             return .{ .operation = operation, .id = seg.id, .event = .{ .none = {} } };
         },
         .create_product, .update_product => {
-            if (body.len == 0) return null;
-            const product = parse_product_json(body) orelse return null;
+            if (body.len == 0) return reject("create/update product: missing body");
+            const product = parse_product_json(body) orelse return reject("create/update product: invalid JSON");
             // create requires a client-provided ID; update requires a path ID.
-            if (operation == .create_product and product.id == 0) return null;
+            if (operation == .create_product and product.id == 0) return reject("create_product: missing id in body");
             return .{
                 .operation = operation,
                 .id = seg.id,
@@ -163,16 +172,16 @@ fn translate_products(method: http.Method, seg: PathSegments, body: []const u8, 
 fn translate_collections(method: http.Method, seg: PathSegments, body: []const u8, list_params: message.ListParams) ?message.Message {
     // /collections/:id/products/:product_id — membership operations.
     if (seg.has_id and seg.sub_resource.len > 0) {
-        if (!std.mem.eql(u8, seg.sub_resource, "products")) return null;
-        if (!seg.has_sub_id) return null;
+        if (!std.mem.eql(u8, seg.sub_resource, "products")) return reject("collections: unknown sub-resource");
+        if (!seg.has_sub_id) return reject("collection_member: missing product_id in path");
 
         const operation: message.Operation = switch (method) {
             .post => .add_collection_member,
             .delete => .remove_collection_member,
-            else => return null,
+            else => return reject("collection_member: unsupported method"),
         };
 
-        if (body.len != 0) return null;
+        if (body.len != 0) return reject("collection_member: unexpected body");
         return .{
             .operation = operation,
             .id = seg.id,
@@ -182,26 +191,26 @@ fn translate_collections(method: http.Method, seg: PathSegments, body: []const u
 
     const operation: message.Operation = switch (method) {
         .get => if (seg.has_id) .get_collection else .list_collections,
-        .post => if (!seg.has_id) .create_collection else return null,
-        .delete => if (seg.has_id) .delete_collection else return null,
-        else => return null,
+        .post => if (!seg.has_id) .create_collection else return reject("create_collection: unexpected id in path"),
+        .delete => if (seg.has_id) .delete_collection else return reject("delete_collection: missing id in path"),
+        else => return reject("collections: unsupported method"),
     };
 
     switch (operation) {
         .list_collections => {
-            if (body.len != 0) return null;
+            if (body.len != 0) return reject("list_collections: unexpected body");
             return .{ .operation = operation, .id = 0, .event = .{ .list = list_params } };
         },
         .get_collection, .delete_collection => {
-            if (body.len != 0) return null;
+            if (body.len != 0) return reject("get/delete collection: unexpected body");
             return .{ .operation = operation, .id = seg.id, .event = .{ .none = {} } };
         },
         .create_collection => {
-            if (body.len == 0) return null;
+            if (body.len == 0) return reject("create_collection: missing body");
             return .{
                 .operation = operation,
                 .id = seg.id,
-                .event = .{ .collection = parse_collection_json(body) orelse return null },
+                .event = .{ .collection = parse_collection_json(body) orelse return reject("create_collection: invalid JSON") },
             };
         },
         else => return null,
@@ -211,7 +220,7 @@ fn translate_collections(method: http.Method, seg: PathSegments, body: []const u
 fn translate_orders(method: http.Method, seg: PathSegments, body: []const u8, list_params: message.ListParams) ?message.Message {
     switch (method) {
         .get => {
-            if (body.len != 0) return null;
+            if (body.len != 0) return reject("get orders: unexpected body");
             if (seg.has_id) {
                 return .{ .operation = .get_order, .id = seg.id, .event = .{ .none = {} } };
             } else {
@@ -221,8 +230,8 @@ fn translate_orders(method: http.Method, seg: PathSegments, body: []const u8, li
         .post => {
             // POST /orders/:id/complete — two-phase completion
             if (seg.has_id and seg.sub_resource.len > 0 and std.mem.eql(u8, seg.sub_resource, "complete")) {
-                if (body.len == 0) return null;
-                const completion = parse_completion_json(body) orelse return null;
+                if (body.len == 0) return reject("complete_order: missing body");
+                const completion = parse_completion_json(body) orelse return reject("complete_order: invalid JSON");
                 return .{
                     .operation = .complete_order,
                     .id = seg.id,
@@ -238,16 +247,16 @@ fn translate_orders(method: http.Method, seg: PathSegments, body: []const u8, li
                 };
             }
             // POST /orders — create order
-            if (seg.has_id) return null;
-            if (body.len == 0) return null;
-            const order = parse_order_json(body) orelse return null;
+            if (seg.has_id) return reject("create_order: unexpected id in path");
+            if (body.len == 0) return reject("create_order: missing body");
+            const order = parse_order_json(body) orelse return reject("create_order: invalid JSON");
             return .{
                 .operation = .create_order,
                 .id = order.id,
                 .event = .{ .order = order },
             };
         },
-        else => return null,
+        else => return reject("orders: unsupported method"),
     }
 }
 
