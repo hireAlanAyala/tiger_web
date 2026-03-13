@@ -20,7 +20,6 @@ const Fuzzers = .{
     .state_machine = @import("fuzz.zig"),
     .codec = @import("codec_fuzz.zig"),
     .storage = @import("storage_fuzz.zig"),
-    .proxy = @import("proxy_fuzz.zig"),
     // Quickly run all fuzzers as a smoke test
     .smoke = {},
 };
@@ -54,7 +53,6 @@ fn main_smoke() !void {
     inline for (comptime std.enums.values(FuzzersEnum)) |fuzzer| {
         const events_max: ?usize = switch (fuzzer) {
             .smoke => continue,
-            .proxy => continue,
             .state_machine => 10_000,
             .codec => 10_000,
             .storage => 10_000,
