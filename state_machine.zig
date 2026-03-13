@@ -3142,3 +3142,42 @@ test "search products — case insensitive" {
     try std.testing.expectEqual(resp.status, .ok);
     try std.testing.expectEqual(resp.result.product_list.len, 1);
 }
+
+test "search products — multi-word all must match" {
+    var env: TestEnv = undefined;
+    try env.init();
+    defer env.deinit();
+
+    env.create_product(.{ .id = 1, .name = "Blue Widget", .price = 1000 });
+    env.create_product(.{ .id = 2, .name = "Red Widget", .price = 2000 });
+    env.create_product(.{ .id = 3, .name = "Blue Gadget", .price = 3000 });
+
+    // Both words must match.
+    const resp = search_products(&env.sm, "blue widget");
+    try std.testing.expectEqual(resp.status, .ok);
+    try std.testing.expectEqual(resp.result.product_list.len, 1);
+    try std.testing.expectEqual(resp.result.product_list.items[0].id, 1);
+
+    // One word doesn't match any product.
+    const resp2 = search_products(&env.sm, "blue nonexistent");
+    try std.testing.expectEqual(resp2.status, .ok);
+    try std.testing.expectEqual(resp2.result.product_list.len, 0);
+
+    // Single word matches multiple.
+    const resp3 = search_products(&env.sm, "widget");
+    try std.testing.expectEqual(resp3.status, .ok);
+    try std.testing.expectEqual(resp3.result.product_list.len, 2);
+}
+
+test "search products — extra whitespace" {
+    var env: TestEnv = undefined;
+    try env.init();
+    defer env.deinit();
+
+    env.create_product(.{ .id = 1, .name = "Blue Widget", .price = 1000 });
+
+    // Leading, trailing, and multiple spaces between words.
+    const resp = search_products(&env.sm, "  blue   widget  ");
+    try std.testing.expectEqual(resp.status, .ok);
+    try std.testing.expectEqual(resp.result.product_list.len, 1);
+}

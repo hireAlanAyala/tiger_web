@@ -147,7 +147,7 @@ pub const Auditor = struct {
             .add_collection_member => self.on_add_member(msg.id, msg.event.member_id, resp),
             .remove_collection_member => self.on_remove_member(msg.id, msg.event.member_id, resp),
             .list_products => self.on_list_products(resp),
-            .search_products => self.on_search_products(resp),
+            .search_products => self.on_search_products(msg.event.search, resp),
             .list_collections => self.on_list_collections(resp),
             .list_orders => self.on_list_orders(resp),
         }
@@ -587,15 +587,31 @@ pub const Auditor = struct {
         }
     }
 
-    fn on_search_products(self: *const Auditor, resp: message.MessageResponse) void {
+    fn on_search_products(self: *const Auditor, query: message.SearchQuery, resp: message.MessageResponse) void {
         assert(resp.status == .ok);
         const list = resp.result.product_list;
-        // Validate all returned products exist in the model and are active.
+
+        // Compute expected result set independently.
+        var expected_count: u32 = 0;
+        for (self.products) |maybe_product| {
+            const product = maybe_product orelse continue;
+            if (!product.flags.active) continue;
+            if (query.matches(&product)) expected_count += 1;
+        }
+
+        // Result count must match (capped at list_max).
+        const capped = @min(expected_count, message.list_max);
+        if (list.len != capped) {
+            std.debug.panic("search result count mismatch: expected={} got={}", .{ capped, list.len });
+        }
+
+        // Every returned product must exist, be active, match the query, and have correct data.
         for (list.items[0..list.len]) |*p| {
             const idx = self.find_product(p.id) orelse {
                 std.debug.panic("search returned unknown product id={}", .{p.id});
             };
             assert(self.products[idx].?.flags.active);
+            assert(query.matches(&self.products[idx].?));
             assert_product_equal(&self.products[idx].?, p);
         }
     }
