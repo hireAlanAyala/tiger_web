@@ -132,6 +132,12 @@ fn assert_response_equal(
         .collection_list => |ml| assert_collection_list_equal(&ml, &sql.result.collection_list, event_i, operation),
         .order => |mo| assert_order_equal(&mo, &sql.result.order, event_i, operation),
         .order_list => |ml| assert_order_list_equal(&ml, &sql.result.order_list, event_i, operation),
+        .page_load_dashboard => |md| {
+            const sd = sql.result.page_load_dashboard;
+            assert_product_list_equal(&md.products, &sd.products, event_i, operation);
+            assert_collection_list_equal(&md.collections, &sd.collections, event_i, operation);
+            assert_order_list_equal(&md.orders, &sd.orders, event_i, operation);
+        },
     }
 }
 

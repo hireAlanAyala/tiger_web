@@ -1,5 +1,6 @@
 const std = @import("std");
 const assert = std.debug.assert;
+const stdx = @import("stdx.zig");
 const message = @import("message.zig");
 const http = @import("http.zig");
 
@@ -10,8 +11,18 @@ const log = std.log.scoped(.codec);
 /// Returns null if the request doesn't map to a valid operation.
 pub fn translate(method: http.Method, raw_path: []const u8, body: []const u8) ?message.Message {
     // Strip leading /.
-    const path = if (raw_path.len > 0 and raw_path[0] == '/') raw_path[1..] else raw_path;
-    if (path.len == 0) return null;
+    if (raw_path.len == 0 or raw_path[0] != '/') return null;
+    const path = raw_path[1..];
+
+    // GET / → page_load_dashboard
+    if (path.len == 0) {
+        if (method != .get) return null;
+        return .{
+            .operation = .page_load_dashboard,
+            .id = 0,
+            .event = .{ .none = {} },
+        };
+    }
 
     // Split path from query string.
     const query_sep = std.mem.indexOf(u8, path, "?");
@@ -531,6 +542,7 @@ pub fn encode_response_json(buf: []u8, resp: message.MessageResponse) []const u8
             write_next_cursor(&w, if (l.len > 0) l.items[l.len - 1].id else 0, l.len);
             w.raw("}");
         },
+        .page_load_dashboard => unreachable, // rendered by render.zig, not JSON
         .empty => w.raw("[]"),
     }
 
@@ -591,19 +603,19 @@ const JsonWriter = struct {
 
     fn write_u32(self: *JsonWriter, val: u32) void {
         var num_buf: [10]u8 = undefined;
-        const s = format_u32(&num_buf, val);
+        const s = stdx.format_u32(&num_buf, val);
         self.raw(s);
     }
 
     fn write_u64(self: *JsonWriter, val: u64) void {
         var num_buf: [20]u8 = undefined;
-        const s = format_u64(&num_buf, val);
+        const s = stdx.format_u64(&num_buf, val);
         self.raw(s);
     }
 
     fn write_uuid(self: *JsonWriter, val: u128) void {
         var uuid_buf: [32]u8 = undefined;
-        write_uuid_to_buf(&uuid_buf, val);
+        stdx.write_uuid_to_buf(&uuid_buf, val);
         self.raw(&uuid_buf);
     }
 
@@ -796,48 +808,7 @@ fn parse_uuid(s: []const u8) ?u128 {
 }
 
 /// Format a u128 as a 32-character lowercase hex string.
-fn write_uuid_to_buf(buf: *[32]u8, val: u128) void {
-    const hex = "0123456789abcdef";
-    var v = val;
-    var i: usize = 32;
-    while (i > 0) {
-        i -= 1;
-        buf[i] = hex[@intCast(v & 0xf)];
-        v >>= 4;
-    }
-}
-
-/// Format a u64 as a decimal string.
-fn format_u64(buf: *[20]u8, val: u64) []const u8 {
-    if (val == 0) {
-        buf[0] = '0';
-        return buf[0..1];
-    }
-    var v = val;
-    var pos: usize = 20;
-    while (v > 0) {
-        pos -= 1;
-        buf[pos] = '0' + @as(u8, @intCast(v % 10));
-        v /= 10;
-    }
-    return buf[pos..20];
-}
-
-/// Format a u32 as a decimal string.
-fn format_u32(buf: *[10]u8, val: u32) []const u8 {
-    if (val == 0) {
-        buf[0] = '0';
-        return buf[0..1];
-    }
-    var v = val;
-    var pos: usize = 10;
-    while (v > 0) {
-        pos -= 1;
-        buf[pos] = '0' + @as(u8, @intCast(v % 10));
-        v /= 10;
-    }
-    return buf[pos..10];
-}
+// format_u32, format_u64, write_uuid_to_buf are in stdx.zig.
 
 // =====================================================================
 // Tests
@@ -846,8 +817,13 @@ fn format_u32(buf: *[10]u8, val: u32) []const u8 {
 const test_uuid_str = "aabbccdd11223344aabbccdd11223344";
 const test_uuid: u128 = 0xaabbccdd11223344aabbccdd11223344;
 
+/// Test helper: translate with is_datastar_request=false, return just the message.
+fn test_translate(method: http.Method, raw_path: []const u8, body: []const u8) ?message.Message {
+    return translate(method, raw_path, body);
+}
+
 test "GET /products (list)" {
-    const msg = translate(.get, "/products", "").?;
+    const msg = test_translate(.get, "/products", "").?;
     try std.testing.expectEqual(msg.operation, .list_products);
     try std.testing.expectEqual(msg.id, 0);
     try std.testing.expectEqual(msg.event.list.cursor, 0);
@@ -855,12 +831,12 @@ test "GET /products (list)" {
 }
 
 test "GET /products?active=all shows all" {
-    const msg = translate(.get, "/products?active=all", "").?;
+    const msg = test_translate(.get, "/products?active=all", "").?;
     try std.testing.expectEqual(msg.event.list.active_filter, .any);
 }
 
 test "GET /products/:id (get)" {
-    const msg = translate(.get, "/products/" ++ test_uuid_str, "").?;
+    const msg = test_translate(.get, "/products/" ++ test_uuid_str, "").?;
     try std.testing.expectEqual(msg.operation, .get_product);
     try std.testing.expectEqual(msg.id, test_uuid);
 }
@@ -869,7 +845,7 @@ test "POST /products (create)" {
     const body =
         \\{"id":"aabbccdd11223344aabbccdd11223344","name":"Widget","description":"A small widget","price_cents":999,"inventory":50,"active":true}
     ;
-    const msg = translate(.post, "/products", body).?;
+    const msg = test_translate(.post, "/products", body).?;
     try std.testing.expectEqual(msg.operation, .create_product);
     try std.testing.expectEqual(msg.id, 0);
     const p = msg.event.product;
@@ -882,7 +858,7 @@ test "POST /products (create)" {
 }
 
 test "PUT /products/:id (update)" {
-    const msg = translate(.put, "/products/" ++ test_uuid_str,
+    const msg = test_translate(.put, "/products/" ++ test_uuid_str,
         \\{"name":"Updated"}
     ).?;
     try std.testing.expectEqual(msg.operation, .update_product);
@@ -891,41 +867,45 @@ test "PUT /products/:id (update)" {
 }
 
 test "DELETE /products/:id (delete)" {
-    const msg = translate(.delete, "/products/" ++ test_uuid_str, "").?;
+    const msg = test_translate(.delete, "/products/" ++ test_uuid_str, "").?;
     try std.testing.expectEqual(msg.operation, .delete_product);
     try std.testing.expectEqual(msg.id, test_uuid);
 }
 
+test "GET / routes to page_load_dashboard" {
+    const msg = test_translate(.get, "/", "").?;
+    try std.testing.expectEqual(msg.operation, .page_load_dashboard);
+}
+
 test "rejects unknown collection" {
-    try std.testing.expect(translate(.get, "/widgets", "") == null);
-    try std.testing.expect(translate(.get, "/", "") == null);
-    try std.testing.expect(translate(.get, "", "") == null);
+    try std.testing.expect(test_translate(.get, "/widgets", "") == null);
+    try std.testing.expect(test_translate(.get, "", "") == null);
 }
 
 test "rejects invalid method/path combos" {
     // POST with ID.
-    try std.testing.expect(translate(.post, "/products/" ++ test_uuid_str,
+    try std.testing.expect(test_translate(.post, "/products/" ++ test_uuid_str,
         \\{"name":"X"}
     ) == null);
     // PUT without ID.
-    try std.testing.expect(translate(.put, "/products",
+    try std.testing.expect(test_translate(.put, "/products",
         \\{"name":"X"}
     ) == null);
     // DELETE without ID.
-    try std.testing.expect(translate(.delete, "/products", "") == null);
+    try std.testing.expect(test_translate(.delete, "/products", "") == null);
 }
 
 test "rejects invalid UUID in path" {
     // Too short.
-    try std.testing.expect(translate(.get, "/products/123", "") == null);
+    try std.testing.expect(test_translate(.get, "/products/123", "") == null);
     // Uppercase not accepted.
-    try std.testing.expect(translate(.get, "/products/AABBCCDD11223344AABBCCDD11223344", "") == null);
+    try std.testing.expect(test_translate(.get, "/products/AABBCCDD11223344AABBCCDD11223344", "") == null);
     // Non-hex chars.
-    try std.testing.expect(translate(.get, "/products/zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz", "") == null);
+    try std.testing.expect(test_translate(.get, "/products/zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz", "") == null);
 }
 
 test "strips query string" {
-    const msg = translate(.get, "/products?page=1", "").?;
+    const msg = test_translate(.get, "/products?page=1", "").?;
     try std.testing.expectEqual(msg.operation, .list_products);
     try std.testing.expectEqual(msg.event.list.cursor, 0);
     // Products default to active_only when ?active not specified.
@@ -933,53 +913,53 @@ test "strips query string" {
 }
 
 test "parses after cursor from query string" {
-    const msg = translate(.get, "/products?after=00000000000000000000000000000abc", "").?;
+    const msg = test_translate(.get, "/products?after=00000000000000000000000000000abc", "").?;
     try std.testing.expectEqual(msg.operation, .list_products);
     try std.testing.expectEqual(msg.event.list.cursor, 0xabc);
 }
 
 test "cursor with other query params" {
-    const msg = translate(.get, "/products?limit=10&after=00000000000000000000000000000042&foo=bar", "").?;
+    const msg = test_translate(.get, "/products?limit=10&after=00000000000000000000000000000042&foo=bar", "").?;
     try std.testing.expectEqual(msg.event.list.cursor, 0x42);
 }
 
 test "invalid cursor ignored" {
-    const msg = translate(.get, "/products?after=notauuid", "").?;
+    const msg = test_translate(.get, "/products?after=notauuid", "").?;
     try std.testing.expectEqual(msg.event.list.cursor, 0);
 }
 
 test "parses active filter from query string" {
-    const msg1 = translate(.get, "/products?active=true", "").?;
+    const msg1 = test_translate(.get, "/products?active=true", "").?;
     try std.testing.expectEqual(msg1.event.list.active_filter, .active_only);
 
-    const msg2 = translate(.get, "/products?active=false", "").?;
+    const msg2 = test_translate(.get, "/products?active=false", "").?;
     try std.testing.expectEqual(msg2.event.list.active_filter, .inactive_only);
 
-    const msg3 = translate(.get, "/products?active=maybe", "").?;
+    const msg3 = test_translate(.get, "/products?active=maybe", "").?;
     try std.testing.expectEqual(msg3.event.list.active_filter, .any);
 }
 
 test "parses price range from query string" {
-    const msg = translate(.get, "/products?price_min=500&price_max=2000", "").?;
+    const msg = test_translate(.get, "/products?price_min=500&price_max=2000", "").?;
     try std.testing.expectEqual(msg.event.list.price_min, 500);
     try std.testing.expectEqual(msg.event.list.price_max, 2000);
 }
 
 test "parses name prefix from query string" {
-    const msg = translate(.get, "/products?name_prefix=Widget", "").?;
+    const msg = test_translate(.get, "/products?name_prefix=Widget", "").?;
     try std.testing.expectEqualSlices(u8, msg.event.list.name_prefix_slice(), "Widget");
 }
 
 test "GET rejects non-empty body" {
-    try std.testing.expect(translate(.get, "/products/" ++ test_uuid_str, "data") == null);
+    try std.testing.expect(test_translate(.get, "/products/" ++ test_uuid_str, "data") == null);
 }
 
 test "POST rejects empty body" {
-    try std.testing.expect(translate(.post, "/products", "") == null);
+    try std.testing.expect(test_translate(.post, "/products", "") == null);
 }
 
 test "POST rejects missing name" {
-    try std.testing.expect(translate(.post, "/products",
+    try std.testing.expect(test_translate(.post, "/products",
         \\{"id":"aabbccdd11223344aabbccdd11223344","price_cents":100}
     ) == null);
 }
@@ -1038,7 +1018,7 @@ test "encode_response_json — single product" {
 test "parse_uuid and write_uuid roundtrip" {
     const uuid = parse_uuid("0123456789abcdef0123456789abcdef").?;
     var buf: [32]u8 = undefined;
-    write_uuid_to_buf(&buf, uuid);
+    stdx.write_uuid_to_buf(&buf, uuid);
     try std.testing.expectEqualSlices(u8, &buf, "0123456789abcdef0123456789abcdef");
 }
 
@@ -1061,21 +1041,21 @@ test "encode_response_json — empty list" {
 }
 
 test "GET /products/:id/inventory (get_inventory)" {
-    const msg = translate(.get, "/products/" ++ test_uuid_str ++ "/inventory", "").?;
+    const msg = test_translate(.get, "/products/" ++ test_uuid_str ++ "/inventory", "").?;
     try std.testing.expectEqual(msg.operation, .get_product_inventory);
     try std.testing.expectEqual(msg.id, test_uuid);
     try std.testing.expectEqual(msg.event, .none);
 }
 
 test "rejects unknown sub-resource" {
-    try std.testing.expect(translate(.get, "/products/" ++ test_uuid_str ++ "/unknown", "") == null);
+    try std.testing.expect(test_translate(.get, "/products/" ++ test_uuid_str ++ "/unknown", "") == null);
 }
 
 const test_uuid2_str = "aabbccdd11223344aabbccdd11223345";
 const test_uuid2: u128 = 0xaabbccdd11223344aabbccdd11223345;
 
 test "POST /products/:id/transfer-inventory/:target_id" {
-    const msg = translate(.post, "/products/" ++ test_uuid_str ++ "/transfer-inventory/" ++ test_uuid2_str,
+    const msg = test_translate(.post, "/products/" ++ test_uuid_str ++ "/transfer-inventory/" ++ test_uuid2_str,
         \\{"quantity":10}
     ).?;
     try std.testing.expectEqual(msg.operation, .transfer_inventory);
@@ -1085,23 +1065,23 @@ test "POST /products/:id/transfer-inventory/:target_id" {
 }
 
 test "transfer-inventory rejects zero quantity" {
-    try std.testing.expect(translate(.post, "/products/" ++ test_uuid_str ++ "/transfer-inventory/" ++ test_uuid2_str,
+    try std.testing.expect(test_translate(.post, "/products/" ++ test_uuid_str ++ "/transfer-inventory/" ++ test_uuid2_str,
         \\{"quantity":0}
     ) == null);
 }
 
 test "transfer-inventory rejects empty body" {
-    try std.testing.expect(translate(.post, "/products/" ++ test_uuid_str ++ "/transfer-inventory/" ++ test_uuid2_str, "") == null);
+    try std.testing.expect(test_translate(.post, "/products/" ++ test_uuid_str ++ "/transfer-inventory/" ++ test_uuid2_str, "") == null);
 }
 
 test "transfer-inventory rejects same source and target" {
-    try std.testing.expect(translate(.post, "/products/" ++ test_uuid_str ++ "/transfer-inventory/" ++ test_uuid_str,
+    try std.testing.expect(test_translate(.post, "/products/" ++ test_uuid_str ++ "/transfer-inventory/" ++ test_uuid_str,
         \\{"quantity":5}
     ) == null);
 }
 
 test "transfer-inventory rejects missing target" {
-    try std.testing.expect(translate(.post, "/products/" ++ test_uuid_str ++ "/transfer-inventory",
+    try std.testing.expect(test_translate(.post, "/products/" ++ test_uuid_str ++ "/transfer-inventory",
         \\{"quantity":5}
     ) == null);
 }
@@ -1110,7 +1090,7 @@ test "POST /orders (create_order)" {
     const body =
         \\{"id":"eeee0000000000000000000000000001","items":[{"product_id":"aabbccdd11223344aabbccdd11223344","quantity":2},{"product_id":"aabbccdd11223344aabbccdd11223345","quantity":3}]}
     ;
-    const msg = translate(.post, "/orders", body).?;
+    const msg = test_translate(.post, "/orders", body).?;
     try std.testing.expectEqual(msg.operation, .create_order);
     const order = msg.event.order;
     try std.testing.expectEqual(order.id, 0xeeee0000000000000000000000000001);
@@ -1122,36 +1102,36 @@ test "POST /orders (create_order)" {
 }
 
 test "POST /orders rejects empty items" {
-    try std.testing.expect(translate(.post, "/orders",
+    try std.testing.expect(test_translate(.post, "/orders",
         \\{"id":"eeee0000000000000000000000000001","items":[]}
     ) == null);
 }
 
 test "POST /orders rejects missing id" {
-    try std.testing.expect(translate(.post, "/orders",
+    try std.testing.expect(test_translate(.post, "/orders",
         \\{"items":[{"product_id":"aabbccdd11223344aabbccdd11223344","quantity":1}]}
     ) == null);
 }
 
 test "POST /orders rejects zero quantity" {
-    try std.testing.expect(translate(.post, "/orders",
+    try std.testing.expect(test_translate(.post, "/orders",
         \\{"id":"eeee0000000000000000000000000001","items":[{"product_id":"aabbccdd11223344aabbccdd11223344","quantity":0}]}
     ) == null);
 }
 
 test "POST /orders rejects duplicate product_id" {
-    try std.testing.expect(translate(.post, "/orders",
+    try std.testing.expect(test_translate(.post, "/orders",
         \\{"id":"eeee0000000000000000000000000001","items":[{"product_id":"aabbccdd11223344aabbccdd11223344","quantity":1},{"product_id":"aabbccdd11223344aabbccdd11223344","quantity":2}]}
     ) == null);
 }
 
 test "GET /orders (list)" {
-    const msg = translate(.get, "/orders", "").?;
+    const msg = test_translate(.get, "/orders", "").?;
     try std.testing.expectEqual(msg.operation, .list_orders);
 }
 
 test "GET /orders/:id (get)" {
-    const msg = translate(.get, "/orders/" ++ test_uuid_str, "").?;
+    const msg = test_translate(.get, "/orders/" ++ test_uuid_str, "").?;
     try std.testing.expectEqual(msg.operation, .get_order);
     try std.testing.expectEqual(msg.id, test_uuid);
 }
@@ -1261,7 +1241,7 @@ test "seeded: UUID parse/write roundtrip" {
     for (0..1000) |_| {
         const val = prng.int(u128);
         var buf: [32]u8 = undefined;
-        write_uuid_to_buf(&buf, val);
+        stdx.write_uuid_to_buf(&buf, val);
         const parsed = parse_uuid(&buf).?;
         try std.testing.expectEqual(parsed, val);
     }
@@ -1272,7 +1252,7 @@ test "seeded: format_u32 roundtrip" {
     for (0..1000) |_| {
         const val = prng.int(u32);
         var buf: [10]u8 = undefined;
-        const s = format_u32(&buf, val);
+        const s = stdx.format_u32(&buf, val);
         const parsed = std.fmt.parseInt(u32, s, 10) catch unreachable;
         try std.testing.expectEqual(parsed, val);
     }
@@ -1283,7 +1263,7 @@ test "seeded: format_u64 roundtrip" {
     for (0..1000) |_| {
         const val = prng.int(u64);
         var buf: [20]u8 = undefined;
-        const s = format_u64(&buf, val);
+        const s = stdx.format_u64(&buf, val);
         const parsed = std.fmt.parseInt(u64, s, 10) catch unreachable;
         try std.testing.expectEqual(parsed, val);
     }
@@ -1296,7 +1276,7 @@ test "seeded: translate valid product JSON roundtrip" {
         // Generate a random UUID string.
         var uuid_buf: [32]u8 = undefined;
         const id = prng.int(u128) | 1; // ensure non-zero
-        write_uuid_to_buf(&uuid_buf, id);
+        stdx.write_uuid_to_buf(&uuid_buf, id);
 
         // Generate a random name (1..8 alpha chars).
         var name_buf: [8]u8 = undefined;
@@ -1312,7 +1292,7 @@ test "seeded: translate valid product JSON roundtrip" {
             uuid_buf, name, prng.int_inclusive(u32, 99999),
         }) catch unreachable;
 
-        const msg = translate(.post, "/products", body) orelse continue;
+        const msg = test_translate(.post, "/products", body) orelse continue;
         try std.testing.expectEqual(msg.operation, .create_product);
         try std.testing.expectEqual(msg.event.product.id, id);
         try std.testing.expectEqualSlices(u8, msg.event.product.name_slice(), name);

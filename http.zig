@@ -15,8 +15,10 @@ pub const response_body_max = 64 * 1024;
 pub const recv_buf_max = max_header_size + body_max;
 
 /// Maximum send buffer: HTTP response headers + body.
-/// Accounts for CORS headers (~100 bytes) and other headers (~200 bytes).
-pub const send_buf_max = 400 + response_body_max;
+/// Large enough for both JSON responses (400 + response_body_max)
+/// and render.zig's worst-case HTML page (page shell + dashboard_list_max cards
+/// each for products, collections, and orders, with full HTML/JS escape expansion).
+pub const send_buf_max = 96 * 1024;
 
 pub const ParseResult = union(enum) {
     /// Not enough bytes to parse a complete request.
@@ -38,6 +40,8 @@ pub const ParseResult = union(enum) {
         /// Bearer token from Authorization header, or null if absent.
         /// Points into buf — valid only while buf is live.
         authorization: ?[]const u8,
+        /// Whether the client sent Datastar-Request: true.
+        is_datastar_request: bool,
     },
 };
 
@@ -132,6 +136,12 @@ pub fn parse_request(buf: []const u8) ParseResult {
         break :blk null;
     };
 
+    // Detect Datastar-Request: true header.
+    const is_datastar_request = blk: {
+        const val = find_header_value(headers, "Datastar-Request") orelse break :blk false;
+        break :blk ascii_eql_ignore_case(val, "true");
+    };
+
     return .{ .complete = .{
         .method = method,
         .path = raw_path,
@@ -139,14 +149,13 @@ pub fn parse_request(buf: []const u8) ParseResult {
         .total_len = @intCast(total_len),
         .keep_alive = keep_alive,
         .authorization = authorization,
+        .is_datastar_request = is_datastar_request,
     } };
 }
 
-/// Encode an HTTP response with JSON content type.
-pub fn encode_json_response(buf: []u8, status: message.Status, json_body: []const u8) []const u8 {
-    assert(buf.len >= send_buf_max);
-
-    const status_line = switch (status) {
+/// HTTP/1.1 status line for a given status. Used by both JSON and HTML response encoders.
+pub fn status_line(status: message.Status) []const u8 {
+    return switch (status) {
         .ok => "HTTP/1.1 200 OK\r\n",
         .not_found => "HTTP/1.1 404 Not Found\r\n",
         .storage_error => "HTTP/1.1 503 Service Unavailable\r\n",
@@ -155,11 +164,18 @@ pub fn encode_json_response(buf: []u8, status: message.Status, json_body: []cons
         .order_expired => "HTTP/1.1 410 Gone\r\n",
         .order_not_pending => "HTTP/1.1 409 Conflict\r\n",
     };
+}
+
+/// Encode an HTTP response with JSON content type.
+pub fn encode_json_response(buf: []u8, status_val: message.Status, json_body: []const u8) []const u8 {
+    assert(buf.len >= send_buf_max);
+
+    const sl = status_line(status_val);
 
     var pos: usize = 0;
 
-    @memcpy(buf[pos..][0..status_line.len], status_line);
-    pos += status_line.len;
+    @memcpy(buf[pos..][0..sl.len], sl);
+    pos += sl.len;
 
     const cl_prefix = "Content-Length: ";
     @memcpy(buf[pos..][0..cl_prefix.len], cl_prefix);
@@ -428,6 +444,20 @@ test "Connection header case-insensitive" {
     const result = parse_request(req);
     try std.testing.expect(result == .complete);
     try std.testing.expect(result.complete.keep_alive == false);
+}
+
+test "Datastar-Request header parsed" {
+    const req = "GET / HTTP/1.1\r\nDatastar-Request: true\r\n\r\n";
+    const result = parse_request(req);
+    try std.testing.expect(result == .complete);
+    try std.testing.expect(result.complete.is_datastar_request == true);
+}
+
+test "Datastar-Request absent defaults to false" {
+    const req = "GET / HTTP/1.1\r\n\r\n";
+    const result = parse_request(req);
+    try std.testing.expect(result == .complete);
+    try std.testing.expect(result.complete.is_datastar_request == false);
 }
 
 // =====================================================================

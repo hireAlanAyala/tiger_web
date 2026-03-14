@@ -101,6 +101,93 @@ fn has_unique_representation(comptime T: type) bool {
     }
 }
 
+/// Checks that a byte slice is zeroed.
+/// Uses bitwise OR for compiler vectorization.
+/// Ported from TigerBeetle's stdx.zeroed.
+pub fn zeroed(bytes: []const u8) bool {
+    var byte_bits: u8 = 0;
+    for (bytes) |byte| {
+        byte_bits |= byte;
+    }
+    return byte_bits == 0;
+}
+
+// --- Shared formatters (no std.fmt in hot paths) ---
+
+/// Format a u32 as a decimal string into a caller-provided buffer.
+/// Returns the slice within `buf` containing the formatted digits.
+pub fn format_u32(buf: *[10]u8, val: u32) []const u8 {
+    if (val == 0) {
+        buf[0] = '0';
+        return buf[0..1];
+    }
+    var v = val;
+    var pos: usize = 10;
+    while (v > 0) {
+        pos -= 1;
+        buf[pos] = '0' + @as(u8, @intCast(v % 10));
+        v /= 10;
+    }
+    return buf[pos..10];
+}
+
+/// Format a u64 as a decimal string into a caller-provided buffer.
+pub fn format_u64(buf: *[20]u8, val: u64) []const u8 {
+    if (val == 0) {
+        buf[0] = '0';
+        return buf[0..1];
+    }
+    var v = val;
+    var pos: usize = 20;
+    while (v > 0) {
+        pos -= 1;
+        buf[pos] = '0' + @as(u8, @intCast(v % 10));
+        v /= 10;
+    }
+    return buf[pos..20];
+}
+
+/// Write a u128 as 32-char lowercase hex into a caller-provided buffer.
+pub fn write_uuid_to_buf(buf: *[32]u8, val: u128) void {
+    const hex = "0123456789abcdef";
+    var v = val;
+    var i: usize = 32;
+    while (i > 0) {
+        i -= 1;
+        buf[i] = hex[@intCast(v & 0xf)];
+        v >>= 4;
+    }
+}
+
+// =====================================================================
+// Tests
+// =====================================================================
+
+test "format_u32 edge cases" {
+    var buf: [10]u8 = undefined;
+    try std.testing.expectEqualSlices(u8, format_u32(&buf, 0), "0");
+    try std.testing.expectEqualSlices(u8, format_u32(&buf, 1), "1");
+    try std.testing.expectEqualSlices(u8, format_u32(&buf, 999), "999");
+    try std.testing.expectEqualSlices(u8, format_u32(&buf, std.math.maxInt(u32)), "4294967295");
+}
+
+test "format_u64 edge cases" {
+    var buf: [20]u8 = undefined;
+    try std.testing.expectEqualSlices(u8, format_u64(&buf, 0), "0");
+    try std.testing.expectEqualSlices(u8, format_u64(&buf, 1), "1");
+    try std.testing.expectEqualSlices(u8, format_u64(&buf, std.math.maxInt(u64)), "18446744073709551615");
+}
+
+test "write_uuid_to_buf" {
+    var buf: [32]u8 = undefined;
+    write_uuid_to_buf(&buf, 0);
+    try std.testing.expectEqualSlices(u8, &buf, "00000000000000000000000000000000");
+    write_uuid_to_buf(&buf, 0x0123456789abcdef0123456789abcdef);
+    try std.testing.expectEqualSlices(u8, &buf, "0123456789abcdef0123456789abcdef");
+    write_uuid_to_buf(&buf, std.math.maxInt(u128));
+    try std.testing.expectEqualSlices(u8, &buf, "ffffffffffffffffffffffffffffffff");
+}
+
 fn has_pointers(comptime T: type) bool {
     switch (@typeInfo(T)) {
         .pointer => return true,

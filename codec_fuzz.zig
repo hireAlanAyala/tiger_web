@@ -71,15 +71,14 @@ fn fuzz_translate(prng: *PRNG) bool {
     const path = gen_path(prng, &path_buf);
     var body_buf: [body_buf_max]u8 = undefined;
     const body = gen_body(prng, &body_buf);
+    const msg = codec.translate(method, path, body);
 
-    const result = codec.translate(method, path, body);
-
-    // Core invariant: if translate returns a message, it must pass input_valid.
-    if (result) |msg| {
-        assert(StateMachine.input_valid(msg));
+    // Core invariant: if translate returns a result, the message must pass input_valid.
+    if (msg) |m| {
+        assert(StateMachine.input_valid(m));
 
         // Pair assertion: event tag matches operation.
-        assert(msg.event == msg.operation.event_tag());
+        assert(m.event == m.operation.event_tag());
         return true;
     }
     return false;
@@ -527,6 +526,8 @@ fn gen_response(prng: *PRNG) message.MessageResponse {
         return .{ .status = status, .result = .{ .empty = {} } };
     }
 
+    // page_load_dashboard is rendered by render.zig, not encode_response_json.
+    // render_fuzz.zig covers that path. Only generate JSON-encodable variants here.
     const result_tag = prng.int_inclusive(usize, 7);
     const result: message.Result = switch (result_tag) {
         0 => .{ .product = gen_product(prng) },

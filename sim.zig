@@ -822,12 +822,12 @@ test "mark: unknown route triggers unmapped request" {
     sim_io.connect_client(0);
     run_ticks(&server, &sim_io, 10);
 
-    // GET / doesn't match any known route — triggers unmapped.
+    // GET /unknown doesn't match any known route — triggers unmapped.
     // Must include a valid auth token to pass the auth gate.
     const mark = marks.check("unmapped request");
     var req_buf: [http.recv_buf_max]u8 = undefined;
     var pos: usize = 0;
-    const req_line = "GET / HTTP/1.1\r\n";
+    const req_line = "GET /unknown HTTP/1.1\r\n";
     @memcpy(req_buf[pos..][0..req_line.len], req_line);
     pos += req_line.len;
     pos += write_auth_header(req_buf[pos..]);
@@ -1376,6 +1376,7 @@ const FuzzAction = enum {
     get_order,
     list_orders,
     search_products,
+    page_load_dashboard,
     toggle_faults,
 };
 
@@ -1437,6 +1438,7 @@ const Fuzzer = struct {
             .get_order => self.step_get_order(prng, io, server),
             .list_orders => self.step_list_orders(prng, io, server),
             .search_products => self.step_search_products(prng, io, server),
+            .page_load_dashboard => self.step_page_load_dashboard(prng, io, server),
             .toggle_faults => self.step_toggle_faults(prng, io, storage),
         }
     }
@@ -1724,6 +1726,14 @@ const Fuzzer = struct {
         self.ensure_connected(io, server);
         const client = self.pick_connected(prng);
         io.inject_get(client, "/orders");
+        _ = run_until_response(server, io, client, 300);
+        io.clear_response(client);
+    }
+
+    fn step_page_load_dashboard(self: *Fuzzer, prng: *PRNG, io: *SimIO, server: *Server) void {
+        self.ensure_connected(io, server);
+        const client = self.pick_connected(prng);
+        io.inject_get(client, "/");
         _ = run_until_response(server, io, client, 300);
         io.clear_response(client);
     }

@@ -1,5 +1,6 @@
 const std = @import("std");
 const assert = std.debug.assert;
+const stdx = @import("stdx.zig");
 const message = @import("message.zig");
 const Tracer = @import("tracer.zig");
 const marks = @import("marks.zig");
@@ -69,6 +70,7 @@ pub fn StateMachineType(comptime Storage: type) type {
                     if (p.id == 0) return false;
                     if (p.name_len == 0 or p.name_len > message.product_name_max) return false;
                     if (p.description_len > message.product_description_max) return false;
+                    if (p.flags.padding != 0) return false;
                     if (!std.unicode.utf8ValidateSlice(p.name[0..p.name_len])) return false;
                     if (!std.unicode.utf8ValidateSlice(p.description[0..p.description_len])) return false;
                 },
@@ -77,6 +79,7 @@ pub fn StateMachineType(comptime Storage: type) type {
                     const p = msg.event.product;
                     if (p.name_len == 0 or p.name_len > message.product_name_max) return false;
                     if (p.description_len > message.product_description_max) return false;
+                    if (p.flags.padding != 0) return false;
                     if (!std.unicode.utf8ValidateSlice(p.name[0..p.name_len])) return false;
                     if (!std.unicode.utf8ValidateSlice(p.description[0..p.description_len])) return false;
                 },
@@ -84,6 +87,7 @@ pub fn StateMachineType(comptime Storage: type) type {
                     const col = msg.event.collection;
                     if (col.id == 0) return false;
                     if (col.name_len == 0 or col.name_len > message.collection_name_max) return false;
+                    if (!stdx.zeroed(&col.reserved)) return false;
                     if (!std.unicode.utf8ValidateSlice(col.name[0..col.name_len])) return false;
                 },
                 .transfer_inventory => {
@@ -125,6 +129,7 @@ pub fn StateMachineType(comptime Storage: type) type {
                 .get_collection,
                 .delete_collection,
                 .get_order,
+                .page_load_dashboard,
                 => {},
                 .add_collection_member,
                 .remove_collection_member,
@@ -151,6 +156,7 @@ pub fn StateMachineType(comptime Storage: type) type {
         /// Returns true if prefetch completed (success or error).
         /// Returns false if storage is busy — connection stays .ready, retried next tick.
         pub fn prefetch(self: *StateMachine, msg: message.Message) bool {
+
             assert(self.prefetch_result == null);
             // Pair assertion: event tag must match what EventType prescribes
             // for this operation. Construction site is codec.zig; this is the
@@ -197,6 +203,7 @@ pub fn StateMachineType(comptime Storage: type) type {
                 .search_products => self.prefetch_search_products(msg.event.search),
                 .get_order, .complete_order, .cancel_order => self.prefetch_order_read(msg.id),
                 .list_orders => self.prefetch_list_all_orders(msg.event.list),
+                .page_load_dashboard => self.prefetch_dashboard(),
                 .transfer_inventory => blk: {
                     const transfer = msg.event.transfer;
                     assert(msg.id > 0);
@@ -220,7 +227,10 @@ pub fn StateMachineType(comptime Storage: type) type {
             };
 
             switch (result) {
-                .busy => return false,
+                .busy => {
+                    assert(self.prefetch_result == null);
+                    return false;
+                },
                 .corruption => @panic("storage corruption in prefetch"),
                 .ok, .not_found, .err => self.prefetch_result = result,
             }
@@ -253,6 +263,7 @@ pub fn StateMachineType(comptime Storage: type) type {
         /// after prefetch() returned true.
         pub fn commit(self: *StateMachine, msg: message.Message) message.MessageResponse {
             const result = self.prefetch_result.?;
+            defer self.invariants();
             defer self.reset_prefetch();
 
             const resp = if (result == .err)
@@ -291,13 +302,8 @@ pub fn StateMachineType(comptime Storage: type) type {
                 .search_products,
                 => |comptime_op| self.execute_list(comptime_op, result),
 
-                inline .create_product,
-                .create_collection,
-                => |comptime_op| self.execute_create(
-                    comptime_op,
-                    msg.event.unwrap(comptime_op.EventType()),
-                    result,
-                ),
+                .create_product => self.execute_create_product(msg.event.product, result),
+                .create_collection => self.execute_create_collection(msg.event.collection, result),
 
                 .delete_product => self.execute_soft_delete_product(msg.id, result),
 
@@ -340,6 +346,8 @@ pub fn StateMachineType(comptime Storage: type) type {
                 ),
 
                 .cancel_order => self.execute_cancel_order(msg.id, result),
+
+                .page_load_dashboard => self.execute_dashboard(result),
             };
         }
 
@@ -392,41 +400,57 @@ pub fn StateMachineType(comptime Storage: type) type {
             };
         }
 
-        /// Create pattern: check doesn't exist, write, return entity.
-        /// Shared by create_product, create_collection. The event parameter
-        /// type is resolved at comptime via op.EventType() — Product for
-        /// create_product, ProductCollection for create_collection.
-        fn execute_create(
-            self: *StateMachine,
-            comptime op: message.Operation,
-            event: op.EventType(),
-            result: StorageResult,
-        ) message.MessageResponse {
+        /// Create product: field-by-field reconstruction guarantees canonical storage.
+        /// Matches TigerBeetle's create_account pattern — never store the input
+        /// struct directly, always reconstruct from validated fields.
+        fn execute_create_product(self: *StateMachine, event: message.Product, result: StorageResult) message.MessageResponse {
             if (result == .ok) return message.MessageResponse.storage_error;
             assert(result == .not_found);
 
-            // For products, set initial version.
-            var entity = event;
-            if (op == .create_product) {
-                entity.version = 1;
-            }
-
-            const write_result = switch (op) {
-                .create_product => self.storage.put(&entity),
-                .create_collection => self.storage.put_collection(&entity),
-                else => unreachable,
+            var entity: message.Product = .{
+                .id = event.id,
+                .name = std.mem.zeroes([message.product_name_max]u8),
+                .description = std.mem.zeroes([message.product_description_max]u8),
+                .name_len = event.name_len,
+                .description_len = event.description_len,
+                .price_cents = event.price_cents,
+                .inventory = event.inventory,
+                .version = 1,
+                .flags = event.flags,
             };
+            @memcpy(entity.name[0..event.name_len], event.name[0..event.name_len]);
+            @memcpy(entity.description[0..event.description_len], event.description[0..event.description_len]);
 
-            const ok_result: message.Result = switch (op) {
-                .create_product => .{ .product = entity },
-                .create_collection => .{ .collection = .{
-                    .collection = entity,
-                    .products = .{ .items = undefined, .len = 0 },
-                } },
-                else => unreachable,
+            // Pair assertion: reconstruction produced canonical output.
+            assert(stdx.zeroed(entity.name[entity.name_len..]));
+            assert(stdx.zeroed(entity.description[entity.description_len..]));
+
+            const write_result = self.storage.put(&entity);
+            return self.commit_write(write_result, .{ .product = entity });
+        }
+
+        /// Create collection: field-by-field reconstruction guarantees canonical storage.
+        fn execute_create_collection(self: *StateMachine, event: message.ProductCollection, result: StorageResult) message.MessageResponse {
+            if (result == .ok) return message.MessageResponse.storage_error;
+            assert(result == .not_found);
+
+            var entity: message.ProductCollection = .{
+                .id = event.id,
+                .name = std.mem.zeroes([message.collection_name_max]u8),
+                .name_len = event.name_len,
+                .reserved = std.mem.zeroes([15]u8),
             };
+            @memcpy(entity.name[0..event.name_len], event.name[0..event.name_len]);
 
-            return self.commit_write(write_result, ok_result);
+            // Pair assertion: reconstruction produced canonical output.
+            assert(stdx.zeroed(entity.name[entity.name_len..]));
+            assert(stdx.zeroed(&entity.reserved));
+
+            const write_result = self.storage.put_collection(&entity);
+            return self.commit_write(write_result, .{ .collection = .{
+                .collection = entity,
+                .products = .{ .items = undefined, .len = 0 },
+            } });
         }
 
         /// Soft delete: set active = false, increment version.
@@ -463,6 +487,7 @@ pub fn StateMachineType(comptime Storage: type) type {
 
         /// Update with optimistic concurrency: client provides expected version,
         /// server rejects if it doesn't match. Version increments on success.
+        /// Field-by-field reconstruction guarantees canonical storage.
         fn execute_update_product(self: *StateMachine, id: u128, event: message.Product, result: StorageResult) message.MessageResponse {
             if (result == .not_found) return message.MessageResponse.not_found;
             assert(result == .ok);
@@ -475,9 +500,24 @@ pub fn StateMachineType(comptime Storage: type) type {
                 return .{ .status = .version_conflict, .result = .{ .empty = {} } };
             }
 
-            var updated = event;
-            updated.id = id;
-            updated.version = current.version + 1;
+            var updated: message.Product = .{
+                .id = id,
+                .name = std.mem.zeroes([message.product_name_max]u8),
+                .description = std.mem.zeroes([message.product_description_max]u8),
+                .name_len = event.name_len,
+                .description_len = event.description_len,
+                .price_cents = event.price_cents,
+                .inventory = event.inventory,
+                .version = current.version + 1,
+                .flags = event.flags,
+            };
+            @memcpy(updated.name[0..event.name_len], event.name[0..event.name_len]);
+            @memcpy(updated.description[0..event.description_len], event.description[0..event.description_len]);
+
+            // Pair assertion: reconstruction produced canonical output.
+            assert(stdx.zeroed(updated.name[updated.name_len..]));
+            assert(stdx.zeroed(updated.description[updated.description_len..]));
+
             assert(self.storage.update(id, &updated) == .ok);
             return .{ .status = .ok, .result = .{ .product = updated } };
         }
@@ -560,6 +600,7 @@ pub fn StateMachineType(comptime Storage: type) type {
                 const line_total = @as(u64, product.price_cents) * @as(u64, item.quantity);
                 order_result.items[i] = std.mem.zeroes(message.OrderResultItem);
                 order_result.items[i].product_id = product.id;
+                // Safe: product came from storage, already canonical.
                 order_result.items[i].name = product.name;
                 order_result.items[i].name_len = product.name_len;
                 order_result.items[i].quantity = item.quantity;
@@ -670,17 +711,6 @@ pub fn StateMachineType(comptime Storage: type) type {
             };
         }
 
-        fn reset_prefetch(self: *StateMachine) void {
-            self.prefetch_product = null;
-            self.prefetch_product_list.len = 0;
-            self.prefetch_products = [_]?message.Product{null} ** message.order_items_max;
-            self.prefetch_collection = null;
-            self.prefetch_collection_list.len = 0;
-            self.prefetch_order = null;
-            self.prefetch_order_list.len = 0;
-            self.prefetch_result = null;
-        }
-
         fn reset_prefetch_cache(self: *StateMachine) void {
             self.prefetch_product = null;
             self.prefetch_product_list.len = 0;
@@ -689,6 +719,24 @@ pub fn StateMachineType(comptime Storage: type) type {
             self.prefetch_collection_list.len = 0;
             self.prefetch_order = null;
             self.prefetch_order_list.len = 0;
+        }
+
+        fn reset_prefetch(self: *StateMachine) void {
+            self.reset_prefetch_cache();
+            self.prefetch_result = null;
+        }
+
+        /// Cross-check structural invariants after every commit.
+        fn invariants(self: *StateMachine) void {
+            // Prefetch cache must be clean after commit.
+            assert(self.prefetch_result == null);
+            assert(self.prefetch_product == null);
+            assert(self.prefetch_product_list.len == 0);
+            assert(self.prefetch_collection == null);
+            assert(self.prefetch_collection_list.len == 0);
+            assert(self.prefetch_order == null);
+            assert(self.prefetch_order_list.len == 0);
+            for (self.prefetch_products) |slot| assert(slot == null);
         }
 
         // --- Product prefetch helpers (read-only) ---
@@ -774,6 +822,43 @@ pub fn StateMachineType(comptime Storage: type) type {
                 &self.prefetch_product_list.items,
                 &self.prefetch_product_list.len,
             );
+        }
+
+        // --- Dashboard (page_load_dashboard) ---
+
+        /// Prefetch all three lists for the dashboard page.
+        fn prefetch_dashboard(self: *StateMachine) StorageResult {
+            var params = std.mem.zeroes(message.ListParams);
+            params.active_filter = .active_only;
+            const r1 = self.prefetch_list_products(params);
+            if (r1 != .ok) return r1;
+            params.active_filter = .any; // collections/orders don't filter by active
+            const r2 = self.prefetch_list_all_collections(params);
+            if (r2 != .ok) return r2;
+            return self.prefetch_list_all_orders(params);
+        }
+
+        /// Execute dashboard: return all three cached lists, capped to dashboard_list_max.
+        fn execute_dashboard(self: *StateMachine, result: StorageResult) message.MessageResponse {
+            assert(result == .ok);
+
+            // Domain cap: dashboard shows a summary, not a full dump.
+            // Storage may return up to list_max; we cap to dashboard_list_max.
+            var products = self.prefetch_product_list;
+            products.len = @min(products.len, message.dashboard_list_max);
+            var collections = self.prefetch_collection_list;
+            collections.len = @min(collections.len, message.dashboard_list_max);
+            var orders = self.prefetch_order_list;
+            orders.len = @min(orders.len, message.dashboard_list_max);
+
+            return .{
+                .status = .ok,
+                .result = .{ .page_load_dashboard = .{
+                    .products = products,
+                    .collections = collections,
+                    .orders = orders,
+                } },
+            };
         }
     };
 }

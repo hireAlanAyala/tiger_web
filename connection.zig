@@ -56,6 +56,9 @@ pub fn ConnectionType(comptime IO: type) type {
         // Whether the client wants keep-alive (HTTP/1.1 default) or close (HTTP/1.0 default).
         keep_alive: bool,
 
+        // Whether the client sent the Datastar-Request header.
+        // The render layer uses this to decide full-page HTML vs SSE fragments.
+        is_datastar_request: bool,
 
         pub fn init_free() Connection {
             return .{
@@ -73,6 +76,7 @@ pub fn ConnectionType(comptime IO: type) type {
                 .recv_activity = false,
                 .send_activity = false,
                 .keep_alive = true,
+                .is_datastar_request = false,
             };
         }
 
@@ -121,6 +125,7 @@ pub fn ConnectionType(comptime IO: type) type {
                     assert(conn.fd == 0);
                     assert(conn.recv_completion.operation == .none);
                     assert(conn.send_completion.operation == .none);
+                    assert(!conn.is_datastar_request);
                 },
                 .accepting => {
                     assert(conn.fd == 0);
@@ -139,6 +144,9 @@ pub fn ConnectionType(comptime IO: type) type {
                     assert(conn.send_len > 0);
                     assert(conn.send_len <= conn.send_buf.len);
                     assert(conn.send_pos <= conn.send_len);
+                    // Datastar responses use Connection: close — the flag must not
+                    // leak to a subsequent request on a keep-alive connection.
+                    if (conn.is_datastar_request) assert(!conn.keep_alive);
                 },
                 .closing => {
                     assert(conn.fd > 0);

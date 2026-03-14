@@ -55,6 +55,9 @@ pub const Operation = enum(u8) {
     add_collection_member = 11,
     remove_collection_member = 12,
 
+    // Pages
+    page_load_dashboard = 20,
+
     /// Input event type — what the message body carries for this operation.
     /// Called with comptime operation (via inline dispatch) to resolve types
     /// at compile time, same as TigerBeetle's Operation.EventType().
@@ -78,6 +81,7 @@ pub const Operation = enum(u8) {
             .cancel_order,
             .get_collection,
             .delete_collection,
+            .page_load_dashboard,
             => void,
         };
     }
@@ -482,10 +486,32 @@ pub const CollectionList = struct {
     len: u32,
 };
 
+/// Maximum items per list in a dashboard page load response.
+/// This is a domain constraint: the dashboard shows a summary, not a dump.
+/// Buffer sizing in render.zig derives from this constant, not list_max.
+pub const dashboard_list_max = 10;
+
 comptime {
     assert(list_max > 0);
     assert(list_max <= 1024);
+    assert(dashboard_list_max > 0);
+    assert(dashboard_list_max <= list_max);
 }
+
+/// Dashboard page load result — all three lists in one response.
+/// Each list is capped to dashboard_list_max by the state machine.
+pub const PageLoadDashboardResult = struct {
+    products: ProductList,
+    collections: CollectionList,
+    orders: OrderSummaryList,
+
+    comptime {
+        // The state machine must cap lists before constructing this result.
+        // render.zig derives its buffer math from dashboard_list_max, not list_max.
+        // If this assert is wrong, fix the state machine — not the buffer.
+        assert(dashboard_list_max <= list_max);
+    }
+};
 
 /// Result payload — self-describing tagged union for response encoding.
 /// The encoder switches on the variant — no external context needed.
@@ -497,6 +523,7 @@ pub const Result = union(enum) {
     collection_list: CollectionList,
     order: OrderResult,
     order_list: OrderSummaryList,
+    page_load_dashboard: PageLoadDashboardResult,
     empty: void,
 };
 

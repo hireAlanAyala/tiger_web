@@ -113,6 +113,7 @@ pub const Auditor = struct {
             .list_collections,
             .list_orders,
             .transfer_inventory,
+            .page_load_dashboard,
             => false,
         };
     }
@@ -150,6 +151,7 @@ pub const Auditor = struct {
             .search_products => self.on_search_products(msg.event.search, resp),
             .list_collections => self.on_list_collections(resp),
             .list_orders => self.on_list_orders(resp),
+            .page_load_dashboard => self.on_page_load_dashboard(resp),
         }
     }
 
@@ -165,14 +167,23 @@ pub const Auditor = struct {
 
         assert(resp.status == .ok);
 
-        // Validate returned product matches input with version=1.
-        var expected = input;
-        expected.version = 1;
-        assert_product_equal(&expected, &resp.result.product);
+        // Validate returned product matches input semantically.
+        // The state machine reconstructs canonical storage (zeroed trailing
+        // bytes), so byte-wise comparison against the input would fail.
+        const returned = resp.result.product;
+        assert(returned.id == input.id);
+        assert(returned.name_len == input.name_len);
+        assert(std.mem.eql(u8, returned.name[0..returned.name_len], input.name[0..input.name_len]));
+        assert(returned.description_len == input.description_len);
+        assert(std.mem.eql(u8, returned.description[0..returned.description_len], input.description[0..input.description_len]));
+        assert(returned.price_cents == input.price_cents);
+        assert(returned.inventory == input.inventory);
+        assert(returned.version == 1);
+        assert(returned.flags.active == input.flags.active);
 
-        // Update model.
+        // Update model with the canonical returned value.
         const slot = self.find_empty_product_slot();
-        self.products[slot] = expected;
+        self.products[slot] = returned;
         self.product_count += 1;
 
         if (self.product_id_count < id_pool_capacity) {
@@ -219,13 +230,20 @@ pub const Auditor = struct {
 
         assert(resp.status == .ok);
 
-        var expected = input;
-        expected.id = id;
-        expected.version = current.version + 1;
-        assert_product_equal(&expected, &resp.result.product);
+        // Validate returned product matches input semantically.
+        const returned = resp.result.product;
+        assert(returned.id == id);
+        assert(returned.name_len == input.name_len);
+        assert(std.mem.eql(u8, returned.name[0..returned.name_len], input.name[0..input.name_len]));
+        assert(returned.description_len == input.description_len);
+        assert(std.mem.eql(u8, returned.description[0..returned.description_len], input.description[0..input.description_len]));
+        assert(returned.price_cents == input.price_cents);
+        assert(returned.inventory == input.inventory);
+        assert(returned.version == current.version + 1);
+        assert(returned.flags.active == input.flags.active);
 
-        // Update model.
-        self.products[idx] = expected;
+        // Update model with the canonical returned value.
+        self.products[idx] = returned;
     }
 
     fn on_delete_product(self: *Auditor, id: u128, resp: message.MessageResponse) void {
@@ -470,12 +488,17 @@ pub const Auditor = struct {
         assert(resp.status == .ok);
 
         const returned = resp.result.collection;
-        assert(stdx.equal_bytes(message.ProductCollection, &input, &returned.collection));
+        // Compare semantic fields — the state machine reconstructs canonical
+        // storage (zeroed trailing bytes), so byte-wise comparison against the
+        // input would fail. Compare what matters: id and name content.
+        assert(returned.collection.id == input.id);
+        assert(returned.collection.name_len == input.name_len);
+        assert(std.mem.eql(u8, returned.collection.name[0..returned.collection.name_len], input.name[0..input.name_len]));
         assert(returned.products.len == 0);
 
-        // Update model.
+        // Update model with the canonical returned value.
         const slot = self.find_empty_collection_slot();
-        self.collections[slot] = input;
+        self.collections[slot] = returned.collection;
         self.collection_count += 1;
 
         if (self.collection_id_count < id_pool_capacity) {
@@ -637,6 +660,29 @@ pub const Auditor = struct {
             const expected = self.orders[idx].?;
             assert(summary.total_cents == expected.total_cents);
             assert(summary.items_len == expected.items_len);
+        }
+    }
+
+    fn on_page_load_dashboard(self: *const Auditor, resp: message.MessageResponse) void {
+        assert(resp.status == .ok);
+        const dashboard = resp.result.page_load_dashboard;
+
+        // Domain cap: state machine must not return more than dashboard_list_max.
+        assert(dashboard.products.len <= message.dashboard_list_max);
+        assert(dashboard.collections.len <= message.dashboard_list_max);
+        assert(dashboard.orders.len <= message.dashboard_list_max);
+
+        // Validate each sub-list is consistent with the model.
+        for (dashboard.products.items[0..dashboard.products.len]) |p| {
+            assert(self.find_product(p.id) != null);
+            // Dashboard uses active_filter=.active_only — no inactive products.
+            assert(p.flags.active);
+        }
+        for (dashboard.collections.items[0..dashboard.collections.len]) |c| {
+            assert(self.find_collection(c.id) != null);
+        }
+        for (dashboard.orders.items[0..dashboard.orders.len]) |o| {
+            assert(self.find_order(o.id) != null);
         }
     }
 

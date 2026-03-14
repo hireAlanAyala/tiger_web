@@ -2,7 +2,8 @@
 <html>
 <head>
 <meta charset="utf-8">
-<title>Tiger Web — Test Harness</title>
+<title>Tiger Web — Datastar</title>
+<script type="module" src="https://cdn.jsdelivr.net/gh/starfederation/datastar@1.0.0-RC.7/bundles/datastar.js"></script>
 <style>
 * { box-sizing: border-box; margin: 0; padding: 0; }
 body { font-family: system-ui, sans-serif; background: #f5f5f5; color: #333; padding: 20px; }
@@ -15,8 +16,6 @@ input, select { padding: 4px 8px; border: 1px solid #ccc; border-radius: 3px; }
 .row { display: flex; gap: 8px; align-items: center; margin: 6px 0; flex-wrap: wrap; }
 .card { background: #fff; border: 1px solid #ddd; border-radius: 4px; padding: 12px; margin: 8px 0; }
 .card .meta { font-size: 12px; color: #888; }
-.log { background: #1a1a2e; color: #0f0; font-family: monospace; font-size: 12px; padding: 12px;
-       border-radius: 4px; max-height: 200px; overflow-y: auto; margin-top: 16px; white-space: pre-wrap; }
 .error { color: #f44; }
 .ok { color: #4a4; }
 table { border-collapse: collapse; width: 100%; }
@@ -25,14 +24,34 @@ th { background: #f0f0f0; }
 section { margin-bottom: 24px; }
 .cols { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
 @media (max-width: 800px) { .cols { grid-template-columns: 1fr; } }
+.badge { display: inline-block; font-size: 11px; padding: 1px 6px; border-radius: 8px; }
+.badge-live { background: #4a4; color: #fff; }
+.badge-off { background: #999; color: #fff; }
 </style>
 </head>
-<body>
+<body
+  data-signals="{
+    token: '{{.Token}}',
+    _pName: '', _pDesc: '', _pPrice: 999, _pInv: 10,
+    _pActive: '', _pPrefix: '',
+    _cName: '',
+    _oItems: '',
+    _tSrc: '', _tDst: '', _tQty: 1,
+    _sseConnected: false
+  }"
+  data-init="$_sseConnected = true; @get('/events?token=' + $token)"
+>
 
-<h1>Tiger Web — Test Harness</h1>
+<h1>Tiger Web — Datastar</h1>
+
 <div class="row">
-  <label>Base URL: <input id="base" value="http://localhost:3000" style="width:220px"></label>
-  <button onclick="refreshAll()">Refresh All</button>
+  <label>Token: <input data-bind:token style="width:360px"></label>
+  <span data-show="$_sseConnected" class="badge badge-live">SSE live</span>
+  <button data-on:click="
+    @get('/products', {headers: {'Authorization': 'Bearer ' + $token}});
+    @get('/collections', {headers: {'Authorization': 'Bearer ' + $token}});
+    @get('/orders', {headers: {'Authorization': 'Bearer ' + $token}})
+  ">Refresh All</button>
 </div>
 
 <div class="cols">
@@ -42,28 +61,53 @@ section { margin-bottom: 24px; }
 <section>
 <h2>Products</h2>
 <div class="row">
-  <input id="p-name" placeholder="Name" style="width:120px">
-  <input id="p-desc" placeholder="Description" style="width:140px">
-  <input id="p-price" placeholder="Price (cents)" type="number" style="width:100px">
-  <input id="p-inv" placeholder="Inventory" type="number" style="width:80px">
-  <button onclick="createProduct()">Create</button>
+  <input data-bind:_p-name placeholder="Name" style="width:120px">
+  <input data-bind:_p-desc placeholder="Description" style="width:140px">
+  <input data-bind:_p-price placeholder="Price (cents)" type="number" style="width:100px">
+  <input data-bind:_p-inv placeholder="Inventory" type="number" style="width:80px">
+  <button data-on:click="
+    @post('/products', {
+      headers: {'Authorization': 'Bearer ' + $token},
+      payload: {
+        id: uuid(), name: $_pName || 'Test Product', description: $_pDesc,
+        price_cents: +$_pPrice || 999, inventory: +$_pInv || 10, active: true
+      }
+    })
+  ">Create</button>
 </div>
 <div class="row">
-  <label>Filter: <select id="p-active"><option value="">active (default)</option><option value="all">all</option><option value="false">inactive</option></select></label>
-  <input id="p-prefix" placeholder="Name prefix" style="width:100px">
-  <button onclick="listProducts()">List</button>
+  <label>Filter: <select data-bind:_p-active>
+    <option value="">active (default)</option>
+    <option value="all">all</option>
+    <option value="false">inactive</option>
+  </select></label>
+  <input data-bind:_p-prefix placeholder="Name prefix" style="width:100px">
+  <button data-on:click="
+    let qs = '';
+    if ($_pActive) qs += '?active=' + $_pActive;
+    if ($_pPrefix) qs += (qs ? '&' : '?') + 'name_prefix=' + encodeURIComponent($_pPrefix);
+    @get('/products' + qs, {headers: {'Authorization': 'Bearer ' + $token}})
+  ">List</button>
 </div>
-<div id="product-list"></div>
+<div id="product-list">
+  {{.Products}}
+</div>
 </section>
 
 <!-- Inventory Transfer -->
 <section>
 <h2>Inventory Transfer</h2>
 <div class="row">
-  <input id="t-src" placeholder="Source product ID" style="width:260px">
-  <input id="t-dst" placeholder="Target product ID" style="width:260px">
-  <input id="t-qty" placeholder="Qty" type="number" style="width:70px">
-  <button onclick="transferInventory()">Transfer</button>
+  <input data-bind:_t-src placeholder="Source product ID" style="width:260px">
+  <input data-bind:_t-dst placeholder="Target product ID" style="width:260px">
+  <input data-bind:_t-qty placeholder="Qty" type="number" style="width:70px">
+  <button data-on:click="
+    if (!$_tSrc || !$_tDst) { alert('Enter source and target product IDs'); return; }
+    @post('/products/' + $_tSrc + '/transfer-inventory/' + $_tDst, {
+      headers: {'Authorization': 'Bearer ' + $token},
+      payload: {quantity: +$_tQty || 1}
+    })
+  ">Transfer</button>
 </div>
 </section>
 
@@ -74,276 +118,56 @@ section { margin-bottom: 24px; }
 <section>
 <h2>Collections</h2>
 <div class="row">
-  <input id="c-name" placeholder="Collection name" style="width:180px">
-  <button onclick="createCollection()">Create</button>
-  <button onclick="listCollections()">List</button>
+  <input data-bind:_c-name placeholder="Collection name" style="width:180px">
+  <button data-on:click="
+    @post('/collections', {
+      headers: {'Authorization': 'Bearer ' + $token},
+      payload: {id: uuid(), name: $_cName || 'Test Collection'}
+    })
+  ">Create</button>
+  <button data-on:click="
+    @get('/collections', {headers: {'Authorization': 'Bearer ' + $token}})
+  ">List</button>
 </div>
-<div id="collection-list"></div>
+<div id="collection-list">
+  {{.Collections}}
+</div>
 </section>
 
 <!-- Orders -->
 <section>
-<h2>Orders</h2>
+<h2>Orders
+  <span data-show="$_sseConnected" class="badge badge-live">live</span>
+</h2>
 <div class="row">
-  <button onclick="listOrders()">List Orders</button>
+  <input data-bind:_o-items placeholder="Product IDs (comma-sep), qty=1 each" style="width:400px">
+  <button data-on:click="
+    if (!$_oItems) { alert('Enter product IDs'); return; }
+    const ids = $_oItems.split(',').map(s => s.trim()).filter(Boolean);
+    const items = ids.map(id => ({product_id: id, quantity: 1}));
+    @post('/orders', {
+      headers: {'Authorization': 'Bearer ' + $token},
+      payload: {id: uuid(), items}
+    })
+  ">Create Order</button>
+  <button data-on:click="
+    @get('/orders', {headers: {'Authorization': 'Bearer ' + $token}})
+  ">List Orders</button>
 </div>
-<div class="row">
-  <input id="o-items" placeholder='Product IDs (comma-sep), qty=1 each' style="width:400px">
-  <button onclick="createOrder()">Create Order</button>
+<div id="order-list">
+  {{.Orders}}
 </div>
-<div id="order-list"></div>
 </section>
 
 </div>
 </div>
 
-<!-- Log -->
-<h2>Request Log</h2>
-<div class="log" id="log"></div>
-
 <script>
-const $ = id => document.getElementById(id);
-const base = () => $('base').value.replace(/\/+$/, '');
-
 function uuid() {
-  // Simple v4-ish UUID as 32 hex chars (no dashes — server accepts this).
   const b = new Uint8Array(16);
   crypto.getRandomValues(b);
   return Array.from(b, x => x.toString(16).padStart(2, '0')).join('');
 }
-
-function logReq(method, path, status, body, elapsed) {
-  const el = $('log');
-  const cls = status >= 400 ? 'error' : 'ok';
-  const line = `${method} ${path} → <span class="${cls}">${status}</span> (${elapsed}ms)\n`;
-  el.innerHTML = line + el.innerHTML;
-}
-
-async function api(method, path, body) {
-  const url = base() + path;
-  const opts = { method, headers: {} };
-  if (body) {
-    opts.headers['Content-Type'] = 'application/json';
-    opts.body = JSON.stringify(body);
-  }
-  const t0 = performance.now();
-  const res = await fetch(url, opts);
-  const elapsed = Math.round(performance.now() - t0);
-  const text = await res.text();
-  let json = null;
-  try { json = JSON.parse(text); } catch {}
-  logReq(method, path, res.status, text, elapsed);
-  return { status: res.status, json, text };
-}
-
-function fmt$(cents) { return '$' + (cents / 100).toFixed(2); }
-
-// --- Products ---
-
-function productCard(p) {
-  return `<div class="card" id="product-${p.id}">
-    <strong>${esc(p.name)}</strong> — ${fmt$(p.price_cents)} — inv: ${p.inventory} — v${p.version}
-    ${p.active ? '' : ' <span class="error">[inactive]</span>'}
-    <div class="meta">${p.id}</div>
-    <div class="meta">${esc(p.description)}</div>
-    <div class="row" style="margin-top:4px">
-      <button onclick="deleteProduct('${p.id}')">Delete</button>
-      <button onclick="promptUpdate('${p.id}', '${esc(p.name)}', ${p.price_cents}, ${p.version})">Update</button>
-      <button onclick="getProduct('${p.id}')">Get</button>
-      <button onclick="getInventory('${p.id}')">Inventory</button>
-    </div>
-  </div>`;
-}
-
-async function createProduct() {
-  const name = $('p-name').value || 'Test Product';
-  const desc = $('p-desc').value || '';
-  const price = parseInt($('p-price').value) || 999;
-  const inv = parseInt($('p-inv').value) || 10;
-  const id = uuid();
-  const { json } = await api('POST', '/products', { id, name, description: desc, price_cents: price, inventory: inv, active: true });
-  $('p-name').value = '';
-  $('p-desc').value = '';
-  if (json && json.id) {
-    $('product-list').insertAdjacentHTML('afterbegin', productCard(json));
-  }
-}
-
-async function listProducts() {
-  let qs = '';
-  const active = $('p-active').value;
-  if (active) qs += '?active=' + active;
-  const prefix = $('p-prefix').value;
-  if (prefix) qs += (qs ? '&' : '?') + 'name_prefix=' + encodeURIComponent(prefix);
-
-  const { json } = await api('GET', '/products' + qs);
-  const el = $('product-list');
-  if (!json || !json.data) { el.innerHTML = '<div class="card">No results</div>'; return; }
-  el.innerHTML = json.data.map(p => productCard(p)).join('');
-  if (json.next_cursor) {
-    el.innerHTML += `<button onclick="listProductsCursor('${json.next_cursor}')">Next page</button>`;
-  }
-}
-
-async function listProductsCursor(cursor) {
-  const { json } = await api('GET', '/products?cursor=' + cursor + '&active=all');
-  const el = $('product-list');
-  if (!json || !json.data) return;
-  el.innerHTML += json.data.map(p => `
-    <div class="card">
-      <strong>${esc(p.name)}</strong> — ${fmt$(p.price_cents)} — inv: ${p.inventory}
-      <div class="meta">${p.id}</div>
-    </div>
-  `).join('');
-}
-
-async function deleteProduct(id) {
-  const { status } = await api('DELETE', '/products/' + id);
-  if (status === 200) {
-    const el = document.getElementById('product-' + id);
-    if (el) el.remove();
-  }
-}
-
-async function getProduct(id) {
-  await api('GET', '/products/' + id);
-}
-
-async function getInventory(id) {
-  const { json } = await api('GET', '/products/' + id + '/inventory');
-  if (json) alert('Inventory: ' + json.inventory);
-}
-
-function promptUpdate(id, name, price, version) {
-  const newName = prompt('New name:', name);
-  if (!newName) return;
-  const newPrice = parseInt(prompt('New price (cents):', price));
-  if (isNaN(newPrice)) return;
-  updateProduct(id, newName, newPrice, version);
-}
-
-async function updateProduct(id, name, price, version) {
-  const { json } = await api('PUT', '/products/' + id, { name, price_cents: price, version });
-  if (json && json.id) {
-    const existing = document.getElementById('product-' + id);
-    if (existing) existing.outerHTML = productCard(json);
-  }
-}
-
-// --- Inventory Transfer ---
-
-async function transferInventory() {
-  const src = $('t-src').value;
-  const dst = $('t-dst').value;
-  const qty = parseInt($('t-qty').value) || 1;
-  if (!src || !dst) { alert('Enter source and target product IDs'); return; }
-  await api('POST', '/products/' + src + '/transfer-inventory/' + dst, { quantity: qty });
-  listProducts();
-}
-
-// --- Collections ---
-
-async function createCollection() {
-  const name = $('c-name').value || 'Test Collection';
-  const id = uuid();
-  await api('POST', '/collections', { id, name });
-  $('c-name').value = '';
-  listCollections();
-}
-
-async function listCollections() {
-  const { json } = await api('GET', '/collections');
-  const el = $('collection-list');
-  if (!json || !json.data) { el.innerHTML = '<div class="card">No collections</div>'; return; }
-  el.innerHTML = json.data.map(c => `
-    <div class="card">
-      <strong>${esc(c.name)}</strong>
-      <div class="meta">${c.id}</div>
-      <div class="row" style="margin-top:4px">
-        <button onclick="getCollection('${c.id}')">View</button>
-        <button onclick="deleteCollection('${c.id}')" class="danger">Delete</button>
-        <input id="add-${c.id}" placeholder="Product ID" style="width:260px">
-        <button onclick="addMember('${c.id}')">Add Product</button>
-      </div>
-      <div id="col-products-${c.id}"></div>
-    </div>
-  `).join('');
-}
-
-async function getCollection(id) {
-  const { json } = await api('GET', '/collections/' + id);
-  const el = document.getElementById('col-products-' + id);
-  if (!el || !json || !json.products) return;
-  if (json.products.length === 0) { el.innerHTML = '<div class="meta">No products</div>'; return; }
-  el.innerHTML = '<table><tr><th>Name</th><th>Price</th><th>Inv</th><th></th></tr>' +
-    json.products.map(p => `<tr><td>${esc(p.name)}</td><td>${fmt$(p.price_cents)}</td><td>${p.inventory}</td>
-      <td><button onclick="removeMember('${id}','${p.id}')" class="danger">Remove</button></td></tr>`).join('') +
-    '</table>';
-}
-
-async function deleteCollection(id) {
-  await api('DELETE', '/collections/' + id);
-  listCollections();
-}
-
-async function addMember(collectionId) {
-  const productId = document.getElementById('add-' + collectionId).value;
-  if (!productId) { alert('Enter a product ID'); return; }
-  await api('POST', '/collections/' + collectionId + '/products/' + productId);
-  getCollection(collectionId);
-}
-
-async function removeMember(collectionId, productId) {
-  await api('DELETE', '/collections/' + collectionId + '/products/' + productId);
-  getCollection(collectionId);
-}
-
-// --- Orders ---
-
-async function createOrder() {
-  const raw = $('o-items').value;
-  if (!raw) { alert('Enter product IDs'); return; }
-  const ids = raw.split(',').map(s => s.trim()).filter(Boolean);
-  const items = ids.map(id => ({ product_id: id, quantity: 1 }));
-  const id = uuid();
-  await api('POST', '/orders', { id, items });
-  listOrders();
-}
-
-async function listOrders() {
-  const { json } = await api('GET', '/orders');
-  const el = $('order-list');
-  if (!json || !json.data) { el.innerHTML = '<div class="card">No orders</div>'; return; }
-  el.innerHTML = json.data.map(o => `
-    <div class="card">
-      Order <strong>${o.id.substring(0, 8)}...</strong> — ${fmt$(o.total_cents)} — ${o.items_count} items
-      <button onclick="getOrder('${o.id}')">Details</button>
-      <div id="order-detail-${o.id}"></div>
-    </div>
-  `).join('');
-}
-
-async function getOrder(id) {
-  const { json } = await api('GET', '/orders/' + id);
-  const el = document.getElementById('order-detail-' + id);
-  if (!el || !json || !json.items) return;
-  el.innerHTML = '<table><tr><th>Product</th><th>Qty</th><th>Price</th><th>Line Total</th></tr>' +
-    json.items.map(i => `<tr><td>${esc(i.name)}</td><td>${i.quantity}</td><td>${fmt$(i.price_cents)}</td><td>${fmt$(i.line_total_cents)}</td></tr>`).join('') +
-    `<tr><td colspan="3"><strong>Total</strong></td><td><strong>${fmt$(json.total_cents)}</strong></td></tr></table>`;
-}
-
-// --- Helpers ---
-
-function esc(s) { const d = document.createElement('div'); d.textContent = s || ''; return d.innerHTML; }
-
-function refreshAll() {
-  listProducts();
-  listCollections();
-  listOrders();
-}
-
-// Auto-load on page open.
-refreshAll();
 </script>
 
 </body>

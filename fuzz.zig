@@ -336,6 +336,11 @@ pub fn gen_message(prng: *PRNG, operation: message.Operation, pools: IdPools) ?m
                 .event = .{ .member_id = pools.product_ids[prng.int_inclusive(usize, pools.product_ids.len - 1)] },
             };
         },
+        .page_load_dashboard => .{
+            .operation = .page_load_dashboard,
+            .id = 0,
+            .event = .{ .none = {} },
+        },
     };
 }
 

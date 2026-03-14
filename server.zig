@@ -7,6 +7,7 @@ const http = @import("http.zig");
 const auth = @import("auth.zig");
 const StateMachineType = @import("state_machine.zig").StateMachineType;
 const ConnectionType = @import("connection.zig").ConnectionType;
+const render = @import("render.zig");
 const Time = @import("time.zig").Time;
 const marks = @import("marks.zig");
 const log = marks.wrap_log(std.log.scoped(.server));
@@ -185,24 +186,27 @@ pub fn ServerType(comptime IO: type, comptime Storage: type) type {
                     continue;
                 }
 
-                // Auth gate.
-                const token = parsed.authorization orelse {
-                    log.mark.warn("auth: missing token fd={d}", .{conn.fd});
-                    conn.set_response(http.encode_401_response(&conn.send_buf));
-                    continue;
-                };
-                if (server.token_cache.verify_cached(token, server.time.realtime(), server.secret_key) == null) {
-                    log.mark.warn("auth: invalid token fd={d}", .{conn.fd});
-                    conn.set_response(http.encode_401_response(&conn.send_buf));
-                    continue;
-                }
-
-                // Route through codec.
+                // Route through codec first — auth depends on the operation.
                 const msg = codec.translate(parsed.method, parsed.path, parsed.body) orelse {
                     log.mark.warn("unmapped request fd={d}", .{conn.fd});
                     conn.state = .closing;
                     continue;
                 };
+                conn.is_datastar_request = parsed.is_datastar_request;
+
+                // Auth gate — page_load_dashboard is public (it serves the login page).
+                if (msg.operation != .page_load_dashboard) {
+                    const token = parsed.authorization orelse {
+                        log.mark.warn("auth: missing token fd={d}", .{conn.fd});
+                        conn.set_response(http.encode_401_response(&conn.send_buf));
+                        continue;
+                    };
+                    if (server.token_cache.verify_cached(token, server.time.realtime(), server.secret_key) == null) {
+                        log.mark.warn("auth: invalid token fd={d}", .{conn.fd});
+                        conn.set_response(http.encode_401_response(&conn.send_buf));
+                        continue;
+                    }
+                }
 
                 // Prefetch. Storage busy → skip, retry next tick.
                 server.state_machine.tracer.start(.prefetch);
@@ -218,8 +222,21 @@ pub fn ServerType(comptime IO: type, comptime Storage: type) type {
                 server.state_machine.tracer.stop(.execute, msg.operation);
                 server.state_machine.tracer.trace_log(msg.operation, resp.status, conn.fd);
 
-                const json = codec.encode_response_json(&json_buf, resp);
-                conn.set_response(http.encode_json_response(&conn.send_buf, resp.status, json));
+                // Encode response: render for page_load_dashboard, JSON for everything else.
+                // Gate: the result variant must match the operation that produced it.
+                const is_dashboard = msg.operation == .page_load_dashboard;
+                if (resp.status == .ok) {
+                    assert((resp.result == .page_load_dashboard) == is_dashboard);
+                }
+
+                if (is_dashboard) {
+                    const len = render.encode_response(&conn.send_buf, resp, conn.is_datastar_request);
+                    conn.set_response(conn.send_buf[0..len]);
+                    conn.keep_alive = false;
+                } else {
+                    const json = codec.encode_response_json(&json_buf, resp);
+                    conn.set_response(http.encode_json_response(&conn.send_buf, resp.status, json));
+                }
             }
         }
 
