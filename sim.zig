@@ -1547,8 +1547,13 @@ const Fuzzer = struct {
             3 => "/products?price_min=100&price_max=5000",
             else => unreachable,
         };
-        io.inject_get(client, path);
-        _ = run_until_response(server, io, client, 300);
+        if (prng.boolean()) {
+            io.inject_get_datastar(client, path);
+            _ = run_until_close_response(server, io, client, 500);
+        } else {
+            io.inject_get(client, path);
+            _ = run_until_response(server, io, client, 300);
+        }
         io.clear_response(client);
     }
 
@@ -1646,16 +1651,26 @@ const Fuzzer = struct {
         const client = self.pick_connected(prng);
         const id = self.pick_collection_id(prng);
         const path = path_with_id(&self.path_buf, "/collections/", id);
-        io.inject_get(client, path);
-        _ = run_until_response(server, io, client, 300);
+        if (prng.boolean()) {
+            io.inject_get_datastar(client, path);
+            _ = run_until_close_response(server, io, client, 500);
+        } else {
+            io.inject_get(client, path);
+            _ = run_until_response(server, io, client, 300);
+        }
         io.clear_response(client);
     }
 
     fn step_list_collections(self: *Fuzzer, prng: *PRNG, io: *SimIO, server: *Server) void {
         self.ensure_connected(io, server);
         const client = self.pick_connected(prng);
-        io.inject_get(client, "/collections");
-        _ = run_until_response(server, io, client, 300);
+        if (prng.boolean()) {
+            io.inject_get_datastar(client, "/collections");
+            _ = run_until_close_response(server, io, client, 500);
+        } else {
+            io.inject_get(client, "/collections");
+            _ = run_until_response(server, io, client, 300);
+        }
         io.clear_response(client);
     }
 
@@ -1757,16 +1772,26 @@ const Fuzzer = struct {
         const client = self.pick_connected(prng);
         const id = self.pick_order_id(prng);
         const path = path_with_id(&self.path_buf, "/orders/", id);
-        io.inject_get(client, path);
-        _ = run_until_response(server, io, client, 300);
+        if (prng.boolean()) {
+            io.inject_get_datastar(client, path);
+            _ = run_until_close_response(server, io, client, 500);
+        } else {
+            io.inject_get(client, path);
+            _ = run_until_response(server, io, client, 300);
+        }
         io.clear_response(client);
     }
 
     fn step_list_orders(self: *Fuzzer, prng: *PRNG, io: *SimIO, server: *Server) void {
         self.ensure_connected(io, server);
         const client = self.pick_connected(prng);
-        io.inject_get(client, "/orders");
-        _ = run_until_response(server, io, client, 300);
+        if (prng.boolean()) {
+            io.inject_get_datastar(client, "/orders");
+            _ = run_until_close_response(server, io, client, 500);
+        } else {
+            io.inject_get(client, "/orders");
+            _ = run_until_response(server, io, client, 300);
+        }
         io.clear_response(client);
     }
 
