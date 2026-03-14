@@ -207,6 +207,14 @@ pub const SimIO = struct {
 
     /// Inject an HTTP GET to a path.
     pub fn inject_get(self: *SimIO, client_index: usize, path: []const u8) void {
+        self.inject_get_with_headers(client_index, path, "");
+    }
+
+    pub fn inject_get_datastar(self: *SimIO, client_index: usize, path: []const u8) void {
+        self.inject_get_with_headers(client_index, path, "Datastar-Request: true\r\n");
+    }
+
+    fn inject_get_with_headers(self: *SimIO, client_index: usize, path: []const u8, extra_headers: []const u8) void {
         var buf: [http.recv_buf_max]u8 = undefined;
         var pos: usize = 0;
 
@@ -219,6 +227,8 @@ pub const SimIO = struct {
         @memcpy(buf[pos..][0..line2.len], line2);
         pos += line2.len;
         pos += write_auth_header(buf[pos..]);
+        @memcpy(buf[pos..][0..extra_headers.len], extra_headers);
+        pos += extra_headers.len;
         const end = "\r\n";
         @memcpy(buf[pos..][0..end.len], end);
         pos += end.len;
@@ -280,6 +290,27 @@ pub const SimIO = struct {
         if (data.len < body_start + content_length) return null;
 
         const body = data[body_start..][0..content_length];
+
+        return .{
+            .status_code = status_code,
+            .body = body,
+        };
+    }
+
+    /// Read a Connection: close response (no Content-Length).
+    /// The body is everything after the headers.
+    pub fn read_close_response(self: *SimIO, client_index: usize) ?HttpResponse {
+        assert(client_index < max_clients);
+        const client = &self.clients[client_index];
+        if (client.recv_len == 0) return null;
+        const data = client.recv_buf[0..client.recv_len];
+
+        const header_end = std.mem.indexOf(u8, data, "\r\n\r\n") orelse return null;
+        if (data.len < 12) return null;
+        if (!std.mem.startsWith(u8, data, "HTTP/1.1 ")) return null;
+        const status_code = std.fmt.parseInt(u16, data[9..12], 10) catch return null;
+
+        const body = data[header_end + 4 ..];
 
         return .{
             .status_code = status_code,
@@ -556,6 +587,15 @@ fn run_until_response(server: *Server, io: *SimIO, client_index: usize, max_tick
         server.tick();
         io.run_for_ns(10 * std.time.ns_per_ms);
         if (io.read_response(client_index)) |resp| return resp;
+    }
+    return null;
+}
+
+fn run_until_close_response(server: *Server, io: *SimIO, client_index: usize, max_ticks: usize) ?SimIO.HttpResponse {
+    for (0..max_ticks) |_| {
+        server.tick();
+        io.run_for_ns(10 * std.time.ns_per_ms);
+        if (io.read_close_response(client_index)) |resp| return resp;
     }
     return null;
 }
@@ -1733,8 +1773,17 @@ const Fuzzer = struct {
     fn step_page_load_dashboard(self: *Fuzzer, prng: *PRNG, io: *SimIO, server: *Server) void {
         self.ensure_connected(io, server);
         const client = self.pick_connected(prng);
-        io.inject_get(client, "/");
-        _ = run_until_response(server, io, client, 300);
+        const datastar = prng.boolean();
+
+        if (datastar) {
+            io.inject_get_datastar(client, "/");
+        } else {
+            io.inject_get(client, "/");
+        }
+
+        // Dashboard uses Connection: close (no Content-Length).
+        // Run enough ticks for the full response to arrive (partial sends).
+        _ = run_until_close_response(server, io, client, 500);
         io.clear_response(client);
     }
 
