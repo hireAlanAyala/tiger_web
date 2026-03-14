@@ -222,17 +222,19 @@ pub fn ServerType(comptime IO: type, comptime Storage: type) type {
                 server.state_machine.tracer.stop(.execute, msg.operation);
                 server.state_machine.tracer.trace_log(msg.operation, resp.status, conn.fd);
 
-                // Encode response: render for page_load_dashboard, JSON for everything else.
-                // Gate: the result variant must match the operation that produced it.
-                const is_dashboard = msg.operation == .page_load_dashboard;
-                if (resp.status == .ok) {
-                    assert((resp.result == .page_load_dashboard) == is_dashboard);
-                }
+                // Encode response: render for dashboard + Datastar GETs, JSON for everything else.
+                const use_render = switch (msg.operation) {
+                    .page_load_dashboard => true,
+                    .list_products, .list_collections, .list_orders,
+                    .get_collection, .get_order,
+                    => conn.is_datastar_request,
+                    else => false,
+                };
 
-                if (is_dashboard) {
-                    const len = render.encode_response(&conn.send_buf, resp, conn.is_datastar_request);
+                if (use_render) {
+                    const len = render.encode_response(&conn.send_buf, msg.operation, resp, conn.is_datastar_request);
                     conn.set_response(conn.send_buf[0..len]);
-                    conn.keep_alive = false;
+                    conn.keep_alive = false; // Rendered responses emit Connection: close.
                 } else {
                     const json = codec.encode_response_json(&json_buf, resp);
                     conn.set_response(http.encode_json_response(&conn.send_buf, resp.status, json));
