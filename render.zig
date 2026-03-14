@@ -9,9 +9,9 @@ const http = @import("http.zig");
 // If the HTML changes, the constants update automatically — no manual counting.
 // Buffer math uses dashboard_list_max (domain constant), not list_max.
 
-pub const product_card_max = comptime_card_size(message.Product, render_product_card);
-pub const collection_card_max = comptime_card_size(message.ProductCollection, render_collection_card);
-pub const order_card_max = comptime_card_size(message.OrderSummary, render_order_card);
+pub const product_card_max = comptime_render_size(message.Product, render_product_card);
+pub const collection_card_max = comptime_render_size(message.ProductCollection, render_collection_card);
+pub const order_card_max = comptime_render_size(message.OrderSummary, render_order_card);
 
 /// Full page with empty lists — measures the page shell (headers + CSS + scaffold).
 pub const page_shell_max = blk: {
@@ -37,22 +37,55 @@ const count_indicator_max = blk: {
     break :blk w.pos;
 };
 
-pub const send_buf_max = page_shell_max
-    + (message.dashboard_list_max * product_card_max)
-    + (message.dashboard_list_max * collection_card_max)
-    + (message.dashboard_list_max * order_card_max)
-    + 3 * count_indicator_max;
+/// Collection detail: collection name + table of member products.
+pub const collection_detail_max = comptime_render_size(message.CollectionWithProducts, render_collection_detail);
+
+/// Order detail: order header + line items table.
+pub const order_detail_max = comptime_render_size(message.OrderResult, render_order_detail);
+
+/// SSE frame overhead: event line + longest selector + mode + "data: elements " + trailing newlines.
+/// Measured at comptime by writing the framing with an empty body.
+const sse_frame_overhead = blk: {
+    var buf: [256]u8 = undefined;
+    var w = HtmlWriter{ .buf = &buf, .pos = 0 };
+    // Use longest selector form: "#col-" + 32-char UUID.
+    const selector = id_selector("#col-", std.math.maxInt(u128));
+    sse_event_begin(&w, &selector);
+    sse_event_end(&w);
+    break :blk w.pos;
+};
+
+pub const send_buf_max = blk: {
+    const product_list_body = message.dashboard_list_max * product_card_max + count_indicator_max;
+    const collection_list_body = message.dashboard_list_max * collection_card_max + count_indicator_max;
+    const order_list_body = message.dashboard_list_max * order_card_max + count_indicator_max;
+
+    const full_page = page_shell_max + product_list_body + collection_list_body + order_list_body;
+
+    // Dashboard SSE sends 3 fragments (one per list).
+    const dashboard_sse = 3 * sse_frame_overhead + product_list_body + collection_list_body + order_list_body;
+
+    // Single SSE list fragment.
+    const sse_list = sse_frame_overhead +
+        @max(product_list_body, @max(collection_list_body, order_list_body));
+
+    // Single SSE detail fragment.
+    const sse_detail = sse_frame_overhead +
+        @max(collection_detail_max, order_detail_max);
+
+    break :blk @max(full_page, @max(dashboard_sse, @max(sse_list, sse_detail)));
+};
 
 comptime {
     assert(send_buf_max <= http.send_buf_max);
 }
 
-/// Run a card renderer at comptime on worst-case input, return exact output size.
-fn comptime_card_size(comptime T: type, comptime render_fn: *const fn (*HtmlWriter, *const T) void) usize {
+/// Run a renderer at comptime on worst-case input, return exact output size.
+fn comptime_render_size(comptime T: type, comptime render_fn: *const fn (*HtmlWriter, *const T) void) usize {
     comptime {
-        @setEvalBranchQuota(100_000);
+        @setEvalBranchQuota(500_000);
         const item = worst_case(T);
-        var buf: [64 * 1024]u8 = undefined;
+        var buf: [256 * 1024]u8 = undefined;
         var w = HtmlWriter{ .buf = &buf, .pos = 0 };
         render_fn(&w, &item);
         return w.pos;
@@ -87,22 +120,50 @@ fn worst_case(comptime T: type) T {
             o.total_cents = std.math.maxInt(u64);
             o.items_len = message.order_items_max;
             return o;
+        } else if (T == message.CollectionWithProducts) {
+            var cwp: message.CollectionWithProducts = undefined;
+            cwp.collection = worst_case(message.ProductCollection);
+            cwp.products.len = message.dashboard_list_max;
+            for (cwp.products.items[0..cwp.products.len]) |*p| {
+                p.* = worst_case(message.Product);
+            }
+            return cwp;
+        } else if (T == message.OrderResult) {
+            var o = std.mem.zeroes(message.OrderResult);
+            o.id = std.math.maxInt(u128);
+            o.total_cents = std.math.maxInt(u64);
+            o.status = .pending; // includes Complete/Cancel buttons
+            o.items_len = message.order_items_max;
+            for (o.items[0..o.items_len]) |*item| {
+                item.* = std.mem.zeroes(message.OrderResultItem);
+                item.product_id = std.math.maxInt(u128);
+                item.price_cents = std.math.maxInt(u32);
+                item.quantity = std.math.maxInt(u32);
+                item.line_total_cents = std.math.maxInt(u64);
+                item.name_len = message.product_name_max;
+                @memset(item.name[0..item.name_len], '"');
+            }
+            return o;
         } else {
             unreachable;
         }
     }
 }
 
-/// Encode a page_load_dashboard response as either a full HTML page or SSE fragments.
+/// Encode a response as HTML page, SSE fragments, or SSE error.
+/// The result variant drives success encoding. For errors, `operation`
+/// selects which UI panel to show the error in.
 /// Returns the number of bytes written into send_buf.
-pub fn encode_response(send_buf: []u8, resp: message.MessageResponse, is_datastar_request: bool) u32 {
+pub fn encode_response(send_buf: []u8, operation: message.Operation, resp: message.MessageResponse, is_datastar_request: bool) u32 {
     assert(send_buf.len >= http.send_buf_max);
 
     var w = HtmlWriter{ .buf = send_buf, .pos = 0 };
 
     if (resp.status != .ok) {
+        // Errors carry no result — operation tells us which UI panel to target.
+        assert(resp.result == .empty);
         if (is_datastar_request) {
-            encode_sse_error(&w, resp.status);
+            encode_sse_error(&w, operation, resp.status);
         } else {
             encode_error_page(&w, resp.status);
         }
@@ -110,16 +171,52 @@ pub fn encode_response(send_buf: []u8, resp: message.MessageResponse, is_datasta
         return @intCast(w.pos);
     }
 
-    assert(resp.result == .page_load_dashboard);
-    const dashboard = resp.result.page_load_dashboard;
+    // Pair assertion: operation and result variant must agree.
+    assert(result_matches_operation(operation, resp.result));
 
-    if (is_datastar_request) {
-        encode_sse_headers(&w);
-        encode_sse_fragment(&w, "#product-list", message.ProductList, &dashboard.products);
-        encode_sse_fragment(&w, "#collection-list", message.CollectionList, &dashboard.collections);
-        encode_sse_fragment(&w, "#order-list", message.OrderSummaryList, &dashboard.orders);
-    } else {
-        encode_full_page(&w, &dashboard);
+    switch (resp.result) {
+        .page_load_dashboard => |dashboard| {
+            if (is_datastar_request) {
+                encode_sse_headers(&w);
+                encode_sse_fragment(&w, "#product-list", message.ProductList, &dashboard.products);
+                encode_sse_fragment(&w, "#collection-list", message.CollectionList, &dashboard.collections);
+                encode_sse_fragment(&w, "#order-list", message.OrderSummaryList, &dashboard.orders);
+            } else {
+                encode_full_page(&w, &dashboard);
+            }
+        },
+        .product_list => |list| {
+            assert(is_datastar_request);
+            encode_sse_headers(&w);
+            encode_sse_fragment(&w, "#product-list", message.ProductList, &list);
+        },
+        .collection_list => |list| {
+            assert(is_datastar_request);
+            encode_sse_headers(&w);
+            encode_sse_fragment(&w, "#collection-list", message.CollectionList, &list);
+        },
+        .order_list => |list| {
+            assert(is_datastar_request);
+            encode_sse_headers(&w);
+            encode_sse_fragment(&w, "#order-list", message.OrderSummaryList, &list);
+        },
+        .collection => |cwp| {
+            assert(is_datastar_request);
+            encode_sse_headers(&w);
+            const selector = id_selector("#col-", cwp.collection.id);
+            sse_event_begin(&w, &selector);
+            render_collection_detail(&w, &cwp);
+            sse_event_end(&w);
+        },
+        .order => |order| {
+            assert(is_datastar_request);
+            encode_sse_headers(&w);
+            const selector = id_selector("#od-", order.id);
+            sse_event_begin(&w, &selector);
+            render_order_detail(&w, &order);
+            sse_event_end(&w);
+        },
+        .product, .inventory, .empty => unreachable,
     }
 
     assert(w.pos > 0);
@@ -301,15 +398,16 @@ fn encode_full_page(w: *HtmlWriter, dashboard: *const message.PageLoadDashboardR
 const auth_opt = "{headers:{'Authorization':'Bearer '+$token}}";
 
 fn render_product_cards(w: *HtmlWriter, list: *const message.ProductList) void {
-    assert(list.len <= message.dashboard_list_max);
+    assert(list.len <= message.list_max);
     if (list.len == 0) {
         w.raw("<div class=\"card\">No products</div>");
         return;
     }
-    for (list.items[0..list.len]) |*p| {
+    const display_len = @min(list.len, message.dashboard_list_max);
+    for (list.items[0..display_len]) |*p| {
         render_product_card(w, p);
     }
-    if (list.len == message.dashboard_list_max) {
+    if (list.len >= message.dashboard_list_max) {
         w.raw("<div class=\"meta\">Showing first ");
         w.write_u32(message.dashboard_list_max);
         w.raw("</div>");
@@ -354,15 +452,16 @@ fn render_product_card(w: *HtmlWriter, p: *const message.Product) void {
 }
 
 fn render_collection_cards(w: *HtmlWriter, list: *const message.CollectionList) void {
-    assert(list.len <= message.dashboard_list_max);
+    assert(list.len <= message.list_max);
     if (list.len == 0) {
         w.raw("<div class=\"card\">No collections</div>");
         return;
     }
-    for (list.items[0..list.len]) |*c| {
+    const display_len = @min(list.len, message.dashboard_list_max);
+    for (list.items[0..display_len]) |*c| {
         render_collection_card(w, c);
     }
-    if (list.len == message.dashboard_list_max) {
+    if (list.len >= message.dashboard_list_max) {
         w.raw("<div class=\"meta\">Showing first ");
         w.write_u32(message.dashboard_list_max);
         w.raw("</div>");
@@ -403,15 +502,16 @@ fn render_collection_card(w: *HtmlWriter, c: *const message.ProductCollection) v
 }
 
 fn render_order_cards(w: *HtmlWriter, list: *const message.OrderSummaryList) void {
-    assert(list.len <= message.dashboard_list_max);
+    assert(list.len <= message.list_max);
     if (list.len == 0) {
         w.raw("<div class=\"card\">No orders</div>");
         return;
     }
-    for (list.items[0..list.len]) |*o| {
+    const display_len = @min(list.len, message.dashboard_list_max);
+    for (list.items[0..display_len]) |*o| {
         render_order_card(w, o);
     }
-    if (list.len == message.dashboard_list_max) {
+    if (list.len >= message.dashboard_list_max) {
         w.raw("<div class=\"meta\">Showing first ");
         w.write_u32(message.dashboard_list_max);
         w.raw("</div>");
@@ -436,6 +536,83 @@ fn render_order_card(w: *HtmlWriter, o: *const message.OrderSummary) void {
     w.raw("\"></div></div>");
 }
 
+// --- Detail renderers ---
+
+fn render_collection_detail(w: *HtmlWriter, cwp: *const message.CollectionWithProducts) void {
+    w.raw("<strong>");
+    w.html_escaped(cwp.collection.name_slice());
+    w.raw("</strong>");
+    const products = &cwp.products;
+    if (products.len == 0) {
+        w.raw("<div class=\"meta\">No products</div>");
+        return;
+    }
+    w.raw("<table><tr><th>Product</th><th>Price</th><th>Inv</th><th></th></tr>");
+    const display_len = @min(products.len, message.dashboard_list_max);
+    for (products.items[0..display_len]) |*p| {
+        w.raw("<tr><td>");
+        w.html_escaped(p.name_slice());
+        w.raw("</td><td>");
+        w.write_price(p.price_cents);
+        w.raw("</td><td>");
+        w.write_u32(p.inventory);
+        w.raw("</td><td><button class=\"danger\" data-on:click=\"@delete('/collections/");
+        w.write_uuid(cwp.collection.id);
+        w.raw("/products/");
+        w.write_uuid(p.id);
+        w.raw("'," ++ auth_opt ++ ")\">Remove</button></td></tr>");
+    }
+    w.raw("</table>");
+    if (products.len >= message.dashboard_list_max) {
+        w.raw("<div class=\"meta\">Showing first ");
+        w.write_u32(message.dashboard_list_max);
+        w.raw("</div>");
+    }
+}
+
+fn render_order_detail(w: *HtmlWriter, order: *const message.OrderResult) void {
+    w.raw("<strong>");
+    w.write_short_uuid(order.id);
+    w.raw("...</strong> &mdash; ");
+    w.raw(switch (order.status) {
+        .pending => "Pending",
+        .confirmed => "Confirmed",
+        .failed => "Failed",
+        .cancelled => "Cancelled",
+    });
+    w.raw(" &mdash; ");
+    w.write_price(order.total_cents);
+    if (order.items_len == 0) {
+        w.raw("<div class=\"meta\">No items</div>");
+        return;
+    }
+    w.raw("<table><tr><th>Product</th><th>Qty</th><th>Price</th><th>Line Total</th></tr>");
+    for (order.items[0..order.items_len]) |*item| {
+        w.raw("<tr><td>");
+        w.html_escaped(item.name_slice());
+        w.raw("</td><td>");
+        w.write_u32(item.quantity);
+        w.raw("</td><td>");
+        w.write_price(item.price_cents);
+        w.raw("</td><td>");
+        w.write_price(item.line_total_cents);
+        w.raw("</td></tr>");
+    }
+    w.raw("<tr><td colspan=\"3\"><strong>Total</strong></td><td><strong>");
+    w.write_price(order.total_cents);
+    w.raw("</strong></td></tr></table>");
+    if (order.status == .pending) {
+        w.raw("<div class=\"row\" style=\"margin-top:4px\">");
+        w.raw("<button data-on:click=\"@post('/orders/");
+        w.write_uuid(order.id);
+        w.raw("/complete'," ++ auth_opt ++ ")\">Complete</button> ");
+        w.raw("<button class=\"danger\" data-on:click=\"@post('/orders/");
+        w.write_uuid(order.id);
+        w.raw("/cancel'," ++ auth_opt ++ ")\">Cancel</button>");
+        w.raw("</div>");
+    }
+}
+
 // --- SSE framing ---
 
 fn encode_sse_headers(w: *HtmlWriter) void {
@@ -446,20 +623,37 @@ fn encode_sse_headers(w: *HtmlWriter) void {
         "\r\n");
 }
 
-fn encode_sse_fragment(w: *HtmlWriter, selector: []const u8, comptime ListType: type, list: *const ListType) void {
-    w.raw("event: datastar-patch-elements\n");
-    w.raw("data: selector ");
-    w.raw(selector);
-    w.raw("\ndata: mode inner\n");
+/// Build a selector like "#col-aabbccdd11223344aabbccdd11223344" on the stack.
+fn id_selector(comptime prefix: []const u8, id: u128) [prefix.len + 32]u8 {
+    var buf: [prefix.len + 32]u8 = undefined;
+    @memcpy(buf[0..prefix.len], prefix);
+    stdx.write_uuid_to_buf(buf[prefix.len..][0..32], id);
+    return buf;
+}
 
-    w.raw("data: elements ");
+/// Begin an SSE patch-elements event: writes event line, selector, mode, and
+/// "data: elements " prefix. Caller writes content, then calls sse_event_end.
+fn sse_event_begin(w: *HtmlWriter, selector: []const u8) void {
+    w.raw("event: datastar-patch-elements\n" ++
+        "data: selector ");
+    w.raw(selector);
+    w.raw("\ndata: mode inner\n" ++
+        "data: elements ");
+}
+
+fn sse_event_end(w: *HtmlWriter) void {
+    w.raw("\n\n");
+}
+
+fn encode_sse_fragment(w: *HtmlWriter, selector: []const u8, comptime ListType: type, list: *const ListType) void {
+    sse_event_begin(w, selector);
     switch (ListType) {
         message.ProductList => render_product_cards(w, list),
         message.CollectionList => render_collection_cards(w, list),
         message.OrderSummaryList => render_order_cards(w, list),
         else => unreachable,
     }
-    w.raw("\n\n");
+    sse_event_end(w);
 }
 
 // --- Error responses ---
@@ -474,14 +668,37 @@ fn encode_error_page(w: *HtmlWriter, status: message.Status) void {
     w.raw("</h1></body></html>\n");
 }
 
-fn encode_sse_error(w: *HtmlWriter, status: message.Status) void {
+fn encode_sse_error(w: *HtmlWriter, operation: message.Operation, status: message.Status) void {
     encode_sse_headers(w);
-    w.raw("event: datastar-patch-elements\n" ++
-        "data: selector #product-list\n" ++
-        "data: mode inner\n" ++
-        "data: elements <div class=\"error\">");
+    sse_event_begin(w, error_selector(operation));
+    w.raw("<div class=\"error\">");
     w.raw(status_to_string(status));
-    w.raw("</div>\n\n");
+    w.raw("</div>");
+    sse_event_end(w);
+}
+
+/// Pair assertion: the result variant must match the operation that produced it.
+/// Catches misrouted responses — e.g. a product result on a collection operation.
+fn result_matches_operation(operation: message.Operation, result: message.Result) bool {
+    return switch (operation) {
+        .page_load_dashboard => result == .page_load_dashboard,
+        .list_products => result == .product_list,
+        .list_collections => result == .collection_list,
+        .list_orders => result == .order_list,
+        .get_collection => result == .collection,
+        .get_order => result == .order,
+        else => false, // not a rendered operation
+    };
+}
+
+fn error_selector(operation: message.Operation) []const u8 {
+    return switch (operation) {
+        .list_products, .get_product, .search_products => "#product-list",
+        .list_collections, .get_collection => "#collection-list",
+        .list_orders, .get_order => "#order-list",
+        .page_load_dashboard => "#product-list",
+        else => "#product-list",
+    };
 }
 
 fn status_to_string(status: message.Status) []const u8 {
@@ -603,7 +820,7 @@ test "encode_response full page — empty dashboard" {
             .orders = .{ .items = undefined, .len = 0 },
         } },
     };
-    const len = encode_response(&send_buf, resp, false);
+    const len = encode_response(&send_buf, .page_load_dashboard, resp, false);
     assert(len > 0);
     assert(len <= send_buf.len);
     const output = send_buf[0..len];
@@ -623,7 +840,7 @@ test "encode_response SSE — empty dashboard" {
             .orders = .{ .items = undefined, .len = 0 },
         } },
     };
-    const len = encode_response(&send_buf, resp, true);
+    const len = encode_response(&send_buf, .page_load_dashboard, resp, true);
     assert(len > 0);
     const output = send_buf[0..len];
     assert(std.mem.startsWith(u8, output, "HTTP/1.1 200 OK\r\n"));
@@ -632,10 +849,10 @@ test "encode_response SSE — empty dashboard" {
     assert(std.mem.indexOf(u8, output, "#product-list") != null);
 }
 
-test "encode_response error page" {
+test "encode_response error — HTML error page" {
     var send_buf: [http.send_buf_max]u8 = undefined;
     const resp = message.MessageResponse.storage_error;
-    const len = encode_response(&send_buf, resp, false);
+    const len = encode_response(&send_buf, .page_load_dashboard, resp, false);
     assert(len > 0);
     const output = send_buf[0..len];
     assert(std.mem.startsWith(u8, output, "HTTP/1.1 503"));
@@ -662,11 +879,95 @@ test "encode_response with products" {
             .orders = .{ .items = undefined, .len = 0 },
         } },
     };
-    const len = encode_response(&send_buf, resp, false);
+    const len = encode_response(&send_buf, .page_load_dashboard, resp, false);
     assert(len > 0);
     const output = send_buf[0..len];
     assert(std.mem.indexOf(u8, output, "Widget") != null);
     assert(std.mem.indexOf(u8, output, "$9.99") != null);
+}
+
+test "encode_response SSE — product list" {
+    var send_buf: [http.send_buf_max]u8 = undefined;
+    var products = message.ProductList{ .items = undefined, .len = 1 };
+    products.items[0] = std.mem.zeroes(message.Product);
+    products.items[0].id = 0xaabbccdd11223344aabbccdd11223344;
+    products.items[0].name_len = 6;
+    products.items[0].price_cents = 999;
+    products.items[0].inventory = 10;
+    products.items[0].version = 1;
+    products.items[0].flags = .{ .active = true };
+    @memcpy(products.items[0].name[0..6], "Widget");
+
+    const resp = message.MessageResponse{
+        .status = .ok,
+        .result = .{ .product_list = products },
+    };
+    const len = encode_response(&send_buf, .list_products, resp, true);
+    assert(len > 0);
+    const output = send_buf[0..len];
+    assert(std.mem.indexOf(u8, output, "text/event-stream") != null);
+    assert(std.mem.indexOf(u8, output, "#product-list") != null);
+    assert(std.mem.indexOf(u8, output, "Widget") != null);
+}
+
+test "encode_response SSE — collection detail" {
+    var send_buf: [http.send_buf_max]u8 = undefined;
+    var col = std.mem.zeroes(message.ProductCollection);
+    col.id = 0xcc000000000000000000000000000001;
+    col.name_len = 4;
+    @memcpy(col.name[0..4], "Sale");
+
+    const resp = message.MessageResponse{
+        .status = .ok,
+        .result = .{ .collection = .{
+            .collection = col,
+            .products = .{ .items = undefined, .len = 0 },
+        } },
+    };
+    const len = encode_response(&send_buf, .get_collection, resp, true);
+    assert(len > 0);
+    const output = send_buf[0..len];
+    assert(std.mem.indexOf(u8, output, "#col-cc000000000000000000000000000001") != null);
+    assert(std.mem.indexOf(u8, output, "Sale") != null);
+}
+
+test "encode_response SSE — order detail" {
+    var send_buf: [http.send_buf_max]u8 = undefined;
+    var order = std.mem.zeroes(message.OrderResult);
+    order.id = 0xee000000000000000000000000000001;
+    order.total_cents = 1998;
+    order.status = .pending;
+    order.items_len = 1;
+    order.items[0] = std.mem.zeroes(message.OrderResultItem);
+    order.items[0].name_len = 6;
+    order.items[0].quantity = 2;
+    order.items[0].price_cents = 999;
+    order.items[0].line_total_cents = 1998;
+    @memcpy(order.items[0].name[0..6], "Widget");
+
+    const resp = message.MessageResponse{
+        .status = .ok,
+        .result = .{ .order = order },
+    };
+    const len = encode_response(&send_buf, .get_order, resp, true);
+    assert(len > 0);
+    const output = send_buf[0..len];
+    assert(std.mem.indexOf(u8, output, "#od-ee000000000000000000000000000001") != null);
+    assert(std.mem.indexOf(u8, output, "Widget") != null);
+    assert(std.mem.indexOf(u8, output, "Complete") != null);
+    assert(std.mem.indexOf(u8, output, "Cancel") != null);
+}
+
+test "encode_response SSE error — targets correct selector" {
+    var send_buf: [http.send_buf_max]u8 = undefined;
+    const resp = message.MessageResponse.not_found;
+
+    // list_orders error should target #order-list
+    const len = encode_response(&send_buf, .list_orders, resp, true);
+    assert(len > 0);
+    const output = send_buf[0..len];
+    assert(std.mem.indexOf(u8, output, "#order-list") != null);
+    assert(std.mem.indexOf(u8, output, "Not Found") != null);
 }
 
 test "html_escaped handles special chars" {
