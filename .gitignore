@@ -1,7 +1,1 @@
-.claude/
-.zig-cache/
-zig-out/
-zig/
-*.db
-*.db-wal
-*.db-shm
+.penits
