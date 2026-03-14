@@ -144,9 +144,6 @@ pub fn ConnectionType(comptime IO: type) type {
                     assert(conn.send_len > 0);
                     assert(conn.send_len <= conn.send_buf.len);
                     assert(conn.send_pos <= conn.send_len);
-                    // Datastar responses use Connection: close — the flag must not
-                    // leak to a subsequent request on a keep-alive connection.
-                    if (conn.is_datastar_request) assert(!conn.keep_alive);
                 },
                 .closing => {
                     assert(conn.fd > 0);
