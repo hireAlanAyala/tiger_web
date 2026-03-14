@@ -60,9 +60,9 @@ func (h *Hub) Len() int {
 	return len(h.clients)
 }
 
-// PatchSignalsFrame builds a Datastar patch-signals SSE event.
-func PatchSignalsFrame(key string, json []byte) []byte {
-	return fmt.Appendf(nil, "event: datastar-patch-signals\ndata: signals {\"%s\":%s}\n\n", key, json)
+// MergeSignalsFrame builds a Datastar mergeSignals SSE event.
+func MergeSignalsFrame(key string, json []byte) []byte {
+	return fmt.Appendf(nil, "event: datastar-merge-signals\ndata: signals {\"%s\":%s}\n\n", key, json)
 }
 
 // HandleSSE serves a long-lived SSE connection to a browser.
@@ -123,16 +123,13 @@ func HandleSSE(hub *Hub, tigerAddr string) http.HandlerFunc {
 }
 
 // HandleProxy forwards requests to tiger_web and relays the response.
-// When the Datastar-Request header is present, the JSON response is wrapped
-// in an SSE datastar-patch-signals event so Datastar actions (@get, @post, etc.)
-// can consume it directly.
 func HandleProxy(tigerAddr string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		// CORS preflight.
 		if r.Method == http.MethodOptions {
 			w.Header().Set("Access-Control-Allow-Origin", "*")
 			w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
-			w.Header().Set("Access-Control-Allow-Headers", "Authorization, Content-Type, Datastar-Request")
+			w.Header().Set("Access-Control-Allow-Headers", "Authorization, Content-Type")
 			w.WriteHeader(http.StatusNoContent)
 			return
 		}
@@ -146,25 +143,16 @@ func HandleProxy(tigerAddr string) http.HandlerFunc {
 		}
 
 		var reqBody io.Reader
-		// Datastar sends signals as a body on every request, but tiger_web
-		// rejects GET/DELETE with a body. Strip it for those methods.
-		if len(body) > 0 && r.Method != http.MethodGet && r.Method != http.MethodDelete {
+		if len(body) > 0 {
 			reqBody = bytes.NewReader(body)
 		}
 
 		status, respBody := httpDoFull(r.Method, tigerAddr+r.URL.RequestURI(), token, r.Header.Get("Content-Type"), reqBody)
 
 		w.Header().Set("Access-Control-Allow-Origin", "*")
-
-		if r.Header.Get("Datastar-Request") == "true" {
-			w.Header().Set("Content-Type", "text/event-stream")
-			w.Header().Set("Cache-Control", "no-cache")
-			renderDatastarResponse(w, r.Method, r.URL.Path, tigerAddr, token, status, respBody)
-		} else {
-			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(status)
-			w.Write(respBody)
-		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(status)
+		w.Write(respBody)
 	}
 }
 
@@ -196,7 +184,7 @@ func PollOrders(ctx context.Context, hub *Hub, tigerAddr, token string, interval
 				continue
 			}
 			lastBody = bodyStr
-			hub.Broadcast(PatchElementsFrame("#order-list", "inner", renderOrderList(body)))
+			hub.Broadcast(MergeSignalsFrame("orders", body))
 			log.Printf("poller: order change detected, broadcast to %d clients", hub.Len())
 		}
 	}

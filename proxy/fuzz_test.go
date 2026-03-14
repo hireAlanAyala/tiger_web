@@ -9,9 +9,9 @@ import (
 	"testing"
 )
 
-// FuzzPatchSignalsFrame ensures PatchSignalsFrame never panics and always
+// FuzzMergeSignalsFrame ensures MergeSignalsFrame never panics and always
 // produces valid SSE framing regardless of input.
-func FuzzPatchSignalsFrame(f *testing.F) {
+func FuzzMergeSignalsFrame(f *testing.F) {
 	f.Add("orders", `[{"id":"1"}]`)
 	f.Add("", "")
 	f.Add("key with spaces", `null`)
@@ -19,10 +19,10 @@ func FuzzPatchSignalsFrame(f *testing.F) {
 	f.Add("\n\n", "data: injection\n\n")
 
 	f.Fuzz(func(t *testing.T, key string, json string) {
-		frame := PatchSignalsFrame(key, []byte(json))
+		frame := MergeSignalsFrame(key, []byte(json))
 		s := string(frame)
 
-		if !strings.HasPrefix(s, "event: datastar-patch-signals\n") {
+		if !strings.HasPrefix(s, "event: datastar-merge-signals\n") {
 			t.Errorf("missing event line: %q", s)
 		}
 		if !strings.Contains(s, "data: signals {") {

@@ -12,7 +12,7 @@ import (
 	"time"
 )
 
-func TestPatchSignalsFrame(t *testing.T) {
+func TestMergeSignalsFrame(t *testing.T) {
 	tests := []struct {
 		name string
 		key  string
@@ -23,19 +23,19 @@ func TestPatchSignalsFrame(t *testing.T) {
 			name: "orders",
 			key:  "orders",
 			json: `[{"id":"abc","status":"pending"}]`,
-			want: "event: datastar-patch-signals\ndata: signals {\"orders\":[{\"id\":\"abc\",\"status\":\"pending\"}]}\n\n",
+			want: "event: datastar-merge-signals\ndata: signals {\"orders\":[{\"id\":\"abc\",\"status\":\"pending\"}]}\n\n",
 		},
 		{
 			name: "empty array",
 			key:  "orders",
 			json: `[]`,
-			want: "event: datastar-patch-signals\ndata: signals {\"orders\":[]}\n\n",
+			want: "event: datastar-merge-signals\ndata: signals {\"orders\":[]}\n\n",
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := string(PatchSignalsFrame(tt.key, []byte(tt.json)))
+			got := string(MergeSignalsFrame(tt.key, []byte(tt.json)))
 			if got != tt.want {
 				t.Errorf("got:\n%s\nwant:\n%s", got, tt.want)
 			}
@@ -43,10 +43,10 @@ func TestPatchSignalsFrame(t *testing.T) {
 	}
 }
 
-func TestPatchSignalsFrameStructure(t *testing.T) {
-	frame := string(PatchSignalsFrame("test", []byte(`{"a":1}`)))
+func TestMergeSignalsFrameStructure(t *testing.T) {
+	frame := string(MergeSignalsFrame("test", []byte(`{"a":1}`)))
 
-	if !strings.HasPrefix(frame, "event: datastar-patch-signals\n") {
+	if !strings.HasPrefix(frame, "event: datastar-merge-signals\n") {
 		t.Error("missing event line")
 	}
 	if !strings.Contains(frame, "data: signals ") {
@@ -143,7 +143,7 @@ func TestChangeDetection(t *testing.T) {
 
 	for i := 0; i < 3; i++ {
 		if body != lastBody {
-			hub.Broadcast(PatchSignalsFrame("orders", []byte(body)))
+			hub.Broadcast(MergeSignalsFrame("orders", []byte(body)))
 			lastBody = body
 		}
 	}
@@ -156,7 +156,7 @@ func TestChangeDetection(t *testing.T) {
 	// Now change the body — should broadcast again.
 	body = `[{"id":"1","status":"confirmed"}]`
 	if body != lastBody {
-		hub.Broadcast(PatchSignalsFrame("orders", []byte(body)))
+		hub.Broadcast(MergeSignalsFrame("orders", []byte(body)))
 		lastBody = body
 	}
 
@@ -204,7 +204,7 @@ func TestHandleSSE_ValidToken(t *testing.T) {
 	waitFor(t, func() bool { return hub.Len() == 1 })
 
 	// Push an event.
-	hub.Broadcast([]byte("event: datastar-patch-signals\ndata: signals {\"test\":1}\n\n"))
+	hub.Broadcast([]byte("event: datastar-merge-signals\ndata: signals {\"test\":1}\n\n"))
 
 	// Give the handler time to write.
 	time.Sleep(20 * time.Millisecond)
@@ -212,7 +212,7 @@ func TestHandleSSE_ValidToken(t *testing.T) {
 	wg.Wait()
 
 	body := rec.Body.String()
-	if !strings.Contains(body, "datastar-patch-signals") {
+	if !strings.Contains(body, "datastar-merge-signals") {
 		t.Errorf("SSE stream missing event, got: %q", body)
 	}
 
