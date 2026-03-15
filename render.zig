@@ -855,7 +855,7 @@ fn result_matches_operation(operation: message.Operation, result: message.Result
     };
 }
 
-fn error_selector(operation: message.Operation) []const u8 {
+pub fn error_selector(operation: message.Operation) []const u8 {
     return switch (operation) {
         .create_product, .update_product, .get_product,
         .delete_product, .get_product_inventory,
@@ -1166,6 +1166,109 @@ test "encode_response SSE error — targets correct selector" {
     const output = send_buf[r.offset..][0..r.len];
     assert(std.mem.indexOf(u8, output, "#order-list") != null);
     assert(std.mem.indexOf(u8, output, "Not Found") != null);
+}
+
+test "encode_followup ok — 3 SSE fragments, no error" {
+    var send_buf: [http.send_buf_max]u8 = undefined;
+    const dashboard = message.PageLoadDashboardResult{
+        .products = .{ .items = undefined, .len = 0 },
+        .collections = .{ .items = undefined, .len = 0 },
+        .orders = .{ .items = undefined, .len = 0 },
+    };
+    const r = encode_followup(&send_buf, &dashboard, .create_product, .ok);
+    assert(r.len > 0);
+    assert(!r.keep_alive);
+    const output = send_buf[r.offset..][0..r.len];
+    assert(std.mem.startsWith(u8, output, "HTTP/1.1 200 OK\r\n"));
+    assert(std.mem.indexOf(u8, output, "text/event-stream") != null);
+    assert(count_occurrences(output, "event: datastar-patch-elements") == 3);
+    assert(std.mem.indexOf(u8, output, "<div class=\"error\">") == null);
+    assert(std.mem.indexOf(u8, output, "Content-Length") == null);
+}
+
+test "encode_followup error — 4 SSE fragments with error targeting correct panel" {
+    var send_buf: [http.send_buf_max]u8 = undefined;
+    const dashboard = message.PageLoadDashboardResult{
+        .products = .{ .items = undefined, .len = 0 },
+        .collections = .{ .items = undefined, .len = 0 },
+        .orders = .{ .items = undefined, .len = 0 },
+    };
+    // Product mutation error → targets #product-list.
+    const r1 = encode_followup(&send_buf, &dashboard, .create_product, .not_found);
+    assert(r1.len > 0);
+    assert(!r1.keep_alive);
+    const out1 = send_buf[r1.offset..][0..r1.len];
+    assert(count_occurrences(out1, "event: datastar-patch-elements") == 4);
+    assert(std.mem.indexOf(u8, out1, "<div class=\"error\">Not Found</div>") != null);
+    assert(std.mem.indexOf(u8, out1, "#product-list") != null);
+
+    // Order mutation error → targets #order-list.
+    const r2 = encode_followup(&send_buf, &dashboard, .create_order, .order_expired);
+    const out2 = send_buf[r2.offset..][0..r2.len];
+    assert(count_occurrences(out2, "event: datastar-patch-elements") == 4);
+    assert(std.mem.indexOf(u8, out2, "Order Expired") != null);
+    assert(std.mem.indexOf(u8, out2, "#order-list") != null);
+
+    // Collection mutation error → targets #collection-list.
+    const r3 = encode_followup(&send_buf, &dashboard, .delete_collection, .storage_error);
+    const out3 = send_buf[r3.offset..][0..r3.len];
+    assert(count_occurrences(out3, "event: datastar-patch-elements") == 4);
+    assert(std.mem.indexOf(u8, out3, "#collection-list") != null);
+}
+
+test "Content-Length matches body length — full page" {
+    var send_buf: [http.send_buf_max]u8 = undefined;
+    const resp = message.MessageResponse{
+        .status = .ok,
+        .result = .{ .page_load_dashboard = .{
+            .products = .{ .items = undefined, .len = 0 },
+            .collections = .{ .items = undefined, .len = 0 },
+            .orders = .{ .items = undefined, .len = 0 },
+        } },
+    };
+    const r = encode_response(&send_buf, .page_load_dashboard, resp, false);
+    const output = send_buf[r.offset..][0..r.len];
+    assert_content_length_matches(output);
+}
+
+test "Content-Length matches body length — error dashboard" {
+    var send_buf: [http.send_buf_max]u8 = undefined;
+    const r = encode_response(&send_buf, .page_load_dashboard, message.MessageResponse.storage_error, false);
+    const output = send_buf[r.offset..][0..r.len];
+    assert_content_length_matches(output);
+}
+
+test "Content-Length matches body length — non-SSE product" {
+    var send_buf: [http.send_buf_max]u8 = undefined;
+    var p = std.mem.zeroes(message.Product);
+    p.id = 1;
+    p.name_len = 4;
+    @memcpy(p.name[0..4], "Test");
+    p.flags = .{ .active = true };
+    p.version = 1;
+    const r = encode_response(&send_buf, .get_product, .{ .status = .ok, .result = .{ .product = p } }, false);
+    const output = send_buf[r.offset..][0..r.len];
+    assert_content_length_matches(output);
+}
+
+fn assert_content_length_matches(output: []const u8) void {
+    const header_end = std.mem.indexOf(u8, output, "\r\n\r\n") orelse unreachable;
+    const body = output[header_end + 4 ..];
+    const headers = output[0..header_end];
+    const cl_start = (std.mem.indexOf(u8, headers, "Content-Length: ") orelse unreachable) + "Content-Length: ".len;
+    const cl_end = std.mem.indexOfPos(u8, headers, cl_start, "\r\n") orelse unreachable;
+    const cl_val = std.fmt.parseInt(usize, headers[cl_start..cl_end], 10) catch unreachable;
+    assert(cl_val == body.len);
+}
+
+fn count_occurrences(haystack: []const u8, needle: []const u8) usize {
+    var count: usize = 0;
+    var pos: usize = 0;
+    while (std.mem.indexOfPos(u8, haystack, pos, needle)) |idx| {
+        count += 1;
+        pos = idx + needle.len;
+    }
+    return count;
 }
 
 test "html_escaped handles special chars" {

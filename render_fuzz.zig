@@ -78,8 +78,9 @@ pub fn main(allocator: std.mem.Allocator, args: FuzzArgs) !void {
             assert(std.mem.indexOf(u8, output, "event: datastar-patch-elements") != null);
             assert_sse_framing(output);
 
-            // Error follow-ups include the status string in the output.
+            // Error follow-ups include the status string targeting the correct panel.
             if (followup_status != .ok) {
+                assert(std.mem.indexOf(u8, output, render.error_selector(gen.operation)) != null);
                 error_count += 1;
             }
             followup_count += 1;
