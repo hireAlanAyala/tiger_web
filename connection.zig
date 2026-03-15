@@ -88,7 +88,7 @@ pub fn ConnectionType(comptime IO: type) type {
                 .is_datastar_request = false,
                 .pending_followup = false,
                 .followup_status = .ok,
-                .followup_operation = undefined,
+                .followup_operation = .page_load_dashboard,
             };
         }
 
@@ -146,6 +146,7 @@ pub fn ConnectionType(comptime IO: type) type {
                 .receiving => {
                     assert(conn.fd > 0);
                     assert(conn.recv_pos <= conn.recv_buf.len);
+                    assert(!conn.pending_followup);
                 },
                 .ready => {
                     assert(conn.fd > 0);
@@ -291,6 +292,7 @@ pub fn ConnectionType(comptime IO: type) type {
                 conn.recv_pos = @intCast(remaining);
                 assert(conn.recv_pos <= conn.recv_buf.len);
                 conn.request_consumed = 0;
+                conn.is_datastar_request = false;
                 conn.state = .receiving;
 
                 // Try to parse pipelined data immediately. If a complete
