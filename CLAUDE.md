@@ -44,9 +44,9 @@ http.zig → codec.zig → message.zig → state_machine.zig → storage
 | `main.zig` | Entry point, tick loop, runtime log level filtering, CLI parsing |
 | `server.zig` | `ServerType(IO, Storage)` — accepts connections, drives prefetch→execute |
 | `connection.zig` | Per-connection state machine (accepting → receiving → ready → sending) |
-| `http.zig` | HTTP/1.0+1.1 request parser, status lines, 401 response |
+| `http.zig` | HTTP/1.0+1.1 request parser (pure parser, no response encoding — see design/002-always-200.md) |
 | `codec.zig` | Route parsing, JSON request → typed struct translation, UUID parsing |
-| `render.zig` | HTML + SSE response renderer — body-first with Content-Length backfill (keep-alive), SSE from offset 0 (Connection: close) |
+| `render.zig` | HTML + SSE response renderer — always 200, body-first with Content-Length backfill (keep-alive), SSE from offset 0 (Connection: close), auth failure renders login page |
 | `message.zig` | Types: Product, ProductCollection, flat Operation enum with EventType, Message, MessageResponse |
 | `state_machine.zig` | `StateMachineType(Storage)` — inline dispatch in execute, flat switch in prefetch, `MemoryStorage` |
 | `storage.zig` | `SqliteStorage` — SQLite backend with prepared statements, WAL mode |
@@ -205,9 +205,12 @@ Use `log.mark.*` for **testable decision boundaries** — code paths the sim fuz
 | `connection.zig` | `recv_callback` peer closed | `"recv: peer closed"` |
 | `connection.zig` | `send_callback` error | `"send: error"` |
 | `connection.zig` | `try_parse_request` invalid HTTP | `"invalid HTTP"` |
-| `connection.zig` | `try_parse_request` unmapped request | `"unmapped request"` |
+| `server.zig` | `process_inbox` unmapped request | `"unmapped request"` |
 | `server.zig` | `accept_callback` failed | `"accept failed"` |
 | `server.zig` | `timeout_idle` timed out | `"connection timed out"` |
+| `server.zig` | `process_inbox` SSE mutation deferred | `"SSE mutation: deferring to follow-up"` |
+| `server.zig` | `process_inbox` auth missing token | `"auth: missing token"` |
+| `server.zig` | `process_inbox` auth invalid token | `"auth: invalid token"` |
 | `state_machine.zig` | `MemoryStorage.fault` busy injected | `"storage: busy fault injected"` |
 | `state_machine.zig` | `MemoryStorage.fault` err injected | `"storage: err fault injected"` |
 
