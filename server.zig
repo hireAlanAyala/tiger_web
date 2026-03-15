@@ -193,14 +193,14 @@ pub fn ServerType(comptime IO: type, comptime Storage: type) type {
                 if (msg.operation != .page_load_dashboard) {
                     const token = parsed.authorization orelse {
                         log.mark.warn("auth: missing token fd={d}", .{conn.fd});
-                        const r = render.encode_unauthorized(&conn.send_buf, conn.is_datastar_request);
+                        const r = render.encode_response(&conn.send_buf, .page_load_dashboard, .{ .status = .unauthorized, .result = .{ .empty = {} } }, conn.is_datastar_request);
                         conn.set_response(r.offset, r.len);
                         conn.keep_alive = r.keep_alive;
                         continue;
                     };
                     if (server.token_cache.verify_cached(token, server.time.realtime(), server.secret_key) == null) {
                         log.mark.warn("auth: invalid token fd={d}", .{conn.fd});
-                        const r = render.encode_unauthorized(&conn.send_buf, conn.is_datastar_request);
+                        const r = render.encode_response(&conn.send_buf, .page_load_dashboard, .{ .status = .unauthorized, .result = .{ .empty = {} } }, conn.is_datastar_request);
                         conn.set_response(r.offset, r.len);
                         conn.keep_alive = r.keep_alive;
                         continue;

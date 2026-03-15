@@ -33,10 +33,10 @@ pub fn main(allocator: std.mem.Allocator, args: FuzzArgs) !void {
 
         var send_buf: [http.send_buf_max]u8 = undefined;
 
-        // ~5% of events exercise the auth failure path.
+        // ~5% of events exercise the auth failure path (through encode_response).
         if (prng.chance(PRNG.ratio(1, 20))) {
             const is_datastar = prng.boolean();
-            const resp = render.encode_unauthorized(&send_buf, is_datastar);
+            const resp = render.encode_response(&send_buf, .page_load_dashboard, .{ .status = .unauthorized, .result = .{ .empty = {} } }, is_datastar);
             assert(resp.len > 0);
             assert(resp.offset + resp.len <= send_buf.len);
             const output = send_buf[resp.offset..][0..resp.len];

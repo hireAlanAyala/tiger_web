@@ -11,7 +11,7 @@ pub fn maybe(ok: bool) void {
 
 /// Response status — named results, not generic error buckets.
 /// Each business logic failure gets its own variant (TigerBeetle style).
-/// codec.zig maps these to HTTP status codes + JSON error strings.
+/// render.zig maps these to HTML error strings.
 pub const Status = enum(u8) {
     ok = 1,
     not_found = 2,
@@ -22,6 +22,9 @@ pub const Status = enum(u8) {
     version_conflict = 11,
     order_expired = 12,
     order_not_pending = 13,
+
+    // Auth — short-circuits before the state machine.
+    unauthorized = 14,
 };
 
 /// Flat operation enum — encodes entity type AND action in a single tag,

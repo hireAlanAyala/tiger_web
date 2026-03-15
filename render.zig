@@ -236,26 +236,6 @@ pub fn encode_followup(
     return .{ .offset = 0, .len = @intCast(w.pos), .keep_alive = false };
 }
 
-/// Auth failure: render the dashboard page (which has the token input) for
-/// non-SSE, or an SSE error fragment for Datastar. Always 200 — the HTML
-/// tells the human what happened, not the status code.
-pub fn encode_unauthorized(send_buf: []u8, is_datastar_request: bool) Response {
-    assert(send_buf.len >= http.send_buf_max);
-
-    if (is_datastar_request) {
-        var w = HtmlWriter{ .buf = send_buf, .pos = 0 };
-        encode_sse_headers(&w);
-        sse_event_begin(&w, "#product-list");
-        w.raw("<div class=\"error\">Unauthorized</div>");
-        sse_event_end(&w);
-        assert(w.pos > 0);
-        return .{ .offset = 0, .len = @intCast(w.pos), .keep_alive = false };
-    }
-
-    // Non-SSE: render the full dashboard page with empty lists.
-    // The page includes the token input — the user lands here and logs in.
-    return encode_dashboard_page(send_buf);
-}
 
 /// SSE path: headers + body written sequentially. Connection: close.
 fn encode_sse_response(send_buf: []u8, operation: message.Operation, resp: message.MessageResponse) Response {
@@ -902,6 +882,7 @@ fn status_to_string(status: message.Status) []const u8 {
         .version_conflict => "Version Conflict",
         .order_expired => "Order Expired",
         .order_not_pending => "Order Not Pending",
+        .unauthorized => "Unauthorized",
     };
 }
 
@@ -1053,9 +1034,9 @@ test "encode_response error — renders dashboard page for recovery" {
     assert(r.keep_alive);
 }
 
-test "encode_unauthorized — full page with token input" {
+test "unauthorized — full page with token input" {
     var send_buf: [http.send_buf_max]u8 = undefined;
-    const r = encode_unauthorized(&send_buf, false);
+    const r = encode_response(&send_buf, .page_load_dashboard, .{ .status = .unauthorized, .result = .{ .empty = {} } }, false);
     assert(r.len > 0);
     const output = send_buf[r.offset..][0..r.len];
     assert(std.mem.startsWith(u8, output, "HTTP/1.1 200 OK\r\n"));
@@ -1065,9 +1046,9 @@ test "encode_unauthorized — full page with token input" {
     assert(std.mem.indexOf(u8, output, "Content-Length:") != null);
 }
 
-test "encode_unauthorized — SSE error fragment" {
+test "unauthorized — SSE error fragment" {
     var send_buf: [http.send_buf_max]u8 = undefined;
-    const r = encode_unauthorized(&send_buf, true);
+    const r = encode_response(&send_buf, .page_load_dashboard, .{ .status = .unauthorized, .result = .{ .empty = {} } }, true);
     assert(r.len > 0);
     const output = send_buf[r.offset..][0..r.len];
     assert(std.mem.startsWith(u8, output, "HTTP/1.1 200 OK\r\n"));

@@ -540,7 +540,8 @@ now: i64           (wall clock seconds)</code>
 </div>
 <div class="section">
   <span class="label">Reject path (always 200)</span>
-  <code>render.encode_unauthorized(send_buf, is_datastar):
+  <code>status: .unauthorized (message.Status)
+render.encode_response(page_load_dashboard, resp):
   non-SSE -> 200 + full dashboard page (token input)
   SSE     -> 200 + SSE error "Unauthorized"
 (short-circuits, never reaches codec)</code>
@@ -719,10 +720,9 @@ list(params) -> ProductList | StorageResult</code>
     title: 'Render — Response Encoding',
     file: 'render.zig',
     body: `<div class="section">
-  <span class="label">Three entry points</span>
+  <span class="label">Two entry points</span>
   <code>encode_response(send_buf, op, resp, is_datastar)
-encode_followup(send_buf, dashboard, op, status)
-encode_unauthorized(send_buf, is_datastar)</code>
+encode_followup(send_buf, dashboard, op, status)</code>
 </div>
 <div class="section">
   <span class="label">Non-SSE (full HTML page)</span>

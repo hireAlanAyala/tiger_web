@@ -283,6 +283,7 @@ pub fn StateMachineType(comptime Storage: type) type {
                 .version_conflict => .requests_version_conflict,
                 .order_expired => .requests_order_expired,
                 .order_not_pending => .requests_order_not_pending,
+                .unauthorized => unreachable, // auth gate short-circuits before state machine
             }, 1);
 
             return resp;
