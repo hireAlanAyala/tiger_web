@@ -146,50 +146,36 @@ pub const SimIO = struct {
 
     /// Inject an HTTP POST request with a body.
     pub fn inject_post(self: *SimIO, client_index: usize, path: []const u8, body: []const u8) void {
-        var buf: [http.recv_buf_max]u8 = undefined;
-        var pos: usize = 0;
+        self.inject_with_body(client_index, "POST ", path, body, "");
+    }
 
-        const line1 = "POST ";
-        @memcpy(buf[pos..][0..line1.len], line1);
-        pos += line1.len;
-        @memcpy(buf[pos..][0..path.len], path);
-        pos += path.len;
-        const line2 = " HTTP/1.1\r\n";
-        @memcpy(buf[pos..][0..line2.len], line2);
-        pos += line2.len;
-        pos += write_auth_header(buf[pos..]);
-        const cl_hdr = "Content-Length: ";
-        @memcpy(buf[pos..][0..cl_hdr.len], cl_hdr);
-        pos += cl_hdr.len;
-
-        var cl_buf: [10]u8 = undefined;
-        const cl_str = format_u32(&cl_buf, @intCast(body.len));
-        @memcpy(buf[pos..][0..cl_str.len], cl_str);
-        pos += cl_str.len;
-
-        const end = "\r\n\r\n";
-        @memcpy(buf[pos..][0..end.len], end);
-        pos += end.len;
-        @memcpy(buf[pos..][0..body.len], body);
-        pos += body.len;
-
-        self.inject_bytes(client_index, buf[0..pos]);
+    pub fn inject_post_datastar(self: *SimIO, client_index: usize, path: []const u8, body: []const u8) void {
+        self.inject_with_body(client_index, "POST ", path, body, "Datastar-Request: true\r\n");
     }
 
     /// Inject an HTTP PUT request to a path with a body.
     pub fn inject_put(self: *SimIO, client_index: usize, path: []const u8, body: []const u8) void {
+        self.inject_with_body(client_index, "PUT ", path, body, "");
+    }
+
+    pub fn inject_put_datastar(self: *SimIO, client_index: usize, path: []const u8, body: []const u8) void {
+        self.inject_with_body(client_index, "PUT ", path, body, "Datastar-Request: true\r\n");
+    }
+
+    fn inject_with_body(self: *SimIO, client_index: usize, method: []const u8, path: []const u8, body: []const u8, extra_headers: []const u8) void {
         var buf: [http.recv_buf_max]u8 = undefined;
         var pos: usize = 0;
 
-        const line1 = "PUT ";
-        @memcpy(buf[pos..][0..line1.len], line1);
-        pos += line1.len;
+        @memcpy(buf[pos..][0..method.len], method);
+        pos += method.len;
         @memcpy(buf[pos..][0..path.len], path);
         pos += path.len;
         const line2 = " HTTP/1.1\r\n";
         @memcpy(buf[pos..][0..line2.len], line2);
         pos += line2.len;
         pos += write_auth_header(buf[pos..]);
+        @memcpy(buf[pos..][0..extra_headers.len], extra_headers);
+        pos += extra_headers.len;
         const cl_hdr = "Content-Length: ";
         @memcpy(buf[pos..][0..cl_hdr.len], cl_hdr);
         pos += cl_hdr.len;
@@ -241,6 +227,14 @@ pub const SimIO = struct {
 
     /// Inject an HTTP DELETE to a path.
     pub fn inject_delete(self: *SimIO, client_index: usize, path: []const u8) void {
+        self.inject_delete_with_headers(client_index, path, "");
+    }
+
+    pub fn inject_delete_datastar(self: *SimIO, client_index: usize, path: []const u8) void {
+        self.inject_delete_with_headers(client_index, path, "Datastar-Request: true\r\n");
+    }
+
+    fn inject_delete_with_headers(self: *SimIO, client_index: usize, path: []const u8, extra_headers: []const u8) void {
         var buf: [http.recv_buf_max]u8 = undefined;
         var pos: usize = 0;
 
@@ -253,6 +247,8 @@ pub const SimIO = struct {
         @memcpy(buf[pos..][0..line2.len], line2);
         pos += line2.len;
         pos += write_auth_header(buf[pos..]);
+        @memcpy(buf[pos..][0..extra_headers.len], extra_headers);
+        pos += extra_headers.len;
         const end = "\r\n";
         @memcpy(buf[pos..][0..end.len], end);
         pos += end.len;
@@ -264,6 +260,18 @@ pub const SimIO = struct {
     pub const HttpResponse = struct {
         status_code: u16,
         body: []const u8,
+
+        /// Whether this SSE response contains an error fragment.
+        /// Follow-ups always return HTTP 200; the error is in the body.
+        pub fn sse_has_error(self: HttpResponse) bool {
+            return std.mem.indexOf(u8, self.body, "<div class=\"error\">") != null;
+        }
+
+        /// Whether the operation succeeded — works for both HTTP and SSE.
+        /// HTTP: status 200. SSE follow-up: status 200 and no error fragment.
+        pub fn is_ok(self: HttpResponse) bool {
+            return self.status_code == 200 and !self.sse_has_error();
+        }
     };
 
     /// Read the HTTP response received by a simulated client.
@@ -917,6 +925,29 @@ test "mark: unknown route triggers unmapped request" {
     try mark.expect_hit();
 }
 
+test "auth failure — 200 with login page, not 401" {
+    var sim_io = SimIO.init(0xa010);
+    var storage = try MemoryStorage.init(std.testing.allocator);
+    defer storage.deinit(std.testing.allocator);
+    var sm = StateMachine.init(&storage, false);
+    var time_sim = TimeSim{};
+    var server = try Server.init(std.testing.allocator, &sim_io, &sm, 1, time_sim.time(), test_key);
+    defer server.deinit(std.testing.allocator);
+
+    sim_io.connect_client(0);
+    run_ticks(&server, &sim_io, 10);
+
+    // Request without auth token — should get 200 + full page with token input.
+    const mark = marks.check("auth: missing token");
+    sim_io.inject_bytes(0, "GET /products HTTP/1.1\r\n\r\n");
+    const resp = run_until_response(&server, &sim_io, 0, 300) orelse
+        return error.TestUnexpectedResult;
+    try mark.expect_hit();
+    try std.testing.expectEqual(resp.status_code, 200);
+    try std.testing.expect(body_contains(resp.body, "<!DOCTYPE html>"));
+    try std.testing.expect(body_contains(resp.body, "data-bind:token"));
+}
+
 test "mark: accept failure logs warning" {
     var sim_io = SimIO.init(0xa007);
     var storage = try MemoryStorage.init(std.testing.allocator);
@@ -932,6 +963,39 @@ test "mark: accept failure logs warning" {
     const mark = marks.check("accept failed");
     run_ticks(&server, &sim_io, 10);
     try mark.expect_hit();
+}
+
+test "mark: SSE mutation triggers follow-up" {
+    var sim_io = SimIO.init(0xf001);
+    var storage = try MemoryStorage.init(std.testing.allocator);
+    defer storage.deinit(std.testing.allocator);
+    var sm = StateMachine.init(&storage, false);
+    var time_sim = TimeSim{};
+    var server = try Server.init(std.testing.allocator, &sim_io, &sm, 1, time_sim.time(), test_key);
+    defer server.deinit(std.testing.allocator);
+
+    sim_io.connect_client(0);
+    run_ticks(&server, &sim_io, 10);
+
+    // Create a product via plain HTTP first.
+    sim_io.inject_post(0, "/products",
+        "{\"id\":\"" ++ test_uuid1 ++ "\",\"name\":\"Widget\",\"price_cents\":100}",
+    );
+    _ = run_until_response(&server, &sim_io, 0, 300) orelse
+        return error.TestUnexpectedResult;
+    clear_and_reconnect(&sim_io, &server, 0);
+
+    // Delete via Datastar — should trigger follow-up path.
+    const mark = marks.check("SSE mutation: deferring to follow-up");
+    sim_io.inject_delete_datastar(0, "/products/" ++ test_uuid1);
+    const resp = run_until_close_response(&server, &sim_io, 0, 500) orelse
+        return error.TestUnexpectedResult;
+    try mark.expect_hit();
+
+    // Follow-up response is SSE with dashboard fragments.
+    try std.testing.expectEqual(resp.status_code, 200);
+    try std.testing.expect(std.mem.indexOf(u8, resp.body, "event: datastar-patch-elements") != null);
+    clear_and_reconnect(&sim_io, &server, 0);
 }
 
 // =====================================================================
@@ -979,7 +1043,7 @@ test "storage busy fault — prefetch retries next tick then succeeds" {
     try std.testing.expect(body_contains(resp.body, "Widget"));
 }
 
-test "storage err fault — returns 503" {
+test "storage err fault — renders dashboard page" {
     var sim_io = SimIO.init(0xc002);
     var storage = try MemoryStorage.init(std.testing.allocator);
     defer storage.deinit(std.testing.allocator);
@@ -1000,8 +1064,9 @@ test "storage err fault — returns 503" {
     const resp = run_until_response(&server, &sim_io, 0, 500) orelse
         return error.TestUnexpectedResult;
     try mark.expect_hit();
-    try std.testing.expectEqual(resp.status_code, 503);
-    try std.testing.expect(body_contains(resp.body, "Service Unavailable"));
+    try std.testing.expectEqual(resp.status_code, 200);
+    try std.testing.expect(body_contains(resp.body, "<!DOCTYPE html>"));
+    try std.testing.expect(body_contains(resp.body, "data-bind:token"));
 }
 
 test "concurrent connections — busy client deferred, ready client served" {
@@ -1223,12 +1288,13 @@ test "two-phase order — completion after timeout expires" {
     // Advance time past the order timeout.
     time_sim.advance(message.order_timeout_seconds + 1);
 
-    // Worker tries to complete — should get 410 (order_expired).
-    sim_io.inject_post(1, "/orders/" ++ test_order_uuid ++ "/complete",
+    // Worker tries to complete — order_expired error in the SSE fragment.
+    sim_io.inject_post_datastar(1, "/orders/" ++ test_order_uuid ++ "/complete",
         "{\"result\":\"confirmed\"}",
     );
-    const resp = run_until_response(&server, &sim_io, 1, 500) orelse return error.TestUnexpectedResult;
-    try std.testing.expectEqual(resp.status_code, 410);
+    const resp = run_until_close_response(&server, &sim_io, 1, 500) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(resp.status_code, 200);
+    try std.testing.expect(body_contains(resp.body, "Order Expired"));
     sim_io.clear_response(1);
 
     // Inventory restored because the order expired.
@@ -1368,12 +1434,13 @@ test "cancel order — client cancels, worker completion rejected" {
     try std.testing.expect(body_contains(cancel_resp.body, "Cancelled"));
     clear_and_reconnect(&sim_io, &server, 0);
 
-    // Worker tries to complete — rejected.
-    sim_io.inject_post(1, "/orders/" ++ test_order_uuid ++ "/complete",
+    // Worker tries to complete — rejected (order not pending, error in SSE fragment).
+    sim_io.inject_post_datastar(1, "/orders/" ++ test_order_uuid ++ "/complete",
         "{\"result\":\"confirmed\"}",
     );
-    const complete_resp = run_until_response(&server, &sim_io, 1, 500) orelse return error.TestUnexpectedResult;
-    try std.testing.expectEqual(complete_resp.status_code, 409);
+    const complete_resp = run_until_close_response(&server, &sim_io, 1, 500) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(complete_resp.status_code, 200);
+    try std.testing.expect(body_contains(complete_resp.body, "Order Not Pending"));
     sim_io.clear_response(1);
 
     // Inventory fully restored.
@@ -1414,10 +1481,11 @@ test "cancel order — cancel already confirmed is rejected" {
     _ = run_until_response(&server, &sim_io, 1, 500) orelse return error.TestUnexpectedResult;
     sim_io.clear_response(1);
 
-    // Client tries to cancel — too late.
-    sim_io.inject_post(0, "/orders/" ++ test_order_uuid ++ "/cancel", "");
-    const cancel_resp = run_until_response(&server, &sim_io, 0, 500) orelse return error.TestUnexpectedResult;
-    try std.testing.expectEqual(cancel_resp.status_code, 409);
+    // Client tries to cancel — too late (order not pending, error in SSE fragment).
+    sim_io.inject_post_datastar(0, "/orders/" ++ test_order_uuid ++ "/cancel", "");
+    const cancel_resp = run_until_close_response(&server, &sim_io, 0, 500) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(cancel_resp.status_code, 200);
+    try std.testing.expect(body_contains(cancel_resp.body, "Order Not Pending"));
     clear_and_reconnect(&sim_io, &server, 0);
 
     // Inventory stays at confirmed level.
@@ -1554,10 +1622,15 @@ const Fuzzer = struct {
         const client = self.pick_connected(prng);
         const id: u128 = prng.int(u128) | 1;
         const body = self.gen_product_body(prng, id);
-        io.inject_post(client, "/products", body);
-        const resp = run_until_response(server, io, client, 300);
+        const resp = if (prng.boolean()) blk: {
+            io.inject_post_datastar(client, "/products", body);
+            break :blk run_until_close_response(server, io, client, 500);
+        } else blk: {
+            io.inject_post(client, "/products", body);
+            break :blk run_until_response(server, io, client, 300);
+        };
         if (resp) |r| {
-            if (r.status_code == 200 and self.product_count < id_pool_max) {
+            if (r.is_ok() and self.product_count < id_pool_max) {
                 self.product_ids[self.product_count] = id;
                 self.product_count += 1;
             }
@@ -1613,8 +1686,13 @@ const Fuzzer = struct {
         const id = self.pick_known_product(prng);
         const body = self.gen_product_body(prng, id);
         const path = path_with_id(&self.path_buf, "/products/", id);
-        io.inject_put(client, path, body);
-        _ = run_until_response(server, io, client, 300);
+        if (prng.boolean()) {
+            io.inject_put_datastar(client, path, body);
+            _ = run_until_close_response(server, io, client, 500);
+        } else {
+            io.inject_put(client, path, body);
+            _ = run_until_response(server, io, client, 300);
+        }
         clear_and_reconnect(io, server, client);
     }
 
@@ -1625,10 +1703,15 @@ const Fuzzer = struct {
         const idx = prng.int_inclusive(u32, self.product_count - 1);
         const id = self.product_ids[idx];
         const path = path_with_id(&self.path_buf, "/products/", id);
-        io.inject_delete(client, path);
-        const resp = run_until_response(server, io, client, 300);
+        const resp = if (prng.boolean()) blk: {
+            io.inject_delete_datastar(client, path);
+            break :blk run_until_close_response(server, io, client, 500);
+        } else blk: {
+            io.inject_delete(client, path);
+            break :blk run_until_response(server, io, client, 300);
+        };
         if (resp) |r| {
-            if (r.status_code == 200) {
+            if (r.is_ok()) {
                 // Remove from pool by swapping with last.
                 self.product_count -= 1;
                 self.product_ids[idx] = self.product_ids[self.product_count];
@@ -1661,8 +1744,13 @@ const Fuzzer = struct {
         const path = path_with_two_ids(&self.path_buf, "/products/", src_id, "/transfer-inventory/", dst_id);
         const qty = prng.range_inclusive(u32, 1, 50);
         const body = self.gen_transfer_body(qty);
-        io.inject_post(client, path, body);
-        _ = run_until_response(server, io, client, 300);
+        if (prng.boolean()) {
+            io.inject_post_datastar(client, path, body);
+            _ = run_until_close_response(server, io, client, 500);
+        } else {
+            io.inject_post(client, path, body);
+            _ = run_until_response(server, io, client, 300);
+        }
         clear_and_reconnect(io, server, client);
     }
 
@@ -1673,10 +1761,15 @@ const Fuzzer = struct {
         const client = self.pick_connected(prng);
         const id: u128 = prng.int(u128) | 1;
         const body = self.gen_collection_body(prng, id);
-        io.inject_post(client, "/collections", body);
-        const resp = run_until_response(server, io, client, 300);
+        const resp = if (prng.boolean()) blk: {
+            io.inject_post_datastar(client, "/collections", body);
+            break :blk run_until_close_response(server, io, client, 500);
+        } else blk: {
+            io.inject_post(client, "/collections", body);
+            break :blk run_until_response(server, io, client, 300);
+        };
         if (resp) |r| {
-            if (r.status_code == 200 and self.collection_count < id_pool_max) {
+            if (r.is_ok() and self.collection_count < id_pool_max) {
                 self.collection_ids[self.collection_count] = id;
                 self.collection_count += 1;
             }
@@ -1719,10 +1812,15 @@ const Fuzzer = struct {
         const idx = prng.int_inclusive(u32, self.collection_count - 1);
         const id = self.collection_ids[idx];
         const path = path_with_id(&self.path_buf, "/collections/", id);
-        io.inject_delete(client, path);
-        const resp = run_until_response(server, io, client, 300);
+        const resp = if (prng.boolean()) blk: {
+            io.inject_delete_datastar(client, path);
+            break :blk run_until_close_response(server, io, client, 500);
+        } else blk: {
+            io.inject_delete(client, path);
+            break :blk run_until_response(server, io, client, 300);
+        };
         if (resp) |r| {
-            if (r.status_code == 200) {
+            if (r.is_ok()) {
                 self.collection_count -= 1;
                 self.collection_ids[idx] = self.collection_ids[self.collection_count];
             }
@@ -1737,8 +1835,13 @@ const Fuzzer = struct {
         const col_id = self.pick_known_collection(prng);
         const prod_id = self.pick_known_product(prng);
         const path = path_with_two_ids(&self.path_buf, "/collections/", col_id, "/products/", prod_id);
-        io.inject_bytes(client, build_simple_request(&self.body_buf, "POST ", path));
-        _ = run_until_response(server, io, client, 300);
+        if (prng.boolean()) {
+            io.inject_bytes(client, build_simple_request_datastar(&self.body_buf, "POST ", path));
+            _ = run_until_close_response(server, io, client, 500);
+        } else {
+            io.inject_bytes(client, build_simple_request(&self.body_buf, "POST ", path));
+            _ = run_until_response(server, io, client, 300);
+        }
         clear_and_reconnect(io, server, client);
     }
 
@@ -1749,8 +1852,13 @@ const Fuzzer = struct {
         const col_id = self.pick_known_collection(prng);
         const prod_id = self.pick_known_product(prng);
         const path = path_with_two_ids(&self.path_buf, "/collections/", col_id, "/products/", prod_id);
-        io.inject_bytes(client, build_simple_request(&self.body_buf, "DELETE ", path));
-        _ = run_until_response(server, io, client, 300);
+        if (prng.boolean()) {
+            io.inject_bytes(client, build_simple_request_datastar(&self.body_buf, "DELETE ", path));
+            _ = run_until_close_response(server, io, client, 500);
+        } else {
+            io.inject_bytes(client, build_simple_request(&self.body_buf, "DELETE ", path));
+            _ = run_until_response(server, io, client, 300);
+        }
         clear_and_reconnect(io, server, client);
     }
 
@@ -1762,10 +1870,15 @@ const Fuzzer = struct {
         const client = self.pick_connected(prng);
         const id: u128 = prng.int(u128) | 1;
         const body = self.gen_order_body(prng, id);
-        io.inject_post(client, "/orders", body);
-        const resp = run_until_response(server, io, client, 300);
+        const resp = if (prng.boolean()) blk: {
+            io.inject_post_datastar(client, "/orders", body);
+            break :blk run_until_close_response(server, io, client, 500);
+        } else blk: {
+            io.inject_post(client, "/orders", body);
+            break :blk run_until_response(server, io, client, 300);
+        };
         if (resp) |r| {
-            if (r.status_code == 200 and self.order_count < id_pool_max) {
+            if (r.is_ok() and self.order_count < id_pool_max) {
                 self.order_ids[self.order_count] = id;
                 self.order_count += 1;
             }
@@ -1790,8 +1903,13 @@ const Fuzzer = struct {
             w.raw("\"");
         }
         w.raw("}");
-        io.inject_post(client, path, w.slice());
-        _ = run_until_response(server, io, client, 300);
+        if (prng.boolean()) {
+            io.inject_post_datastar(client, path, w.slice());
+            _ = run_until_close_response(server, io, client, 500);
+        } else {
+            io.inject_post(client, path, w.slice());
+            _ = run_until_response(server, io, client, 300);
+        }
         clear_and_reconnect(io, server, client);
     }
 
@@ -1800,8 +1918,13 @@ const Fuzzer = struct {
         const client = self.pick_connected(prng);
         const id = self.pick_order_id(prng);
         const path = path_with_id_suffix(&self.path_buf, "/orders/", id, "/cancel");
-        io.inject_post(client, path, "");
-        _ = run_until_response(server, io, client, 300);
+        if (prng.boolean()) {
+            io.inject_post_datastar(client, path, "");
+            _ = run_until_close_response(server, io, client, 500);
+        } else {
+            io.inject_post(client, path, "");
+            _ = run_until_response(server, io, client, 300);
+        }
         clear_and_reconnect(io, server, client);
     }
 
@@ -2070,11 +2193,20 @@ fn path_with_two_ids(buf: *[256]u8, prefix: []const u8, id1: u128, middle: []con
 
 /// Build "METHOD /path HTTP/1.1\r\nAuthorization: ...\r\n\r\n" for bodyless requests.
 fn build_simple_request(buf: *[2048]u8, method: []const u8, path: []const u8) []const u8 {
+    return build_simple_request_with_headers(buf, method, path, "");
+}
+
+fn build_simple_request_datastar(buf: *[2048]u8, method: []const u8, path: []const u8) []const u8 {
+    return build_simple_request_with_headers(buf, method, path, "Datastar-Request: true\r\n");
+}
+
+fn build_simple_request_with_headers(buf: *[2048]u8, method: []const u8, path: []const u8, extra_headers: []const u8) []const u8 {
     var w = BufWriter{ .buf = buf };
     w.raw(method);
     w.raw(path);
     w.raw(" HTTP/1.1\r\n");
     w.pos += write_auth_header(buf[w.pos..]);
+    w.raw(extra_headers);
     w.raw("\r\n");
     return w.slice();
 }

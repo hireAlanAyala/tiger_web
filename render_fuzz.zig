@@ -24,13 +24,67 @@ pub fn main(allocator: std.mem.Allocator, args: FuzzArgs) !void {
 
     var full_page_count: u64 = 0;
     var sse_count: u64 = 0;
+    var followup_count: u64 = 0;
+    var unauth_count: u64 = 0;
     var error_count: u64 = 0;
 
     for (0..events_max) |event_i| {
         log.debug("Running render_fuzz[{}/{}]", .{ event_i, events_max });
 
         var send_buf: [http.send_buf_max]u8 = undefined;
+
+        // ~5% of events exercise the auth failure path.
+        if (prng.chance(PRNG.ratio(1, 20))) {
+            const is_datastar = prng.boolean();
+            const resp = render.encode_unauthorized(&send_buf, is_datastar);
+            assert(resp.len > 0);
+            assert(resp.offset + resp.len <= send_buf.len);
+            const output = send_buf[resp.offset..][0..resp.len];
+            assert(std.mem.startsWith(u8, output, "HTTP/1.1 200 OK\r\n"));
+            if (is_datastar) {
+                assert(!resp.keep_alive);
+                assert(std.mem.indexOf(u8, output, "text/event-stream") != null);
+                assert(std.mem.indexOf(u8, output, "Unauthorized") != null);
+                assert_sse_framing(output);
+            } else {
+                assert(resp.keep_alive);
+                assert(std.mem.indexOf(u8, output, "<!DOCTYPE html>") != null);
+                assert(std.mem.indexOf(u8, output, "Content-Length:") != null);
+            }
+            unauth_count += 1;
+            continue;
+        }
+
         const gen = gen_response(&prng);
+
+        // SSE mutations go through encode_followup, not encode_response.
+        if (gen.is_datastar_request and render.is_mutation(gen.operation)) {
+            const dashboard = message.PageLoadDashboardResult{
+                .products = gen_product_list(&prng, message.dashboard_list_max),
+                .collections = gen_collection_list(&prng, message.dashboard_list_max),
+                .orders = gen_order_summary_list(&prng, message.dashboard_list_max),
+            };
+            const followup_status = if (gen.resp.status != .ok) gen.resp.status else .ok;
+            const resp = render.encode_followup(&send_buf, &dashboard, gen.operation, followup_status);
+
+            assert(resp.len > 0);
+            assert(resp.offset + resp.len <= send_buf.len);
+            assert(!resp.keep_alive);
+
+            const output = send_buf[resp.offset..][0..resp.len];
+            assert(std.mem.startsWith(u8, output, "HTTP/1.1 200 OK\r\n"));
+            assert(std.mem.indexOf(u8, output, "text/event-stream") != null);
+            // Follow-ups always have dashboard fragments.
+            assert(std.mem.indexOf(u8, output, "event: datastar-patch-elements") != null);
+            assert_sse_framing(output);
+
+            // Error follow-ups include the status string in the output.
+            if (followup_status != .ok) {
+                error_count += 1;
+            }
+            followup_count += 1;
+            continue;
+        }
 
         const resp = render.encode_response(&send_buf, gen.operation, gen.resp, gen.is_datastar_request);
 
@@ -41,24 +95,30 @@ pub fn main(allocator: std.mem.Allocator, args: FuzzArgs) !void {
         const output = send_buf[resp.offset..][0..resp.len];
 
         // Must start with HTTP response line.
-        assert(std.mem.startsWith(u8, output, "HTTP/1.1 "));
+        assert(std.mem.startsWith(u8, output, "HTTP/1.1 200 OK\r\n"));
 
         if (gen.is_datastar_request) {
             assert(!resp.keep_alive);
         }
 
         if (gen.resp.status != .ok) {
+            if (gen.is_datastar_request) {
+                // SSE errors: error fragment targeting the operation's panel.
+                assert(std.mem.indexOf(u8, output, "text/event-stream") != null);
+                assert(std.mem.indexOf(u8, output, "<div class=\"error\">") != null);
+                assert_sse_framing(output);
+            } else {
+                // Non-SSE errors: full dashboard page for recovery.
+                assert(std.mem.indexOf(u8, output, "<!DOCTYPE html>") != null);
+                assert(std.mem.indexOf(u8, output, "Content-Length:") != null);
+                assert(resp.keep_alive);
+            }
             error_count += 1;
         } else if (!gen.is_datastar_request and gen.operation == .page_load_dashboard) {
             assert(std.mem.indexOf(u8, output, "<!DOCTYPE html>") != null);
             assert(resp.keep_alive);
             assert(std.mem.indexOf(u8, output, "Content-Length:") != null);
             full_page_count += 1;
-        } else if (gen.is_datastar_request and render.is_mutation(gen.operation)) {
-            // Mutations over SSE: headers only, no events.
-            assert(std.mem.indexOf(u8, output, "text/event-stream") != null);
-            assert(std.mem.indexOf(u8, output, "event:") == null);
-            sse_count += 1;
         } else if (gen.is_datastar_request) {
             // GETs over SSE: headers + event data.
             assert(std.mem.indexOf(u8, output, "text/event-stream") != null);
@@ -77,8 +137,8 @@ pub fn main(allocator: std.mem.Allocator, args: FuzzArgs) !void {
     log.info(
         \\Render fuzz done:
         \\  events_max={}
-        \\  full_page={} sse={} error={}
-    , .{ events_max, full_page_count, sse_count, error_count });
+        \\  full_page={} sse={} followup={} unauth={} error={}
+    , .{ events_max, full_page_count, sse_count, followup_count, unauth_count, error_count });
 }
 
 // =====================================================================
