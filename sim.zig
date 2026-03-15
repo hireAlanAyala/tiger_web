@@ -653,6 +653,16 @@ fn body_contains(body: []const u8, needle: []const u8) bool {
     return std.mem.indexOf(u8, body, needle) != null;
 }
 
+fn count_occurrences(haystack: []const u8, needle: []const u8) usize {
+    var count: usize = 0;
+    var pos: usize = 0;
+    while (std.mem.indexOfPos(u8, haystack, pos, needle)) |idx| {
+        count += 1;
+        pos = idx + needle.len;
+    }
+    return count;
+}
+
 const test_uuid1 = "aabbccdd11223344aabbccdd11223344";
 const test_uuid2 = "aabbccdd11223344aabbccdd11223345";
 
@@ -992,9 +1002,10 @@ test "mark: SSE mutation triggers follow-up" {
         return error.TestUnexpectedResult;
     try mark.expect_hit();
 
-    // Follow-up response is SSE with dashboard fragments.
+    // Follow-up response is SSE with exactly 3 dashboard fragments (ok status).
     try std.testing.expectEqual(resp.status_code, 200);
-    try std.testing.expect(std.mem.indexOf(u8, resp.body, "event: datastar-patch-elements") != null);
+    try std.testing.expectEqual(count_occurrences(resp.body, "event: datastar-patch-elements"), 3);
+    try std.testing.expect(std.mem.indexOf(u8, resp.body, "<div class=\"error\">") == null);
     clear_and_reconnect(&sim_io, &server, 0);
 }
 
