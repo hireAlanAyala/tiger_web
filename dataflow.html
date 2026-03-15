@@ -219,7 +219,7 @@
     <rect class="stage-box" x="320" y="80" width="110" height="70" fill="#161b22" stroke="#58a6ff" stroke-width="1.5" stroke-opacity="0.5"/>
     <text class="stage-title" x="375" y="107" text-anchor="middle" fill="#58a6ff">http.zig</text>
     <text class="stage-sub" x="375" y="122" text-anchor="middle" fill="#484f58">parse_request</text>
-    <text class="stage-sub" x="375" y="136" text-anchor="middle" fill="#484f58">frame detect</text>
+    <text class="stage-sub" x="375" y="136" text-anchor="middle" fill="#484f58">pure parser</text>
   </g>
 
   <!-- Arrow: HTTP -> Auth -->
@@ -315,32 +315,20 @@
     <text class="stage-sub" x="620" y="376" text-anchor="middle" fill="#484f58">(tagged union)</text>
   </g>
 
-  <!-- Arrow: MessageResponse -> Codec encode -->
-  <path d="M 560 355 L 502 355" stroke="#f0883e" stroke-width="1.5" marker-end="url(#arrow-resp)" class="flow-resp" fill="none"/>
+  <!-- Arrow: MessageResponse -> Render -->
+  <path d="M 560 355 L 382 355" stroke="#f0883e" stroke-width="1.5" marker-end="url(#arrow-resp)" class="flow-resp" fill="none"/>
 
-  <!-- Codec encode -->
-  <g class="stage" data-stage="codec_encode">
-    <rect class="stage-box" x="380" y="320" width="120" height="70" fill="#161b22" stroke="#f0883e" stroke-width="1.5" stroke-opacity="0.5"/>
-    <text class="stage-title" x="440" y="347" text-anchor="middle" fill="#f0883e">codec.zig</text>
-    <text class="stage-sub" x="440" y="362" text-anchor="middle" fill="#c9d1d9">encode_response</text>
-    <text class="stage-sub" x="440" y="376" text-anchor="middle" fill="#484f58">Result -> JSON</text>
+  <!-- Render (replaces codec_encode + http_encode) -->
+  <g class="stage" data-stage="render">
+    <rect class="stage-box" x="260" y="320" width="120" height="70" fill="#161b22" stroke="#f0883e" stroke-width="1.5" stroke-opacity="0.5"/>
+    <text class="stage-title" x="320" y="342" text-anchor="middle" fill="#f0883e">render.zig</text>
+    <text class="stage-sub" x="320" y="357" text-anchor="middle" fill="#c9d1d9">HTML or SSE</text>
+    <text class="stage-sub" x="320" y="371" text-anchor="middle" fill="#484f58">always 200 OK</text>
   </g>
 
-  <!-- Arrow: Codec encode -> HTTP encode -->
-  <path d="M 380 355 L 322 355" stroke="#f0883e" stroke-width="1.5" marker-end="url(#arrow-resp)" class="flow-resp" fill="none"/>
-  <text class="data-label" x="338" y="347">JSON []u8</text>
-
-  <!-- HTTP encode -->
-  <g class="stage" data-stage="http_encode">
-    <rect class="stage-box" x="200" y="320" width="120" height="70" fill="#161b22" stroke="#f0883e" stroke-width="1.5" stroke-opacity="0.5"/>
-    <text class="stage-title" x="260" y="347" text-anchor="middle" fill="#f0883e">http.zig</text>
-    <text class="stage-sub" x="260" y="362" text-anchor="middle" fill="#c9d1d9">encode_json_resp</text>
-    <text class="stage-sub" x="260" y="376" text-anchor="middle" fill="#484f58">status + headers</text>
-  </g>
-
-  <!-- Arrow: HTTP encode -> IO send -->
-  <path d="M 200 355 L 142 355" stroke="#f0883e" stroke-width="1.5" marker-end="url(#arrow-resp)" class="flow-resp" fill="none"/>
-  <text class="data-label" x="158" y="347">send_buf</text>
+  <!-- Arrow: Render -> IO send -->
+  <path d="M 260 355 L 142 355" stroke="#f0883e" stroke-width="1.5" marker-end="url(#arrow-resp)" class="flow-resp" fill="none"/>
+  <text class="data-label" x="188" y="347">send_buf</text>
 
   <!-- IO send -->
   <g class="stage" data-stage="io_send">
@@ -356,13 +344,13 @@
   <rect x="150" y="55" width="780" height="360" rx="10" ry="10"
         fill="none" stroke="#30363d" stroke-width="1" stroke-dasharray="6 3"/>
   <text x="160" y="48" font-size="11" fill="#30363d" font-family="'SF Mono', monospace">
-    server.zig — tick loop orchestrates: maybe_accept → process_inbox → flush_outbox → close_dead
+    server.zig — tick: maybe_accept -> process_inbox -> process_followups -> flush_outbox -> close_dead
   </text>
 
   <!-- ==================== EXAMPLE FLOW (bottom section) ==================== -->
 
   <text x="40" y="460" font-size="13" fill="#58a6ff" font-weight="bold" font-family="'SF Mono', monospace">
-    Example: PUT /products/:id  (update product)
+    Example: PUT /products/:id  (update product, Datastar SSE mutation)
   </text>
 
   <!-- Step boxes -->
@@ -381,27 +369,27 @@
 
     <!-- Step 3 -->
     <rect x="360" y="475" width="150" height="52" rx="4" fill="#0d1117" stroke="#30363d"/>
-    <text x="368" y="490" fill="#7ee787" font-size="9" font-weight="bold">3. PREFETCH</text>
-    <text x="368" y="503" fill="#c9d1d9">storage.get(id)</text>
-    <text x="368" y="515" fill="#c9d1d9">-> prefetch_product</text>
+    <text x="368" y="490" fill="#7ee787" font-size="9" font-weight="bold">3. PREFETCH + EXECUTE</text>
+    <text x="368" y="503" fill="#c9d1d9">version check, merge</text>
+    <text x="368" y="515" fill="#c9d1d9">storage.put(product)</text>
 
     <!-- Step 4 -->
     <rect x="520" y="475" width="150" height="52" rx="4" fill="#0d1117" stroke="#30363d"/>
-    <text x="528" y="490" fill="#7ee787" font-size="9" font-weight="bold">4. EXECUTE</text>
-    <text x="528" y="503" fill="#c9d1d9">version check, merge</text>
-    <text x="528" y="515" fill="#c9d1d9">storage.put(product)</text>
+    <text x="528" y="490" fill="#f0883e" font-size="9" font-weight="bold">4. SSE FOLLOW-UP</text>
+    <text x="528" y="503" fill="#c9d1d9">page_load_dashboard</text>
+    <text x="528" y="515" fill="#c9d1d9">-> fresh list data</text>
 
     <!-- Step 5 -->
     <rect x="680" y="475" width="150" height="52" rx="4" fill="#0d1117" stroke="#30363d"/>
-    <text x="688" y="490" fill="#f0883e" font-size="9" font-weight="bold">5. RESPONSE</text>
-    <text x="688" y="503" fill="#c9d1d9">status: .ok</text>
-    <text x="688" y="515" fill="#c9d1d9">result: .product{...}</text>
+    <text x="688" y="490" fill="#f0883e" font-size="9" font-weight="bold">5. RENDER</text>
+    <text x="688" y="503" fill="#c9d1d9">encode_followup()</text>
+    <text x="688" y="515" fill="#c9d1d9">SSE dashboard frags</text>
 
     <!-- Step 6 -->
     <rect x="840" y="475" width="150" height="52" rx="4" fill="#0d1117" stroke="#30363d"/>
-    <text x="848" y="490" fill="#f0883e" font-size="9" font-weight="bold">6. ENCODE</text>
+    <text x="848" y="490" fill="#f0883e" font-size="9" font-weight="bold">6. SEND</text>
     <text x="848" y="503" fill="#c9d1d9">HTTP/1.1 200 OK</text>
-    <text x="848" y="515" fill="#c9d1d9">{"id":...,"name":...}</text>
+    <text x="848" y="515" fill="#c9d1d9">event: datastar-...</text>
   </g>
 
   <!-- Step arrows -->
@@ -451,20 +439,33 @@ const details = {
     title: 'Client',
     file: '',
     body: `<div class="section">
-  <span class="label">Sends</span>
+  <span class="label">Sends (browser / Datastar)</span>
   <code>PUT /products/550e8400-e29b... HTTP/1.1\r\n
 Content-Length: 82\r\n
 Authorization: Bearer eyJhbGc...\r\n
+Datastar-Request: true\r\n
 \r\n
 {"name":"Shirt","price_cents":1999,...}</code>
 </div>
 <div class="section">
-  <span class="label">Receives</span>
+  <span class="label">Receives — HTML page (non-Datastar)</span>
   <code>HTTP/1.1 200 OK\r\n
-Content-Length: 128\r\n
-Content-Type: application/json\r\n
+Content-Length: 4821\r\n
+Content-Type: text/html\r\n
+Connection: keep-alive\r\n
 \r\n
-{"id":"550e8400-e29b...","name":"Shirt",...}</code>
+&lt;!DOCTYPE html&gt;&lt;html&gt;...&lt;/html&gt;</code>
+</div>
+<div class="section">
+  <span class="label">Receives — SSE (Datastar)</span>
+  <code>HTTP/1.1 200 OK\r\n
+Content-Type: text/event-stream\r\n
+Connection: close\r\n
+\r\n
+event: datastar-patch-elements
+data: selector #products
+data: elements &lt;div class="card"&gt;...
+\n</code>
 </div>`
   },
   io: {
@@ -485,6 +486,12 @@ send(fd, send_buf[send_pos..send_len])</code>
   <span class="label">Buffers (fixed, no alloc)</span>
   <code>recv_buf: [12288]u8  (8K headers + 4K body)
 send_buf: [65936]u8  (400 headers + 64K body)</code>
+</div>
+<div class="section">
+  <span class="label">Follow-up fields</span>
+  <code>pending_followup: bool
+followup_operation: Operation
+followup_status: Status</code>
 </div>`
   },
   http: {
@@ -506,18 +513,19 @@ send_buf: [65936]u8  (400 headers + 64K body)</code>
     total_len: u32,       // bytes consumed
     keep_alive: bool,     // HTTP/1.1 default
     authorization: ?[]const u8,  // Bearer token
+    is_datastar_request: bool,
   },
 }</code>
 </div>
 <div class="section">
   <span class="label">Key</span>
   Pure parser — no side effects, no logging, no allocations.
-  Slices point into recv_buf.
+  No response encoding. Slices point into recv_buf.
 </div>`
   },
   auth: {
     title: 'Auth Gate',
-    file: 'auth.zig',
+    file: 'auth.zig, render.zig',
     body: `<div class="section">
   <span class="label">Input</span>
   <code>token: []const u8  (from Authorization header)
@@ -531,9 +539,10 @@ now: i64           (wall clock seconds)</code>
 4. Return claims or null</code>
 </div>
 <div class="section">
-  <span class="label">Reject path</span>
-  <code>Missing token  -> 401 + encode_401_response()
-Invalid/expired -> 401 + encode_401_response()
+  <span class="label">Reject path (always 200)</span>
+  <code>render.encode_unauthorized(send_buf, is_datastar):
+  non-SSE -> 200 + full dashboard page (token input)
+  SSE     -> 200 + SSE error "Unauthorized"
 (short-circuits, never reaches codec)</code>
 </div>`
   },
@@ -566,6 +575,11 @@ body:   []const u8    // raw JSON</code>
     ...
   }},
 }</code>
+</div>
+<div class="section">
+  <span class="label">Key</span>
+  Request-only. No response encoding — render.zig
+  handles all output.
 </div>`
   },
   message: {
@@ -692,60 +706,51 @@ list(params) -> ProductList | StorageResult</code>
 .collection_list: CollectionList
 .order:           OrderResult
 .order_list:      OrderSummaryList
+.page_load_dashboard: PageLoadDashboardResult
 .empty:           void</code>
+</div>
+<div class="section">
+  <span class="label">Always 200</span>
+  Every status maps to HTTP 200 OK. The HTML body
+  is the only error channel. See design/002-always-200.md.
 </div>`
   },
-  codec_encode: {
-    title: 'Codec — Response Encoding',
-    file: 'codec.zig : encode_response_json()',
+  render: {
+    title: 'Render — Response Encoding',
+    file: 'render.zig',
     body: `<div class="section">
-  <span class="label">Input</span>
-  <code>MessageResponse {
-  status: .ok,
-  result: .product = Product{...},
-}</code>
+  <span class="label">Three entry points</span>
+  <code>encode_response(send_buf, op, resp, is_datastar)
+encode_followup(send_buf, dashboard, op, status)
+encode_unauthorized(send_buf, is_datastar)</code>
 </div>
 <div class="section">
-  <span class="label">Process</span>
-  <code>Switch on result tag:
-  .product       -> serialize Product fields
-  .product_list  -> serialize array of products
-  .inventory     -> {"inventory": N}
-  .collection    -> collection + member products
-  .order         -> order + line items + totals
-  .empty         -> status-only error JSON</code>
+  <span class="label">Non-SSE (full HTML page)</span>
+  <code>1. Body written at header_reserve offset
+2. Headers backfilled before body
+3. Content-Length set from body size
+4. Connection: keep-alive
+Errors render empty dashboard (recovery path).</code>
 </div>
 <div class="section">
-  <span class="label">Output</span>
-  <code>JSON bytes in json_buf[0..len]
-e.g. {"id":"550e...","name":"Shirt",...}</code>
-</div>`
-  },
-  http_encode: {
-    title: 'HTTP Response Encoding',
-    file: 'http.zig : encode_json_response()',
-    body: `<div class="section">
-  <span class="label">Input</span>
-  <code>status: message.Status   // -> HTTP status code
-json:   []const u8       // response body</code>
+  <span class="label">SSE (Datastar fragments)</span>
+  <code>1. Headers written from offset 0
+2. SSE events: datastar-patch-elements
+3. Connection: close (no keep-alive)
+4. Errors: &lt;div class="error"&gt;...&lt;/div&gt;</code>
 </div>
 <div class="section">
-  <span class="label">Status mapping</span>
-  <code>.ok                     -> 200 OK
-.not_found              -> 404 Not Found
-.storage_error          -> 503 Service Unavailable
-.insufficient_inventory -> 409 Conflict
-.version_conflict       -> 409 Conflict</code>
+  <span class="label">SSE follow-up (mutations)</span>
+  <code>After mutation commit, server runs
+page_load_dashboard and sends fresh
+list data as SSE fragments. Same tick.</code>
 </div>
 <div class="section">
-  <span class="label">Output (into send_buf)</span>
-  <code>HTTP/1.1 200 OK\r\n
-Content-Length: 128\r\n
-Content-Type: application/json\r\n
-Connection: keep-alive\r\n
-Access-Control-Allow-Origin: *\r\n
-\r\n
-{"id":"550e8400...","name":"Shirt",...}</code>
+  <span class="label">Always 200</span>
+  <code>"HTTP/1.1 200 OK\\r\\n" is a string literal
+in exactly two places: backfill_headers
+(non-SSE) and encode_sse_headers (SSE).
+No status mapping function exists.</code>
 </div>`
   },
   io_send: {
@@ -771,7 +776,9 @@ Server tick re-submits until pos == len.</code>
   <code>After full send:
   keep_alive=true  -> shift leftover bytes,
                       state = .receiving
-  keep_alive=false -> state = .closing</code>
+  keep_alive=false -> state = .closing
+Non-SSE pages: keep-alive (Content-Length).
+SSE streams: Connection: close.</code>
 </div>`
   },
 };
