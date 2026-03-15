@@ -258,6 +258,7 @@ pub fn ServerType(comptime IO: type, comptime Storage: type) type {
                 if (!conn.pending_followup) continue;
                 assert(conn.state == .ready);
                 assert(conn.is_datastar_request);
+                assert(render.is_mutation(conn.followup_operation));
 
                 const msg = message.Message{
                     .operation = .page_load_dashboard,
