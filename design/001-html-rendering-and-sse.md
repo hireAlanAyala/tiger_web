@@ -146,9 +146,10 @@ The `Datastar-Request` header is parsed by http.zig and passed to codec.zig.
 ### Connection struct additions
 
 ```zig
-is_sse: bool,             // default false
-pending_followup: bool,   // default false
-followup_status: Status,  // result status from tick N, read by render in tick N+1
+is_datastar_request: bool,    // default false — set by codec from Datastar-Request header
+pending_followup: bool,       // default false — set by process_inbox for SSE mutations
+followup_status: Status,      // result status from mutation, read by encode_followup
+followup_operation: Operation, // original mutation op, selects error panel in render
 ```
 
 ## Mutation follow-up
@@ -184,18 +185,32 @@ scale), ~50KB of SSE events (within 128KB send buffer), one tick (10ms)
 latency. On error the data hasn't changed, so the refresh is redundant but
 harmless.
 
-### Two-tick flow
+### Same-tick follow-up
 
-1. **Tick N**: Server receives request. Sets `is_sse = true`. Prefetch →
-   commit the mutation. Stores result status in `followup_status`. Sets
-   `pending_followup = true`. Nothing is sent.
+Originally designed as a two-tick flow, but implemented as same-tick.
+`process_followups` runs immediately after `process_inbox` within the
+same `tick()` call. This works because `process_inbox` wraps all writes
+in `begin_batch`/`commit_batch` (deferred), so the mutation's writes are
+committed before `process_followups` opens its own batch. The follow-up
+runs a fresh prefetch/commit cycle — it doesn't try to piggyback on the
+mutation's cache. Same-tick saves 10ms latency with no correctness cost.
 
-2. **Tick N+1**: Server sees `pending_followup`. Runs `page_load` through
-   prefetch → commit. Render writes SSE fragments into send_buf. If
-   `followup_status` was an error, includes error message. Clears
-   `pending_followup`. Connection transitions to `.closing`.
+1. `process_inbox`: Prefetch → commit the mutation. Stores result status
+   in `followup_status`. Sets `pending_followup = true`. Nothing is sent.
 
-If prefetch returns `busy` in tick N+1, retries in N+2, N+3, etc.
+2. `process_followups` (same tick): Sees `pending_followup`. Runs
+   `page_load` through prefetch → commit. Render writes SSE fragments
+   into send_buf. If `followup_status` was an error, includes error
+   message. Clears `pending_followup`. Connection transitions to
+   `.sending`, then closes after send (SSE, Connection: close).
+
+If prefetch returns `busy`, retries next tick. The idle timeout bounds
+the retry window.
+
+If multiple SSE mutations complete in the same tick, each gets its own
+`page_load` prefetch/commit cycle reading identical data. Cost: N
+microsecond queries for N concurrent mutations. Acceptable at 128 pool
+slots; optimize if profiling shows otherwise.
 
 ## Server tick
 

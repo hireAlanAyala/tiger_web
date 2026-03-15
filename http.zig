@@ -1,6 +1,6 @@
 const std = @import("std");
 const assert = std.debug.assert;
-const message = @import("message.zig");
+
 
 /// Maximum HTTP header size. Requests with headers exceeding this are rejected.
 pub const max_header_size = 8192;
@@ -147,35 +147,6 @@ pub fn parse_request(buf: []const u8) ParseResult {
         .authorization = authorization,
         .is_datastar_request = is_datastar_request,
     } };
-}
-
-/// HTTP/1.1 status line for a given status. Used by both JSON and HTML response encoders.
-pub fn status_line(status: message.Status) []const u8 {
-    return switch (status) {
-        .ok => "HTTP/1.1 200 OK\r\n",
-        .not_found => "HTTP/1.1 404 Not Found\r\n",
-        .storage_error => "HTTP/1.1 503 Service Unavailable\r\n",
-        .insufficient_inventory => "HTTP/1.1 409 Conflict\r\n",
-        .version_conflict => "HTTP/1.1 409 Conflict\r\n",
-        .order_expired => "HTTP/1.1 410 Gone\r\n",
-        .order_not_pending => "HTTP/1.1 409 Conflict\r\n",
-    };
-}
-
-/// Encode a 401 Unauthorized HTML response.
-pub fn encode_401_response(buf: []u8) []const u8 {
-    const body = "<!DOCTYPE html><html><body><h1>Unauthorized</h1></body></html>\n";
-    comptime assert(body.len == 63);
-    const response = "HTTP/1.1 401 Unauthorized\r\n" ++
-        "Content-Type: text/html; charset=utf-8\r\n" ++
-        "Content-Length: 63\r\n" ++
-        "WWW-Authenticate: Bearer\r\n" ++
-        "Connection: keep-alive\r\n" ++
-        "\r\n" ++
-        body;
-    assert(buf.len >= response.len);
-    @memcpy(buf[0..response.len], response);
-    return buf[0..response.len];
 }
 
 // --- Internal helpers ---

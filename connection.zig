@@ -1,6 +1,7 @@
 const std = @import("std");
 const assert = std.debug.assert;
-const maybe = @import("message.zig").maybe;
+const message = @import("message.zig");
+const maybe = message.maybe;
 const http = @import("http.zig");
 const marks = @import("marks.zig");
 const log = marks.wrap_log(std.log.scoped(.connection));
@@ -61,6 +62,12 @@ pub fn ConnectionType(comptime IO: type) type {
         // The render layer uses this to decide full-page HTML vs SSE fragments.
         is_datastar_request: bool,
 
+        // SSE follow-up state: after a Datastar mutation commits, the server
+        // stores the result and renders a full dashboard refresh next tick.
+        pending_followup: bool,
+        followup_status: message.Status,
+        followup_operation: message.Operation,
+
         pub fn init_free() Connection {
             return .{
                 .state = .free,
@@ -79,6 +86,9 @@ pub fn ConnectionType(comptime IO: type) type {
                 .send_activity = false,
                 .keep_alive = true,
                 .is_datastar_request = false,
+                .pending_followup = false,
+                .followup_status = .ok,
+                .followup_operation = undefined,
             };
         }
 
@@ -128,6 +138,7 @@ pub fn ConnectionType(comptime IO: type) type {
                     assert(conn.recv_completion.operation == .none);
                     assert(conn.send_completion.operation == .none);
                     assert(!conn.is_datastar_request);
+                    assert(!conn.pending_followup);
                 },
                 .accepting => {
                     assert(conn.fd == 0);
@@ -140,12 +151,14 @@ pub fn ConnectionType(comptime IO: type) type {
                     assert(conn.fd > 0);
                     assert(conn.request_consumed > 0);
                     assert(conn.request_consumed <= conn.recv_pos);
+                    if (conn.pending_followup) assert(conn.is_datastar_request);
                 },
                 .sending => {
                     assert(conn.fd > 0);
                     assert(conn.send_len > 0);
                     assert(conn.send_start + conn.send_len <= conn.send_buf.len);
                     assert(conn.send_pos <= conn.send_len);
+                    assert(!conn.pending_followup);
                 },
                 .closing => {
                     assert(conn.fd > 0);

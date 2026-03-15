@@ -4,6 +4,15 @@ const stdx = @import("stdx.zig");
 const message = @import("message.zig");
 const http = @import("http.zig");
 
+/// Empty dashboard — used for error responses, auth failures, and comptime
+/// buffer sizing. Every non-SSE error renders the full page (with token input)
+/// so the user has a recovery path.
+const empty_dashboard = message.PageLoadDashboardResult{
+    .products = .{ .items = undefined, .len = 0 },
+    .collections = .{ .items = undefined, .len = 0 },
+    .orders = .{ .items = undefined, .len = 0 },
+};
+
 // --- Buffer constants ---
 // Derived at comptime by running the actual renderers on worst-case input.
 // If the HTML changes, the constants update automatically — no manual counting.
@@ -16,11 +25,6 @@ pub const order_card_max = comptime_render_size(message.OrderSummary, render_ord
 /// Full page with empty lists — measures the page shell (headers + CSS + scaffold).
 pub const page_shell_max = blk: {
     @setEvalBranchQuota(100_000);
-    const empty_dashboard = message.PageLoadDashboardResult{
-        .products = .{ .items = undefined, .len = 0 },
-        .collections = .{ .items = undefined, .len = 0 },
-        .orders = .{ .items = undefined, .len = 0 },
-    };
     var buf: [64 * 1024]u8 = undefined;
     var w = HtmlWriter{ .buf = &buf, .pos = 0 };
     encode_full_page(&w, &empty_dashboard);
@@ -55,6 +59,16 @@ const sse_frame_overhead = blk: {
     break :blk w.pos;
 };
 
+/// Maximum size of an SSE error body: "<div class=\"error\">...</div>".
+const sse_error_body_max = blk: {
+    // Measure longest status string.
+    var max_len: usize = 0;
+    for (std.enums.values(message.Status)) |s| {
+        max_len = @max(max_len, status_to_string(s).len);
+    }
+    break :blk "<div class=\"error\">".len + max_len + "</div>".len;
+};
+
 pub const send_buf_max = blk: {
     const product_list_body = message.dashboard_list_max * product_card_max + count_indicator_max;
     const collection_list_body = message.dashboard_list_max * collection_card_max + count_indicator_max;
@@ -66,6 +80,9 @@ pub const send_buf_max = blk: {
     // Dashboard SSE sends 3 fragments (one per list). SSE writes from offset 0.
     const dashboard_sse = 3 * sse_frame_overhead + product_list_body + collection_list_body + order_list_body;
 
+    // Follow-up SSE: 3 dashboard fragments + optional error fragment.
+    const followup_sse = dashboard_sse + sse_frame_overhead + sse_error_body_max;
+
     // Single SSE list fragment.
     const sse_list = sse_frame_overhead +
         @max(product_list_body, @max(collection_list_body, order_list_body));
@@ -74,7 +91,7 @@ pub const send_buf_max = blk: {
     const sse_detail = sse_frame_overhead +
         @max(collection_detail_max, order_detail_max);
 
-    break :blk @max(full_page, @max(dashboard_sse, @max(sse_list, sse_detail)));
+    break :blk @max(full_page, @max(followup_sse, @max(dashboard_sse, @max(sse_list, sse_detail))));
 };
 
 comptime {
@@ -163,12 +180,12 @@ pub const Response = struct {
 };
 
 /// Reserve space for HTTP headers so we can backfill Content-Length.
-/// Worst case: "HTTP/1.1 503 Service Unavailable\r\n" (34) +
+/// "HTTP/1.1 200 OK\r\n" (18) +
 /// "Content-Type: text/html; charset=utf-8\r\n" (40) +
 /// "Content-Length: NNNNN\r\n" (23 max for 5-digit) +
 /// "Cache-Control: no-cache\r\n" (25) +
 /// "Connection: keep-alive\r\n" (24) +
-/// "\r\n" (2) = 148.  Round up for safety.
+/// "\r\n" (2) = 132.  Round up for safety.
 const header_reserve: u32 = 192;
 
 /// The result variant drives success encoding. For errors, `operation`
@@ -185,6 +202,61 @@ pub fn encode_response(send_buf: []u8, operation: message.Operation, resp: messa
     }
 }
 
+/// SSE follow-up: after an SSE mutation, the server runs page_load_dashboard
+/// next tick and renders the full dashboard as SSE fragments. If the original
+/// mutation failed, an error fragment is included targeting the relevant panel.
+pub fn encode_followup(
+    send_buf: []u8,
+    dashboard: *const message.PageLoadDashboardResult,
+    original_operation: message.Operation,
+    followup_status: message.Status,
+) Response {
+    assert(send_buf.len >= http.send_buf_max);
+    assert(is_mutation(original_operation));
+
+    var w = HtmlWriter{ .buf = send_buf, .pos = 0 };
+    encode_sse_headers(&w);
+
+    // Dashboard fragments — always sent, even on error (data hasn't changed
+    // but the refresh is harmless and keeps the UI in sync).
+    encode_sse_fragment(&w, "#product-list", message.ProductList, &dashboard.products);
+    encode_sse_fragment(&w, "#collection-list", message.CollectionList, &dashboard.collections);
+    encode_sse_fragment(&w, "#order-list", message.OrderSummaryList, &dashboard.orders);
+
+    // Error fragment if the original mutation failed.
+    if (followup_status != .ok) {
+        sse_event_begin(&w, error_selector(original_operation));
+        w.raw("<div class=\"error\">");
+        w.raw(status_to_string(followup_status));
+        w.raw("</div>");
+        sse_event_end(&w);
+    }
+
+    assert(w.pos > 0);
+    return .{ .offset = 0, .len = @intCast(w.pos), .keep_alive = false };
+}
+
+/// Auth failure: render the dashboard page (which has the token input) for
+/// non-SSE, or an SSE error fragment for Datastar. Always 200 — the HTML
+/// tells the human what happened, not the status code.
+pub fn encode_unauthorized(send_buf: []u8, is_datastar_request: bool) Response {
+    assert(send_buf.len >= http.send_buf_max);
+
+    if (is_datastar_request) {
+        var w = HtmlWriter{ .buf = send_buf, .pos = 0 };
+        encode_sse_headers(&w);
+        sse_event_begin(&w, "#product-list");
+        w.raw("<div class=\"error\">Unauthorized</div>");
+        sse_event_end(&w);
+        assert(w.pos > 0);
+        return .{ .offset = 0, .len = @intCast(w.pos), .keep_alive = false };
+    }
+
+    // Non-SSE: render the full dashboard page with empty lists.
+    // The page includes the token input — the user lands here and logs in.
+    return encode_dashboard_page(send_buf);
+}
+
 /// SSE path: headers + body written sequentially. Connection: close.
 fn encode_sse_response(send_buf: []u8, operation: message.Operation, resp: message.MessageResponse) Response {
     var w = HtmlWriter{ .buf = send_buf, .pos = 0 };
@@ -195,11 +267,11 @@ fn encode_sse_response(send_buf: []u8, operation: message.Operation, resp: messa
     } else {
         assert(result_matches_operation(operation, resp.result));
 
+        // Mutations over SSE are handled by encode_followup, not this path.
+        assert(!is_mutation(operation));
         encode_sse_headers(&w);
 
-        // Mutations over SSE: headers only, no body. Phase 4 adds the
-        // follow-up mechanism that renders a full page refresh next tick.
-        if (!is_mutation(operation)) switch (resp.result) {
+        switch (resp.result) {
             .page_load_dashboard => |dashboard| {
                 encode_sse_fragment(&w, "#product-list", message.ProductList, &dashboard.products);
                 encode_sse_fragment(&w, "#collection-list", message.CollectionList, &dashboard.collections);
@@ -239,7 +311,7 @@ fn encode_sse_response(send_buf: []u8, operation: message.Operation, resp: messa
                 sse_event_end(&w);
             },
             .empty => unreachable,
-        };
+        }
     }
     assert(w.pos > 0);
     return .{ .offset = 0, .len = @intCast(w.pos), .keep_alive = false };
@@ -252,9 +324,9 @@ fn encode_html_response(send_buf: []u8, operation: message.Operation, resp: mess
 
     if (resp.status != .ok) {
         assert(resp.result == .empty);
-        encode_error_body(&w);
-        w.raw(status_to_string(resp.status));
-        encode_error_body_end(&w);
+        // Render the full dashboard — gives the user the token input and
+        // navigation instead of a dead-end error page.
+        return encode_dashboard_page(send_buf);
     } else {
         assert(result_matches_operation(operation, resp.result));
         switch (resp.result) {
@@ -278,17 +350,17 @@ fn encode_html_response(send_buf: []u8, operation: message.Operation, resp: mess
     const body_len = w.pos - header_reserve;
     assert(body_len > 0);
 
-    return backfill_headers(send_buf, resp.status, body_len);
+    return backfill_headers(send_buf, body_len);
 }
 
 /// Write HTTP headers right-aligned into the reserved space before the body.
-fn backfill_headers(send_buf: []u8, status: message.Status, body_len: usize) Response {
+/// Always 200 OK — see design/002-always-200.md.
+fn backfill_headers(send_buf: []u8, body_len: usize) Response {
     // Build headers into a stack buffer.
     var hdr_buf: [header_reserve]u8 = undefined;
     var h = HtmlWriter{ .buf = &hdr_buf, .pos = 0 };
 
-    const sl = http.status_line(status);
-    h.raw(sl);
+    h.raw("HTTP/1.1 200 OK\r\n");
     h.raw("Content-Type: text/html; charset=utf-8\r\n");
     h.raw("Content-Length: ");
     var cl_buf: [10]u8 = undefined;
@@ -308,6 +380,16 @@ fn backfill_headers(send_buf: []u8, status: message.Status, body_len: usize) Res
         .len = @intCast(h.pos + body_len),
         .keep_alive = true,
     };
+}
+
+/// Render the full dashboard page with empty lists. Used for auth failures
+/// and non-SSE errors — the user sees the page with the token input.
+fn encode_dashboard_page(send_buf: []u8) Response {
+    var w = HtmlWriter{ .buf = send_buf, .pos = header_reserve };
+    encode_full_page(&w, &empty_dashboard);
+    const body_len = w.pos - header_reserve;
+    assert(body_len > 0);
+    return backfill_headers(send_buf, body_len);
 }
 
 // --- Full HTML page ---
@@ -744,14 +826,6 @@ fn encode_sse_fragment(w: *HtmlWriter, selector: []const u8, comptime ListType: 
 
 // --- Non-SSE body helpers ---
 
-fn encode_error_body(w: *HtmlWriter) void {
-    w.raw("<!DOCTYPE html><html><body><h1>");
-}
-
-fn encode_error_body_end(w: *HtmlWriter) void {
-    w.raw("</h1></body></html>\n");
-}
-
 // --- Error responses ---
 
 fn encode_sse_error(w: *HtmlWriter, operation: message.Operation, status: message.Status) void {
@@ -967,14 +1041,39 @@ test "encode_response SSE — empty dashboard" {
     assert(std.mem.indexOf(u8, output, "#product-list") != null);
 }
 
-test "encode_response error — HTML error page" {
+test "encode_response error — renders dashboard page for recovery" {
     var send_buf: [http.send_buf_max]u8 = undefined;
     const resp = message.MessageResponse.storage_error;
     const r = encode_response(&send_buf, .page_load_dashboard, resp, false);
     assert(r.len > 0);
     const output = send_buf[r.offset..][0..r.len];
-    assert(std.mem.startsWith(u8, output, "HTTP/1.1 503"));
-    assert(std.mem.indexOf(u8, output, "Service Unavailable") != null);
+    assert(std.mem.startsWith(u8, output, "HTTP/1.1 200 OK\r\n"));
+    assert(std.mem.indexOf(u8, output, "<!DOCTYPE html>") != null);
+    assert(std.mem.indexOf(u8, output, "data-bind:token") != null);
+    assert(r.keep_alive);
+}
+
+test "encode_unauthorized — full page with token input" {
+    var send_buf: [http.send_buf_max]u8 = undefined;
+    const r = encode_unauthorized(&send_buf, false);
+    assert(r.len > 0);
+    const output = send_buf[r.offset..][0..r.len];
+    assert(std.mem.startsWith(u8, output, "HTTP/1.1 200 OK\r\n"));
+    assert(std.mem.indexOf(u8, output, "<!DOCTYPE html>") != null);
+    assert(std.mem.indexOf(u8, output, "data-bind:token") != null);
+    assert(r.keep_alive);
+    assert(std.mem.indexOf(u8, output, "Content-Length:") != null);
+}
+
+test "encode_unauthorized — SSE error fragment" {
+    var send_buf: [http.send_buf_max]u8 = undefined;
+    const r = encode_unauthorized(&send_buf, true);
+    assert(r.len > 0);
+    const output = send_buf[r.offset..][0..r.len];
+    assert(std.mem.startsWith(u8, output, "HTTP/1.1 200 OK\r\n"));
+    assert(std.mem.indexOf(u8, output, "text/event-stream") != null);
+    assert(std.mem.indexOf(u8, output, "Unauthorized") != null);
+    assert(!r.keep_alive);
 }
 
 test "encode_response with products" {

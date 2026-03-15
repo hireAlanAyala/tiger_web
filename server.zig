@@ -91,14 +91,16 @@ pub fn ServerType(comptime IO: type, comptime Storage: type) type {
         ///
         /// 1. Accept new connections if slots available
         /// 2. Process inbox: execute ready requests
-        /// 3. Flush outbox: start sending responses
-        /// 4. Continue receiving on connections that need more bytes
-        /// 5. Close dead connections
+        /// 3. Process follow-ups: dashboard refresh after SSE mutations
+        /// 4. Flush outbox: start sending responses
+        /// 5. Continue receiving on connections that need more bytes
+        /// 6. Close dead connections
         pub fn tick(server: *Server) void {
             server.tick_count +%= 1;
             defer server.invariants();
             server.maybe_accept();
             server.process_inbox();
+            server.process_followups();
             server.log_metrics();
             server.flush_outbox();
             server.continue_receives();
@@ -170,6 +172,7 @@ pub fn ServerType(comptime IO: type, comptime Storage: type) type {
 
             for (server.connections) |*conn| {
                 if (conn.state != .ready) continue;
+                if (conn.pending_followup) continue;
 
                 // Re-parse HTTP from recv_buf. Deterministic — same bytes, same result.
                 const parsed = switch (http.parse_request(conn.recv_buf[0..conn.recv_pos])) {
@@ -190,12 +193,16 @@ pub fn ServerType(comptime IO: type, comptime Storage: type) type {
                 if (msg.operation != .page_load_dashboard) {
                     const token = parsed.authorization orelse {
                         log.mark.warn("auth: missing token fd={d}", .{conn.fd});
-                        conn.set_response(0, @intCast(http.encode_401_response(&conn.send_buf).len));
+                        const r = render.encode_unauthorized(&conn.send_buf, conn.is_datastar_request);
+                        conn.set_response(r.offset, r.len);
+                        conn.keep_alive = r.keep_alive;
                         continue;
                     };
                     if (server.token_cache.verify_cached(token, server.time.realtime(), server.secret_key) == null) {
                         log.mark.warn("auth: invalid token fd={d}", .{conn.fd});
-                        conn.set_response(0, @intCast(http.encode_401_response(&conn.send_buf).len));
+                        const r = render.encode_unauthorized(&conn.send_buf, conn.is_datastar_request);
+                        conn.set_response(r.offset, r.len);
+                        conn.keep_alive = r.keep_alive;
                         continue;
                     }
                 }
@@ -214,8 +221,80 @@ pub fn ServerType(comptime IO: type, comptime Storage: type) type {
                 server.state_machine.tracer.stop(.execute, msg.operation);
                 server.state_machine.tracer.trace_log(msg.operation, resp.status, conn.fd);
 
+                // SSE mutations: defer rendering to process_followups.
+                // Store the result status so the follow-up can include an error
+                // message alongside the dashboard refresh.
+                if (conn.is_datastar_request and render.is_mutation(msg.operation)) {
+                    log.mark.debug("SSE mutation: deferring to follow-up fd={d}", .{conn.fd});
+                    conn.pending_followup = true;
+                    conn.followup_status = resp.status;
+                    conn.followup_operation = msg.operation;
+                    continue;
+                }
+
                 // Encode response.
                 const r = render.encode_response(&conn.send_buf, msg.operation, resp, conn.is_datastar_request);
+                conn.set_response(r.offset, r.len);
+                conn.keep_alive = r.keep_alive;
+            }
+        }
+
+        // --- Follow-ups: refresh dashboard after SSE mutations ---
+
+        fn process_followups(server: *Server) void {
+            var any_followup = false;
+            for (server.connections) |*conn| {
+                if (conn.pending_followup) {
+                    any_followup = true;
+                    break;
+                }
+            }
+            if (!any_followup) return;
+
+            server.state_machine.begin_batch();
+            defer server.state_machine.commit_batch();
+
+            for (server.connections) |*conn| {
+                if (!conn.pending_followup) continue;
+                assert(conn.state == .ready);
+                assert(conn.is_datastar_request);
+
+                const msg = message.Message{
+                    .operation = .page_load_dashboard,
+                    .id = 0,
+                    .event = .{ .none = {} },
+                };
+
+                // Prefetch. Storage busy → skip, retry next tick.
+                server.state_machine.tracer.start(.prefetch);
+                if (!server.state_machine.prefetch(msg)) {
+                    server.state_machine.tracer.cancel(.prefetch);
+                    continue;
+                }
+                server.state_machine.tracer.stop(.prefetch, .page_load_dashboard);
+
+                server.state_machine.tracer.start(.execute);
+                const resp = server.state_machine.commit(msg);
+                server.state_machine.tracer.stop(.execute, .page_load_dashboard);
+
+                // Dashboard load itself failed (storage error). The mutation
+                // already committed — just close the connection. The client
+                // sees a disconnect and can refresh the page.
+                if (resp.status != .ok) {
+                    conn.pending_followup = false;
+                    conn.state = .closing;
+                    continue;
+                }
+
+                const dashboard = resp.result.page_load_dashboard;
+
+                const r = render.encode_followup(
+                    &conn.send_buf,
+                    &dashboard,
+                    conn.followup_operation,
+                    conn.followup_status,
+                );
+                conn.pending_followup = false;
                 conn.set_response(r.offset, r.len);
                 conn.keep_alive = r.keep_alive;
             }
