@@ -39,6 +39,7 @@ pub fn ConnectionType(comptime IO: type) type {
 
         // Send buffer: holds the HTTP response being sent.
         send_buf: [http.send_buf_max]u8,
+        send_start: u32,
         send_len: u32,
         send_pos: u32,
         send_completion: IO.Completion,
@@ -68,6 +69,7 @@ pub fn ConnectionType(comptime IO: type) type {
                 .recv_pos = 0,
                 .recv_completion = .{},
                 .send_buf = undefined,
+                .send_start = 0,
                 .send_len = 0,
                 .send_pos = 0,
                 .send_completion = .{},
@@ -142,7 +144,7 @@ pub fn ConnectionType(comptime IO: type) type {
                 .sending => {
                     assert(conn.fd > 0);
                     assert(conn.send_len > 0);
-                    assert(conn.send_len <= conn.send_buf.len);
+                    assert(conn.send_start + conn.send_len <= conn.send_buf.len);
                     assert(conn.send_pos <= conn.send_len);
                 },
                 .closing => {
@@ -212,10 +214,11 @@ pub fn ConnectionType(comptime IO: type) type {
         /// Called by the server tick to place an encoded HTTP response in the
         /// send buffer. The server encodes the response; the connection is
         /// pure byte mechanics.
-        pub fn set_response(conn: *Connection, encoded: []const u8) void {
+        pub fn set_response(conn: *Connection, offset: u32, len: u32) void {
             assert(conn.state == .ready);
             defer conn.invariants();
-            conn.send_len = @intCast(encoded.len);
+            conn.send_start = offset;
+            conn.send_len = len;
             conn.send_pos = 0;
             conn.state = .sending;
         }
@@ -224,7 +227,9 @@ pub fn ConnectionType(comptime IO: type) type {
         pub fn submit_send(conn: *Connection, io: *IO) void {
             assert(conn.state == .sending);
             assert(conn.send_pos < conn.send_len);
-            const buf = conn.send_buf[conn.send_pos..conn.send_len];
+            const abs_pos = conn.send_start + conn.send_pos;
+            const abs_end = conn.send_start + conn.send_len;
+            const buf = conn.send_buf[abs_pos..abs_end];
             io.send(conn.fd, buf, &conn.send_completion, @ptrCast(conn), send_callback);
         }
 

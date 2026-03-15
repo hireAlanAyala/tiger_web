@@ -201,7 +201,8 @@ pub fn StateMachineType(comptime Storage: type) type {
                 },
                 .remove_collection_member => self.prefetch_collection_read(msg.id),
                 .search_products => self.prefetch_search_products(msg.event.search),
-                .get_order, .complete_order, .cancel_order => self.prefetch_order_read(msg.id),
+                .get_order => self.prefetch_order_read(msg.id),
+                .complete_order, .cancel_order => self.prefetch_order_with_products(msg.id),
                 .list_orders => self.prefetch_list_all_orders(msg.event.list),
                 .page_load_dashboard => self.prefetch_dashboard(),
                 .transfer_inventory => blk: {
@@ -684,12 +685,12 @@ pub fn StateMachineType(comptime Storage: type) type {
         }
 
         /// Restore inventory for all items in a failed/expired order.
+        /// Products were prefetched by prefetch_order_with_products.
+        /// Product may have been soft-deleted between order creation and
+        /// completion — prefetch_find returns null for missing products.
         fn restore_inventory(self: *StateMachine, order: *const message.OrderResult) void {
             for (order.items[0..order.items_len]) |item| {
-                var product: message.Product = undefined;
-                const r = self.storage.get(item.product_id, &product);
-                // Product must exist — it was validated at create_order time.
-                assert(r == .ok);
+                var product = self.prefetch_find(item.product_id) orelse continue;
                 product.inventory += item.quantity;
                 assert(self.storage.update(product.id, &product) == .ok);
             }
@@ -804,6 +805,20 @@ pub fn StateMachineType(comptime Storage: type) type {
             const result = self.storage.get_order(id, &order);
             if (result == .ok) self.prefetch_order = order;
             return result;
+        }
+
+        /// Prefetch an order and all its products for inventory restoration.
+        /// Complete/cancel may need to restore inventory, which requires
+        /// product data. Prefetching here means execute never reads storage.
+        fn prefetch_order_with_products(self: *StateMachine, id: u128) StorageResult {
+            const r = self.prefetch_order_read(id);
+            if (r != .ok) return r;
+            const order = self.prefetch_order.?;
+            var ids: [message.order_items_max]u128 = undefined;
+            for (order.items[0..order.items_len], 0..) |item, i| {
+                ids[i] = item.product_id;
+            }
+            return self.prefetch_multi(ids[0..order.items_len]);
         }
 
         fn prefetch_list_all_orders(self: *StateMachine, params: message.ListParams) StorageResult {

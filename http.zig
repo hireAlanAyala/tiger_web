@@ -8,16 +8,13 @@ pub const max_header_size = 8192;
 /// Maximum incoming request body size. Enough for any product JSON.
 pub const body_max = 4096;
 
-/// Maximum outgoing response body size. Enough for a product list as JSON.
-pub const response_body_max = 64 * 1024;
-
 /// Maximum total recv buffer: HTTP headers + body.
 pub const recv_buf_max = max_header_size + body_max;
 
 /// Maximum send buffer: HTTP response headers + body.
-/// Large enough for both JSON responses (400 + response_body_max)
-/// and render.zig's worst-case HTML page (page shell + dashboard_list_max cards
-/// each for products, collections, and orders, with full HTML/JS escape expansion).
+/// Sized for render.zig's worst-case HTML page (page shell + dashboard_list_max
+/// cards each for products, collections, and orders, with full HTML/JS escape
+/// expansion). render.zig has a comptime assert that send_buf_max fits.
 pub const send_buf_max = 96 * 1024;
 
 pub const ParseResult = union(enum) {
@@ -50,7 +47,6 @@ pub const Method = enum {
     put,
     post,
     delete,
-    options,
 };
 
 /// Parse an HTTP/1.1 request from a buffer. The buffer may contain a partial
@@ -104,7 +100,7 @@ pub fn parse_request(buf: []const u8) ParseResult {
 
     // Validate method/body constraints.
     switch (method) {
-        .get, .delete, .options => {
+        .get, .delete => {
             if (content_length != 0) return .invalid;
         },
         .put => {
@@ -166,72 +162,21 @@ pub fn status_line(status: message.Status) []const u8 {
     };
 }
 
-/// Encode an HTTP response with JSON content type.
-pub fn encode_json_response(buf: []u8, status_val: message.Status, json_body: []const u8) []const u8 {
-    assert(buf.len >= send_buf_max);
-
-    const sl = status_line(status_val);
-
-    var pos: usize = 0;
-
-    @memcpy(buf[pos..][0..sl.len], sl);
-    pos += sl.len;
-
-    const cl_prefix = "Content-Length: ";
-    @memcpy(buf[pos..][0..cl_prefix.len], cl_prefix);
-    pos += cl_prefix.len;
-
-    var cl_buf: [10]u8 = undefined;
-    const cl_str = format_u32(&cl_buf, @intCast(json_body.len));
-    @memcpy(buf[pos..][0..cl_str.len], cl_str);
-    pos += cl_str.len;
-
-    const headers_end = "\r\nContent-Type: application/json" ++
-        "\r\nConnection: keep-alive" ++
-        cors_headers ++
-        "\r\n\r\n";
-    @memcpy(buf[pos..][0..headers_end.len], headers_end);
-    pos += headers_end.len;
-
-    if (json_body.len > 0) {
-        @memcpy(buf[pos..][0..json_body.len], json_body);
-        pos += json_body.len;
-    }
-
-    assert(pos <= buf.len);
-    return buf[0..pos];
-}
-
-/// Encode a 204 No Content response for OPTIONS preflight requests with CORS headers.
-pub fn encode_options_response(buf: []u8) []const u8 {
-    const response = "HTTP/1.1 204 No Content" ++
-        "\r\nConnection: keep-alive" ++
-        cors_headers ++
-        "\r\nAccess-Control-Max-Age: 86400" ++
-        "\r\n\r\n";
-    assert(buf.len >= response.len);
-    @memcpy(buf[0..response.len], response);
-    return buf[0..response.len];
-}
-
-/// Encode a 401 Unauthorized response.
+/// Encode a 401 Unauthorized HTML response.
 pub fn encode_401_response(buf: []u8) []const u8 {
-    const response = "HTTP/1.1 401 Unauthorized" ++
-        "\r\nContent-Length: 26" ++
-        "\r\nContent-Type: application/json" ++
-        "\r\nConnection: keep-alive" ++
-        "\r\nWWW-Authenticate: Bearer" ++
-        cors_headers ++
-        "\r\n\r\n" ++
-        "{\"error\":\"unauthorized\"}";
+    const body = "<!DOCTYPE html><html><body><h1>Unauthorized</h1></body></html>\n";
+    comptime assert(body.len == 63);
+    const response = "HTTP/1.1 401 Unauthorized\r\n" ++
+        "Content-Type: text/html; charset=utf-8\r\n" ++
+        "Content-Length: 63\r\n" ++
+        "WWW-Authenticate: Bearer\r\n" ++
+        "Connection: keep-alive\r\n" ++
+        "\r\n" ++
+        body;
     assert(buf.len >= response.len);
     @memcpy(buf[0..response.len], response);
     return buf[0..response.len];
 }
-
-const cors_headers = "\r\nAccess-Control-Allow-Origin: *" ++
-    "\r\nAccess-Control-Allow-Methods: GET, PUT, POST, DELETE" ++
-    "\r\nAccess-Control-Allow-Headers: Content-Type";
 
 // --- Internal helpers ---
 
@@ -250,7 +195,6 @@ fn parse_method(s: []const u8) ?Method {
     if (std.mem.eql(u8, s, "PUT")) return .put;
     if (std.mem.eql(u8, s, "POST")) return .post;
     if (std.mem.eql(u8, s, "DELETE")) return .delete;
-    if (std.mem.eql(u8, s, "OPTIONS")) return .options;
     return null;
 }
 
@@ -496,7 +440,7 @@ test "fuzz — parse_request never crashes on random bytes" {
 }
 
 test "fuzz — parse_request with structured mutations" {
-    const methods = [_][]const u8{ "GET", "PUT", "POST", "DELETE", "OPTIONS" };
+    const methods = [_][]const u8{ "GET", "PUT", "POST", "DELETE" };
     const versions = [_][]const u8{ "HTTP/1.0", "HTTP/1.1" };
     const iterations = 5_000;
 

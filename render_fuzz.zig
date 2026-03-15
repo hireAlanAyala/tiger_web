@@ -32,26 +32,44 @@ pub fn main(allocator: std.mem.Allocator, args: FuzzArgs) !void {
         var send_buf: [http.send_buf_max]u8 = undefined;
         const gen = gen_response(&prng);
 
-        const len = render.encode_response(&send_buf, gen.operation, gen.resp, gen.is_datastar_request);
+        const resp = render.encode_response(&send_buf, gen.operation, gen.resp, gen.is_datastar_request);
 
         // Core invariants.
-        assert(len > 0);
-        assert(len <= send_buf.len);
+        assert(resp.len > 0);
+        assert(resp.offset + resp.len <= send_buf.len);
 
-        const output = send_buf[0..len];
+        const output = send_buf[resp.offset..][0..resp.len];
 
         // Must start with HTTP response line.
         assert(std.mem.startsWith(u8, output, "HTTP/1.1 "));
 
+        if (gen.is_datastar_request) {
+            assert(!resp.keep_alive);
+        }
+
         if (gen.resp.status != .ok) {
             error_count += 1;
-        } else if (gen.is_datastar_request or gen.operation != .page_load_dashboard) {
+        } else if (!gen.is_datastar_request and gen.operation == .page_load_dashboard) {
+            assert(std.mem.indexOf(u8, output, "<!DOCTYPE html>") != null);
+            assert(resp.keep_alive);
+            assert(std.mem.indexOf(u8, output, "Content-Length:") != null);
+            full_page_count += 1;
+        } else if (gen.is_datastar_request and render.is_mutation(gen.operation)) {
+            // Mutations over SSE: headers only, no events.
+            assert(std.mem.indexOf(u8, output, "text/event-stream") != null);
+            assert(std.mem.indexOf(u8, output, "event:") == null);
+            sse_count += 1;
+        } else if (gen.is_datastar_request) {
+            // GETs over SSE: headers + event data.
             assert(std.mem.indexOf(u8, output, "text/event-stream") != null);
             assert(std.mem.indexOf(u8, output, "event: datastar-patch-elements") != null);
             assert_sse_framing(output);
             sse_count += 1;
         } else {
-            assert(std.mem.indexOf(u8, output, "<!DOCTYPE html>") != null);
+            // Non-Datastar, non-dashboard: HTML response.
+            assert(std.mem.indexOf(u8, output, "text/html") != null);
+            assert(resp.keep_alive);
+            assert(std.mem.indexOf(u8, output, "Content-Length:") != null);
             full_page_count += 1;
         }
     }
@@ -74,19 +92,32 @@ const GenResult = struct {
 };
 
 fn gen_response(prng: *PRNG) GenResult {
-    // Pick a renderable operation.
-    const renderable_ops = [_]message.Operation{
+    // All operations are rendered — pick any.
+    const all_ops = [_]message.Operation{
         .page_load_dashboard,
         .list_products,
         .list_collections,
         .list_orders,
         .get_collection,
         .get_order,
+        .create_product,
+        .update_product,
+        .get_product,
+        .delete_product,
+        .get_product_inventory,
+        .transfer_inventory,
+        .search_products,
+        .create_collection,
+        .delete_collection,
+        .add_collection_member,
+        .remove_collection_member,
+        .create_order,
+        .complete_order,
+        .cancel_order,
     };
-    const operation = renderable_ops[prng.int_inclusive(usize, renderable_ops.len - 1)];
+    const operation = all_ops[prng.int_inclusive(usize, all_ops.len - 1)];
 
-    // is_datastar_request: always true for non-dashboard ops (render asserts it).
-    const is_datastar_request = if (operation != .page_load_dashboard) true else prng.boolean();
+    const is_datastar_request = prng.boolean();
 
     // Sometimes generate error responses.
     if (prng.chance(PRNG.ratio(2, 10))) {
@@ -125,11 +156,40 @@ fn gen_response(prng: *PRNG) GenResult {
             .status = .ok,
             .result = .{ .collection = gen_collection_with_products(prng) },
         },
-        .get_order => .{
+        .get_order, .create_order => .{
             .status = .ok,
             .result = .{ .order = gen_order_result(prng) },
         },
-        else => unreachable,
+        .create_product, .update_product, .get_product => .{
+            .status = .ok,
+            .result = .{ .product = gen_product(prng) },
+        },
+        .get_product_inventory => .{
+            .status = .ok,
+            .result = .{ .inventory = prng.int(u32) },
+        },
+        .transfer_inventory => .{
+            .status = .ok,
+            .result = .{ .product_list = gen_product_list(prng, message.list_max) },
+        },
+        .create_collection => .{
+            .status = .ok,
+            .result = .{ .collection = gen_collection_with_products(prng) },
+        },
+        .complete_order, .cancel_order => .{
+            .status = .ok,
+            .result = .{ .order = gen_order_result(prng) },
+        },
+        .search_products => .{
+            .status = .ok,
+            .result = .{ .product_list = gen_product_list(prng, message.list_max) },
+        },
+        .delete_product, .delete_collection,
+        .add_collection_member, .remove_collection_member,
+        => .{
+            .status = .ok,
+            .result = .{ .empty = {} },
+        },
     };
 
     return .{

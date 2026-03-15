@@ -1,9 +1,8 @@
 //! Codec fuzzer — throws random HTTP methods, paths, and JSON bodies at
-//! codec.translate(), and random MessageResponse values at encode_response_json().
+//! codec.translate().
 //!
 //! Asserts: translate either returns a valid Message (passing input_valid)
 //! or returns null — never panics, never triggers UB.
-//! Asserts: encode_response_json always produces output that fits in the buffer.
 //!
 //! Follows TigerBeetle's fuzz pattern: library called by fuzz_tests.zig dispatcher.
 
@@ -30,34 +29,19 @@ pub fn main(allocator: std.mem.Allocator, args: FuzzArgs) !void {
 
     var translate_count: u64 = 0;
     var translate_valid: u64 = 0;
-    var encode_count: u64 = 0;
 
     for (0..events_max) |event_i| {
-        const phase = prng.chances(.{
-            .translate = 7,
-            .encode = 3,
-        });
+        log.debug("Running fuzz_ops[{}/{}]", .{ event_i, events_max });
 
-        log.debug("Running fuzz_ops[{}/{}] == {s}", .{ event_i, events_max, @tagName(phase) });
-
-        switch (phase) {
-            .translate => {
-                if (fuzz_translate(&prng)) translate_valid += 1;
-                translate_count += 1;
-            },
-            .encode => {
-                fuzz_encode(&prng);
-                encode_count += 1;
-            },
-        }
+        if (fuzz_translate(&prng)) translate_valid += 1;
+        translate_count += 1;
     }
 
     log.info(
         \\Codec fuzz done:
         \\  events_max={}
         \\  translate={} (valid={})
-        \\  encode={}
-    , .{ events_max, translate_count, translate_valid, encode_count });
+    , .{ events_max, translate_count, translate_valid });
 }
 
 // =====================================================================
@@ -87,20 +71,6 @@ fn fuzz_translate(prng: *PRNG) bool {
 // =====================================================================
 // Encode fuzzer
 // =====================================================================
-
-fn fuzz_encode(prng: *PRNG) void {
-    const resp = gen_response(prng);
-
-    // Validate that what we're asking the encoder to produce is within bounds.
-    // The encoder asserts internally when writes exceed the buffer.
-    var buf: [http.send_buf_max]u8 = undefined;
-    const json = codec.encode_response_json(&buf, resp);
-
-    // Must produce non-empty output.
-    assert(json.len > 0);
-    // Must fit in the buffer.
-    assert(json.len <= buf.len);
-}
 
 // =====================================================================
 // HTTP method generation
@@ -516,159 +486,8 @@ fn gen_random_body(prng: *PRNG, buf: *[body_buf_max]u8) []const u8 {
 }
 
 // =====================================================================
-// Response generation (for encode fuzzer)
-// =====================================================================
-
-fn gen_response(prng: *PRNG) message.MessageResponse {
-    const status = prng.enum_uniform(message.Status);
-
-    if (status != .ok) {
-        return .{ .status = status, .result = .{ .empty = {} } };
-    }
-
-    // page_load_dashboard is rendered by render.zig, not encode_response_json.
-    // render_fuzz.zig covers that path. Only generate JSON-encodable variants here.
-    const result_tag = prng.int_inclusive(usize, 7);
-    const result: message.Result = switch (result_tag) {
-        0 => .{ .product = gen_product(prng) },
-        1 => .{ .product_list = gen_product_list(prng) },
-        2 => .{ .inventory = prng.int(u32) },
-        3 => .{ .collection = gen_collection_with_products(prng) },
-        4 => .{ .collection_list = gen_collection_list(prng) },
-        5 => .{ .order = gen_order_result(prng) },
-        6 => .{ .order_list = gen_order_summary_list(prng) },
-        7 => .{ .empty = {} },
-        else => unreachable,
-    };
-
-    return .{ .status = .ok, .result = result };
-}
-
-fn gen_product(prng: *PRNG) message.Product {
-    var p = std.mem.zeroes(message.Product);
-    p.id = prng.int(u128) | 1;
-    p.price_cents = prng.int(u32);
-    p.inventory = prng.int(u32);
-    p.version = prng.int(u32);
-    p.flags = .{ .active = prng.boolean() };
-    p.name_len = prng.range_inclusive(u8, 1, message.product_name_max);
-    for (p.name[0..p.name_len]) |*c| {
-        // Include chars that need JSON escaping.
-        c.* = gen_json_char(prng);
-    }
-    p.description_len = prng.range_inclusive(u16, 0, message.product_description_max);
-    for (p.description[0..p.description_len]) |*c| {
-        c.* = gen_json_char(prng);
-    }
-    return p;
-}
-
-fn gen_product_list(prng: *PRNG) message.ProductList {
-    // Cap at list_max. The encoder must handle a full page, but max-length
-    // names with escapable chars can exceed send_buf_max, so we limit list
-    // length when product sizes are large (matching real-world constraints —
-    // the server stores bounded products).
-    var list: message.ProductList = .{
-        .items = undefined,
-        .len = prng.range_inclusive(u32, 0, message.list_max),
-    };
-    for (list.items[0..list.len]) |*p| {
-        p.* = gen_product(prng);
-    }
-    // Estimate output size and trim to fit send buffer.
-    // Worst case per product: ~1400 bytes (max name + desc with 2x escape expansion).
-    const max_safe_items = http.response_body_max / 1400;
-    if (list.len > max_safe_items) list.len = max_safe_items;
-    return list;
-}
-
-fn gen_collection_with_products(prng: *PRNG) message.CollectionWithProducts {
-    var col = std.mem.zeroes(message.ProductCollection);
-    col.id = prng.int(u128) | 1;
-    col.name_len = prng.range_inclusive(u8, 1, message.collection_name_max);
-    for (col.name[0..col.name_len]) |*c| {
-        c.* = gen_json_char(prng);
-    }
-    var products = gen_product_list(prng);
-    // Keep product list short to avoid buffer overflow in encoder.
-    if (products.len > 10) products.len = 10;
-    return .{
-        .collection = col,
-        .products = products,
-    };
-}
-
-fn gen_collection_list(prng: *PRNG) message.CollectionList {
-    var list: message.CollectionList = .{
-        .items = undefined,
-        .len = prng.range_inclusive(u32, 0, message.list_max),
-    };
-    for (list.items[0..list.len]) |*col| {
-        col.* = std.mem.zeroes(message.ProductCollection);
-        col.id = prng.int(u128) | 1;
-        col.name_len = prng.range_inclusive(u8, 1, message.collection_name_max);
-        for (col.name[0..col.name_len]) |*c| {
-            c.* = gen_json_char(prng);
-        }
-    }
-    // Cap to fit send buffer: ~300 bytes per collection worst case.
-    const max_safe_items = http.response_body_max / 300;
-    if (list.len > max_safe_items) list.len = max_safe_items;
-    return list;
-}
-
-fn gen_order_result(prng: *PRNG) message.OrderResult {
-    var order = std.mem.zeroes(message.OrderResult);
-    order.id = prng.int(u128) | 1;
-    order.items_len = prng.range_inclusive(u8, 1, message.order_items_max);
-    order.total_cents = prng.int(u64);
-    order.status = prng.enum_uniform(message.OrderStatus);
-    order.timeout_at = prng.int(u64);
-    for (order.items[0..order.items_len]) |*item| {
-        item.* = std.mem.zeroes(message.OrderResultItem);
-        item.product_id = prng.int(u128) | 1;
-        item.quantity = prng.range_inclusive(u32, 1, 10_000);
-        item.price_cents = prng.int(u32);
-        item.line_total_cents = prng.int(u64);
-        item.name_len = prng.range_inclusive(u8, 1, message.product_name_max);
-        for (item.name[0..item.name_len]) |*c| {
-            c.* = gen_json_char(prng);
-        }
-    }
-    return order;
-}
-
-fn gen_order_summary_list(prng: *PRNG) message.OrderSummaryList {
-    var list: message.OrderSummaryList = .{
-        .items = undefined,
-        .len = prng.range_inclusive(u32, 0, message.list_max),
-    };
-    for (list.items[0..list.len]) |*o| {
-        o.* = std.mem.zeroes(message.OrderSummary);
-        o.id = prng.int(u128) | 1;
-        o.total_cents = prng.int(u64);
-        o.items_len = prng.range_inclusive(u8, 1, message.order_items_max);
-        o.status = prng.enum_uniform(message.OrderStatus);
-        o.timeout_at = prng.int(u64);
-    }
-    return list;
-}
-
-// =====================================================================
 // Helpers
 // =====================================================================
-
-/// Generate a character suitable for name/description fields.
-/// Occasionally produces chars that need JSON escaping.
-fn gen_json_char(prng: *PRNG) u8 {
-    if (prng.chance(PRNG.ratio(1, 20))) {
-        // Escapable characters.
-        const escapable = [_]u8{ '"', '\\', '\n', '\r', '\t' };
-        return escapable[prng.int_inclusive(usize, escapable.len - 1)];
-    }
-    // Printable ASCII.
-    return prng.range_inclusive(u8, 0x20, 0x7e);
-}
 
 fn gen_uuid_string(prng: *PRNG) [32]u8 {
     const strategy = prng.chances(.{

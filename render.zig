@@ -60,9 +60,10 @@ pub const send_buf_max = blk: {
     const collection_list_body = message.dashboard_list_max * collection_card_max + count_indicator_max;
     const order_list_body = message.dashboard_list_max * order_card_max + count_indicator_max;
 
-    const full_page = page_shell_max + product_list_body + collection_list_body + order_list_body;
+    // HTML path: body starts at header_reserve, headers backfilled before it.
+    const full_page = header_reserve + page_shell_max + product_list_body + collection_list_body + order_list_body;
 
-    // Dashboard SSE sends 3 fragments (one per list).
+    // Dashboard SSE sends 3 fragments (one per list). SSE writes from offset 0.
     const dashboard_sse = 3 * sse_frame_overhead + product_list_body + collection_list_body + order_list_body;
 
     // Single SSE list fragment.
@@ -119,6 +120,7 @@ fn worst_case(comptime T: type) T {
             o.id = std.math.maxInt(u128);
             o.total_cents = std.math.maxInt(u64);
             o.items_len = message.order_items_max;
+            o.status = .cancelled; // longest status string
             return o;
         } else if (T == message.CollectionWithProducts) {
             var cwp: message.CollectionWithProducts = undefined;
@@ -151,89 +153,166 @@ fn worst_case(comptime T: type) T {
 }
 
 /// Encode a response as HTML page, SSE fragments, or SSE error.
+pub const Response = struct {
+    /// Byte offset into send_buf where the response starts.
+    offset: u32,
+    /// Total response length (headers + body).
+    len: u32,
+    /// Whether the connection can be reused.
+    keep_alive: bool,
+};
+
+/// Reserve space for HTTP headers so we can backfill Content-Length.
+/// Worst case: "HTTP/1.1 503 Service Unavailable\r\n" (34) +
+/// "Content-Type: text/html; charset=utf-8\r\n" (40) +
+/// "Content-Length: NNNNN\r\n" (23 max for 5-digit) +
+/// "Cache-Control: no-cache\r\n" (25) +
+/// "Connection: keep-alive\r\n" (24) +
+/// "\r\n" (2) = 148.  Round up for safety.
+const header_reserve: u32 = 192;
+
 /// The result variant drives success encoding. For errors, `operation`
 /// selects which UI panel to show the error in.
-/// Returns the number of bytes written into send_buf.
-pub fn encode_response(send_buf: []u8, operation: message.Operation, resp: message.MessageResponse, is_datastar_request: bool) u32 {
+pub fn encode_response(send_buf: []u8, operation: message.Operation, resp: message.MessageResponse, is_datastar_request: bool) Response {
     assert(send_buf.len >= http.send_buf_max);
 
+    // SSE responses write headers + body sequentially from offset 0.
+    // Non-SSE responses write body at header_reserve, then backfill headers.
+    if (is_datastar_request) {
+        return encode_sse_response(send_buf, operation, resp);
+    } else {
+        return encode_html_response(send_buf, operation, resp);
+    }
+}
+
+/// SSE path: headers + body written sequentially. Connection: close.
+fn encode_sse_response(send_buf: []u8, operation: message.Operation, resp: message.MessageResponse) Response {
     var w = HtmlWriter{ .buf = send_buf, .pos = 0 };
 
     if (resp.status != .ok) {
-        // Errors carry no result — operation tells us which UI panel to target.
         assert(resp.result == .empty);
-        if (is_datastar_request) {
-            encode_sse_error(&w, operation, resp.status);
-        } else {
-            encode_error_page(&w, resp.status);
-        }
-        assert(w.pos > 0);
-        return @intCast(w.pos);
-    }
+        encode_sse_error(&w, operation, resp.status);
+    } else {
+        assert(result_matches_operation(operation, resp.result));
 
-    // Pair assertion: operation and result variant must agree.
-    assert(result_matches_operation(operation, resp.result));
+        encode_sse_headers(&w);
 
-    switch (resp.result) {
-        .page_load_dashboard => |dashboard| {
-            if (is_datastar_request) {
-                encode_sse_headers(&w);
+        // Mutations over SSE: headers only, no body. Phase 4 adds the
+        // follow-up mechanism that renders a full page refresh next tick.
+        if (!is_mutation(operation)) switch (resp.result) {
+            .page_load_dashboard => |dashboard| {
                 encode_sse_fragment(&w, "#product-list", message.ProductList, &dashboard.products);
                 encode_sse_fragment(&w, "#collection-list", message.CollectionList, &dashboard.collections);
                 encode_sse_fragment(&w, "#order-list", message.OrderSummaryList, &dashboard.orders);
-            } else {
-                encode_full_page(&w, &dashboard);
-            }
-        },
-        .product_list => |list| {
-            assert(is_datastar_request);
-            encode_sse_headers(&w);
-            encode_sse_fragment(&w, "#product-list", message.ProductList, &list);
-        },
-        .collection_list => |list| {
-            assert(is_datastar_request);
-            encode_sse_headers(&w);
-            encode_sse_fragment(&w, "#collection-list", message.CollectionList, &list);
-        },
-        .order_list => |list| {
-            assert(is_datastar_request);
-            encode_sse_headers(&w);
-            encode_sse_fragment(&w, "#order-list", message.OrderSummaryList, &list);
-        },
-        .collection => |cwp| {
-            assert(is_datastar_request);
-            encode_sse_headers(&w);
-            const selector = id_selector("#col-", cwp.collection.id);
-            sse_event_begin(&w, &selector);
-            render_collection_detail(&w, &cwp);
-            sse_event_end(&w);
-        },
-        .order => |order| {
-            assert(is_datastar_request);
-            encode_sse_headers(&w);
-            const selector = id_selector("#od-", order.id);
-            sse_event_begin(&w, &selector);
-            render_order_detail(&w, &order);
-            sse_event_end(&w);
-        },
-        .product, .inventory, .empty => unreachable,
+            },
+            .product_list => |list| {
+                encode_sse_fragment(&w, "#product-list", message.ProductList, &list);
+            },
+            .collection_list => |list| {
+                encode_sse_fragment(&w, "#collection-list", message.CollectionList, &list);
+            },
+            .order_list => |list| {
+                encode_sse_fragment(&w, "#order-list", message.OrderSummaryList, &list);
+            },
+            .collection => |cwp| {
+                const selector = id_selector("#col-", cwp.collection.id);
+                sse_event_begin(&w, &selector);
+                render_collection_detail(&w, &cwp);
+                sse_event_end(&w);
+            },
+            .order => |order| {
+                const selector = id_selector("#od-", order.id);
+                sse_event_begin(&w, &selector);
+                render_order_detail(&w, &order);
+                sse_event_end(&w);
+            },
+            .product => |p| {
+                const selector = id_selector("#pd-", p.id);
+                sse_event_begin(&w, &selector);
+                render_product_card(&w, &p);
+                sse_event_end(&w);
+            },
+            .inventory => |inv| {
+                sse_event_begin(&w, "#inventory");
+                w.raw("inventory: ");
+                w.write_u32(inv);
+                sse_event_end(&w);
+            },
+            .empty => unreachable,
+        };
+    }
+    assert(w.pos > 0);
+    return .{ .offset = 0, .len = @intCast(w.pos), .keep_alive = false };
+}
+
+/// Non-SSE path: write body first at header_reserve, then backfill
+/// headers with Content-Length. Enables HTTP keep-alive.
+fn encode_html_response(send_buf: []u8, operation: message.Operation, resp: message.MessageResponse) Response {
+    var w = HtmlWriter{ .buf = send_buf, .pos = header_reserve };
+
+    if (resp.status != .ok) {
+        assert(resp.result == .empty);
+        encode_error_body(&w);
+        w.raw(status_to_string(resp.status));
+        encode_error_body_end(&w);
+    } else {
+        assert(result_matches_operation(operation, resp.result));
+        switch (resp.result) {
+            .page_load_dashboard => |dashboard| encode_full_page(&w, &dashboard),
+            .product_list => |list| render_product_cards(&w, &list),
+            .collection_list => |list| render_collection_cards(&w, &list),
+            .order_list => |list| render_order_cards(&w, &list),
+            .collection => |cwp| render_collection_detail(&w, &cwp),
+            .order => |order| render_order_detail(&w, &order),
+            .product => |p| render_product_card(&w, &p),
+            .inventory => |inv| {
+                w.raw("inventory: ");
+                w.write_u32(inv);
+            },
+            .empty => {
+                w.raw("OK");
+            },
+        }
     }
 
-    assert(w.pos > 0);
-    assert(w.pos <= send_buf.len);
-    return @intCast(w.pos);
+    const body_len = w.pos - header_reserve;
+    assert(body_len > 0);
+
+    return backfill_headers(send_buf, resp.status, body_len);
+}
+
+/// Write HTTP headers right-aligned into the reserved space before the body.
+fn backfill_headers(send_buf: []u8, status: message.Status, body_len: usize) Response {
+    // Build headers into a stack buffer.
+    var hdr_buf: [header_reserve]u8 = undefined;
+    var h = HtmlWriter{ .buf = &hdr_buf, .pos = 0 };
+
+    const sl = http.status_line(status);
+    h.raw(sl);
+    h.raw("Content-Type: text/html; charset=utf-8\r\n");
+    h.raw("Content-Length: ");
+    var cl_buf: [10]u8 = undefined;
+    h.raw(stdx.format_u32(&cl_buf, @intCast(body_len)));
+    h.raw("\r\nConnection: keep-alive\r\n" ++
+        "Cache-Control: no-cache\r\n" ++
+        "\r\n");
+
+    assert(h.pos <= header_reserve);
+
+    // Copy headers right-aligned so they abut the body.
+    const start = header_reserve - h.pos;
+    @memcpy(send_buf[start..][0..h.pos], hdr_buf[0..h.pos]);
+
+    return .{
+        .offset = @intCast(start),
+        .len = @intCast(h.pos + body_len),
+        .keep_alive = true,
+    };
 }
 
 // --- Full HTML page ---
 
 fn encode_full_page(w: *HtmlWriter, dashboard: *const message.PageLoadDashboardResult) void {
-    // HTTP headers — Connection: close because we don't emit Content-Length.
-    w.raw("HTTP/1.1 200 OK\r\n" ++
-        "Content-Type: text/html; charset=utf-8\r\n" ++
-        "Connection: close\r\n" ++
-        "Cache-Control: no-cache\r\n" ++
-        "\r\n");
-
     // DOCTYPE + head
     w.raw("<!DOCTYPE html>\n<html>\n<head>\n" ++
         "<meta charset=\"utf-8\">\n" ++
@@ -522,6 +601,13 @@ fn render_order_card(w: *HtmlWriter, o: *const message.OrderSummary) void {
     w.raw("<div class=\"card\">Order <strong>");
     w.write_short_uuid(o.id);
     w.raw("...</strong> &mdash; ");
+    w.raw(switch (o.status) {
+        .pending => "Pending",
+        .confirmed => "Confirmed",
+        .failed => "Failed",
+        .cancelled => "Cancelled",
+    });
+    w.raw(" &mdash; ");
     w.write_price(o.total_cents);
     w.raw(" &mdash; ");
     w.write_u32(@intCast(o.items_len));
@@ -656,17 +742,17 @@ fn encode_sse_fragment(w: *HtmlWriter, selector: []const u8, comptime ListType: 
     sse_event_end(w);
 }
 
-// --- Error responses ---
+// --- Non-SSE body helpers ---
 
-fn encode_error_page(w: *HtmlWriter, status: message.Status) void {
-    w.raw(http.status_line(status));
-    w.raw("Content-Type: text/html; charset=utf-8\r\n" ++
-        "Connection: close\r\n" ++
-        "\r\n" ++
-        "<!DOCTYPE html><html><body><h1>");
-    w.raw(status_to_string(status));
+fn encode_error_body(w: *HtmlWriter) void {
+    w.raw("<!DOCTYPE html><html><body><h1>");
+}
+
+fn encode_error_body_end(w: *HtmlWriter) void {
     w.raw("</h1></body></html>\n");
 }
+
+// --- Error responses ---
 
 fn encode_sse_error(w: *HtmlWriter, operation: message.Operation, status: message.Status) void {
     encode_sse_headers(w);
@@ -679,6 +765,22 @@ fn encode_sse_error(w: *HtmlWriter, operation: message.Operation, status: messag
 
 /// Pair assertion: the result variant must match the operation that produced it.
 /// Catches misrouted responses — e.g. a product result on a collection operation.
+pub fn is_mutation(operation: message.Operation) bool {
+    return switch (operation) {
+        .page_load_dashboard,
+        .list_products, .list_collections, .list_orders,
+        .get_product, .get_collection, .get_order,
+        .get_product_inventory, .search_products,
+        => false,
+        .create_product, .update_product, .delete_product,
+        .create_collection, .delete_collection,
+        .add_collection_member, .remove_collection_member,
+        .create_order, .complete_order, .cancel_order,
+        .transfer_inventory,
+        => true,
+    };
+}
+
 fn result_matches_operation(operation: message.Operation, result: message.Result) bool {
     return switch (operation) {
         .page_load_dashboard => result == .page_load_dashboard,
@@ -687,17 +789,33 @@ fn result_matches_operation(operation: message.Operation, result: message.Result
         .list_orders => result == .order_list,
         .get_collection => result == .collection,
         .get_order => result == .order,
-        else => false, // not a rendered operation
+        .create_product, .update_product, .get_product => result == .product,
+        .get_product_inventory => result == .inventory,
+        .transfer_inventory => result == .product_list,
+        .create_order, .complete_order, .cancel_order => result == .order,
+        .search_products => result == .product_list,
+        .create_collection => result == .collection,
+        .delete_product, .delete_collection,
+        .add_collection_member, .remove_collection_member,
+        => result == .empty,
     };
 }
 
 fn error_selector(operation: message.Operation) []const u8 {
     return switch (operation) {
-        .list_products, .get_product, .search_products => "#product-list",
-        .list_collections, .get_collection => "#collection-list",
-        .list_orders, .get_order => "#order-list",
+        .create_product, .update_product, .get_product,
+        .delete_product, .get_product_inventory,
+        .transfer_inventory, .search_products,
+        .list_products,
+        => "#product-list",
+        .create_collection, .delete_collection,
+        .add_collection_member, .remove_collection_member,
+        .get_collection, .list_collections,
+        => "#collection-list",
+        .create_order, .complete_order, .cancel_order,
+        .get_order, .list_orders,
+        => "#order-list",
         .page_load_dashboard => "#product-list",
-        else => "#product-list",
     };
 }
 
@@ -820,10 +938,10 @@ test "encode_response full page — empty dashboard" {
             .orders = .{ .items = undefined, .len = 0 },
         } },
     };
-    const len = encode_response(&send_buf, .page_load_dashboard, resp, false);
-    assert(len > 0);
-    assert(len <= send_buf.len);
-    const output = send_buf[0..len];
+    const r = encode_response(&send_buf, .page_load_dashboard, resp, false);
+    assert(r.len > 0);
+    assert(r.offset + r.len <= send_buf.len);
+    const output = send_buf[r.offset..][0..r.len];
     assert(std.mem.startsWith(u8, output, "HTTP/1.1 200 OK\r\n"));
     assert(std.mem.indexOf(u8, output, "<!DOCTYPE html>") != null);
     assert(std.mem.indexOf(u8, output, "product-list") != null);
@@ -840,9 +958,9 @@ test "encode_response SSE — empty dashboard" {
             .orders = .{ .items = undefined, .len = 0 },
         } },
     };
-    const len = encode_response(&send_buf, .page_load_dashboard, resp, true);
-    assert(len > 0);
-    const output = send_buf[0..len];
+    const r = encode_response(&send_buf, .page_load_dashboard, resp, true);
+    assert(r.len > 0);
+    const output = send_buf[r.offset..][0..r.len];
     assert(std.mem.startsWith(u8, output, "HTTP/1.1 200 OK\r\n"));
     assert(std.mem.indexOf(u8, output, "text/event-stream") != null);
     assert(std.mem.indexOf(u8, output, "event: datastar-patch-elements") != null);
@@ -852,9 +970,9 @@ test "encode_response SSE — empty dashboard" {
 test "encode_response error — HTML error page" {
     var send_buf: [http.send_buf_max]u8 = undefined;
     const resp = message.MessageResponse.storage_error;
-    const len = encode_response(&send_buf, .page_load_dashboard, resp, false);
-    assert(len > 0);
-    const output = send_buf[0..len];
+    const r = encode_response(&send_buf, .page_load_dashboard, resp, false);
+    assert(r.len > 0);
+    const output = send_buf[r.offset..][0..r.len];
     assert(std.mem.startsWith(u8, output, "HTTP/1.1 503"));
     assert(std.mem.indexOf(u8, output, "Service Unavailable") != null);
 }
@@ -879,9 +997,9 @@ test "encode_response with products" {
             .orders = .{ .items = undefined, .len = 0 },
         } },
     };
-    const len = encode_response(&send_buf, .page_load_dashboard, resp, false);
-    assert(len > 0);
-    const output = send_buf[0..len];
+    const r = encode_response(&send_buf, .page_load_dashboard, resp, false);
+    assert(r.len > 0);
+    const output = send_buf[r.offset..][0..r.len];
     assert(std.mem.indexOf(u8, output, "Widget") != null);
     assert(std.mem.indexOf(u8, output, "$9.99") != null);
 }
@@ -902,9 +1020,9 @@ test "encode_response SSE — product list" {
         .status = .ok,
         .result = .{ .product_list = products },
     };
-    const len = encode_response(&send_buf, .list_products, resp, true);
-    assert(len > 0);
-    const output = send_buf[0..len];
+    const r = encode_response(&send_buf, .list_products, resp, true);
+    assert(r.len > 0);
+    const output = send_buf[r.offset..][0..r.len];
     assert(std.mem.indexOf(u8, output, "text/event-stream") != null);
     assert(std.mem.indexOf(u8, output, "#product-list") != null);
     assert(std.mem.indexOf(u8, output, "Widget") != null);
@@ -924,9 +1042,9 @@ test "encode_response SSE — collection detail" {
             .products = .{ .items = undefined, .len = 0 },
         } },
     };
-    const len = encode_response(&send_buf, .get_collection, resp, true);
-    assert(len > 0);
-    const output = send_buf[0..len];
+    const r = encode_response(&send_buf, .get_collection, resp, true);
+    assert(r.len > 0);
+    const output = send_buf[r.offset..][0..r.len];
     assert(std.mem.indexOf(u8, output, "#col-cc000000000000000000000000000001") != null);
     assert(std.mem.indexOf(u8, output, "Sale") != null);
 }
@@ -949,9 +1067,9 @@ test "encode_response SSE — order detail" {
         .status = .ok,
         .result = .{ .order = order },
     };
-    const len = encode_response(&send_buf, .get_order, resp, true);
-    assert(len > 0);
-    const output = send_buf[0..len];
+    const r = encode_response(&send_buf, .get_order, resp, true);
+    assert(r.len > 0);
+    const output = send_buf[r.offset..][0..r.len];
     assert(std.mem.indexOf(u8, output, "#od-ee000000000000000000000000000001") != null);
     assert(std.mem.indexOf(u8, output, "Widget") != null);
     assert(std.mem.indexOf(u8, output, "Complete") != null);
@@ -963,9 +1081,9 @@ test "encode_response SSE error — targets correct selector" {
     const resp = message.MessageResponse.not_found;
 
     // list_orders error should target #order-list
-    const len = encode_response(&send_buf, .list_orders, resp, true);
-    assert(len > 0);
-    const output = send_buf[0..len];
+    const r = encode_response(&send_buf, .list_orders, resp, true);
+    assert(r.len > 0);
+    const output = send_buf[r.offset..][0..r.len];
     assert(std.mem.indexOf(u8, output, "#order-list") != null);
     assert(std.mem.indexOf(u8, output, "Not Found") != null);
 }

@@ -157,8 +157,6 @@ pub fn ServerType(comptime IO: type, comptime Storage: type) type {
         // --- Inbox: process ready requests ---
 
         fn process_inbox(server: *Server) void {
-            var json_buf: [http.response_body_max]u8 = undefined;
-
             // Set wall-clock time for this batch — all operations in the tick
             // see the same timestamp.
             server.state_machine.set_time(server.time.realtime());
@@ -180,12 +178,6 @@ pub fn ServerType(comptime IO: type, comptime Storage: type) type {
                     .incomplete, .invalid => unreachable,
                 };
 
-                // OPTIONS preflight — respond directly, no auth needed.
-                if (parsed.method == .options) {
-                    conn.set_response(http.encode_options_response(&conn.send_buf));
-                    continue;
-                }
-
                 // Route through codec first — auth depends on the operation.
                 const msg = codec.translate(parsed.method, parsed.path, parsed.body) orelse {
                     log.mark.warn("unmapped request fd={d}", .{conn.fd});
@@ -198,12 +190,12 @@ pub fn ServerType(comptime IO: type, comptime Storage: type) type {
                 if (msg.operation != .page_load_dashboard) {
                     const token = parsed.authorization orelse {
                         log.mark.warn("auth: missing token fd={d}", .{conn.fd});
-                        conn.set_response(http.encode_401_response(&conn.send_buf));
+                        conn.set_response(0, @intCast(http.encode_401_response(&conn.send_buf).len));
                         continue;
                     };
                     if (server.token_cache.verify_cached(token, server.time.realtime(), server.secret_key) == null) {
                         log.mark.warn("auth: invalid token fd={d}", .{conn.fd});
-                        conn.set_response(http.encode_401_response(&conn.send_buf));
+                        conn.set_response(0, @intCast(http.encode_401_response(&conn.send_buf).len));
                         continue;
                     }
                 }
@@ -222,23 +214,10 @@ pub fn ServerType(comptime IO: type, comptime Storage: type) type {
                 server.state_machine.tracer.stop(.execute, msg.operation);
                 server.state_machine.tracer.trace_log(msg.operation, resp.status, conn.fd);
 
-                // Encode response: render for dashboard + Datastar GETs, JSON for everything else.
-                const use_render = switch (msg.operation) {
-                    .page_load_dashboard => true,
-                    .list_products, .list_collections, .list_orders,
-                    .get_collection, .get_order,
-                    => conn.is_datastar_request,
-                    else => false,
-                };
-
-                if (use_render) {
-                    const len = render.encode_response(&conn.send_buf, msg.operation, resp, conn.is_datastar_request);
-                    conn.set_response(conn.send_buf[0..len]);
-                    conn.keep_alive = false; // Rendered responses emit Connection: close.
-                } else {
-                    const json = codec.encode_response_json(&json_buf, resp);
-                    conn.set_response(http.encode_json_response(&conn.send_buf, resp.status, json));
-                }
+                // Encode response.
+                const r = render.encode_response(&conn.send_buf, msg.operation, resp, conn.is_datastar_request);
+                conn.set_response(r.offset, r.len);
+                conn.keep_alive = r.keep_alive;
             }
         }
 

@@ -35,8 +35,6 @@ pub fn translate(method: http.Method, raw_path: []const u8, body: []const u8) ?m
     // Split path into up to 4 segments: /resource/:id/sub/:sub_id
     const segments = split_path(path_clean) orelse return null;
 
-    if (method == .options) return null;
-
     // Products default to active_only when ?active is not specified.
     const has_active_param = query_param(query_string, "active") != null;
 
@@ -140,7 +138,6 @@ fn translate_products(method: http.Method, seg: PathSegments, body: []const u8, 
         .post => if (!seg.has_id) .create_product else return reject("create_product: unexpected id in path"),
         .put => if (seg.has_id and seg.id != 0) .update_product else return reject("update_product: missing or invalid id in path"),
         .delete => if (seg.has_id) .delete_product else return reject("delete_product: missing id in path"),
-        .options => return null,
     };
 
     switch (operation) {
@@ -416,227 +413,6 @@ fn parse_collection_json(body: []const u8) ?message.ProductCollection {
 
     return col;
 }
-
-/// Encode a MessageResponse as JSON into buf. Returns the written slice.
-/// The response is self-describing — the encoder switches on the result variant.
-pub fn encode_response_json(buf: []u8, resp: message.MessageResponse) []const u8 {
-    var w = JsonWriter{ .buf = buf, .pos = 0 };
-
-    switch (resp.status) {
-        .not_found => {
-            w.raw("{\"error\":\"not found\"}");
-            return buf[0..w.pos];
-        },
-        .insufficient_inventory => {
-            w.raw("{\"error\":\"insufficient_inventory\"}");
-            return buf[0..w.pos];
-        },
-        .version_conflict => {
-            w.raw("{\"error\":\"version_conflict\"}");
-            return buf[0..w.pos];
-        },
-        .storage_error => {
-            w.raw("{\"error\":\"service unavailable\"}");
-            return buf[0..w.pos];
-        },
-        .order_expired => {
-            w.raw("{\"error\":\"order_expired\"}");
-            return buf[0..w.pos];
-        },
-        .order_not_pending => {
-            w.raw("{\"error\":\"order_not_pending\"}");
-            return buf[0..w.pos];
-        },
-        .ok => {},
-    }
-
-    switch (resp.result) {
-        .product => |*p| encode_product(&w, p),
-        .product_list => |*l| {
-            w.raw("{\"data\":[");
-            for (l.items[0..l.len], 0..) |*p, i| {
-                if (i > 0) w.raw(",");
-                encode_product(&w, p);
-            }
-            w.raw("]");
-            write_next_cursor(&w, if (l.len > 0) l.items[l.len - 1].id else 0, l.len);
-            w.raw("}");
-        },
-        .inventory => |inv| {
-            w.raw("{\"inventory\":");
-            w.write_u32(inv);
-            w.raw("}");
-        },
-        .collection => |*cwp| {
-            w.raw("{\"id\":\"");
-            w.write_uuid(cwp.collection.id);
-            w.raw("\",\"name\":\"");
-            w.escaped(cwp.collection.name_slice());
-            w.raw("\",\"products\":[");
-            for (cwp.products.items[0..cwp.products.len], 0..) |*p, i| {
-                if (i > 0) w.raw(",");
-                encode_product(&w, p);
-            }
-            w.raw("]}");
-        },
-        .collection_list => |*l| {
-            w.raw("{\"data\":[");
-            for (l.items[0..l.len], 0..) |*col, i| {
-                if (i > 0) w.raw(",");
-                w.raw("{\"id\":\"");
-                w.write_uuid(col.id);
-                w.raw("\",\"name\":\"");
-                w.escaped(col.name_slice());
-                w.raw("\"}");
-            }
-            w.raw("]");
-            write_next_cursor(&w, if (l.len > 0) l.items[l.len - 1].id else 0, l.len);
-            w.raw("}");
-        },
-        .order => |*o| {
-            w.raw("{\"id\":\"");
-            w.write_uuid(o.id);
-            w.raw("\",\"status\":\"");
-            w.raw(order_status_string(o.status));
-            w.raw("\",\"timeout_at\":");
-            w.write_u64(o.timeout_at);
-            w.raw(",\"items\":[");
-            for (o.items[0..o.items_len], 0..) |*item, i| {
-                if (i > 0) w.raw(",");
-                w.raw("{\"product_id\":\"");
-                w.write_uuid(item.product_id);
-                w.raw("\",\"name\":\"");
-                w.escaped(item.name_slice());
-                w.raw("\",\"quantity\":");
-                w.write_u32(item.quantity);
-                w.raw(",\"price_cents\":");
-                w.write_u32(item.price_cents);
-                w.raw(",\"line_total_cents\":");
-                w.write_u64(item.line_total_cents);
-                w.raw("}");
-            }
-            w.raw("],\"total_cents\":");
-            w.write_u64(o.total_cents);
-            if (o.payment_ref_len > 0) {
-                w.raw(",\"payment_ref\":\"");
-                w.raw(o.payment_ref_slice());
-                w.raw("\"");
-            }
-            w.raw("}");
-        },
-        .order_list => |*l| {
-            w.raw("{\"data\":[");
-            for (l.items[0..l.len], 0..) |*o, i| {
-                if (i > 0) w.raw(",");
-                w.raw("{\"id\":\"");
-                w.write_uuid(o.id);
-                w.raw("\",\"status\":\"");
-                w.raw(order_status_string(o.status));
-                w.raw("\",\"total_cents\":");
-                w.write_u64(o.total_cents);
-                w.raw(",\"items_count\":");
-                w.write_u32(@intCast(o.items_len));
-                w.raw("}");
-            }
-            w.raw("]");
-            write_next_cursor(&w, if (l.len > 0) l.items[l.len - 1].id else 0, l.len);
-            w.raw("}");
-        },
-        .page_load_dashboard => unreachable, // rendered by render.zig, not JSON
-        .empty => w.raw("[]"),
-    }
-
-    return buf[0..w.pos];
-}
-
-/// Write ,"next_cursor":"<uuid>" if the page is full, or ,"next_cursor":null otherwise.
-fn order_status_string(status: message.OrderStatus) []const u8 {
-    return switch (status) {
-        .pending => "pending",
-        .confirmed => "confirmed",
-        .failed => "failed",
-        .cancelled => "cancelled",
-    };
-}
-
-fn write_next_cursor(w: *JsonWriter, last_id: u128, len: u32) void {
-    if (len == message.list_max) {
-        w.raw(",\"next_cursor\":\"");
-        w.write_uuid(last_id);
-        w.raw("\"");
-    } else {
-        w.raw(",\"next_cursor\":null");
-    }
-}
-
-fn encode_product(w: *JsonWriter, p: *const message.Product) void {
-    w.raw("{\"id\":\"");
-    w.write_uuid(p.id);
-    w.raw("\",\"name\":\"");
-    w.escaped(p.name_slice());
-    w.raw("\",\"description\":\"");
-    w.escaped(p.description_slice());
-    w.raw("\",\"price_cents\":");
-    w.write_u32(p.price_cents);
-    w.raw(",\"inventory\":");
-    w.write_u32(p.inventory);
-    w.raw(",\"version\":");
-    w.write_u32(p.version);
-    w.raw(",\"active\":");
-    w.raw(if (p.flags.active) "true" else "false");
-    w.raw("}");
-}
-
-// =====================================================================
-// JSON writer — writes directly into a fixed buffer, no allocations
-// =====================================================================
-
-const JsonWriter = struct {
-    buf: []u8,
-    pos: usize,
-
-    fn raw(self: *JsonWriter, s: []const u8) void {
-        assert(self.pos + s.len <= self.buf.len);
-        @memcpy(self.buf[self.pos..][0..s.len], s);
-        self.pos += s.len;
-    }
-
-    fn write_u32(self: *JsonWriter, val: u32) void {
-        var num_buf: [10]u8 = undefined;
-        const s = stdx.format_u32(&num_buf, val);
-        self.raw(s);
-    }
-
-    fn write_u64(self: *JsonWriter, val: u64) void {
-        var num_buf: [20]u8 = undefined;
-        const s = stdx.format_u64(&num_buf, val);
-        self.raw(s);
-    }
-
-    fn write_uuid(self: *JsonWriter, val: u128) void {
-        var uuid_buf: [32]u8 = undefined;
-        stdx.write_uuid_to_buf(&uuid_buf, val);
-        self.raw(&uuid_buf);
-    }
-
-    /// Write a string with JSON escaping (quotes and backslashes).
-    fn escaped(self: *JsonWriter, s: []const u8) void {
-        for (s) |c| {
-            switch (c) {
-                '"' => self.raw("\\\""),
-                '\\' => self.raw("\\\\"),
-                '\n' => self.raw("\\n"),
-                '\r' => self.raw("\\r"),
-                '\t' => self.raw("\\t"),
-                else => {
-                    assert(self.pos < self.buf.len);
-                    self.buf[self.pos] = c;
-                    self.pos += 1;
-                },
-            }
-        }
-    }
-};
 
 // =====================================================================
 // JSON field extractors — find known fields in a JSON object
@@ -991,30 +767,6 @@ test "json_bool_field extracts boolean" {
     , "active").?, false);
 }
 
-test "encode_response_json — single product" {
-    var p = std.mem.zeroes(message.Product);
-    p.id = 0xaabbccdd11223344aabbccdd11223344;
-    p.name_len = 6;
-    p.description_len = 4;
-    p.price_cents = 999;
-    p.inventory = 10;
-    p.version = 1;
-    p.flags = .{ .active = true };
-    @memcpy(p.name[0..6], "Widget");
-    @memcpy(p.description[0..4], "Cool");
-
-    const resp = message.MessageResponse{
-        .status = .ok,
-        .result = .{ .product = p },
-    };
-
-    var buf: [4096]u8 = undefined;
-    const json = encode_response_json(&buf, resp);
-    try std.testing.expect(std.mem.indexOf(u8, json, "\"id\":\"" ++ test_uuid_str ++ "\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, json, "\"name\":\"Widget\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, json, "\"price_cents\":999") != null);
-}
-
 test "parse_uuid and write_uuid roundtrip" {
     const uuid = parse_uuid("0123456789abcdef0123456789abcdef").?;
     var buf: [32]u8 = undefined;
@@ -1026,18 +778,6 @@ test "parse_uuid rejects invalid input" {
     try std.testing.expect(parse_uuid("123") == null); // too short
     try std.testing.expect(parse_uuid("AABBCCDD11223344AABBCCDD11223344") == null); // uppercase
     try std.testing.expect(parse_uuid("zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz") == null); // non-hex
-}
-
-test "encode_response_json — not found" {
-    var buf: [4096]u8 = undefined;
-    const json = encode_response_json(&buf, message.MessageResponse.not_found);
-    try std.testing.expectEqualSlices(u8, json, "{\"error\":\"not found\"}");
-}
-
-test "encode_response_json — empty list" {
-    var buf: [4096]u8 = undefined;
-    const json = encode_response_json(&buf, message.MessageResponse.empty_ok);
-    try std.testing.expectEqualSlices(u8, json, "[]");
 }
 
 test "GET /products/:id/inventory (get_inventory)" {
@@ -1134,99 +874,6 @@ test "GET /orders/:id (get)" {
     const msg = test_translate(.get, "/orders/" ++ test_uuid_str, "").?;
     try std.testing.expectEqual(msg.operation, .get_order);
     try std.testing.expectEqual(msg.id, test_uuid);
-}
-
-test "encode_response_json — order" {
-    var order_result = std.mem.zeroes(message.OrderResult);
-    order_result.id = 0xeeee0000000000000000000000000001;
-    order_result.items_len = 1;
-    order_result.total_cents = 1998;
-    order_result.status = .pending;
-    order_result.timeout_at = 1700000060;
-    order_result.items[0] = std.mem.zeroes(message.OrderResultItem);
-    order_result.items[0].product_id = test_uuid;
-    order_result.items[0].name_len = 6;
-    order_result.items[0].quantity = 2;
-    order_result.items[0].price_cents = 999;
-    order_result.items[0].line_total_cents = 1998;
-    @memcpy(order_result.items[0].name[0..6], "Widget");
-
-    const resp = message.MessageResponse{
-        .status = .ok,
-        .result = .{ .order = order_result },
-    };
-
-    var buf: [4096]u8 = undefined;
-    const json = encode_response_json(&buf, resp);
-    try std.testing.expect(std.mem.indexOf(u8, json, "\"total_cents\":1998") != null);
-    try std.testing.expect(std.mem.indexOf(u8, json, "\"line_total_cents\":1998") != null);
-    try std.testing.expect(std.mem.indexOf(u8, json, "\"name\":\"Widget\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, json, "\"quantity\":2") != null);
-}
-
-test "encode_response_json — inventory" {
-    const resp = message.MessageResponse{
-        .status = .ok,
-        .result = .{ .inventory = 42 },
-    };
-
-    var buf: [4096]u8 = undefined;
-    const json = encode_response_json(&buf, resp);
-    try std.testing.expectEqualSlices(u8, json, "{\"inventory\":42}");
-}
-
-test "encode_response_json — collection with products" {
-    var col = std.mem.zeroes(message.ProductCollection);
-    col.id = 0xcc000000000000000000000000000001;
-    col.name_len = 11;
-    @memcpy(col.name[0..11], "Summer Sale");
-
-    var p = std.mem.zeroes(message.Product);
-    p.id = test_uuid;
-    p.name_len = 6;
-    p.price_cents = 999;
-    p.inventory = 10;
-    p.version = 1;
-    p.flags = .{ .active = true };
-    @memcpy(p.name[0..6], "Widget");
-
-    var products = message.ProductList{ .items = undefined, .len = 1 };
-    products.items[0] = p;
-
-    const resp = message.MessageResponse{
-        .status = .ok,
-        .result = .{ .collection = .{
-            .collection = col,
-            .products = products,
-        } },
-    };
-
-    var buf: [4096]u8 = undefined;
-    const json = encode_response_json(&buf, resp);
-    try std.testing.expect(std.mem.indexOf(u8, json, "\"name\":\"Summer Sale\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, json, "\"products\":[") != null);
-    try std.testing.expect(std.mem.indexOf(u8, json, "\"name\":\"Widget\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, json, "\"price_cents\":999") != null);
-}
-
-test "encode_response_json — collection with empty products" {
-    var col = std.mem.zeroes(message.ProductCollection);
-    col.id = 0xcc000000000000000000000000000002;
-    col.name_len = 5;
-    @memcpy(col.name[0..5], "Empty");
-
-    const resp = message.MessageResponse{
-        .status = .ok,
-        .result = .{ .collection = .{
-            .collection = col,
-            .products = .{ .items = undefined, .len = 0 },
-        } },
-    };
-
-    var buf: [4096]u8 = undefined;
-    const json = encode_response_json(&buf, resp);
-    try std.testing.expect(std.mem.indexOf(u8, json, "\"name\":\"Empty\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, json, "\"products\":[]") != null);
 }
 
 // =====================================================================

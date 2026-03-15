@@ -34,6 +34,9 @@ Single-threaded event loop using epoll. No allocations after startup. Request pi
 ```
 http.zig → codec.zig → message.zig → state_machine.zig → storage
 (parse HTTP)  (route + JSON → typed)  (types)  (prefetch + execute)  (SQLite or in-memory)
+                                                     ↓
+                                                render.zig
+                                          (HTML page or SSE fragments)
 ```
 
 | File | Role |
@@ -41,8 +44,9 @@ http.zig → codec.zig → message.zig → state_machine.zig → storage
 | `main.zig` | Entry point, tick loop, runtime log level filtering, CLI parsing |
 | `server.zig` | `ServerType(IO, Storage)` — accepts connections, drives prefetch→execute |
 | `connection.zig` | Per-connection state machine (accepting → receiving → ready → sending) |
-| `http.zig` | HTTP/1.0+1.1 parser and response encoder |
-| `codec.zig` | Route parsing, JSON ↔ typed struct translation, UUID parsing |
+| `http.zig` | HTTP/1.0+1.1 request parser, status lines, 401 response |
+| `codec.zig` | Route parsing, JSON request → typed struct translation, UUID parsing |
+| `render.zig` | HTML + SSE response renderer — body-first with Content-Length backfill (keep-alive), SSE from offset 0 (Connection: close) |
 | `message.zig` | Types: Product, ProductCollection, flat Operation enum with EventType, Message, MessageResponse |
 | `state_machine.zig` | `StateMachineType(Storage)` — inline dispatch in execute, flat switch in prefetch, `MemoryStorage` |
 | `storage.zig` | `SqliteStorage` — SQLite backend with prepared statements, WAL mode |
@@ -53,7 +57,8 @@ http.zig → codec.zig → message.zig → state_machine.zig → storage
 | `fuzz_tests.zig` | Fuzz test dispatcher — single binary routing to all fuzzers, matches TB's fuzz_tests.zig |
 | `fuzz_lib.zig` | Shared fuzz utilities — `FuzzArgs` struct, `random_enum_weights`, matches TB's testing/fuzz.zig |
 | `fuzz.zig` | State machine fuzzer — bypasses HTTP, calls prefetch/commit directly |
-| `codec_fuzz.zig` | Codec fuzzer — throws random methods/paths/JSON at codec.translate, random responses at encode |
+| `codec_fuzz.zig` | Codec fuzzer — throws random methods/paths/JSON at codec.translate |
+| `render_fuzz.zig` | Render fuzzer — random operations/results through encode_response, asserts framing and keep-alive invariants |
 | `auditor.zig` | Auditor oracle — independent reference model that validates state machine responses (TB pattern) |
 | `storage_fuzz.zig` | Storage equivalence fuzzer — runs MemoryStorage vs SqliteStorage vs Auditor, asserts agreement |
 | `stdx.zig` | Ported from TB's stdx — `no_padding`, `equal_bytes`, `has_unique_representation` |
