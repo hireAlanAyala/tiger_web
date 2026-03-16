@@ -10,12 +10,11 @@ sh zig/download.sh          # one-time: download Zig 0.14.1
 # First-time setup — create dev.env (gitignored):
 cat > dev.env << 'EOF'
 export SECRET_KEY="tiger-web-test-key-0123456789ab!"
-export TOKEN="eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOjEsImV4cCI6MjE0NTkxNjgwMH0.ulNOjuMyYo5tT5gG78pG6HvyCZm4Gs7azogXTvz-VgY"
 EOF
 
-source dev.env                              # load SECRET_KEY and TOKEN
+source dev.env                              # load SECRET_KEY
 ./zig/zig build run                         # run the server (default port 3000)
-TOKEN=$TOKEN ./zig/zig build run-worker     # run the worker (polls server)
+./zig/zig build run-worker                  # run the worker (polls server)
 ./zig/zig build run -- --log-debug          # enable debug log output
 ./zig/zig build run -- --log-debug --log-trace  # per-request trace logs
 ./zig/zig build unit-test    # unit tests (message, state_machine, http, marks, codec)
@@ -46,7 +45,7 @@ http.zig → codec.zig → message.zig → state_machine.zig → storage
 | `connection.zig` | Per-connection state machine (accepting → receiving → ready → sending) |
 | `http.zig` | HTTP/1.0+1.1 request parser (pure parser, no response encoding — see design/002-always-200.md) |
 | `codec.zig` | Route parsing, JSON request → typed struct translation, UUID parsing |
-| `render.zig` | HTML + SSE response renderer — always 200, body-first with Content-Length backfill (keep-alive), SSE from offset 0 (Connection: close), auth failure renders login page |
+| `render.zig` | HTML + SSE response renderer — always 200, body-first with Content-Length backfill (keep-alive), SSE from offset 0 (Connection: close), Set-Cookie for new visitors |
 | `message.zig` | Types: Product, ProductCollection, flat Operation enum with EventType, Message, MessageResponse |
 | `state_machine.zig` | `StateMachineType(Storage)` — inline dispatch in execute, flat switch in prefetch, `MemoryStorage` |
 | `storage.zig` | `SqliteStorage` — SQLite backend with prepared statements, WAL mode |
@@ -209,8 +208,6 @@ Use `log.mark.*` for **testable decision boundaries** — code paths the sim fuz
 | `server.zig` | `accept_callback` failed | `"accept failed"` |
 | `server.zig` | `timeout_idle` timed out | `"connection timed out"` |
 | `server.zig` | `process_inbox` SSE mutation deferred | `"SSE mutation: deferring to follow-up"` |
-| `server.zig` | `process_inbox` auth missing token | `"auth: missing token"` |
-| `server.zig` | `process_inbox` auth invalid token | `"auth: invalid token"` |
 | `state_machine.zig` | `MemoryStorage.fault` busy injected | `"storage: busy fault injected"` |
 | `state_machine.zig` | `MemoryStorage.fault` err injected | `"storage: err fault injected"` |
 
