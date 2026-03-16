@@ -20,6 +20,7 @@ pub fn translate(method: http.Method, raw_path: []const u8, body: []const u8) ?m
         return .{
             .operation = .page_load_dashboard,
             .id = 0,
+            .user_id = 0,
             .event = .{ .none = {} },
         };
     }
@@ -112,6 +113,7 @@ fn translate_products(method: http.Method, seg: PathSegments, body: []const u8, 
             return .{
                 .operation = .transfer_inventory,
                 .id = seg.id,
+                .user_id = 0,
                 .event = .{ .transfer = .{
                     .target_id = seg.sub_id,
                     .quantity = quantity,
@@ -148,7 +150,7 @@ fn translate_products(method: http.Method, seg: PathSegments, body: []const u8, 
             var sq = std.mem.zeroes(message.SearchQuery);
             @memcpy(sq.query[0..q.len], q);
             sq.query_len = @intCast(q.len);
-            return .{ .operation = .search_products, .id = 0, .event = .{ .search = sq } };
+            return .{ .operation = .search_products, .id = 0, .user_id = 0, .event = .{ .search = sq } };
         },
         .list_products => {
             if (body.len != 0) return reject("list_products: unexpected body");
@@ -156,11 +158,11 @@ fn translate_products(method: http.Method, seg: PathSegments, body: []const u8, 
             // Default to active_only — soft-deleted items hidden unless
             // the client explicitly passes ?active=false or ?active=all.
             if (!has_active_param) params.active_filter = .active_only;
-            return .{ .operation = operation, .id = 0, .event = .{ .list = params } };
+            return .{ .operation = operation, .id = 0, .user_id = 0, .event = .{ .list = params } };
         },
         .get_product, .delete_product, .get_product_inventory => {
             if (body.len != 0) return reject("get/delete product: unexpected body");
-            return .{ .operation = operation, .id = seg.id, .event = .{ .none = {} } };
+            return .{ .operation = operation, .id = seg.id, .user_id = 0, .event = .{ .none = {} } };
         },
         .create_product, .update_product => {
             if (body.len == 0) return reject("create/update product: missing body");
@@ -170,6 +172,7 @@ fn translate_products(method: http.Method, seg: PathSegments, body: []const u8, 
             return .{
                 .operation = operation,
                 .id = seg.id,
+                .user_id = 0,
                 .event = .{ .product = product },
             };
         },
@@ -193,6 +196,7 @@ fn translate_collections(method: http.Method, seg: PathSegments, body: []const u
         return .{
             .operation = operation,
             .id = seg.id,
+            .user_id = 0,
             .event = .{ .member_id = seg.sub_id },
         };
     }
@@ -207,17 +211,18 @@ fn translate_collections(method: http.Method, seg: PathSegments, body: []const u
     switch (operation) {
         .list_collections => {
             if (body.len != 0) return reject("list_collections: unexpected body");
-            return .{ .operation = operation, .id = 0, .event = .{ .list = list_params } };
+            return .{ .operation = operation, .id = 0, .user_id = 0, .event = .{ .list = list_params } };
         },
         .get_collection, .delete_collection => {
             if (body.len != 0) return reject("get/delete collection: unexpected body");
-            return .{ .operation = operation, .id = seg.id, .event = .{ .none = {} } };
+            return .{ .operation = operation, .id = seg.id, .user_id = 0, .event = .{ .none = {} } };
         },
         .create_collection => {
             if (body.len == 0) return reject("create_collection: missing body");
             return .{
                 .operation = operation,
                 .id = seg.id,
+                .user_id = 0,
                 .event = .{ .collection = parse_collection_json(body) orelse return reject("create_collection: invalid JSON") },
             };
         },
@@ -230,9 +235,9 @@ fn translate_orders(method: http.Method, seg: PathSegments, body: []const u8, li
         .get => {
             if (body.len != 0) return reject("get orders: unexpected body");
             if (seg.has_id) {
-                return .{ .operation = .get_order, .id = seg.id, .event = .{ .none = {} } };
+                return .{ .operation = .get_order, .id = seg.id, .user_id = 0, .event = .{ .none = {} } };
             } else {
-                return .{ .operation = .list_orders, .id = 0, .event = .{ .list = list_params } };
+                return .{ .operation = .list_orders, .id = 0, .user_id = 0, .event = .{ .list = list_params } };
             }
         },
         .post => {
@@ -243,6 +248,7 @@ fn translate_orders(method: http.Method, seg: PathSegments, body: []const u8, li
                 return .{
                     .operation = .complete_order,
                     .id = seg.id,
+                    .user_id = 0,
                     .event = .{ .completion = completion },
                 };
             }
@@ -251,6 +257,7 @@ fn translate_orders(method: http.Method, seg: PathSegments, body: []const u8, li
                 return .{
                     .operation = .cancel_order,
                     .id = seg.id,
+                    .user_id = 0,
                     .event = .{ .none = {} },
                 };
             }
@@ -261,6 +268,7 @@ fn translate_orders(method: http.Method, seg: PathSegments, body: []const u8, li
             return .{
                 .operation = .create_order,
                 .id = order.id,
+                .user_id = 0,
                 .event = .{ .order = order },
             };
         },

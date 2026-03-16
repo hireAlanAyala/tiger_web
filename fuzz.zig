@@ -210,20 +210,24 @@ pub fn gen_message(prng: *PRNG, operation: message.Operation, pools: IdPools) ?m
         return gen_random_message(prng, operation);
     }
 
+    const user_id = prng.int(u128) | 1;
     return switch (operation) {
         .create_product => .{
             .operation = .create_product,
             .id = 0,
+            .user_id = user_id,
             .event = .{ .product = gen_product(prng) },
         },
         .get_product, .get_product_inventory => .{
             .operation = operation,
             .id = pick_or_random_id(prng, pools.product_ids),
+            .user_id = user_id,
             .event = .{ .none = {} },
         },
         .list_products => .{
             .operation = .list_products,
             .id = 0,
+            .user_id = user_id,
             .event = .{ .list = gen_list_params(prng) },
         },
         .update_product => blk: {
@@ -231,12 +235,14 @@ pub fn gen_message(prng: *PRNG, operation: message.Operation, pools: IdPools) ?m
             break :blk .{
                 .operation = .update_product,
                 .id = id,
+                .user_id = user_id,
                 .event = .{ .product = gen_product_with_id(prng, id) },
             };
         },
         .delete_product => .{
             .operation = .delete_product,
             .id = pick_or_random_id(prng, pools.product_ids),
+            .user_id = user_id,
             .event = .{ .none = {} },
         },
         .transfer_inventory => blk: {
@@ -247,6 +253,7 @@ pub fn gen_message(prng: *PRNG, operation: message.Operation, pools: IdPools) ?m
             break :blk .{
                 .operation = .transfer_inventory,
                 .id = pools.product_ids[src_idx],
+                .user_id = user_id,
                 .event = .{ .transfer = .{
                     .target_id = pools.product_ids[dst_idx],
                     .quantity = prng.range_inclusive(u32, 1, 1000),
@@ -259,6 +266,7 @@ pub fn gen_message(prng: *PRNG, operation: message.Operation, pools: IdPools) ?m
             break :blk .{
                 .operation = .create_order,
                 .id = 0,
+                .user_id = user_id,
                 .event = .{ .order = gen_order(prng, pools.product_ids) },
             };
         },
@@ -277,47 +285,56 @@ pub fn gen_message(prng: *PRNG, operation: message.Operation, pools: IdPools) ?m
             break :blk .{
                 .operation = .complete_order,
                 .id = pick_or_random_id(prng, pools.order_ids),
+                .user_id = user_id,
                 .event = .{ .completion = completion },
             };
         },
         .cancel_order => .{
             .operation = .cancel_order,
             .id = pick_or_random_id(prng, pools.order_ids),
+            .user_id = user_id,
             .event = .{ .none = {} },
         },
         .search_products => .{
             .operation = .search_products,
             .id = 0,
+            .user_id = user_id,
             .event = .{ .search = gen_search_query(prng) },
         },
         .get_order => .{
             .operation = .get_order,
             .id = pick_or_random_id(prng, pools.order_ids),
+            .user_id = user_id,
             .event = .{ .none = {} },
         },
         .list_orders => .{
             .operation = .list_orders,
             .id = 0,
+            .user_id = user_id,
             .event = .{ .list = gen_list_params(prng) },
         },
         .create_collection => .{
             .operation = .create_collection,
             .id = 0,
+            .user_id = user_id,
             .event = .{ .collection = gen_collection(prng) },
         },
         .get_collection => .{
             .operation = .get_collection,
             .id = pick_or_random_id(prng, pools.collection_ids),
+            .user_id = user_id,
             .event = .{ .none = {} },
         },
         .list_collections => .{
             .operation = .list_collections,
             .id = 0,
+            .user_id = user_id,
             .event = .{ .list = gen_list_params(prng) },
         },
         .delete_collection => .{
             .operation = .delete_collection,
             .id = pick_or_random_id(prng, pools.collection_ids),
+            .user_id = user_id,
             .event = .{ .none = {} },
         },
         .add_collection_member => blk: {
@@ -325,6 +342,7 @@ pub fn gen_message(prng: *PRNG, operation: message.Operation, pools: IdPools) ?m
             break :blk .{
                 .operation = .add_collection_member,
                 .id = pools.collection_ids[prng.int_inclusive(usize, pools.collection_ids.len - 1)],
+                .user_id = user_id,
                 .event = .{ .member_id = pools.product_ids[prng.int_inclusive(usize, pools.product_ids.len - 1)] },
             };
         },
@@ -333,12 +351,14 @@ pub fn gen_message(prng: *PRNG, operation: message.Operation, pools: IdPools) ?m
             break :blk .{
                 .operation = .remove_collection_member,
                 .id = pools.collection_ids[prng.int_inclusive(usize, pools.collection_ids.len - 1)],
+                .user_id = user_id,
                 .event = .{ .member_id = pools.product_ids[prng.int_inclusive(usize, pools.product_ids.len - 1)] },
             };
         },
         .page_load_dashboard => .{
             .operation = .page_load_dashboard,
             .id = 0,
+            .user_id = user_id,
             .event = .{ .none = {} },
         },
     };
@@ -494,6 +514,7 @@ pub fn gen_random_message(prng: *PRNG, operation: message.Operation) message.Mes
     return .{
         .operation = operation,
         .id = prng.int(u128),
+        .user_id = prng.int(u128) | 1,
         .event = event,
     };
 }

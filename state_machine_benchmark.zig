@@ -44,6 +44,7 @@ test "benchmark: state machine" {
         const msg = message.Message{
             .operation = .create_product,
             .id = 0,
+            .user_id = 1,
             .event = .{ .product = p },
         };
         if (!StateMachine.input_valid(msg)) continue;
@@ -71,6 +72,7 @@ test "benchmark: state machine" {
                 const msg = message.Message{
                     .operation = .get_product,
                     .id = product_ids[i % product_count],
+                    .user_id = 1,
                     .event = .{ .none = {} },
                 };
                 assert(sm.prefetch(msg));
@@ -93,6 +95,7 @@ test "benchmark: state machine" {
                 const msg = message.Message{
                     .operation = .list_products,
                     .id = 0,
+                    .user_id = 1,
                     .event = .{ .list = params },
                 };
                 assert(sm.prefetch(msg));
@@ -120,6 +123,7 @@ test "benchmark: state machine" {
                 const msg = message.Message{
                     .operation = .update_product,
                     .id = update_payload.id,
+                    .user_id = 1,
                     .event = .{ .product = update_payload },
                 };
                 assert(sm.prefetch(msg));

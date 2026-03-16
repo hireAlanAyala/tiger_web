@@ -22,9 +22,6 @@ pub const Status = enum(u8) {
     version_conflict = 11,
     order_expired = 12,
     order_not_pending = 13,
-
-    // Auth — short-circuits before the state machine.
-    unauthorized = 14,
 };
 
 /// Flat operation enum — encodes entity type AND action in a single tag,
@@ -467,6 +464,7 @@ pub const Event = union(enum) {
 pub const Message = struct {
     operation: Operation,
     id: u128, // primary entity ID (0 for list/create)
+    user_id: u128,
     event: Event,
 };
 
