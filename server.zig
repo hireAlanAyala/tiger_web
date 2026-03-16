@@ -11,6 +11,7 @@ const render = @import("render.zig");
 const Time = @import("time.zig").Time;
 const marks = @import("marks.zig");
 const log = marks.wrap_log(std.log.scoped(.server));
+const PRNG = @import("prng.zig");
 
 /// The server orchestrator, parameterized on the IO and Storage types.
 /// In production, IO is the real epoll-based implementation and Storage is SqliteStorage.
@@ -43,7 +44,7 @@ pub fn ServerType(comptime IO: type, comptime Storage: type) type {
         connections_used: u32,
 
         secret_key: *const [auth.key_length]u8,
-        token_cache: auth.TokenCache,
+        prng: PRNG,
 
         tick_count: u32,
 
@@ -54,7 +55,7 @@ pub fn ServerType(comptime IO: type, comptime Storage: type) type {
         pub const request_timeout_ticks = 3000;
 
         /// Initialize the server. Allocates the connection pool on the heap.
-        pub fn init(allocator: std.mem.Allocator, io: *IO, state_machine: *StateMachine, listen_fd: IO.fd_t, time: Time, secret_key: *const [auth.key_length]u8) !Server {
+        pub fn init(allocator: std.mem.Allocator, io: *IO, state_machine: *StateMachine, listen_fd: IO.fd_t, time: Time, secret_key: *const [auth.key_length]u8, prng_seed: u64) !Server {
             const connections = try allocator.alloc(Connection, max_connections);
             errdefer allocator.free(connections);
 
@@ -72,7 +73,7 @@ pub fn ServerType(comptime IO: type, comptime Storage: type) type {
                 .connections = connections,
                 .connections_used = 0,
                 .secret_key = secret_key,
-                .token_cache = .{},
+                .prng = PRNG.from_seed(prng_seed),
                 .tick_count = 0,
             };
         }
@@ -181,30 +182,22 @@ pub fn ServerType(comptime IO: type, comptime Storage: type) type {
                     .incomplete, .invalid => unreachable,
                 };
 
-                // Route through codec first — auth depends on the operation.
-                const msg = codec.translate(parsed.method, parsed.path, parsed.body) orelse {
+                // Route through codec.
+                var msg = codec.translate(parsed.method, parsed.path, parsed.body) orelse {
                     log.mark.warn("unmapped request fd={d}", .{conn.fd});
                     conn.state = .closing;
                     continue;
                 };
                 conn.is_datastar_request = parsed.is_datastar_request;
 
-                // Auth gate — page_load_dashboard is public (it serves the login page).
-                if (msg.operation != .page_load_dashboard) {
-                    const token = parsed.authorization orelse {
-                        log.mark.warn("auth: missing token fd={d}", .{conn.fd});
-                        const r = render.encode_response(&conn.send_buf, .page_load_dashboard, .{ .status = .unauthorized, .result = .{ .empty = {} } }, conn.is_datastar_request);
-                        conn.set_response(r.offset, r.len);
-                        conn.keep_alive = r.keep_alive;
-                        continue;
-                    };
-                    if (server.token_cache.verify_cached(token, server.time.realtime(), server.secret_key) == null) {
-                        log.mark.warn("auth: invalid token fd={d}", .{conn.fd});
-                        const r = render.encode_response(&conn.send_buf, .page_load_dashboard, .{ .status = .unauthorized, .result = .{ .empty = {} } }, conn.is_datastar_request);
-                        conn.set_response(r.offset, r.len);
-                        conn.keep_alive = r.keep_alive;
-                        continue;
-                    }
+                // Cookie identity resolution — every visitor gets an identity.
+                const existing = if (parsed.identity_cookie) |cv| auth.verify_cookie(cv, server.secret_key) else null;
+                const user_id = existing orelse mint_user_id(&server.prng);
+                assert(user_id != 0);
+                msg.user_id = user_id;
+                if (existing == null) {
+                    assert(conn.set_cookie_user_id == 0);
+                    conn.set_cookie_user_id = user_id;
                 }
 
                 // Prefetch. Storage busy → skip, retry next tick.
@@ -216,6 +209,7 @@ pub fn ServerType(comptime IO: type, comptime Storage: type) type {
                 server.state_machine.tracer.stop(.prefetch, msg.operation);
 
                 // Execute.
+                assert(msg.user_id != 0);
                 server.state_machine.tracer.start(.execute);
                 const resp = server.state_machine.commit(msg);
                 server.state_machine.tracer.stop(.execute, msg.operation);
@@ -233,7 +227,12 @@ pub fn ServerType(comptime IO: type, comptime Storage: type) type {
                 }
 
                 // Encode response.
-                const r = render.encode_response(&conn.send_buf, msg.operation, resp, conn.is_datastar_request);
+                var cookie_hdr_buf: [auth.set_cookie_header_max]u8 = undefined;
+                const cookie_hdr: ?[]const u8 = if (conn.set_cookie_user_id != 0)
+                    auth.format_set_cookie_header(&cookie_hdr_buf, conn.set_cookie_user_id, server.secret_key)
+                else
+                    null;
+                const r = render.encode_response(&conn.send_buf, msg.operation, resp, conn.is_datastar_request, cookie_hdr);
                 conn.set_response(r.offset, r.len);
                 conn.keep_alive = r.keep_alive;
             }
@@ -263,6 +262,7 @@ pub fn ServerType(comptime IO: type, comptime Storage: type) type {
                 const msg = message.Message{
                     .operation = .page_load_dashboard,
                     .id = 0,
+                    .user_id = 0,
                     .event = .{ .none = {} },
                 };
 
@@ -289,11 +289,17 @@ pub fn ServerType(comptime IO: type, comptime Storage: type) type {
 
                 const dashboard = resp.result.page_load_dashboard;
 
+                var cookie_hdr_buf: [auth.set_cookie_header_max]u8 = undefined;
+                const cookie_hdr: ?[]const u8 = if (conn.set_cookie_user_id != 0)
+                    auth.format_set_cookie_header(&cookie_hdr_buf, conn.set_cookie_user_id, server.secret_key)
+                else
+                    null;
                 const r = render.encode_followup(
                     &conn.send_buf,
                     &dashboard,
                     conn.followup_operation,
                     conn.followup_status,
+                    cookie_hdr,
                 );
                 conn.pending_followup = false;
                 conn.set_response(r.offset, r.len);
@@ -386,6 +392,14 @@ pub fn ServerType(comptime IO: type, comptime Storage: type) type {
                     log.mark.debug("connection timed out fd={d}", .{conn.fd});
                     conn.state = .closing;
                 }
+            }
+        }
+
+        fn mint_user_id(prng: *PRNG) u128 {
+            while (true) {
+                const id = prng.int(u128);
+                maybe(id == 0);
+                if (id != 0) return id;
             }
         }
 

@@ -10,10 +10,13 @@ const assert = std.debug.assert;
 const render = @import("render.zig");
 const http = @import("http.zig");
 const message = @import("message.zig");
+const auth = @import("auth.zig");
 const FuzzArgs = @import("fuzz_lib.zig").FuzzArgs;
 const PRNG = @import("prng.zig");
 
 const log = std.log.scoped(.fuzz);
+
+const test_key: *const [auth.key_length]u8 = "tiger-web-test-key-0123456789ab!";
 
 pub fn main(allocator: std.mem.Allocator, args: FuzzArgs) !void {
     _ = allocator;
@@ -25,7 +28,7 @@ pub fn main(allocator: std.mem.Allocator, args: FuzzArgs) !void {
     var full_page_count: u64 = 0;
     var sse_count: u64 = 0;
     var followup_count: u64 = 0;
-    var unauth_count: u64 = 0;
+    var cookie_count: u64 = 0;
     var error_count: u64 = 0;
 
     for (0..events_max) |event_i| {
@@ -33,27 +36,12 @@ pub fn main(allocator: std.mem.Allocator, args: FuzzArgs) !void {
 
         var send_buf: [http.send_buf_max]u8 = undefined;
 
-        // ~5% of events exercise the auth failure path (through encode_response).
-        if (prng.chance(PRNG.ratio(1, 20))) {
-            const is_datastar = prng.boolean();
-            const resp = render.encode_response(&send_buf, .page_load_dashboard, .{ .status = .unauthorized, .result = .{ .empty = {} } }, is_datastar);
-            assert(resp.len > 0);
-            assert(resp.offset + resp.len <= send_buf.len);
-            const output = send_buf[resp.offset..][0..resp.len];
-            assert(std.mem.startsWith(u8, output, "HTTP/1.1 200 OK\r\n"));
-            if (is_datastar) {
-                assert(!resp.keep_alive);
-                assert(std.mem.indexOf(u8, output, "text/event-stream") != null);
-                assert(std.mem.indexOf(u8, output, "Unauthorized") != null);
-                assert_sse_framing(output);
-            } else {
-                assert(resp.keep_alive);
-                assert(std.mem.indexOf(u8, output, "<!DOCTYPE html>") != null);
-                assert(std.mem.indexOf(u8, output, "Content-Length:") != null);
-            }
-            unauth_count += 1;
-            continue;
-        }
+        // ~20% of events include a Set-Cookie header.
+        var cookie_hdr_buf: [auth.set_cookie_header_max]u8 = undefined;
+        const set_cookie_header: ?[]const u8 = if (prng.chance(PRNG.ratio(1, 5))) blk: {
+            const uid = prng.int(u128) | 1;
+            break :blk auth.format_set_cookie_header(&cookie_hdr_buf, uid, test_key);
+        } else null;
 
         const gen = gen_response(&prng);
 
@@ -65,7 +53,7 @@ pub fn main(allocator: std.mem.Allocator, args: FuzzArgs) !void {
                 .orders = gen_order_summary_list(&prng, message.dashboard_list_max),
             };
             const followup_status = if (gen.resp.status != .ok) gen.resp.status else .ok;
-            const resp = render.encode_followup(&send_buf, &dashboard, gen.operation, followup_status);
+            const resp = render.encode_followup(&send_buf, &dashboard, gen.operation, followup_status, set_cookie_header);
 
             assert(resp.len > 0);
             assert(resp.offset + resp.len <= send_buf.len);
@@ -83,11 +71,17 @@ pub fn main(allocator: std.mem.Allocator, args: FuzzArgs) !void {
                 assert(std.mem.indexOf(u8, output, render.error_selector(gen.operation)) != null);
                 error_count += 1;
             }
+            if (set_cookie_header != null) {
+                assert(std.mem.indexOf(u8, output, "Set-Cookie: tiger_id=") != null);
+                cookie_count += 1;
+            } else {
+                assert(std.mem.indexOf(u8, output, "Set-Cookie:") == null);
+            }
             followup_count += 1;
             continue;
         }
 
-        const resp = render.encode_response(&send_buf, gen.operation, gen.resp, gen.is_datastar_request);
+        const resp = render.encode_response(&send_buf, gen.operation, gen.resp, gen.is_datastar_request, set_cookie_header);
 
         // Core invariants.
         assert(resp.len > 0);
@@ -100,6 +94,14 @@ pub fn main(allocator: std.mem.Allocator, args: FuzzArgs) !void {
 
         if (gen.is_datastar_request) {
             assert(!resp.keep_alive);
+        }
+
+        // Set-Cookie header appears when requested, absent otherwise.
+        if (set_cookie_header != null) {
+            assert(std.mem.indexOf(u8, output, "Set-Cookie: tiger_id=") != null);
+            cookie_count += 1;
+        } else {
+            assert(std.mem.indexOf(u8, output, "Set-Cookie:") == null);
         }
 
         if (gen.resp.status != .ok) {
@@ -138,8 +140,8 @@ pub fn main(allocator: std.mem.Allocator, args: FuzzArgs) !void {
     log.info(
         \\Render fuzz done:
         \\  events_max={}
-        \\  full_page={} sse={} followup={} unauth={} error={}
-    , .{ events_max, full_page_count, sse_count, followup_count, unauth_count, error_count });
+        \\  full_page={} sse={} followup={} cookie={} error={}
+    , .{ events_max, full_page_count, sse_count, followup_count, cookie_count, error_count });
 }
 
 // =====================================================================

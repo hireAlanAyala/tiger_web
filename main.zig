@@ -67,8 +67,9 @@ pub fn main() !void {
 
     const listen_fd = try IO.open_listener(address);
 
+    const prng_seed: u64 = @truncate(std.crypto.random.int(u128));
     var time_real = TimeReal{};
-    var server = try Server.init(std.heap.page_allocator, &io, &sm, listen_fd, time_real.time(), secret_key);
+    var server = try Server.init(std.heap.page_allocator, &io, &sm, listen_fd, time_real.time(), secret_key, prng_seed);
 
     log.info("storage=sqlite tick_interval={d}ms connections={d}", .{
         tick_ns / std.time.ns_per_ms,

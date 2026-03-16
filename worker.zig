@@ -1,4 +1,5 @@
 const std = @import("std");
+const auth = @import("auth.zig");
 const log = std.log.scoped(.worker);
 
 /// Worker process — polls the server for pending orders, simulates an
@@ -7,7 +8,7 @@ const log = std.log.scoped(.worker);
 /// external service ↔ HTTP client.
 ///
 /// Usage:
-///   TOKEN=<jwt> ./zig/zig build run-worker
+///   ./zig/zig build run-worker
 ///   ./zig/zig build run-worker -- --port=3001 --delay-ms=2000
 
 pub fn main() !void {
@@ -19,10 +20,10 @@ pub fn main() !void {
         cli.delay_ms,
     });
 
-    if (cli.token.len == 0) {
-        log.err("TOKEN not set", .{});
-        std.process.exit(1);
-    }
+    // Cookie state: first request has no cookie; the server assigns one via
+    // Set-Cookie. Subsequent requests send the cookie automatically.
+    var cookie_buf: [auth.cookie_value_max]u8 = undefined;
+    var cookie_len: usize = 0;
 
     var poll_count: u64 = 0;
     var completed_count: u64 = 0;
@@ -30,11 +31,27 @@ pub fn main() !void {
     while (true) {
         poll_count += 1;
 
-        const pending = fetch_pending_orders(cli.port, cli.token) catch |err| {
+        const cookie = if (cookie_len > 0) cookie_buf[0..cookie_len] else @as([]const u8, "");
+
+        var buf: [16384]u8 = undefined;
+        const fetch_result = http_get(cli.port, "/orders", cookie, &buf) catch |err| {
             log.warn("poll failed: {s}", .{@errorName(err)});
             std.time.sleep(cli.poll_interval_ms * std.time.ns_per_ms);
             continue;
         };
+
+        // Learn cookie from Set-Cookie header on first response.
+        if (cookie_len == 0) {
+            if (extract_set_cookie(fetch_result.raw_headers)) |val| {
+                if (val.len <= auth.cookie_value_max) {
+                    @memcpy(cookie_buf[0..val.len], val);
+                    cookie_len = val.len;
+                    log.info("received identity cookie", .{});
+                }
+            }
+        }
+
+        const pending = parse_pending_orders(fetch_result.body);
 
         if (pending.count > 0) {
             log.info("poll #{d}: found {d} pending orders", .{ poll_count, pending.count });
@@ -49,7 +66,7 @@ pub fn main() !void {
 
                 // External call "succeeded" — post completion.
                 const result: []const u8 = "confirmed";
-                post_completion(cli.port, cli.token, order_id, result) catch |err| {
+                post_completion(cli.port, cookie_buf[0..cookie_len], order_id, result) catch |err| {
                     log.warn("completion failed for {s}: {s}", .{
                         format_uuid(order_id),
                         @errorName(err),
@@ -85,11 +102,13 @@ const PendingOrders = struct {
     count: usize,
 };
 
-fn fetch_pending_orders(port: u16, token: []const u8) !PendingOrders {
-    var result = PendingOrders{ .ids = undefined, .count = 0 };
+const HttpResult = struct {
+    raw_headers: []const u8,
+    body: []const u8,
+};
 
-    var buf: [16384]u8 = undefined;
-    const response = try http_get(port, "/orders", token, &buf);
+fn parse_pending_orders(response: []const u8) PendingOrders {
+    var result = PendingOrders{ .ids = undefined, .count = 0 };
 
     // Parse order IDs from JSON response. Look for "status":"pending" entries.
     var pos: usize = 0;
@@ -117,7 +136,7 @@ fn fetch_pending_orders(port: u16, token: []const u8) !PendingOrders {
     return result;
 }
 
-fn post_completion(port: u16, token: []const u8, order_id: [32]u8, completion_result: []const u8) !void {
+fn post_completion(port: u16, cookie: []const u8, order_id: [32]u8, completion_result: []const u8) !void {
     var path_buf: [128]u8 = undefined;
     const path = std.fmt.bufPrint(&path_buf, "/orders/{s}/complete", .{order_id}) catch unreachable;
 
@@ -125,10 +144,23 @@ fn post_completion(port: u16, token: []const u8, order_id: [32]u8, completion_re
     const body = std.fmt.bufPrint(&body_buf, "{{\"result\":\"{s}\"}}", .{completion_result}) catch unreachable;
 
     var buf: [4096]u8 = undefined;
-    _ = try http_post(port, path, token, body, &buf);
+    _ = try http_post(port, path, cookie, body, &buf);
 }
 
-fn http_get(port: u16, path: []const u8, token: []const u8, buf: []u8) ![]const u8 {
+/// Extract identity cookie value from Set-Cookie header.
+fn extract_set_cookie(headers: []const u8) ?[]const u8 {
+    const needle = "Set-Cookie: " ++ auth.cookie_name ++ "=";
+    const start = (std.mem.indexOf(u8, headers, needle) orelse return null) + needle.len;
+    const rest = headers[start..];
+    // Value ends at ";" or "\r\n"
+    const semi = std.mem.indexOf(u8, rest, ";") orelse rest.len;
+    const crlf = std.mem.indexOf(u8, rest, "\r\n") orelse rest.len;
+    const end = @min(semi, crlf);
+    if (end == 0) return null;
+    return rest[0..end];
+}
+
+fn http_get(port: u16, path: []const u8, cookie: []const u8, buf: []u8) !HttpResult {
     const addr = std.net.Address.initIp4(.{ 127, 0, 0, 1 }, port);
     const stream = try std.posix.socket(std.posix.AF.INET, std.posix.SOCK.STREAM, 0);
     defer std.posix.close(stream);
@@ -137,7 +169,12 @@ fn http_get(port: u16, path: []const u8, token: []const u8, buf: []u8) ![]const 
 
     // Build request.
     var req_buf: [2048]u8 = undefined;
-    const req = std.fmt.bufPrint(&req_buf, "GET {s} HTTP/1.1\r\nHost: 127.0.0.1:{d}\r\nAuthorization: Bearer {s}\r\nConnection: close\r\n\r\n", .{ path, port, token }) catch unreachable;
+    var req: []const u8 = undefined;
+    if (cookie.len > 0) {
+        req = std.fmt.bufPrint(&req_buf, "GET {s} HTTP/1.1\r\nHost: 127.0.0.1:{d}\r\nCookie: " ++ auth.cookie_name ++ "={s}\r\nConnection: close\r\n\r\n", .{ path, port, cookie }) catch unreachable;
+    } else {
+        req = std.fmt.bufPrint(&req_buf, "GET {s} HTTP/1.1\r\nHost: 127.0.0.1:{d}\r\nConnection: close\r\n\r\n", .{ path, port }) catch unreachable;
+    }
 
     _ = try std.posix.write(stream, req);
 
@@ -153,11 +190,11 @@ fn http_get(port: u16, path: []const u8, token: []const u8, buf: []u8) ![]const 
     }
 
     // Find body (after \r\n\r\n).
-    const header_end = std.mem.indexOf(u8, buf[0..total], "\r\n\r\n") orelse return buf[0..0];
-    return buf[header_end + 4 .. total];
+    const header_end = std.mem.indexOf(u8, buf[0..total], "\r\n\r\n") orelse return .{ .raw_headers = buf[0..0], .body = buf[0..0] };
+    return .{ .raw_headers = buf[0..header_end], .body = buf[header_end + 4 .. total] };
 }
 
-fn http_post(port: u16, path: []const u8, token: []const u8, body: []const u8, buf: []u8) ![]const u8 {
+fn http_post(port: u16, path: []const u8, cookie: []const u8, body: []const u8, buf: []u8) !HttpResult {
     const addr = std.net.Address.initIp4(.{ 127, 0, 0, 1 }, port);
     const stream = try std.posix.socket(std.posix.AF.INET, std.posix.SOCK.STREAM, 0);
     defer std.posix.close(stream);
@@ -165,7 +202,12 @@ fn http_post(port: u16, path: []const u8, token: []const u8, body: []const u8, b
     try std.posix.connect(stream, &addr.any, addr.getOsSockLen());
 
     var req_buf: [2048]u8 = undefined;
-    const req = std.fmt.bufPrint(&req_buf, "POST {s} HTTP/1.1\r\nHost: 127.0.0.1:{d}\r\nAuthorization: Bearer {s}\r\nContent-Type: application/json\r\nContent-Length: {d}\r\nConnection: close\r\n\r\n{s}", .{ path, port, token, body.len, body }) catch unreachable;
+    var req: []const u8 = undefined;
+    if (cookie.len > 0) {
+        req = std.fmt.bufPrint(&req_buf, "POST {s} HTTP/1.1\r\nHost: 127.0.0.1:{d}\r\nCookie: " ++ auth.cookie_name ++ "={s}\r\nContent-Type: application/json\r\nContent-Length: {d}\r\nConnection: close\r\n\r\n{s}", .{ path, port, cookie, body.len, body }) catch unreachable;
+    } else {
+        req = std.fmt.bufPrint(&req_buf, "POST {s} HTTP/1.1\r\nHost: 127.0.0.1:{d}\r\nContent-Type: application/json\r\nContent-Length: {d}\r\nConnection: close\r\n\r\n{s}", .{ path, port, body.len, body }) catch unreachable;
+    }
 
     _ = try std.posix.write(stream, req);
 
@@ -179,8 +221,8 @@ fn http_post(port: u16, path: []const u8, token: []const u8, body: []const u8, b
         total += n;
     }
 
-    const header_end = std.mem.indexOf(u8, buf[0..total], "\r\n\r\n") orelse return buf[0..0];
-    return buf[header_end + 4 .. total];
+    const header_end = std.mem.indexOf(u8, buf[0..total], "\r\n\r\n") orelse return .{ .raw_headers = buf[0..0], .body = buf[0..0] };
+    return .{ .raw_headers = buf[0..header_end], .body = buf[header_end + 4 .. total] };
 }
 
 fn format_uuid(hex: [32]u8) [36]u8 {
@@ -205,7 +247,6 @@ const Cli = struct {
     port: u16,
     poll_interval_ms: u64,
     delay_ms: u64,
-    token: []const u8,
 };
 
 fn parse_cli() Cli {
@@ -213,7 +254,6 @@ fn parse_cli() Cli {
         .port = 3000,
         .poll_interval_ms = 250,
         .delay_ms = 3000,
-        .token = std.posix.getenv("TOKEN") orelse "",
     };
 
     var args = std.process.args();

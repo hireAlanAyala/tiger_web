@@ -173,7 +173,7 @@ pub const SimIO = struct {
         const line2 = " HTTP/1.1\r\n";
         @memcpy(buf[pos..][0..line2.len], line2);
         pos += line2.len;
-        pos += write_auth_header(buf[pos..]);
+        pos += write_cookie_header(buf[pos..]);
         @memcpy(buf[pos..][0..extra_headers.len], extra_headers);
         pos += extra_headers.len;
         const cl_hdr = "Content-Length: ";
@@ -215,7 +215,7 @@ pub const SimIO = struct {
         const line2 = " HTTP/1.1\r\n";
         @memcpy(buf[pos..][0..line2.len], line2);
         pos += line2.len;
-        pos += write_auth_header(buf[pos..]);
+        pos += write_cookie_header(buf[pos..]);
         @memcpy(buf[pos..][0..extra_headers.len], extra_headers);
         pos += extra_headers.len;
         const end = "\r\n";
@@ -246,7 +246,7 @@ pub const SimIO = struct {
         const line2 = " HTTP/1.1\r\n";
         @memcpy(buf[pos..][0..line2.len], line2);
         pos += line2.len;
-        pos += write_auth_header(buf[pos..]);
+        pos += write_cookie_header(buf[pos..]);
         @memcpy(buf[pos..][0..extra_headers.len], extra_headers);
         pos += extra_headers.len;
         const end = "\r\n";
@@ -580,17 +580,16 @@ fn format_u32(buf: *[10]u8, val: u32) []const u8 {
 const Server = ServerType(SimIO, MemoryStorage);
 const test_key: *const [auth.key_length]u8 = "tiger-web-test-key-0123456789ab!";
 
-/// Write "Authorization: Bearer <token>\r\n" into buf. Returns bytes written.
-/// Token expires at 2_000_000_000 (~2033), well past any TimeSim default.
-fn write_auth_header(buf: []u8) usize {
-    const prefix = "Authorization: Bearer ";
+/// Write "Cookie: <name>=<signed_value>\r\n" into buf. Returns bytes written.
+fn write_cookie_header(buf: []u8) usize {
+    const prefix = "Cookie: " ++ auth.cookie_name ++ "=";
     @memcpy(buf[0..prefix.len], prefix);
-    var token_buf: [auth.token_max]u8 = undefined;
-    const token = auth.sign(&token_buf, 1, 2_000_000_000, test_key);
-    @memcpy(buf[prefix.len..][0..token.len], token);
+    var cookie_buf: [auth.cookie_value_max]u8 = undefined;
+    const cookie_val = auth.sign_cookie(&cookie_buf, 1, test_key);
+    @memcpy(buf[prefix.len..][0..cookie_val.len], cookie_val);
     const crlf = "\r\n";
-    @memcpy(buf[prefix.len + token.len ..][0..crlf.len], crlf);
-    return prefix.len + token.len + crlf.len;
+    @memcpy(buf[prefix.len + cookie_val.len ..][0..crlf.len], crlf);
+    return prefix.len + cookie_val.len + crlf.len;
 }
 
 /// Run ticks until the server processes pending work.
@@ -679,7 +678,7 @@ test "deterministic replay — same seed same result" {
         defer storage.deinit(std.testing.allocator);
         var sm = StateMachine.init(&storage, false);
         var time_sim = TimeSim{};
-        var server = try Server.init(std.testing.allocator, &sim_io, &sm, 1, time_sim.time(), test_key);
+        var server = try Server.init(std.testing.allocator, &sim_io, &sm, 1, time_sim.time(), test_key, 0xcafe);
         defer server.deinit(std.testing.allocator);
 
         sim_io.connect_client(0);
@@ -707,7 +706,7 @@ test "pipelining — back-to-back requests on one connection" {
     defer storage.deinit(std.testing.allocator);
     var sm = StateMachine.init(&storage, false);
     var time_sim = TimeSim{};
-    var server = try Server.init(std.testing.allocator, &sim_io, &sm, 1, time_sim.time(), test_key);
+    var server = try Server.init(std.testing.allocator, &sim_io, &sm, 1, time_sim.time(), test_key, 0xcafe);
     defer server.deinit(std.testing.allocator);
 
     sim_io.connect_client(0);
@@ -736,7 +735,7 @@ test "connection drops and reconnects — state machine survives" {
     defer storage.deinit(std.testing.allocator);
     var sm = StateMachine.init(&storage, false);
     var time_sim = TimeSim{};
-    var server = try Server.init(std.testing.allocator, &sim_io, &sm, 1, time_sim.time(), test_key);
+    var server = try Server.init(std.testing.allocator, &sim_io, &sm, 1, time_sim.time(), test_key, 0xcafe);
     defer server.deinit(std.testing.allocator);
 
     sim_io.connect_client(0);
@@ -773,7 +772,7 @@ test "timeout — partial request triggers close" {
     defer storage.deinit(std.testing.allocator);
     var sm = StateMachine.init(&storage, false);
     var time_sim = TimeSim{};
-    var server = try Server.init(std.testing.allocator, &sim_io, &sm, 1, time_sim.time(), test_key);
+    var server = try Server.init(std.testing.allocator, &sim_io, &sm, 1, time_sim.time(), test_key, 0xcafe);
     defer server.deinit(std.testing.allocator);
 
     sim_io.connect_client(0);
@@ -822,7 +821,7 @@ test "mark: disconnect triggers recv peer closed" {
     defer storage.deinit(std.testing.allocator);
     var sm = StateMachine.init(&storage, false);
     var time_sim = TimeSim{};
-    var server = try Server.init(std.testing.allocator, &sim_io, &sm, 1, time_sim.time(), test_key);
+    var server = try Server.init(std.testing.allocator, &sim_io, &sm, 1, time_sim.time(), test_key, 0xcafe);
     defer server.deinit(std.testing.allocator);
 
     sim_io.connect_client(0);
@@ -840,7 +839,7 @@ test "mark: send fault triggers send error" {
     defer storage.deinit(std.testing.allocator);
     var sm = StateMachine.init(&storage, false);
     var time_sim = TimeSim{};
-    var server = try Server.init(std.testing.allocator, &sim_io, &sm, 1, time_sim.time(), test_key);
+    var server = try Server.init(std.testing.allocator, &sim_io, &sm, 1, time_sim.time(), test_key, 0xcafe);
     defer server.deinit(std.testing.allocator);
 
     sim_io.connect_client(0);
@@ -868,7 +867,7 @@ test "mark: idle connection triggers timeout" {
     defer storage.deinit(std.testing.allocator);
     var sm = StateMachine.init(&storage, false);
     var time_sim = TimeSim{};
-    var server = try Server.init(std.testing.allocator, &sim_io, &sm, 1, time_sim.time(), test_key);
+    var server = try Server.init(std.testing.allocator, &sim_io, &sm, 1, time_sim.time(), test_key, 0xcafe);
     defer server.deinit(std.testing.allocator);
 
     sim_io.connect_client(0);
@@ -894,7 +893,7 @@ test "mark: garbage bytes trigger invalid HTTP" {
     defer storage.deinit(std.testing.allocator);
     var sm = StateMachine.init(&storage, false);
     var time_sim = TimeSim{};
-    var server = try Server.init(std.testing.allocator, &sim_io, &sm, 1, time_sim.time(), test_key);
+    var server = try Server.init(std.testing.allocator, &sim_io, &sm, 1, time_sim.time(), test_key, 0xcafe);
     defer server.deinit(std.testing.allocator);
 
     sim_io.connect_client(0);
@@ -912,21 +911,20 @@ test "mark: unknown route triggers unmapped request" {
     defer storage.deinit(std.testing.allocator);
     var sm = StateMachine.init(&storage, false);
     var time_sim = TimeSim{};
-    var server = try Server.init(std.testing.allocator, &sim_io, &sm, 1, time_sim.time(), test_key);
+    var server = try Server.init(std.testing.allocator, &sim_io, &sm, 1, time_sim.time(), test_key, 0xcafe);
     defer server.deinit(std.testing.allocator);
 
     sim_io.connect_client(0);
     run_ticks(&server, &sim_io, 10);
 
     // GET /unknown doesn't match any known route — triggers unmapped.
-    // Must include a valid auth token to pass the auth gate.
     const mark = marks.check("unmapped request");
     var req_buf: [http.recv_buf_max]u8 = undefined;
     var pos: usize = 0;
     const req_line = "GET /unknown HTTP/1.1\r\n";
     @memcpy(req_buf[pos..][0..req_line.len], req_line);
     pos += req_line.len;
-    pos += write_auth_header(req_buf[pos..]);
+    pos += write_cookie_header(req_buf[pos..]);
     const end = "\r\n";
     @memcpy(req_buf[pos..][0..end.len], end);
     pos += end.len;
@@ -935,27 +933,48 @@ test "mark: unknown route triggers unmapped request" {
     try mark.expect_hit();
 }
 
-test "auth failure — 200 with login page, not 401" {
+test "first request without cookie gets identity + Set-Cookie" {
     var sim_io = SimIO.init(0xa010);
     var storage = try MemoryStorage.init(std.testing.allocator);
     defer storage.deinit(std.testing.allocator);
     var sm = StateMachine.init(&storage, false);
     var time_sim = TimeSim{};
-    var server = try Server.init(std.testing.allocator, &sim_io, &sm, 1, time_sim.time(), test_key);
+    var server = try Server.init(std.testing.allocator, &sim_io, &sm, 1, time_sim.time(), test_key, 0xcafe);
     defer server.deinit(std.testing.allocator);
 
     sim_io.connect_client(0);
     run_ticks(&server, &sim_io, 10);
 
-    // Request without auth token — should get 200 + full page with token input.
-    const mark = marks.check("auth: missing token");
-    sim_io.inject_bytes(0, "GET /products HTTP/1.1\r\n\r\n");
+    // Request without cookie — should get 200 + full page + Set-Cookie header.
+    sim_io.inject_bytes(0, "GET / HTTP/1.1\r\n\r\n");
     const resp = run_until_response(&server, &sim_io, 0, 300) orelse
         return error.TestUnexpectedResult;
-    try mark.expect_hit();
     try std.testing.expectEqual(resp.status_code, 200);
     try std.testing.expect(body_contains(resp.body, "<!DOCTYPE html>"));
-    try std.testing.expect(body_contains(resp.body, "data-bind:token"));
+    // Response headers should include Set-Cookie with tiger_id.
+    const full = sim_io.clients[0].recv_buf[0..sim_io.clients[0].recv_len];
+    try std.testing.expect(std.mem.indexOf(u8, full, "Set-Cookie: tiger_id=") != null);
+}
+
+test "request with valid cookie — no Set-Cookie header" {
+    var sim_io = SimIO.init(0xa011);
+    var storage = try MemoryStorage.init(std.testing.allocator);
+    defer storage.deinit(std.testing.allocator);
+    var sm = StateMachine.init(&storage, false);
+    var time_sim = TimeSim{};
+    var server = try Server.init(std.testing.allocator, &sim_io, &sm, 1, time_sim.time(), test_key, 0xcafe);
+    defer server.deinit(std.testing.allocator);
+
+    sim_io.connect_client(0);
+    run_ticks(&server, &sim_io, 10);
+
+    // Request with valid cookie — should get 200, no Set-Cookie.
+    sim_io.inject_get(0, "/");
+    const resp = run_until_response(&server, &sim_io, 0, 300) orelse
+        return error.TestUnexpectedResult;
+    try std.testing.expectEqual(resp.status_code, 200);
+    const full = sim_io.clients[0].recv_buf[0..sim_io.clients[0].recv_len];
+    try std.testing.expect(std.mem.indexOf(u8, full, "Set-Cookie:") == null);
 }
 
 test "mark: accept failure logs warning" {
@@ -964,7 +983,7 @@ test "mark: accept failure logs warning" {
     defer storage.deinit(std.testing.allocator);
     var sm = StateMachine.init(&storage, false);
     var time_sim = TimeSim{};
-    var server = try Server.init(std.testing.allocator, &sim_io, &sm, 1, time_sim.time(), test_key);
+    var server = try Server.init(std.testing.allocator, &sim_io, &sm, 1, time_sim.time(), test_key, 0xcafe);
     defer server.deinit(std.testing.allocator);
 
     // 100% accept fault — every accept attempt fails.
@@ -981,7 +1000,7 @@ test "mark: SSE mutation triggers follow-up" {
     defer storage.deinit(std.testing.allocator);
     var sm = StateMachine.init(&storage, false);
     var time_sim = TimeSim{};
-    var server = try Server.init(std.testing.allocator, &sim_io, &sm, 1, time_sim.time(), test_key);
+    var server = try Server.init(std.testing.allocator, &sim_io, &sm, 1, time_sim.time(), test_key, 0xcafe);
     defer server.deinit(std.testing.allocator);
 
     sim_io.connect_client(0);
@@ -1019,7 +1038,7 @@ test "storage busy fault — prefetch retries next tick then succeeds" {
     defer storage.deinit(std.testing.allocator);
     var sm = StateMachine.init(&storage, false);
     var time_sim = TimeSim{};
-    var server = try Server.init(std.testing.allocator, &sim_io, &sm, 1, time_sim.time(), test_key);
+    var server = try Server.init(std.testing.allocator, &sim_io, &sm, 1, time_sim.time(), test_key, 0xcafe);
     defer server.deinit(std.testing.allocator);
 
     // Create a product first (no faults).
@@ -1060,7 +1079,7 @@ test "storage err fault — renders dashboard page" {
     defer storage.deinit(std.testing.allocator);
     var sm = StateMachine.init(&storage, false);
     var time_sim = TimeSim{};
-    var server = try Server.init(std.testing.allocator, &sim_io, &sm, 1, time_sim.time(), test_key);
+    var server = try Server.init(std.testing.allocator, &sim_io, &sm, 1, time_sim.time(), test_key, 0xcafe);
     defer server.deinit(std.testing.allocator);
 
     sim_io.connect_client(0);
@@ -1077,7 +1096,6 @@ test "storage err fault — renders dashboard page" {
     try mark.expect_hit();
     try std.testing.expectEqual(resp.status_code, 200);
     try std.testing.expect(body_contains(resp.body, "<!DOCTYPE html>"));
-    try std.testing.expect(body_contains(resp.body, "data-bind:token"));
 }
 
 test "concurrent connections — busy client deferred, ready client served" {
@@ -1086,7 +1104,7 @@ test "concurrent connections — busy client deferred, ready client served" {
     defer storage.deinit(std.testing.allocator);
     var sm = StateMachine.init(&storage, false);
     var time_sim = TimeSim{};
-    var server = try Server.init(std.testing.allocator, &sim_io, &sm, 2, time_sim.time(), test_key);
+    var server = try Server.init(std.testing.allocator, &sim_io, &sm, 2, time_sim.time(), test_key, 0xcafe);
     defer server.deinit(std.testing.allocator);
 
     // Connect two clients and let them establish.
@@ -1130,7 +1148,7 @@ test "interleaved writes — update and delete same entity across connections" {
     defer storage.deinit(std.testing.allocator);
     var sm = StateMachine.init(&storage, false);
     var time_sim = TimeSim{};
-    var server = try Server.init(std.testing.allocator, &sim_io, &sm, 2, time_sim.time(), test_key);
+    var server = try Server.init(std.testing.allocator, &sim_io, &sm, 2, time_sim.time(), test_key, 0xcafe);
     defer server.deinit(std.testing.allocator);
 
     // Connect two clients and let them establish.
@@ -1192,7 +1210,7 @@ test "two-phase order — create on client 0, complete on client 1" {
     defer storage.deinit(std.testing.allocator);
     var sm = StateMachine.init(&storage, false);
     var time_sim = TimeSim{};
-    var server = try Server.init(std.testing.allocator, &sim_io, &sm, 2, time_sim.time(), test_key);
+    var server = try Server.init(std.testing.allocator, &sim_io, &sm, 2, time_sim.time(), test_key, 0xcafe);
     defer server.deinit(std.testing.allocator);
 
     sim_io.connect_client(0);
@@ -1237,7 +1255,7 @@ test "two-phase order — failed completion restores inventory" {
     defer storage.deinit(std.testing.allocator);
     var sm = StateMachine.init(&storage, false);
     var time_sim = TimeSim{};
-    var server = try Server.init(std.testing.allocator, &sim_io, &sm, 2, time_sim.time(), test_key);
+    var server = try Server.init(std.testing.allocator, &sim_io, &sm, 2, time_sim.time(), test_key, 0xcafe);
     defer server.deinit(std.testing.allocator);
 
     sim_io.connect_client(0);
@@ -1277,7 +1295,7 @@ test "two-phase order — completion after timeout expires" {
     defer storage.deinit(std.testing.allocator);
     var sm = StateMachine.init(&storage, false);
     var time_sim = TimeSim{};
-    var server = try Server.init(std.testing.allocator, &sim_io, &sm, 2, time_sim.time(), test_key);
+    var server = try Server.init(std.testing.allocator, &sim_io, &sm, 2, time_sim.time(), test_key, 0xcafe);
     defer server.deinit(std.testing.allocator);
 
     sim_io.connect_client(0);
@@ -1320,7 +1338,7 @@ test "two-phase order — idempotent same-result retry" {
     defer storage.deinit(std.testing.allocator);
     var sm = StateMachine.init(&storage, false);
     var time_sim = TimeSim{};
-    var server = try Server.init(std.testing.allocator, &sim_io, &sm, 2, time_sim.time(), test_key);
+    var server = try Server.init(std.testing.allocator, &sim_io, &sm, 2, time_sim.time(), test_key, 0xcafe);
     defer server.deinit(std.testing.allocator);
 
     sim_io.connect_client(0);
@@ -1367,7 +1385,7 @@ test "two-phase order — poll pending then complete (worker pattern)" {
     defer storage.deinit(std.testing.allocator);
     var sm = StateMachine.init(&storage, false);
     var time_sim = TimeSim{};
-    var server = try Server.init(std.testing.allocator, &sim_io, &sm, 2, time_sim.time(), test_key);
+    var server = try Server.init(std.testing.allocator, &sim_io, &sm, 2, time_sim.time(), test_key, 0xcafe);
     defer server.deinit(std.testing.allocator);
 
     sim_io.connect_client(0);
@@ -1418,7 +1436,7 @@ test "cancel order — client cancels, worker completion rejected" {
     defer storage.deinit(std.testing.allocator);
     var sm = StateMachine.init(&storage, false);
     var time_sim = TimeSim{};
-    var server = try Server.init(std.testing.allocator, &sim_io, &sm, 2, time_sim.time(), test_key);
+    var server = try Server.init(std.testing.allocator, &sim_io, &sm, 2, time_sim.time(), test_key, 0xcafe);
     defer server.deinit(std.testing.allocator);
 
     sim_io.connect_client(0);
@@ -1466,7 +1484,7 @@ test "cancel order — cancel already confirmed is rejected" {
     defer storage.deinit(std.testing.allocator);
     var sm = StateMachine.init(&storage, false);
     var time_sim = TimeSim{};
-    var server = try Server.init(std.testing.allocator, &sim_io, &sm, 2, time_sim.time(), test_key);
+    var server = try Server.init(std.testing.allocator, &sim_io, &sm, 2, time_sim.time(), test_key, 0xcafe);
     defer server.deinit(std.testing.allocator);
 
     sim_io.connect_client(0);
@@ -2202,7 +2220,7 @@ fn path_with_two_ids(buf: *[256]u8, prefix: []const u8, id1: u128, middle: []con
     return w.slice();
 }
 
-/// Build "METHOD /path HTTP/1.1\r\nAuthorization: ...\r\n\r\n" for bodyless requests.
+/// Build "METHOD /path HTTP/1.1\r\nCookie: ...\r\n\r\n" for bodyless requests.
 fn build_simple_request(buf: *[2048]u8, method: []const u8, path: []const u8) []const u8 {
     return build_simple_request_with_headers(buf, method, path, "");
 }
@@ -2216,7 +2234,7 @@ fn build_simple_request_with_headers(buf: *[2048]u8, method: []const u8, path: [
     w.raw(method);
     w.raw(path);
     w.raw(" HTTP/1.1\r\n");
-    w.pos += write_auth_header(buf[w.pos..]);
+    w.pos += write_cookie_header(buf[w.pos..]);
     w.raw(extra_headers);
     w.raw("\r\n");
     return w.slice();
@@ -2235,7 +2253,7 @@ fn run_fuzz(seed: u64) !void {
     storage.prng = PRNG.from_seed(prng.int(u64));
     var sm = StateMachine.init(&storage, false);
     var time_sim = TimeSim{};
-    var server = try Server.init(std.testing.allocator, &sim_io, &sm, 1, time_sim.time(), test_key);
+    var server = try Server.init(std.testing.allocator, &sim_io, &sm, 1, time_sim.time(), test_key, 0xcafe);
     defer server.deinit(std.testing.allocator);
 
     var fuzzer = Fuzzer.init();

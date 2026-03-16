@@ -62,6 +62,10 @@ pub fn ConnectionType(comptime IO: type) type {
         // The render layer uses this to decide full-page HTML vs SSE fragments.
         is_datastar_request: bool,
 
+        // Cookie identity: when non-zero, render.zig emits a Set-Cookie header.
+        // Reset on keep-alive transition. Assert == 0 in .free state.
+        set_cookie_user_id: u128,
+
         // SSE follow-up state: after a Datastar mutation commits, the server
         // stores the result and renders a full dashboard refresh next tick.
         pending_followup: bool,
@@ -86,6 +90,7 @@ pub fn ConnectionType(comptime IO: type) type {
                 .send_activity = false,
                 .keep_alive = true,
                 .is_datastar_request = false,
+                .set_cookie_user_id = 0,
                 .pending_followup = false,
                 .followup_status = .ok,
                 .followup_operation = .page_load_dashboard,
@@ -138,6 +143,7 @@ pub fn ConnectionType(comptime IO: type) type {
                     assert(conn.recv_completion.operation == .none);
                     assert(conn.send_completion.operation == .none);
                     assert(!conn.is_datastar_request);
+                    assert(conn.set_cookie_user_id == 0);
                     assert(!conn.pending_followup);
                 },
                 .accepting => {
@@ -293,6 +299,7 @@ pub fn ConnectionType(comptime IO: type) type {
                 assert(conn.recv_pos <= conn.recv_buf.len);
                 conn.request_consumed = 0;
                 conn.is_datastar_request = false;
+                conn.set_cookie_user_id = 0;
                 conn.state = .receiving;
 
                 // Try to parse pipelined data immediately. If a complete

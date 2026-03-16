@@ -1,6 +1,6 @@
 const std = @import("std");
 const assert = std.debug.assert;
-
+const auth = @import("auth.zig");
 
 /// Maximum HTTP header size. Requests with headers exceeding this are rejected.
 pub const max_header_size = 8192;
@@ -34,9 +34,9 @@ pub const ParseResult = union(enum) {
         /// Whether the client wants to keep the connection alive.
         /// HTTP/1.1 defaults to true, HTTP/1.0 defaults to false.
         keep_alive: bool,
-        /// Bearer token from Authorization header, or null if absent.
+        /// Identity cookie value, or null if absent.
         /// Points into buf — valid only while buf is live.
-        authorization: ?[]const u8,
+        identity_cookie: ?[]const u8,
         /// Whether the client sent Datastar-Request: true.
         is_datastar_request: bool,
     },
@@ -120,16 +120,20 @@ pub fn parse_request(buf: []const u8) ParseResult {
 
     const body = if (content_length > 0) buf[body_start..total_len] else &[_]u8{};
 
-    // Extract Bearer token from Authorization header (if present).
-    const authorization = blk: {
-        const auth_value = find_header_value(headers, "Authorization") orelse break :blk null;
-        const bearer_prefix = "Bearer ";
-        if (auth_value.len > bearer_prefix.len and
-            std.mem.eql(u8, auth_value[0..bearer_prefix.len], bearer_prefix))
-        {
-            break :blk auth_value[bearer_prefix.len..];
-        }
-        break :blk null;
+    // Extract identity cookie value (if present).
+    const identity_cookie = blk: {
+        const cookie_value = find_header_value(headers, "Cookie") orelse break :blk null;
+        const needle = auth.cookie_name ++ "=";
+        const needle_pos = std.mem.indexOf(u8, cookie_value, needle) orelse break :blk null;
+        const val_start = needle_pos + needle.len;
+        const remaining = cookie_value[val_start..];
+        // Value extends to ';' or end of string.
+        const val_end = std.mem.indexOf(u8, remaining, ";") orelse remaining.len;
+        // Trim trailing whitespace.
+        var end = val_end;
+        while (end > 0 and remaining[end - 1] == ' ') end -= 1;
+        if (end == 0) break :blk null;
+        break :blk remaining[0..end];
     };
 
     // Detect Datastar-Request: true header.
@@ -144,7 +148,7 @@ pub fn parse_request(buf: []const u8) ParseResult {
         .body = body,
         .total_len = @intCast(total_len),
         .keep_alive = keep_alive,
-        .authorization = authorization,
+        .identity_cookie = identity_cookie,
         .is_datastar_request = is_datastar_request,
     } };
 }
@@ -375,6 +379,55 @@ test "Datastar-Request absent defaults to false" {
     try std.testing.expect(result.complete.is_datastar_request == false);
 }
 
+test "identity_cookie parsed from Cookie header" {
+    const req = "GET / HTTP/1.1\r\nCookie: tiger_id=abc123\r\n\r\n";
+    const result = parse_request(req);
+    try std.testing.expect(result == .complete);
+    try std.testing.expectEqualSlices(u8, result.complete.identity_cookie.?, "abc123");
+}
+
+test "identity_cookie null when no Cookie header" {
+    const req = "GET / HTTP/1.1\r\n\r\n";
+    const result = parse_request(req);
+    try std.testing.expect(result == .complete);
+    try std.testing.expect(result.complete.identity_cookie == null);
+}
+
+test "identity_cookie extracted among multiple cookies" {
+    const req = "GET / HTTP/1.1\r\nCookie: session=xyz; tiger_id=deadbeef; other=123\r\n\r\n";
+    const result = parse_request(req);
+    try std.testing.expect(result == .complete);
+    try std.testing.expectEqualSlices(u8, result.complete.identity_cookie.?, "deadbeef");
+}
+
+test "identity_cookie null when Cookie header lacks tiger_id" {
+    const req = "GET / HTTP/1.1\r\nCookie: session=xyz; other=123\r\n\r\n";
+    const result = parse_request(req);
+    try std.testing.expect(result == .complete);
+    try std.testing.expect(result.complete.identity_cookie == null);
+}
+
+test "identity_cookie null when value is empty" {
+    const req = "GET / HTTP/1.1\r\nCookie: tiger_id=\r\n\r\n";
+    const result = parse_request(req);
+    try std.testing.expect(result == .complete);
+    try std.testing.expect(result.complete.identity_cookie == null);
+}
+
+test "identity_cookie trims trailing whitespace" {
+    const req = "GET / HTTP/1.1\r\nCookie: tiger_id=abc123   \r\n\r\n";
+    const result = parse_request(req);
+    try std.testing.expect(result == .complete);
+    try std.testing.expectEqualSlices(u8, result.complete.identity_cookie.?, "abc123");
+}
+
+test "identity_cookie at end with semicolon" {
+    const req = "GET / HTTP/1.1\r\nCookie: session=xyz; tiger_id=deadbeef;\r\n\r\n";
+    const result = parse_request(req);
+    try std.testing.expect(result == .complete);
+    try std.testing.expectEqualSlices(u8, result.complete.identity_cookie.?, "deadbeef");
+}
+
 // =====================================================================
 // Fuzz tests
 // =====================================================================
@@ -468,6 +521,21 @@ test "fuzz — parse_request with structured mutations" {
             pos += 2;
         }
 
+        // Maybe add a Cookie header (~30% of requests).
+        if (splitmix64(&prng) % 10 < 3) {
+            const cookie_prefix = "Cookie: " ++ auth.cookie_name ++ "=";
+            @memcpy(buf[pos..][0..cookie_prefix.len], cookie_prefix);
+            pos += cookie_prefix.len;
+            const cookie_val_len: usize = @intCast(splitmix64(&prng) % 128);
+            for (0..cookie_val_len) |_| {
+                buf[pos] = @intCast(0x20 + splitmix64(&prng) % 0x5f);
+                pos += 1;
+            }
+            buf[pos] = '\r';
+            buf[pos + 1] = '\n';
+            pos += 2;
+        }
+
         // End of headers.
         buf[pos] = '\r';
         buf[pos + 1] = '\n';
@@ -503,6 +571,8 @@ test "fuzz — parse_request at every truncation point" {
         "DELETE /x HTTP/1.0\r\n\r\n",
         "GET /path HTTP/1.1\r\nConnection: close\r\n\r\n",
         "POST /data HTTP/1.0\r\nConnection: keep-alive\r\nContent-Length: 3\r\n\r\nabc",
+        "GET / HTTP/1.1\r\nCookie: tiger_id=aabbccdd11223344\r\n\r\n",
+        "GET / HTTP/1.1\r\nCookie: session=xyz; tiger_id=aabbccdd\r\n\r\n",
     };
 
     for (requests) |req| {
