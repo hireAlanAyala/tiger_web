@@ -88,75 +88,30 @@ The server checks `wal.disabled` before calling `prepare()`/`append()`. Once dis
 
 ## Rotation and snapshots
 
-### The problem
-
 The WAL is append-only — it grows proportional to the number of mutations over the server's lifetime. Without rotation, disk fills up.
 
-### Framework-coordinated rotation
-
-The framework owns the tick loop and the single-writer constraint. It knows exactly when it's safe to rotate — between ticks, when no batch is in progress. The user can't get the timing wrong because the framework controls when rotation happens.
-
-```
-tick loop:
-    process_inbox()
-    commit_batch()
-    wal.append()
-    ...
-    maybe_rotate()          ← framework decides when
-        hooks.backup()      ← user defines what "backup" means
-        wal.close()
-        wal.open_new()      ← fresh root, op 1
-```
-
-### Backup and restore hooks
-
-The framework provides the timing. The user provides the database operations:
-
-| Hook | When | Who calls it | Default |
-|------|------|-------------|---------|
-| `backup` | WAL rotation, between ticks | Framework (tick loop) | `sqlite3_backup` to paired file |
-| `restore` | Before replay | Framework (replay tool) | Copy snapshot over working database |
-
-The hooks are the DB-agnostic boundary. The framework never touches the database directly. SQLite users get working defaults. Users who swap to Postgres swap the hooks.
-
-### Snapshot + WAL segment pairing
-
-After rotation, a snapshot and WAL segment form a self-contained pair:
+The simplest approach: the operator stops the server, copies the database and WAL as a pair, then restarts. The WAL already handles recovery on startup (backward scan, ftruncate corrupt tail). No framework machinery needed.
 
 ```
 snapshot_2026-03-16.db      ← database state at rotation time
 tiger_web_2026-03-16.wal    ← mutations from that point forward
 ```
 
-The snapshot carries the schema and the data at the point of rotation. The WAL segment contains the mutations recorded against that exact schema by that exact code version. They match by construction — the framework coordinated both sides in a single sequence between ticks.
+The snapshot and WAL segment are a self-contained pair. The replay tool restores the snapshot, then feeds WAL entries into `commit()`. No version tracking needed — the snapshot guarantees the database schema matches the code that wrote the WAL entries. The root checksum catches incompatible Message layouts.
 
-This eliminates the need for version tracking on Messages. The replay tool doesn't interpret body bytes itself — it feeds opaque Messages into `commit()` through the same code path as production. The state machine knows how to interpret its own body bytes. The snapshot guarantees the database schema matches.
+Retention is an operator concern — `find /backups -mtime +30 -delete` or equivalent.
 
-### No version field needed
-
-In a pure event sourcing system, the event log is the authority and the replay tool must deserialize every entry independently. That requires version tracking — each entry must be self-describing so the tool knows which struct layout to use.
-
-Our system is different. The database is the authority, not the events. The replay tool restores a snapshot first, then feeds Messages into `commit()`. It never deserializes the body — the state machine does. Since the snapshot was captured at the same time as the WAL segment, the code that reads the body is the same code (or compatible code) that wrote it.
-
-The root checksum is sufficient for version detection. If the Message layout changes (field reordering, size change), the root checksum changes, and `Wal.init()` rejects the old file. This prevents appending incompatible entries. For replay, the pairing handles it — wrong snapshot + wrong WAL can't happen because the framework coordinates both.
-
-### Retention
-
-Old snapshot+WAL pairs can be archived or deleted based on the user's retention policy. The framework doesn't impose a policy — it provides the rotation mechanism and lets the operator decide how long to keep history.
+If the operational burden of stop+copy+restart becomes too high, framework-coordinated rotation (rotate between ticks, no downtime) is a future option. Design that when there's a real constraint, not before.
 
 ## Replay tool
 
-A generic binary that works for any application built on the framework:
+Implemented in `replay.zig`. Three modes:
 
-1. Calls `restore_hook()` to restore the paired snapshot
-2. Reads WAL entries forward from op 1, verifying checksums and hash chain
-3. Feeds each Message into `commit()` through the normal prefetch/execute path
+- **verify** — read forward, validate checksums and hash chain, report corruption
+- **inspect** — human-readable dump with `--op`, `--operation`, `--user` filters
+- **replay** — restore snapshot, feed WAL entries into prefetch/commit, optional `--trace` and `--stop-at`
 
-The tool doesn't know what a Product or Order is. It passes opaque Messages to the state machine — the same code path as production. For visibility, the state machine's own logging and tracing shows what each operation did.
-
-Optional modes: stop at a specific op number, filter by operation type, enable trace logging for per-operation detail.
-
-Not yet implemented.
+The tool passes opaque Messages to the state machine — same code path as production. It doesn't interpret body bytes.
 
 ## Why not a ring buffer?
 
@@ -238,35 +193,13 @@ Fix: add `.root = 0` to the `Operation` enum. Handle it in every switch (the com
 
 ## Known risks
 
-### Backup hook failure leaves a broken pair
-
-The framework rotates the WAL and calls `backup_hook()` in a single sequence between ticks. But what happens when the backup hook fails? The WAL has already rotated — the old segment is closed, the new one is open. If the snapshot wasn't captured, the old segment has no paired snapshot and the new segment starts from an unrecorded state.
-
-Options: roll back the WAL rotation on hook failure (complex — the old file may already be moved/archived), treat hook failure as fatal (too aggressive for a diagnostic system), or accept the gap and log a loud warning. The last option is consistent with graceful degradation — but the operator must know about it. This error path needs to be designed and tested.
-
-### Backup hook blocks the tick loop
-
-`sqlite3_backup` can take seconds or longer for a large database. During that time, the tick loop is stalled — no requests processed, no connections accepted, no timeouts checked. TigerBeetle would never block the tick loop for an unbounded operation.
-
-Options: run the backup in a subprocess or background thread (breaks single-threaded model), use SQLite's incremental backup API (bounded per-step, but complicates the hook interface), or schedule rotation during a low-traffic window (operational, not architectural). The hook interface should document the stall and let the operator choose an appropriate implementation.
-
 ### WAL disabled state is silent
 
 When the WAL disables itself on write failure, the server continues serving. The operator might not notice for hours that replay coverage has a gap. The tracer should surface "WAL disabled" as a gauge or health check endpoint so monitoring can alert on it.
 
-### Replay tool is unbuilt and untested
-
-The WAL writer is tested (create, recover, hash chain, truncation, corruption). But nothing tests the read-forward-and-replay path — hash chain verification during forward scan, checksum validation of every entry, the interaction with `prefetch()`/`commit()` during replay. Until the replay tool exists and is tested, we don't know if the format actually works for replay. The WAL is write-only until proven otherwise.
-
 ### No cluster field
 
 The `cluster` field is cheap insurance — one u128 that prevents replaying a staging WAL against a production database. We have 15 bytes of reserved space on Message. The cost is negligible and the protection is real. Not critical for single-server, but worth adding before the framework ships to multiple users.
-
-## Open questions
-
-- **Rotation policy**: When should the framework rotate? Fixed interval (daily)? File size threshold? Op count? Configurable?
-- **Backup hook failure**: Roll back rotation, accept the gap, or something else?
-- **Backup stall**: Incremental backup, subprocess, or documented operational constraint?
 
 ## Status
 
@@ -275,12 +208,9 @@ The `cluster` field is cheap insurance — one u128 that prevents replaying a st
 - `wal.zig` — WAL writer with root entry, hash chain, backward scan recovery, ftruncate, graceful degradation
 - `message.zig` — extern struct with `set_checksum()`, `valid_checksum_header()`, `valid_checksum_body()`, `valid_checksum()`
 - `server.zig` — WAL integration (prepare + append after commit for mutations)
+- `replay.zig` — replay tool with verify, inspect, replay modes; unit and E2E tested
 - Stability tests with hardcoded checksums (checksum + root)
-- Unit tests: create/recover, root determinism, hash chain, truncation recovery, corrupt tail recovery, version mismatch detection
 
 ### Not yet implemented
 - Checksum header-only coverage (planned improvement)
 - Root as `.root = 0` Operation variant (planned improvement)
-- Rotation and snapshot coordination
-- Backup/restore hooks
-- Replay tool

@@ -4,7 +4,7 @@
 #
 # Prerequisites:
 #   - hey: go install github.com/rakyll/hey@latest
-#   - source dev.env (sets SECRET_KEY and TOKEN)
+#   - source dev.env (sets SECRET_KEY)
 #   - Server running: ./zig/zig build run
 #
 # Usage:
@@ -15,29 +15,22 @@
 #   ./loadtest.sh search           # full-text search
 #   ./loadtest.sh order            # create order
 #   ./loadtest.sh worker           # worker drain (creates orders, measures completion)
+#   ./loadtest.sh wal              # mutation burst + WAL disk usage report
 #
 # Environment:
-#   TOKEN          — JWT auth token (required, from dev.env)
 #   HOST           — server URL (default: http://localhost:3000)
 #   SEED_COUNT     — products to seed (default: 50)
 #   WORKER_ORDERS  — orders for worker bench (default: 100)
+#   WAL_MUTATIONS  — mutations for WAL test (default: 1000)
 
 set -euo pipefail
 
 HOST="${HOST:-http://localhost:3000}"
 CONCURRENCY_LEVELS="${CONCURRENCY_LEVELS:-1 8 16 32 64 128}"
 SEED_COUNT="${SEED_COUNT:-50}"
-TOKEN="${TOKEN:-}"
-
-if [ -z "$TOKEN" ]; then
-    echo "error: TOKEN not set. Run: source dev.env"
-    exit 1
-fi
-
-AUTH_HEADER="Authorization: Bearer $TOKEN"
 
 # Verify server is reachable before running anything.
-if ! curl -sf "$HOST/products" -H "$AUTH_HEADER" > /dev/null 2>&1; then
+if ! curl -sf "$HOST/products" > /dev/null 2>&1; then
     echo "error: server not reachable at $HOST"
     echo "Start it with: source dev.env && ./zig/zig build run"
     exit 1
@@ -62,7 +55,6 @@ seed() {
         id=$(printf '%032x' $((i + 1000)))
         curl -s -X POST "$HOST/products" \
             -H "Content-Type: application/json" \
-            -H "$AUTH_HEADER" \
             -d "{\"id\":\"$id\",\"name\":\"Product $i\",\"description\":\"Bench product\",\"price\":999,\"stock\":100}" \
             > /dev/null
     done
@@ -78,7 +70,7 @@ bench_get() {
     bench_table_header
     for c in $CONCURRENCY_LEVELS; do
         local result
-        result=$(hey -n $((c * 1000)) -c "$c" -H "$AUTH_HEADER" \
+        result=$(hey -n $((c * 1000)) -c "$c" \
             "$HOST/products/$ID" 2>&1)
         bench_row "$result" "$c"
     done
@@ -91,7 +83,7 @@ bench_list() {
     bench_table_header
     for c in $CONCURRENCY_LEVELS; do
         local result
-        result=$(hey -n $((c * 1000)) -c "$c" -H "$AUTH_HEADER" \
+        result=$(hey -n $((c * 1000)) -c "$c" \
             "$HOST/products" 2>&1)
         bench_row "$result" "$c"
     done
@@ -109,7 +101,6 @@ bench_update() {
         local result
         result=$(hey -n $((c * 1000)) -c "$c" \
             -m PUT \
-            -H "$AUTH_HEADER" \
             -H "Content-Type: application/json" \
             -d "$BODY" \
             "$HOST/products/$ID" 2>&1)
@@ -124,7 +115,7 @@ bench_search() {
     bench_table_header
     for c in $CONCURRENCY_LEVELS; do
         local result
-        result=$(hey -n $((c * 1000)) -c "$c" -H "$AUTH_HEADER" \
+        result=$(hey -n $((c * 1000)) -c "$c" \
             "$HOST/products?q=Product" 2>&1)
         bench_row "$result" "$c"
     done
@@ -143,7 +134,6 @@ bench_create_order() {
         BODY="{\"id\":\"$ORDER_ID\",\"items\":[{\"product_id\":\"$PRODUCT_ID\",\"quantity\":1}]}"
         result=$(hey -n $((c * 1000)) -c "$c" \
             -m POST \
-            -H "$AUTH_HEADER" \
             -H "Content-Type: application/json" \
             -d "$BODY" \
             "$HOST/orders" 2>&1)
@@ -163,7 +153,6 @@ bench_worker() {
     # Ensure product exists.
     curl -s -X POST "$HOST/products" \
         -H "Content-Type: application/json" \
-        -H "$AUTH_HEADER" \
         -d "{\"id\":\"$PRODUCT_ID\",\"name\":\"Bench Product\",\"price\":999,\"stock\":100000}" \
         > /dev/null
 
@@ -174,7 +163,6 @@ bench_worker() {
         ORDER_ID=$(printf '%032x' $((200000 + i)))
         curl -s -X POST "$HOST/orders" \
             -H "Content-Type: application/json" \
-            -H "$AUTH_HEADER" \
             -d "{\"id\":\"$ORDER_ID\",\"items\":[{\"product_id\":\"$PRODUCT_ID\",\"quantity\":1}]}" \
             > /dev/null
     done
@@ -187,14 +175,14 @@ bench_worker() {
     echo "Starting worker (delay=0ms, poll=100ms)..."
     local START END ELAPSED_MS RATE WORKER_PID
     START=$(date +%s%N)
-    TOKEN="$TOKEN" ./zig-out/bin/tiger-worker --delay-ms=0 --poll-ms=100 2>/dev/null &
+    ./zig-out/bin/tiger-worker --delay-ms=0 --poll-ms=100 2>/dev/null &
     WORKER_PID=$!
 
     # Poll until no pending orders remain.
     while true; do
         sleep 0.5
         local RESPONSE PENDING
-        RESPONSE=$(curl -s "$HOST/orders" -H "$AUTH_HEADER")
+        RESPONSE=$(curl -s "$HOST/orders")
         PENDING=$(echo "$RESPONSE" | grep -co '"status":"pending"' || true)
         if [ "$PENDING" -eq 0 ]; then
             break
@@ -212,6 +200,119 @@ bench_worker() {
     echo "Drained $ORDER_COUNT orders in ${ELAPSED_MS}ms (${RATE} orders/sec)"
 }
 
+bench_wal() {
+    local MUTATIONS PRODUCT_ID WAL_FILE
+    MUTATIONS="${WAL_MUTATIONS:-1000}"
+    PRODUCT_ID=$(printf '%032x' 1001)
+    WAL_FILE="tiger_web.wal"
+
+    echo ""
+    echo "=== WAL disk usage: $MUTATIONS mutations ==="
+    echo ""
+
+    # Record WAL size before.
+    local SIZE_BEFORE=0
+    if [ -f "$WAL_FILE" ]; then
+        SIZE_BEFORE=$(stat -c%s "$WAL_FILE")
+    fi
+
+    # Ensure a product exists for updates/orders.
+    curl -s -X POST "$HOST/products" \
+        -H "Content-Type: application/json" \
+        -d "{\"id\":\"$PRODUCT_ID\",\"name\":\"WAL Bench Product\",\"price\":999,\"stock\":1000000}" \
+        > /dev/null
+
+    echo "Running $MUTATIONS mutations (creates + updates + orders)..."
+    local START i
+    START=$(date +%s%N)
+
+    for i in $(seq 1 "$MUTATIONS"); do
+        local MOD=$((i % 3))
+        if [ "$MOD" -eq 0 ]; then
+            # Create product
+            local ID
+            ID=$(printf '%032x' $((500000 + i)))
+            curl -s -X POST "$HOST/products" \
+                -H "Content-Type: application/json" \
+                -d "{\"id\":\"$ID\",\"name\":\"WAL Product $i\",\"description\":\"Load test\",\"price\":$((i % 9999)),\"stock\":$((i % 100))}" \
+                > /dev/null
+        elif [ "$MOD" -eq 1 ]; then
+            # Update product
+            curl -s -X PUT "$HOST/products/$PRODUCT_ID" \
+                -H "Content-Type: application/json" \
+                -d "{\"name\":\"Updated $i\",\"price_cents\":$((i % 9999)),\"version\":0}" \
+                > /dev/null
+        else
+            # Create order
+            local ORDER_ID
+            ORDER_ID=$(printf '%032x' $((600000 + i)))
+            curl -s -X POST "$HOST/orders" \
+                -H "Content-Type: application/json" \
+                -d "{\"id\":\"$ORDER_ID\",\"items\":[{\"product_id\":\"$PRODUCT_ID\",\"quantity\":1}]}" \
+                > /dev/null
+        fi
+
+        # Progress every 100 mutations.
+        if [ $((i % 100)) -eq 0 ]; then
+            printf "  %d/%d\r" "$i" "$MUTATIONS"
+        fi
+    done
+
+    local END ELAPSED_MS
+    END=$(date +%s%N)
+    ELAPSED_MS=$(( (END - START) / 1000000 ))
+
+    # Read WAL size after.
+    local SIZE_AFTER=0
+    if [ -f "$WAL_FILE" ]; then
+        SIZE_AFTER=$(stat -c%s "$WAL_FILE")
+    else
+        echo "warning: WAL file not found at $WAL_FILE"
+        return
+    fi
+
+    local GROWTH=$((SIZE_AFTER - SIZE_BEFORE))
+    local ENTRIES=$((GROWTH / 784))
+    local RATE
+    if [ "$ELAPSED_MS" -gt 0 ]; then
+        RATE=$(awk "BEGIN { printf \"%.1f\", $MUTATIONS * 1000 / $ELAPSED_MS }")
+    else
+        RATE="inf"
+    fi
+
+    # Projections: based on mutation rate, how fast does disk fill?
+    local MB_PER_HOUR MB_PER_DAY MB_PER_WEEK
+    if [ "$ELAPSED_MS" -gt 0 ]; then
+        MB_PER_HOUR=$(awk "BEGIN { printf \"%.1f\", $ENTRIES / ($ELAPSED_MS / 1000.0) * 3600 * 784 / 1048576 }")
+        MB_PER_DAY=$(awk "BEGIN { printf \"%.1f\", $ENTRIES / ($ELAPSED_MS / 1000.0) * 86400 * 784 / 1048576 }")
+        MB_PER_WEEK=$(awk "BEGIN { printf \"%.1f\", $ENTRIES / ($ELAPSED_MS / 1000.0) * 604800 * 784 / 1048576 }")
+    else
+        MB_PER_HOUR="n/a"
+        MB_PER_DAY="n/a"
+        MB_PER_WEEK="n/a"
+    fi
+
+    echo ""
+    echo "  mutations:    $MUTATIONS"
+    echo "  WAL entries:  $ENTRIES (growth: $GROWTH bytes)"
+    echo "  WAL size:     $(awk "BEGIN { printf \"%.2f\", $SIZE_AFTER / 1048576 }") MB total"
+    echo "  entry size:   784 bytes"
+    echo "  time:         ${ELAPSED_MS}ms"
+    echo "  throughput:   ${RATE} mutations/sec"
+    echo ""
+    echo "  --- Projections (at sustained load) ---"
+    echo "  1 hour:       ${MB_PER_HOUR} MB"
+    echo "  1 day:        ${MB_PER_DAY} MB"
+    echo "  1 week:       ${MB_PER_WEEK} MB"
+    echo ""
+    echo "  --- At realistic traffic (estimate 1 mutation/sec) ---"
+    echo "  1 hour:       $(awk "BEGIN { printf \"%.2f\", 3600 * 784 / 1048576 }") MB"
+    echo "  1 day:        $(awk "BEGIN { printf \"%.2f\", 86400 * 784 / 1048576 }") MB"
+    echo "  1 week:       $(awk "BEGIN { printf \"%.2f\", 604800 * 784 / 1048576 }") MB"
+    echo "  1 month:      $(awk "BEGIN { printf \"%.2f\", 2592000 * 784 / 1048576 }") MB"
+    echo "  1 year:       $(awk "BEGIN { printf \"%.2f\", 31536000 * 784 / 1048576 }") MB"
+}
+
 case "${1:-all}" in
     seed)   seed ;;
     get)    bench_get ;;
@@ -220,6 +321,7 @@ case "${1:-all}" in
     search) bench_search ;;
     order)  bench_create_order ;;
     worker) bench_worker ;;
+    wal)    bench_wal ;;
     all)    seed; bench_get; bench_list; bench_update; bench_search; bench_create_order ;;
-    *)      echo "Usage: $0 {seed|get|list|update|search|order|worker|all}"; exit 1 ;;
+    *)      echo "Usage: $0 {seed|get|list|update|search|order|worker|wal|all}"; exit 1 ;;
 esac

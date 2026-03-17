@@ -17,16 +17,30 @@
 //! match what this code produces, the WAL was written by an incompatible
 //! version.
 //!
-//! Completeness gap: the server appends to the WAL *after* committing
-//! to SQLite. A crash between commit and append loses the last entry.
-//! This is intentional — appending before commit would record mutations
-//! that never happened, which is worse. The gap is exactly one entry
-//! wide and only exists during a process crash. If you're reconstructing
-//! from a snapshot + WAL after both a crash and SQLite corruption, the
-//! WAL may be missing the final mutation — but at that point SQLite
-//! corruption is the bigger problem. During normal operation, clean
-//! shutdown, and even kill -9 followed by restart, the gap doesn't
-//! matter because SQLite is the authority and has the data.
+//! Append ordering: the server commits to the database first, then
+//! appends to the WAL. This is a deliberate choice between two options:
+//!
+//!   Option A — WAL first, then DB:
+//!     If the server crashes between append and commit, the WAL contains
+//!     a mutation the database never applied. The entry is valid, the
+//!     chain is intact, and there's no way to detect the phantom. The
+//!     WAL lies silently.
+//!
+//!   Option B — DB first, then WAL (chosen):
+//!     If the server crashes between commit and append, the database has
+//!     the mutation but the WAL doesn't. The chain ends one entry early.
+//!     This is detectable — `tiger-replay verify` reports the clean stop.
+//!     The WAL is honest but incomplete.
+//!
+//! Option B is strictly better: a missing entry is obvious and safe,
+//! a phantom entry is silent and dangerous. The gap is exactly one entry
+//! wide and only exists during a process crash (kill -9, OOM, power loss).
+//! During normal operation the gap doesn't matter — the database is
+//! the authority and has the data.
+//!
+//! This ordering holds regardless of storage backend. The framework is
+//! DB-agnostic — different databases have different WAL semantics or
+//! none at all. The framework's WAL is independent of the storage engine.
 //!
 //! On crash, the tail may also be truncated mid-write. The replay tool
 //! reads entries sequentially and stops at the first invalid checksum.
@@ -51,9 +65,26 @@ pub const Wal = struct {
     /// Construct the root entry — deterministic, same code always produces
     /// the same bytes. Operation is .root (enum value 0), which is not a
     /// valid application operation. Follows TigerBeetle's Header.Prepare.root().
+    ///
+    /// The body contains a layout sentinel — a Product with distinct values
+    /// in every numeric field. If fields are reordered (same size, different
+    /// semantic meaning), the body bytes change and the root checksum catches
+    /// the incompatibility. An all-zero body would not detect same-size swaps.
     pub fn root() Message {
         var entry = std.mem.zeroes(Message);
         entry.operation = .root;
+        const sentinel: message.Product = .{
+            .id = 0x0101010101010101_0101010101010101,
+            .description = [_]u8{0x02} ** message.product_description_max,
+            .name = [_]u8{0x03} ** message.product_name_max,
+            .price_cents = 0x04040404,
+            .inventory = 0x05050505,
+            .version = 0x06060606,
+            .description_len = 0x0707,
+            .name_len = 0x08,
+            .flags = @bitCast(@as(u8, 0x09)),
+        };
+        @memcpy(entry.body[0..@sizeOf(message.Product)], std.mem.asBytes(&sentinel));
         entry.set_checksum();
         return entry;
     }
@@ -309,7 +340,7 @@ test "WAL root deterministic" {
 
     // Stability — if the Message layout or checksum function changes,
     // the root checksum changes and this test catches it.
-    try testing.expectEqual(a.checksum, 0x3C28AE8B6D8FAEC31DDD2215B668AE63);
+    try testing.expectEqual(a.checksum, 0xC12AC0E2DD6948D3353BBB83E282A889);
 }
 
 test "WAL hash chain" {
