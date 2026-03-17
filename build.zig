@@ -36,6 +36,23 @@ pub fn build(b: *std.Build) void {
     const worker_step = b.step("run-worker", "Run the worker process");
     worker_step.dependOn(&worker_cmd.step);
 
+    // --- Replay tool ---
+    const replay_exe = b.addExecutable(.{
+        .name = "tiger-replay",
+        .root_source_file = b.path("replay.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    replay_exe.linkSystemLibrary("sqlite3");
+    replay_exe.linkLibC();
+    b.installArtifact(replay_exe);
+
+    const replay_cmd = b.addRunArtifact(replay_exe);
+    replay_cmd.step.dependOn(b.getInstallStep());
+    if (b.args) |args| replay_cmd.addArgs(args);
+    const replay_step = b.step("replay", "Run the replay tool");
+    replay_step.dependOn(&replay_cmd.step);
+
     // --- Simulation tests ---
     const sim_tests = b.addTest(.{
         .root_source_file = b.path("sim.zig"),
@@ -75,6 +92,8 @@ pub fn build(b: *std.Build) void {
         "time.zig",
         "auth.zig",
         "render.zig",
+        "checksum.zig",
+        "wal.zig",
     };
     const unit_test_step = b.step("unit-test", "Run unit tests");
     for (modules) |mod| {
@@ -87,15 +106,17 @@ pub fn build(b: *std.Build) void {
         unit_test_step.dependOn(&run_unit_test.step);
     }
 
-    // storage.zig needs sqlite3 + libc.
-    const storage_test = b.addTest(.{
-        .root_source_file = b.path("storage.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-    storage_test.linkSystemLibrary("sqlite3");
-    storage_test.linkLibC();
-    unit_test_step.dependOn(&b.addRunArtifact(storage_test).step);
+    // Modules that need sqlite3 + libc.
+    for ([_][]const u8{ "storage.zig", "replay.zig" }) |mod| {
+        const unit_test = b.addTest(.{
+            .root_source_file = b.path(mod),
+            .target = target,
+            .optimize = optimize,
+        });
+        unit_test.linkSystemLibrary("sqlite3");
+        unit_test.linkLibC();
+        unit_test_step.dependOn(&b.addRunArtifact(unit_test).step);
+    }
 
     // --- Benchmark (smoke mode as part of unit-test, real via bench step) ---
     const bench_smoke_options = b.addOptions();
