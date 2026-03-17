@@ -727,61 +727,20 @@ pub const SqliteStorage = struct {
     // Schema versioning
     // =================================================================
 
-    const schema_version: u32 = 1;
+    /// Set to a migration function when the next deploy needs a schema change.
+    /// After deploying, clear it back to null and update schema.sql from prod.
+    /// Additive only — no drops, no renames, no type changes.
+    /// See design/009-documentation_database.md.
+    const next_migration: ?*const fn (*c.sqlite3) void = null;
 
     fn ensure_schema(db: *c.sqlite3) void {
-        const v = get_schema_version(db);
-        if (v > schema_version) @panic("database is from a newer version");
-        if (v < schema_version - 1) @panic("database is too old — deploy previous version first");
-
-        switch (v) {
-            0 => create_tables(db),
-            1 => {}, // Current.
-            else => unreachable,
+        if (get_schema_version(db) == 0) {
+            exec(db, @embedFile("schema.sql"));
+            set_schema_version(db, 1);
         }
-        set_schema_version(db, schema_version);
-    }
-
-    fn create_tables(db: *c.sqlite3) void {
-        exec(db, "CREATE TABLE products (" ++
-            "id BLOB(16) PRIMARY KEY," ++
-            "name TEXT NOT NULL," ++
-            "description TEXT NOT NULL DEFAULT ''," ++
-            "price_cents INTEGER NOT NULL DEFAULT 0," ++
-            "inventory INTEGER NOT NULL DEFAULT 0," ++
-            "version INTEGER NOT NULL DEFAULT 1," ++
-            "active INTEGER NOT NULL DEFAULT 1" ++
-            ");");
-
-        exec(db, "CREATE TABLE collections (" ++
-            "id BLOB(16) PRIMARY KEY," ++
-            "name TEXT NOT NULL" ++
-            ");");
-
-        exec(db, "CREATE TABLE collection_members (" ++
-            "collection_id BLOB(16) NOT NULL," ++
-            "product_id BLOB(16) NOT NULL," ++
-            "PRIMARY KEY (collection_id, product_id)" ++
-            ");");
-
-        exec(db, "CREATE TABLE orders (" ++
-            "id BLOB(16) PRIMARY KEY," ++
-            "total_cents INTEGER NOT NULL," ++
-            "items_len INTEGER NOT NULL," ++
-            "status INTEGER NOT NULL DEFAULT 1," ++
-            "timeout_at INTEGER NOT NULL DEFAULT 0," ++
-            "payment_ref TEXT NOT NULL DEFAULT ''" ++
-            ");");
-
-        exec(db, "CREATE TABLE order_items (" ++
-            "order_id BLOB(16) NOT NULL," ++
-            "product_id BLOB(16) NOT NULL," ++
-            "name TEXT NOT NULL," ++
-            "quantity INTEGER NOT NULL," ++
-            "price_cents INTEGER NOT NULL," ++
-            "line_total_cents INTEGER NOT NULL," ++
-            "PRIMARY KEY (order_id, product_id)" ++
-            ");");
+        if (next_migration) |migrate| {
+            migrate(db);
+        }
     }
 
     fn get_schema_version(db: *c.sqlite3) u32 {
