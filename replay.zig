@@ -100,6 +100,7 @@ pub fn main() !void {
 // Verify
 // =====================================================================
 
+/// Validate WAL checksums and hash chain.
 fn verify(path: []const u8) void {
     const fd = open_wal(path);
     defer std.posix.close(fd);
@@ -136,51 +137,62 @@ fn verify(path: []const u8) void {
     var errors: u64 = 0;
 
     // Verify chain.
+    var batch_buf: [read_ahead]Message = undefined;
     var slot: u64 = 1;
-    while (slot < entry_count) : (slot += 1) {
-        const entry = read_entry_or_fatal(fd, slot * @sizeOf(Message));
+    while (slot < entry_count) {
+        const batch = read_batch(fd, &batch_buf, slot, entry_count);
+        for (batch) |*entry| {
+            // Header checksum.
+            if (!entry.valid_checksum_header()) {
+                write_stderr("error: header checksum failed at slot {d}\n", .{slot});
+                errors += 1;
+                slot += 1;
+                continue;
+            }
 
-        // Header checksum.
-        if (!entry.valid_checksum_header()) {
-            write_stderr("error: header checksum failed at slot {d}\n", .{slot});
-            errors += 1;
-            continue;
+            // Body checksum.
+            if (!entry.valid_checksum_body()) {
+                write_stderr("error: body checksum failed at op {d} (slot {d})\n", .{ entry.op, slot });
+                errors += 1;
+                slot += 1;
+                continue;
+            }
+
+            // Hash chain.
+            if (entry.parent != prev_checksum) {
+                write_stderr("error: hash chain broken at op {d} (slot {d}): parent={x}, expected={x}\n", .{
+                    entry.op, slot, entry.parent, prev_checksum,
+                });
+                errors += 1;
+            }
+
+            // Sequential op.
+            if (entry.op != prev_op + 1) {
+                write_stderr("error: op not sequential at slot {d}: got {d}, expected {d}\n", .{
+                    slot, entry.op, prev_op + 1,
+                });
+                errors += 1;
+            }
+
+            // WAL entries must be mutations — reads are never appended.
+            if (!entry.operation.is_mutation()) {
+                write_stderr("error: non-mutation operation '{s}' at op {d} (slot {d})\n", .{ @tagName(entry.operation), entry.op, slot });
+                errors += 1;
+            }
+
+            if (first_timestamp == 0) first_timestamp = entry.timestamp;
+            last_timestamp = entry.timestamp;
+
+            prev_checksum = entry.checksum;
+            prev_op = entry.op;
+            slot += 1;
         }
+    }
 
-        // Body checksum.
-        if (!entry.valid_checksum_body()) {
-            write_stderr("error: body checksum failed at op {d} (slot {d})\n", .{ entry.op, slot });
-            errors += 1;
-            continue;
-        }
-
-        // Hash chain.
-        if (entry.parent != prev_checksum) {
-            write_stderr("error: hash chain broken at op {d} (slot {d}): parent={x}, expected={x}\n", .{
-                entry.op, slot, entry.parent, prev_checksum,
-            });
-            errors += 1;
-        }
-
-        // Sequential op.
-        if (entry.op != prev_op + 1) {
-            write_stderr("error: op not sequential at slot {d}: got {d}, expected {d}\n", .{
-                slot, entry.op, prev_op + 1,
-            });
-            errors += 1;
-        }
-
-        // WAL entries must be mutations — reads are never appended.
-        if (!entry.operation.is_mutation()) {
-            write_stderr("error: non-mutation operation '{s}' at op {d} (slot {d})\n", .{ @tagName(entry.operation), entry.op, slot });
-            errors += 1;
-        }
-
-        if (first_timestamp == 0) first_timestamp = entry.timestamp;
-        last_timestamp = entry.timestamp;
-
-        prev_checksum = entry.checksum;
-        prev_op = entry.op;
+    assert(slot == entry_count); // We visited every slot.
+    if (errors == 0) {
+        assert(prev_op == entry_count - 1); // Ops sequential from 1..N.
+        assert(last_timestamp >= first_timestamp); // Timestamps monotonic.
     }
 
     const stdout = std.io.getStdOut().writer();
@@ -228,95 +240,53 @@ fn inspect(args: InspectArgs) void {
 
     const stdout = std.io.getStdOut().writer();
 
+    var batch_buf: [read_ahead]Message = undefined;
+    var json_buf: [4096]u8 = undefined;
     var slot: u64 = 1; // skip root
-    while (slot < entry_count) : (slot += 1) {
-        const entry = read_entry_or_fatal(fd, slot * @sizeOf(Message));
+    while (slot < entry_count) {
+        const batch = read_batch(fd, &batch_buf, slot, entry_count);
+        for (batch) |*entry| {
+            slot += 1;
 
-        if (!entry.valid_checksum_header()) continue;
+            if (!entry.valid_checksum_header()) continue;
 
-        // Apply filters.
-        if (args.after) |after| {
-            if (entry.op <= after) continue;
-        }
-        if (args.before) |before| {
-            if (entry.op >= before) continue;
-        }
-        if (filter_op) |f| {
-            if (entry.operation != f) continue;
-        }
-        if (filter_user) |u| {
-            if (entry.user_id != u) continue;
-        }
-        if (filter_id) |i| {
-            if (entity_id(&entry) != i) continue;
-        }
+            // Apply filters.
+            if (args.after) |after| {
+                if (entry.op <= after) continue;
+            }
+            if (args.before) |before| {
+                if (entry.op >= before) continue;
+            }
+            if (filter_op) |f| {
+                if (entry.operation != f) continue;
+            }
+            if (filter_user) |u| {
+                if (entry.user_id != u) continue;
+            }
+            if (filter_id) |i| {
+                if (entity_id(entry) != i) continue;
+            }
 
-        var id_buf: [36]u8 = undefined;
-        var user_buf: [36]u8 = undefined;
-        format_uuid(&id_buf, entity_id(&entry));
-        format_uuid(&user_buf, entry.user_id);
+            var id_buf: [36]u8 = undefined;
+            var user_buf: [36]u8 = undefined;
+            format_uuid(&id_buf, entity_id(entry));
+            format_uuid(&user_buf, entry.user_id);
 
-        stdout.print("op={d:<6} t={d}  {s:<24} id={s}  user={s}", .{
-            entry.op,
-            entry.timestamp,
-            @tagName(entry.operation),
-            &id_buf,
-            &user_buf,
-        }) catch return;
-
-        if (args.verbose) {
-            write_body_summary(stdout, &entry);
-        }
-
-        stdout.print("\n", .{}) catch return;
-    }
-}
-
-/// Print key body fields for the entry's operation type.
-fn write_body_summary(w: anytype, entry: *const Message) void {
-    switch (entry.operation) {
-        .create_product => {
-            const p = entry.body_as(message.Product);
-            w.print("  name=\"{s}\" price={d} stock={d} ver={d}", .{
-                p.name_slice(), p.price_cents, p.inventory, p.version,
+            stdout.print("op={d:<6} t={d}  {s:<24} id={s}  user={s}", .{
+                entry.op,
+                entry.timestamp,
+                @tagName(entry.operation),
+                &id_buf,
+                &user_buf,
             }) catch return;
-        },
-        .update_product => {
-            const p = entry.body_as(message.Product);
-            w.print("  name=\"{s}\" price={d} ver={d}", .{
-                p.name_slice(), p.price_cents, p.version,
-            }) catch return;
-        },
-        .delete_product, .get_product => {
-            // Header-only operations — id is already shown.
-        },
-        .create_collection => {
-            const c = entry.body_as(message.ProductCollection);
-            w.print("  name=\"{s}\"", .{c.name_slice()}) catch return;
-        },
-        .delete_collection, .get_collection => {},
-        .add_collection_member, .remove_collection_member => {
-            const product_id = entry.body_as(u128).*;
-            var buf: [36]u8 = undefined;
-            format_uuid(&buf, product_id);
-            w.print("  product={s}", .{&buf}) catch return;
-        },
-        .create_order => {
-            const o = entry.body_as(message.OrderRequest);
-            w.print("  items={d}", .{o.items_len}) catch return;
-        },
-        .complete_order, .cancel_order, .get_order => {},
-        .transfer_inventory => {
-            const t = entry.body_as(message.InventoryTransfer);
-            var buf: [36]u8 = undefined;
-            format_uuid(&buf, t.target_id);
-            w.print("  target={s} qty={d}", .{ &buf, t.quantity }) catch return;
-        },
-        .list_products, .list_collections, .list_orders,
-        .get_product_inventory, .search_products,
-        .page_load_dashboard,
-        => {},
-        .root => {},
+
+            if (args.verbose) {
+                const json = body_to_json(&json_buf, entry);
+                stdout.print("  {s}", .{json}) catch return;
+            }
+
+            stdout.print("\n", .{}) catch return;
+        }
     }
 }
 
@@ -343,7 +313,14 @@ fn query(args: QueryArgs) void {
     }
     defer _ = sqlite.sqlite3_close(db);
 
-    // Create the entries table.
+    // Query lives in the same binary as replay because SQLite is already
+    // linked for the replay command. A separate binary would duplicate the
+    // dependency for no benefit.
+    //
+    // Header columns from Message + JSON body. Header columns are framework
+    // fields that change only if Message itself changes (compiler catches that
+    // because the INSERT code references entry.op, entry.timestamp, etc.).
+    // Body is comptime-generated JSON — zero maintenance when entity types change.
     const create_sql =
         \\CREATE TABLE entries (
         \\  op INTEGER PRIMARY KEY,
@@ -351,24 +328,16 @@ fn query(args: QueryArgs) void {
         \\  operation TEXT,
         \\  id TEXT,
         \\  user_id TEXT,
-        \\  name TEXT,
-        \\  price_cents INTEGER,
-        \\  inventory INTEGER,
-        \\  version INTEGER,
-        \\  items_len INTEGER,
-        \\  quantity INTEGER,
-        \\  target_id TEXT
+        \\  body TEXT
         \\)
     ;
     if (sqlite.sqlite3_exec(db, create_sql, null, null, null) != sqlite.SQLITE_OK) {
         fatal("failed to create entries table");
     }
 
-    // Prepare insert statement.
     const insert_sql =
-        \\INSERT INTO entries (op, timestamp, operation, id, user_id,
-        \\  name, price_cents, inventory, version, items_len, quantity, target_id)
-        \\VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        \\INSERT INTO entries (op, timestamp, operation, id, user_id, body)
+        \\VALUES (?, ?, ?, ?, ?, ?)
     ;
     var insert_stmt: ?*sqlite.sqlite3_stmt = null;
     if (sqlite.sqlite3_prepare_v2(db, insert_sql, -1, &insert_stmt, null) != sqlite.SQLITE_OK) {
@@ -377,88 +346,42 @@ fn query(args: QueryArgs) void {
     defer _ = sqlite.sqlite3_finalize(insert_stmt);
 
     // Load WAL entries into the table.
-    _ = sqlite.sqlite3_exec(db, "BEGIN", null, null, null);
+    assert(sqlite.sqlite3_exec(db, "BEGIN", null, null, null) == sqlite.SQLITE_OK);
 
+    var batch_buf: [read_ahead]Message = undefined;
+    var json_buf: [4096]u8 = undefined;
     var slot: u64 = 1;
-    while (slot < entry_count) : (slot += 1) {
-        const entry = read_entry_or_fatal(fd, slot * @sizeOf(Message));
-        if (!entry.valid_checksum_header()) continue;
+    while (slot < entry_count) {
+        const batch = read_batch(fd, &batch_buf, slot, entry_count);
+        for (batch) |*entry| {
+            slot += 1;
+            if (!entry.valid_checksum_header()) continue;
 
-        _ = sqlite.sqlite3_reset(insert_stmt);
+            assert(sqlite.sqlite3_reset(insert_stmt) == sqlite.SQLITE_OK);
 
-        // op, timestamp, operation
-        _ = sqlite.sqlite3_bind_int64(insert_stmt, 1, @intCast(entry.op));
-        _ = sqlite.sqlite3_bind_int64(insert_stmt, 2, entry.timestamp);
-        const op_name = @tagName(entry.operation);
-        _ = sqlite.sqlite3_bind_text(insert_stmt, 3, op_name.ptr, @intCast(op_name.len), sqlite.SQLITE_STATIC);
+            // Header columns.
+            assert(sqlite.sqlite3_bind_int64(insert_stmt, 1, @intCast(entry.op)) == sqlite.SQLITE_OK);
+            assert(sqlite.sqlite3_bind_int64(insert_stmt, 2, entry.timestamp) == sqlite.SQLITE_OK);
+            const op_name = @tagName(entry.operation);
+            assert(sqlite.sqlite3_bind_text(insert_stmt, 3, op_name.ptr, @intCast(op_name.len), sqlite.SQLITE_STATIC) == sqlite.SQLITE_OK);
 
-        // id, user_id as hex strings
-        var id_buf: [32]u8 = undefined;
-        var user_buf: [32]u8 = undefined;
-        format_uuid_compact(&id_buf, entity_id(&entry));
-        format_uuid_compact(&user_buf, entry.user_id);
-        _ = sqlite.sqlite3_bind_text(insert_stmt, 4, &id_buf, 32, sqlite.SQLITE_STATIC);
-        _ = sqlite.sqlite3_bind_text(insert_stmt, 5, &user_buf, 32, sqlite.SQLITE_STATIC);
+            var id_buf: [32]u8 = undefined;
+            var user_buf: [32]u8 = undefined;
+            stdx.write_uuid_to_buf(&id_buf, entity_id(entry));
+            stdx.write_uuid_to_buf(&user_buf, entry.user_id);
+            assert(sqlite.sqlite3_bind_text(insert_stmt, 4, &id_buf, 32, sqlite.SQLITE_STATIC) == sqlite.SQLITE_OK);
+            assert(sqlite.sqlite3_bind_text(insert_stmt, 5, &user_buf, 32, sqlite.SQLITE_STATIC) == sqlite.SQLITE_OK);
 
-        // Body fields — NULL for operations that don't have them.
-        switch (entry.operation) {
-            .create_product, .update_product => {
-                const p = entry.body_as(message.Product);
-                _ = sqlite.sqlite3_bind_text(insert_stmt, 6, &p.name, p.name_len, sqlite.SQLITE_STATIC);
-                _ = sqlite.sqlite3_bind_int64(insert_stmt, 7, p.price_cents);
-                _ = sqlite.sqlite3_bind_int64(insert_stmt, 8, p.inventory);
-                _ = sqlite.sqlite3_bind_int64(insert_stmt, 9, p.version);
-                _ = sqlite.sqlite3_bind_null(insert_stmt, 10);
-                _ = sqlite.sqlite3_bind_null(insert_stmt, 11);
-                _ = sqlite.sqlite3_bind_null(insert_stmt, 12);
-            },
-            .create_collection => {
-                const col = entry.body_as(message.ProductCollection);
-                _ = sqlite.sqlite3_bind_text(insert_stmt, 6, &col.name, col.name_len, sqlite.SQLITE_STATIC);
-                _ = sqlite.sqlite3_bind_null(insert_stmt, 7);
-                _ = sqlite.sqlite3_bind_null(insert_stmt, 8);
-                _ = sqlite.sqlite3_bind_null(insert_stmt, 9);
-                _ = sqlite.sqlite3_bind_null(insert_stmt, 10);
-                _ = sqlite.sqlite3_bind_null(insert_stmt, 11);
-                _ = sqlite.sqlite3_bind_null(insert_stmt, 12);
-            },
-            .create_order => {
-                const o = entry.body_as(message.OrderRequest);
-                _ = sqlite.sqlite3_bind_null(insert_stmt, 6);
-                _ = sqlite.sqlite3_bind_null(insert_stmt, 7);
-                _ = sqlite.sqlite3_bind_null(insert_stmt, 8);
-                _ = sqlite.sqlite3_bind_null(insert_stmt, 9);
-                _ = sqlite.sqlite3_bind_int64(insert_stmt, 10, o.items_len);
-                _ = sqlite.sqlite3_bind_null(insert_stmt, 11);
-                _ = sqlite.sqlite3_bind_null(insert_stmt, 12);
-            },
-            .transfer_inventory => {
-                const t = entry.body_as(message.InventoryTransfer);
-                _ = sqlite.sqlite3_bind_null(insert_stmt, 6);
-                _ = sqlite.sqlite3_bind_null(insert_stmt, 7);
-                _ = sqlite.sqlite3_bind_null(insert_stmt, 8);
-                _ = sqlite.sqlite3_bind_null(insert_stmt, 9);
-                _ = sqlite.sqlite3_bind_null(insert_stmt, 10);
-                _ = sqlite.sqlite3_bind_int64(insert_stmt, 11, t.quantity);
-                var target_buf: [32]u8 = undefined;
-                format_uuid_compact(&target_buf, t.target_id);
-                _ = sqlite.sqlite3_bind_text(insert_stmt, 12, &target_buf, 32, sqlite.SQLITE_STATIC);
-            },
-            else => {
-                _ = sqlite.sqlite3_bind_null(insert_stmt, 6);
-                _ = sqlite.sqlite3_bind_null(insert_stmt, 7);
-                _ = sqlite.sqlite3_bind_null(insert_stmt, 8);
-                _ = sqlite.sqlite3_bind_null(insert_stmt, 9);
-                _ = sqlite.sqlite3_bind_null(insert_stmt, 10);
-                _ = sqlite.sqlite3_bind_null(insert_stmt, 11);
-                _ = sqlite.sqlite3_bind_null(insert_stmt, 12);
-            },
+            // Body as comptime-generated JSON.
+            const json = body_to_json(&json_buf, entry);
+            assert(json.len >= 2); // At minimum "{}"
+            assert(sqlite.sqlite3_bind_text(insert_stmt, 6, json.ptr, @intCast(json.len), sqlite.SQLITE_STATIC) == sqlite.SQLITE_OK);
+
+            assert(sqlite.sqlite3_step(insert_stmt) == sqlite.SQLITE_DONE);
         }
-
-        _ = sqlite.sqlite3_step(insert_stmt);
     }
 
-    _ = sqlite.sqlite3_exec(db, "COMMIT", null, null, null);
+    assert(sqlite.sqlite3_exec(db, "COMMIT", null, null, null) == sqlite.SQLITE_OK);
 
     write_stderr("loaded {d} entries\n", .{entry_count - 1});
 
@@ -507,20 +430,167 @@ fn query(args: QueryArgs) void {
     }
 }
 
-/// Format a u128 as 32 lowercase hex chars (no dashes).
-fn format_uuid_compact(buf: *[32]u8, value: u128) void {
-    const bytes: [16]u8 = @bitCast(value);
-    const hex_chars = "0123456789abcdef";
-    // Big-endian: most significant byte first.
-    var pos: usize = 0;
-    var i: usize = 16;
-    while (i > 0) {
-        i -= 1;
-        buf[pos] = hex_chars[bytes[i] >> 4];
-        buf[pos + 1] = hex_chars[bytes[i] & 0xf];
-        pos += 2;
+/// Serialize the entry's body as JSON using comptime struct reflection.
+/// For void-bodied operations returns "{}". For struct-bodied operations,
+/// walks fields at comptime: [N]u8 arrays with _len → strings, u128 → hex
+/// UUID, enums → tag name, packed structs → backing integer. [N]T arrays
+/// (T != u8) are skipped — their _len field carries the count.
+///
+/// No std.fmt — uses stdx.format_u32/format_u64/write_uuid_to_buf.
+fn body_to_json(buf: *[4096]u8, entry: *const Message) []const u8 {
+    var stream = std.io.fixedBufferStream(buf);
+    const w = stream.writer();
+
+    switch (entry.operation) {
+        .root => w.writeAll("{}") catch return "{}",
+        inline else => |comptime_op| {
+            const T = comptime comptime_op.EventType();
+            if (T == void) {
+                w.writeAll("{}") catch return "{}";
+            } else if (T == u128) {
+                const value = entry.body_as(u128).*;
+                var uuid_buf: [32]u8 = undefined;
+                stdx.write_uuid_to_buf(&uuid_buf, value);
+                w.writeAll("{\"value\":\"") catch return "{}";
+                w.writeAll(&uuid_buf) catch return "{}";
+                w.writeAll("\"}") catch return "{}";
+            } else {
+                write_json_struct(T, w, entry.body_as(T)) catch return "{}";
+            }
+        },
+    }
+
+    const written = stream.getWritten();
+    assert(written.len >= 2); // At minimum "{}".
+    return written;
+}
+
+/// Serialize a typed struct as JSON. Comptime-walks fields, skipping
+/// reserved/padding, pairing [N]u8 arrays with their _len companions
+/// as strings, and formatting u128 as hex UUIDs.
+fn write_json_struct(comptime T: type, w: anytype, ptr: *const T) !void {
+    comptime {
+        assert(@typeInfo(T).@"struct".layout == .@"extern");
+        assert(stdx.no_padding(T));
+    }
+    try w.writeByte('{');
+
+    var first = true;
+    inline for (@typeInfo(T).@"struct".fields) |field| {
+        const skip = comptime blk: {
+            if (std.mem.eql(u8, field.name, "reserved")) break :blk true;
+            if (std.mem.eql(u8, field.name, "padding")) break :blk true;
+            // Skip [N]T arrays where T != u8 (complex nested data).
+            if (@typeInfo(field.type) == .array and @typeInfo(field.type).array.child != u8) break :blk true;
+            // Skip _len fields whose base is a [N]u8 array (consumed by the array field).
+            if (is_byte_array_len(T, field.name)) break :blk true;
+            break :blk false;
+        };
+
+        if (!skip) {
+            if (!first) try w.writeByte(',');
+            first = false;
+
+            try w.writeAll("\"" ++ field.name ++ "\":");
+            const value = @field(ptr.*, field.name);
+
+            switch (@typeInfo(field.type)) {
+                .int => |info| {
+                    if (info.bits == 128) {
+                        var uuid_buf: [32]u8 = undefined;
+                        stdx.write_uuid_to_buf(&uuid_buf, value);
+                        try w.writeByte('"');
+                        try w.writeAll(&uuid_buf);
+                        try w.writeByte('"');
+                    } else if (info.bits <= 32) {
+                        var int_buf: [10]u8 = undefined;
+                        try w.writeAll(stdx.format_u32(&int_buf, @intCast(value)));
+                    } else {
+                        var int_buf: [20]u8 = undefined;
+                        try w.writeAll(stdx.format_u64(&int_buf, @intCast(value)));
+                    }
+                },
+                .array => {
+                    // Only [N]u8 arrays reach here (non-u8 filtered above).
+                    const len_name = comptime field.name ++ "_len";
+                    if (comptime @hasField(T, len_name)) {
+                        const len = @field(ptr.*, len_name);
+                        try w.writeByte('"');
+                        try write_json_string(w, value[0..len]);
+                        try w.writeByte('"');
+                    } else {
+                        try w.writeAll("null");
+                    }
+                },
+                .@"enum" => {
+                    try w.writeByte('"');
+                    try w.writeAll(@tagName(value));
+                    try w.writeByte('"');
+                },
+                .@"struct" => |s| {
+                    if (s.layout == .@"packed") {
+                        if (s.backing_integer) |BackingInt| {
+                            const int_val: BackingInt = @bitCast(value);
+                            if (@bitSizeOf(BackingInt) <= 32) {
+                                var int_buf: [10]u8 = undefined;
+                                try w.writeAll(stdx.format_u32(&int_buf, @intCast(int_val)));
+                            } else {
+                                var int_buf: [20]u8 = undefined;
+                                try w.writeAll(stdx.format_u64(&int_buf, @intCast(int_val)));
+                            }
+                        } else {
+                            try w.writeAll("null");
+                        }
+                    } else {
+                        try w.writeAll("null");
+                    }
+                },
+                else => try w.writeAll("null"),
+            }
+        }
+    }
+
+    try w.writeByte('}');
+}
+
+/// True if `name` ends with "_len" and the corresponding base field
+/// in T is a [N]u8 array. These _len fields are consumed by the array
+/// serializer (emitted as string length), so they're skipped as columns.
+fn is_byte_array_len(comptime T: type, comptime name: []const u8) bool {
+    if (!std.mem.endsWith(u8, name, "_len")) return false;
+    const base = name[0 .. name.len - 4];
+    for (@typeInfo(T).@"struct".fields) |f| {
+        if (std.mem.eql(u8, f.name, base)) {
+            return @typeInfo(f.type) == .array and @typeInfo(f.type).array.child == u8;
+        }
+    }
+    return false;
+}
+
+/// Write a string with JSON escaping (quotes, backslashes, control chars).
+fn write_json_string(w: anytype, s: []const u8) !void {
+    for (s) |c| {
+        switch (c) {
+            '"' => try w.writeAll("\\\""),
+            '\\' => try w.writeAll("\\\\"),
+            '\n' => try w.writeAll("\\n"),
+            '\r' => try w.writeAll("\\r"),
+            '\t' => try w.writeAll("\\t"),
+            else => {
+                if (c < 0x20) {
+                    // \u00XX — control chars are always 00XX.
+                    const hex = "0123456789abcdef";
+                    try w.writeAll("\\u00");
+                    try w.writeByte(hex[c >> 4]);
+                    try w.writeByte(hex[c & 0xf]);
+                } else {
+                    try w.writeByte(c);
+                }
+            },
+        }
     }
 }
+
 
 // =====================================================================
 // Replay
@@ -573,6 +643,8 @@ fn replay(args: ReplayArgs) void {
         if (!entry.operation.is_mutation()) {
             fatal_fmt("non-mutation operation '{s}' at op {d}", .{ @tagName(entry.operation), entry.op });
         }
+
+        assert(entry.op == slot); // Ops sequential — no gaps.
 
         if (entry.op > stop_at) break;
 
@@ -701,15 +773,54 @@ fn read_entry_or_fatal(fd: std.posix.fd_t, offset: u64) Message {
     };
 }
 
+/// Read up to read_ahead entries starting at start_slot. Returns a slice
+/// of the buffer containing the entries read. One syscall per batch instead
+/// of one per entry.
+const read_ahead = 64;
+
+fn read_batch(fd: std.posix.fd_t, buf: *[read_ahead]Message, start_slot: u64, entry_count: u64) []const Message {
+    assert(start_slot < entry_count);
+    const remaining = entry_count - start_slot;
+    const to_read: usize = @intCast(@min(remaining, read_ahead));
+    const bytes_wanted = to_read * @sizeOf(Message);
+    const offset = start_slot * @sizeOf(Message);
+    const bytes_read = std.posix.pread(fd, std.mem.asBytes(buf)[0..bytes_wanted], offset) catch |err| {
+        fatal_fmt("read failed at slot {d}: {}", .{ start_slot, err });
+    };
+    assert(bytes_read % @sizeOf(Message) == 0); // No partial entries.
+    const entries_read = bytes_read / @sizeOf(Message);
+    assert(entries_read > 0);
+    return buf[0..entries_read];
+}
+
 /// Extract the primary entity ID for display. Operations that carry
 /// their entity ID in the body (create_product, create_collection, etc.)
 /// need body-aware extraction; the rest use msg.id from the header.
+/// Exhaustive switch — adding a new operation forces handling here.
 fn entity_id(entry: *const Message) u128 {
     return switch (entry.operation) {
         .create_product => entry.body_as(message.Product).id,
         .create_collection => entry.body_as(message.ProductCollection).id,
         .create_order => entry.body_as(message.OrderRequest).id,
-        else => entry.id,
+        .root,
+        .update_product,
+        .delete_product,
+        .delete_collection,
+        .add_collection_member,
+        .remove_collection_member,
+        .transfer_inventory,
+        .complete_order,
+        .cancel_order,
+        .get_product,
+        .get_collection,
+        .get_order,
+        .get_product_inventory,
+        .list_products,
+        .list_collections,
+        .list_orders,
+        .search_products,
+        .page_load_dashboard,
+        => entry.id,
     };
 }
 
@@ -892,6 +1003,133 @@ test "inspect: entries readable" {
     try testing.expectEqual(entry.op, 1);
     try testing.expectEqual(entry.user_id, 42);
     try testing.expectEqual(entry.timestamp, 1000);
+}
+
+test "write_json_string: escaping" {
+    var buf: [256]u8 = undefined;
+
+    const cases = .{
+        // Plain ASCII — no escaping.
+        .{ "hello", "hello" },
+        // Quotes and backslashes.
+        .{ "say \"hi\"", "say \\\"hi\\\"" },
+        .{ "a\\b", "a\\\\b" },
+        // Newline, carriage return, tab.
+        .{ "line1\nline2", "line1\\nline2" },
+        .{ "col1\tcol2", "col1\\tcol2" },
+        .{ "a\rb", "a\\rb" },
+        // Control char (0x01) — \u00XX escape.
+        .{ &[_]u8{0x01}, "\\u0001" },
+        .{ &[_]u8{0x00}, "\\u0000" },
+        .{ &[_]u8{0x1f}, "\\u001f" },
+        // Mixed: control char + quote + normal.
+        .{ &[_]u8{ 0x02, '"', 'x' }, "\\u0002\\\"x" },
+        // Empty string.
+        .{ "", "" },
+        // Printable boundary (0x20 = space, not escaped).
+        .{ " ", " " },
+    };
+
+    inline for (cases) |case| {
+        var stream = std.io.fixedBufferStream(&buf);
+        try write_json_string(stream.writer(), case[0]);
+        try testing.expectEqualSlices(u8, case[1], stream.getWritten());
+    }
+}
+
+test "body_to_json: every mutation operation" {
+    var json_buf: [4096]u8 = undefined;
+
+    // Product body (create_product, update_product).
+    {
+        var product = std.mem.zeroes(message.Product);
+        product.id = 1;
+        product.price_cents = 999;
+        product.inventory = 50;
+        product.version = 3;
+        product.name_len = 6;
+        @memcpy(product.name[0..6], "Widget");
+        product.flags = .{ .active = true };
+
+        const msg = Message.init(.create_product, 1, 42, product);
+        const json = body_to_json(&json_buf, &msg);
+        try testing.expect(json.len > 2);
+        try testing.expect(std.mem.indexOf(u8, json, "\"name\":\"Widget\"") != null);
+        try testing.expect(std.mem.indexOf(u8, json, "\"price_cents\":999") != null);
+        try testing.expect(std.mem.indexOf(u8, json, "\"inventory\":50") != null);
+
+        // update_product uses the same body type.
+        const msg2 = Message.init(.update_product, 1, 42, product);
+        const json2 = body_to_json(&json_buf, &msg2);
+        try testing.expect(std.mem.indexOf(u8, json2, "\"price_cents\":999") != null);
+    }
+
+    // ProductCollection body (create_collection).
+    {
+        var coll = std.mem.zeroes(message.ProductCollection);
+        coll.id = 2;
+        coll.name_len = 4;
+        @memcpy(coll.name[0..4], "Sale");
+
+        const msg = Message.init(.create_collection, 2, 42, coll);
+        const json = body_to_json(&json_buf, &msg);
+        try testing.expect(std.mem.indexOf(u8, json, "\"name\":\"Sale\"") != null);
+    }
+
+    // u128 body (add_collection_member, remove_collection_member).
+    {
+        const member_id: u128 = 0xAABBCCDD;
+        const msg = Message.init(.add_collection_member, 1, 42, member_id);
+        const json = body_to_json(&json_buf, &msg);
+        try testing.expect(std.mem.indexOf(u8, json, "\"value\":\"") != null);
+
+        const msg2 = Message.init(.remove_collection_member, 1, 42, member_id);
+        const json2 = body_to_json(&json_buf, &msg2);
+        try testing.expect(std.mem.indexOf(u8, json2, "\"value\":\"") != null);
+    }
+
+    // InventoryTransfer body (transfer_inventory).
+    {
+        var xfer = std.mem.zeroes(message.InventoryTransfer);
+        xfer.target_id = 2;
+        xfer.quantity = 5;
+
+        const msg = Message.init(.transfer_inventory, 0, 42, xfer);
+        const json = body_to_json(&json_buf, &msg);
+        try testing.expect(std.mem.indexOf(u8, json, "\"quantity\":5") != null);
+    }
+
+    // OrderRequest body (create_order).
+    {
+        var order = std.mem.zeroes(message.OrderRequest);
+        order.id = 10;
+
+        const msg = Message.init(.create_order, 10, 42, order);
+        const json = body_to_json(&json_buf, &msg);
+        try testing.expect(json.len > 2);
+    }
+
+    // OrderCompletion body (complete_order).
+    {
+        var completion = std.mem.zeroes(message.OrderCompletion);
+        completion.result = .confirmed;
+        completion.payment_ref_len = 3;
+        @memcpy(completion.payment_ref[0..3], "abc");
+
+        const msg = Message.init(.complete_order, 10, 42, completion);
+        const json = body_to_json(&json_buf, &msg);
+        try testing.expect(std.mem.indexOf(u8, json, "\"result\":\"confirmed\"") != null);
+        try testing.expect(std.mem.indexOf(u8, json, "\"payment_ref\":\"abc\"") != null);
+    }
+
+    // Void body operations (delete_product, delete_collection, cancel_order).
+    {
+        inline for (.{ .delete_product, .delete_collection, .cancel_order }) |op| {
+            const msg = Message.init(op, 1, 42, {});
+            const json = body_to_json(&json_buf, &msg);
+            try testing.expectEqualSlices(u8, json, "{}");
+        }
+    }
 }
 
 // =====================================================================
