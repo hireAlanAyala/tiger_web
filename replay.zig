@@ -1,5 +1,6 @@
 const std = @import("std");
 const assert = std.debug.assert;
+const stdx = @import("stdx.zig");
 const flags = @import("flags.zig");
 const Wal = @import("wal.zig").Wal;
 const message = @import("message.zig");
@@ -154,9 +155,9 @@ fn verify(path: []const u8) void {
             errors += 1;
         }
 
-        // Operation must not be .root for non-root entries.
-        if (entry.operation == .root) {
-            write_stderr("error: non-root entry has .root operation at op {d} (slot {d})\n", .{ entry.op, slot });
+        // WAL entries must be mutations — reads are never appended.
+        if (!entry.operation.is_mutation()) {
+            write_stderr("error: non-mutation operation '{s}' at op {d} (slot {d})\n", .{ @tagName(entry.operation), entry.op, slot });
             errors += 1;
         }
 
@@ -201,7 +202,7 @@ fn inspect(args: InspectArgs) void {
         null;
 
     const filter_user: ?u128 = if (args.user) |u|
-        parse_uuid(u) orelse fatal_fmt("invalid user UUID: '{s}' (expected 32 hex chars)", .{u})
+        stdx.parse_uuid(u) orelse fatal_fmt("invalid user UUID: '{s}' (expected 32 hex chars)", .{u})
     else
         null;
 
@@ -290,8 +291,8 @@ fn replay(args: ReplayArgs) void {
             fatal_fmt("checksum failed at op {d} (slot {d})", .{ entry.op, slot });
         }
 
-        if (entry.operation == .root) {
-            fatal_fmt("unexpected .root operation at op {d}", .{entry.op});
+        if (!entry.operation.is_mutation()) {
+            fatal_fmt("non-mutation operation '{s}' at op {d}", .{ @tagName(entry.operation), entry.op });
         }
 
         if (entry.op > stop_at) break;
@@ -346,8 +347,9 @@ fn derive_work_path(buf: *[4096]u8, wal_path: []const u8) [:0]const u8 {
 
 /// Copy a file from src path to a sentinel-terminated dst path.
 fn copy_file(src: []const u8, dst: [:0]const u8) void {
+    var path_buf: [4096]u8 = undefined;
     const src_fd = std.posix.open(
-        @ptrCast(src),
+        to_sentinel(&path_buf, src),
         .{ .ACCMODE = .RDONLY },
         0,
     ) catch |err| {
@@ -386,14 +388,23 @@ fn copy_file(src: []const u8, dst: [:0]const u8) void {
 // =====================================================================
 
 fn open_wal(path: []const u8) std.posix.fd_t {
+    var buf: [4096]u8 = undefined;
     return std.posix.open(
-        @ptrCast(path),
+        to_sentinel(&buf, path),
         .{ .ACCMODE = .RDONLY },
         0,
     ) catch |err| {
         write_stderr("error: cannot open '{s}': {}\n", .{ path, err });
         std.process.exit(1);
     };
+}
+
+/// Copy a slice into a caller-owned buffer with null terminator.
+fn to_sentinel(buf: *[4096]u8, path: []const u8) [:0]const u8 {
+    if (path.len >= buf.len) fatal("path too long");
+    @memcpy(buf[0..path.len], path);
+    buf[path.len] = 0;
+    return buf[0..path.len :0];
 }
 
 fn get_file_size(fd: std.posix.fd_t) u64 {
@@ -421,20 +432,6 @@ fn entity_id(entry: *const Message) u128 {
         .create_order => entry.body_as(message.OrderRequest).id,
         else => entry.id,
     };
-}
-
-fn parse_uuid(s: []const u8) ?u128 {
-    if (s.len != 32) return null;
-    var result: u128 = 0;
-    for (s) |c| {
-        const digit: u128 = switch (c) {
-            '0'...'9' => c - '0',
-            'a'...'f' => c - 'a' + 10,
-            else => return null,
-        };
-        result = (result << 4) | digit;
-    }
-    return result;
 }
 
 fn parse_operation_name(name: []const u8) ?message.Operation {

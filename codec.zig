@@ -537,19 +537,7 @@ fn parse_query_u32(s: []const u8) u32 {
     return result;
 }
 
-fn parse_uuid(s: []const u8) ?u128 {
-    if (s.len != 32) return null;
-    var result: u128 = 0;
-    for (s) |c| {
-        const digit: u128 = switch (c) {
-            '0'...'9' => c - '0',
-            'a'...'f' => c - 'a' + 10,
-            else => return null,
-        };
-        result = (result << 4) | digit;
-    }
-    return result;
-}
+const parse_uuid = stdx.parse_uuid;
 
 /// Format a u128 as a 32-character lowercase hex string.
 // format_u32, format_u64, write_uuid_to_buf are in stdx.zig.

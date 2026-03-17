@@ -96,6 +96,26 @@ pub const Operation = enum(u8) {
     /// for this operation. Derived from EventType via inline else so the
     /// mapping is never duplicated. Used by body_as pair assertions to
     /// validate operation-to-body-type pairing at the consumption boundary.
+    /// Whether this operation mutates state. Read-only operations and
+    /// the root sentinel return false. Used by the server to decide
+    /// what enters the WAL, and by the replay tool to validate entries.
+    pub fn is_mutation(op: Operation) bool {
+        return switch (op) {
+            .root,
+            .page_load_dashboard,
+            .list_products, .list_collections, .list_orders,
+            .get_product, .get_collection, .get_order,
+            .get_product_inventory, .search_products,
+            => false,
+            .create_product, .update_product, .delete_product,
+            .create_collection, .delete_collection,
+            .add_collection_member, .remove_collection_member,
+            .create_order, .complete_order, .cancel_order,
+            .transfer_inventory,
+            => true,
+        };
+    }
+
     pub fn event_tag(op: Operation) EventTag {
         return switch (op) {
             inline else => |comptime_op| comptime switch (comptime_op.EventType()) {

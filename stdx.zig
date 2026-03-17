@@ -147,6 +147,22 @@ pub fn format_u64(buf: *[20]u8, val: u64) []const u8 {
     return buf[pos..20];
 }
 
+/// Parse a 32-char lowercase hex string into a u128.
+/// Returns null if the string is not exactly 32 lowercase hex characters.
+pub fn parse_uuid(s: []const u8) ?u128 {
+    if (s.len != 32) return null;
+    var result: u128 = 0;
+    for (s) |c| {
+        const digit: u128 = switch (c) {
+            '0'...'9' => c - '0',
+            'a'...'f' => c - 'a' + 10,
+            else => return null,
+        };
+        result = (result << 4) | digit;
+    }
+    return result;
+}
+
 /// Write a u128 as 32-char lowercase hex into a caller-provided buffer.
 pub fn write_uuid_to_buf(buf: *[32]u8, val: u128) void {
     const hex = "0123456789abcdef";
@@ -176,6 +192,17 @@ test "format_u64 edge cases" {
     try std.testing.expectEqualSlices(u8, format_u64(&buf, 0), "0");
     try std.testing.expectEqualSlices(u8, format_u64(&buf, 1), "1");
     try std.testing.expectEqualSlices(u8, format_u64(&buf, std.math.maxInt(u64)), "18446744073709551615");
+}
+
+test "parse_uuid" {
+    try std.testing.expectEqual(parse_uuid("00000000000000000000000000000000"), 0);
+    try std.testing.expectEqual(parse_uuid("00000000000000000000000000000001"), 1);
+    try std.testing.expectEqual(parse_uuid("0123456789abcdef0123456789abcdef"), 0x0123456789abcdef0123456789abcdef);
+    try std.testing.expectEqual(parse_uuid("ffffffffffffffffffffffffffffffff"), std.math.maxInt(u128));
+    try std.testing.expectEqual(parse_uuid(""), null);
+    try std.testing.expectEqual(parse_uuid("0"), null);
+    try std.testing.expectEqual(parse_uuid("AABBCCDD11223344AABBCCDD11223344"), null); // uppercase
+    try std.testing.expectEqual(parse_uuid("0000000000000000000000000000000g"), null); // invalid char
 }
 
 test "write_uuid_to_buf" {

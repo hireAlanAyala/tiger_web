@@ -817,20 +817,7 @@ fn encode_sse_error(w: *HtmlWriter, operation: message.Operation, status: messag
 /// Pair assertion: the result variant must match the operation that produced it.
 /// Catches misrouted responses — e.g. a product result on a collection operation.
 pub fn is_mutation(operation: message.Operation) bool {
-    return switch (operation) {
-        .root,
-        .page_load_dashboard,
-        .list_products, .list_collections, .list_orders,
-        .get_product, .get_collection, .get_order,
-        .get_product_inventory, .search_products,
-        => false,
-        .create_product, .update_product, .delete_product,
-        .create_collection, .delete_collection,
-        .add_collection_member, .remove_collection_member,
-        .create_order, .complete_order, .cancel_order,
-        .transfer_inventory,
-        => true,
-    };
+    return operation.is_mutation();
 }
 
 fn result_matches_operation(operation: message.Operation, result: message.Result) bool {
