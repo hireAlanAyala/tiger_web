@@ -687,6 +687,7 @@ fn replay(args: ReplayArgs) u64 {
 
 /// Derive a work database path from the WAL path: "<wal-path>.replay.db\0".
 fn derive_work_path(buf: *[4096]u8, wal_path: []const u8) [:0]const u8 {
+    assert(wal_path.len > 0);
     const suffix = ".replay.db";
     if (wal_path.len + suffix.len + 1 > buf.len) {
         fatal("WAL path too long");

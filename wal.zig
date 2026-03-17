@@ -86,6 +86,9 @@ pub const Wal = struct {
         };
         @memcpy(entry.body[0..@sizeOf(message.Product)], std.mem.asBytes(&sentinel));
         entry.set_checksum();
+        assert(entry.valid_checksum()); // TB pattern: verify constructed entry.
+        assert(entry.operation == .root);
+        assert(!entry.operation.is_mutation());
         return entry;
     }
 
@@ -207,11 +210,13 @@ pub const Wal = struct {
     pub fn prepare(wal: *const Wal, msg: Message, timestamp: i64) Message {
         assert(wal.op > 0); // op 0 is the root
         assert(!wal.disabled);
+        assert(msg.operation.is_mutation()); // Only mutations enter the WAL.
         var entry = msg;
         entry.op = wal.op;
         entry.timestamp = timestamp;
         entry.parent = wal.parent;
         entry.set_checksum();
+        assert(entry.valid_checksum()); // Verify constructed entry.
         return entry;
     }
 
@@ -220,6 +225,7 @@ pub const Wal = struct {
     /// WAL and logs a warning — the server continues serving.
     pub fn append(wal: *Wal, entry: *const Message) void {
         assert(entry.valid_checksum());
+        assert(entry.operation.is_mutation()); // Pair: prepare() asserts the same.
         assert(entry.op == wal.op);
         assert(entry.op > 0); // op 0 is the root
         assert(entry.parent == wal.parent);
