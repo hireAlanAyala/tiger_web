@@ -8,6 +8,10 @@ const Message = message.Message;
 const state_machine = @import("state_machine.zig");
 const SqliteStorage = @import("storage.zig").SqliteStorage;
 
+const sqlite = @cImport({
+    @cInclude("sqlite3.h");
+});
+
 const log = std.log.scoped(.replay);
 
 /// Runtime log level — same pattern as main.zig.
@@ -33,6 +37,7 @@ const CliArgs = union(enum) {
     verify: VerifyArgs,
     inspect: InspectArgs,
     replay: ReplayArgs,
+    query: QueryArgs,
 
     pub const help =
         \\Usage: tiger-replay <command> [options]
@@ -41,6 +46,7 @@ const CliArgs = union(enum) {
         \\  verify   Validate WAL checksums and hash chain
         \\  inspect  Print human-readable entry summaries
         \\  replay   Replay WAL entries against a snapshot
+        \\  query    Run SQL against WAL entries
         \\
     ;
 };
@@ -69,6 +75,12 @@ const ReplayArgs = struct {
     snapshot: []const u8,
 };
 
+const QueryArgs = struct {
+    @"--": void,
+    path: []const u8,
+    sql: []const u8,
+};
+
 pub fn main() !void {
     var args = std.process.args();
     const cli = flags.parse(&args, CliArgs);
@@ -76,6 +88,7 @@ pub fn main() !void {
     switch (cli) {
         .verify => |v| verify(v.path),
         .inspect => |i| inspect(i),
+        .query => |q| query(q),
         .replay => |r| {
             if (r.trace) log_level_runtime = .debug;
             replay(r);
@@ -304,6 +317,208 @@ fn write_body_summary(w: anytype, entry: *const Message) void {
         .page_load_dashboard,
         => {},
         .root => {},
+    }
+}
+
+// =====================================================================
+// Query
+// =====================================================================
+
+fn query(args: QueryArgs) void {
+    const fd = open_wal(args.path);
+    defer std.posix.close(fd);
+
+    const file_size = get_file_size(fd);
+    const entry_count = file_size / @sizeOf(Message);
+
+    if (entry_count < 2) {
+        write_stderr("no entries (only root)\n", .{});
+        return;
+    }
+
+    // Open in-memory SQLite database.
+    var db: ?*sqlite.sqlite3 = null;
+    if (sqlite.sqlite3_open(":memory:", &db) != sqlite.SQLITE_OK) {
+        fatal("failed to open in-memory database");
+    }
+    defer _ = sqlite.sqlite3_close(db);
+
+    // Create the entries table.
+    const create_sql =
+        \\CREATE TABLE entries (
+        \\  op INTEGER PRIMARY KEY,
+        \\  timestamp INTEGER,
+        \\  operation TEXT,
+        \\  id TEXT,
+        \\  user_id TEXT,
+        \\  name TEXT,
+        \\  price_cents INTEGER,
+        \\  inventory INTEGER,
+        \\  version INTEGER,
+        \\  items_len INTEGER,
+        \\  quantity INTEGER,
+        \\  target_id TEXT
+        \\)
+    ;
+    if (sqlite.sqlite3_exec(db, create_sql, null, null, null) != sqlite.SQLITE_OK) {
+        fatal("failed to create entries table");
+    }
+
+    // Prepare insert statement.
+    const insert_sql =
+        \\INSERT INTO entries (op, timestamp, operation, id, user_id,
+        \\  name, price_cents, inventory, version, items_len, quantity, target_id)
+        \\VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ;
+    var insert_stmt: ?*sqlite.sqlite3_stmt = null;
+    if (sqlite.sqlite3_prepare_v2(db, insert_sql, -1, &insert_stmt, null) != sqlite.SQLITE_OK) {
+        fatal("failed to prepare insert statement");
+    }
+    defer _ = sqlite.sqlite3_finalize(insert_stmt);
+
+    // Load WAL entries into the table.
+    _ = sqlite.sqlite3_exec(db, "BEGIN", null, null, null);
+
+    var slot: u64 = 1;
+    while (slot < entry_count) : (slot += 1) {
+        const entry = read_entry_or_fatal(fd, slot * @sizeOf(Message));
+        if (!entry.valid_checksum_header()) continue;
+
+        _ = sqlite.sqlite3_reset(insert_stmt);
+
+        // op, timestamp, operation
+        _ = sqlite.sqlite3_bind_int64(insert_stmt, 1, @intCast(entry.op));
+        _ = sqlite.sqlite3_bind_int64(insert_stmt, 2, entry.timestamp);
+        const op_name = @tagName(entry.operation);
+        _ = sqlite.sqlite3_bind_text(insert_stmt, 3, op_name.ptr, @intCast(op_name.len), sqlite.SQLITE_STATIC);
+
+        // id, user_id as hex strings
+        var id_buf: [32]u8 = undefined;
+        var user_buf: [32]u8 = undefined;
+        format_uuid_compact(&id_buf, entity_id(&entry));
+        format_uuid_compact(&user_buf, entry.user_id);
+        _ = sqlite.sqlite3_bind_text(insert_stmt, 4, &id_buf, 32, sqlite.SQLITE_STATIC);
+        _ = sqlite.sqlite3_bind_text(insert_stmt, 5, &user_buf, 32, sqlite.SQLITE_STATIC);
+
+        // Body fields — NULL for operations that don't have them.
+        switch (entry.operation) {
+            .create_product, .update_product => {
+                const p = entry.body_as(message.Product);
+                _ = sqlite.sqlite3_bind_text(insert_stmt, 6, &p.name, p.name_len, sqlite.SQLITE_STATIC);
+                _ = sqlite.sqlite3_bind_int64(insert_stmt, 7, p.price_cents);
+                _ = sqlite.sqlite3_bind_int64(insert_stmt, 8, p.inventory);
+                _ = sqlite.sqlite3_bind_int64(insert_stmt, 9, p.version);
+                _ = sqlite.sqlite3_bind_null(insert_stmt, 10);
+                _ = sqlite.sqlite3_bind_null(insert_stmt, 11);
+                _ = sqlite.sqlite3_bind_null(insert_stmt, 12);
+            },
+            .create_collection => {
+                const col = entry.body_as(message.ProductCollection);
+                _ = sqlite.sqlite3_bind_text(insert_stmt, 6, &col.name, col.name_len, sqlite.SQLITE_STATIC);
+                _ = sqlite.sqlite3_bind_null(insert_stmt, 7);
+                _ = sqlite.sqlite3_bind_null(insert_stmt, 8);
+                _ = sqlite.sqlite3_bind_null(insert_stmt, 9);
+                _ = sqlite.sqlite3_bind_null(insert_stmt, 10);
+                _ = sqlite.sqlite3_bind_null(insert_stmt, 11);
+                _ = sqlite.sqlite3_bind_null(insert_stmt, 12);
+            },
+            .create_order => {
+                const o = entry.body_as(message.OrderRequest);
+                _ = sqlite.sqlite3_bind_null(insert_stmt, 6);
+                _ = sqlite.sqlite3_bind_null(insert_stmt, 7);
+                _ = sqlite.sqlite3_bind_null(insert_stmt, 8);
+                _ = sqlite.sqlite3_bind_null(insert_stmt, 9);
+                _ = sqlite.sqlite3_bind_int64(insert_stmt, 10, o.items_len);
+                _ = sqlite.sqlite3_bind_null(insert_stmt, 11);
+                _ = sqlite.sqlite3_bind_null(insert_stmt, 12);
+            },
+            .transfer_inventory => {
+                const t = entry.body_as(message.InventoryTransfer);
+                _ = sqlite.sqlite3_bind_null(insert_stmt, 6);
+                _ = sqlite.sqlite3_bind_null(insert_stmt, 7);
+                _ = sqlite.sqlite3_bind_null(insert_stmt, 8);
+                _ = sqlite.sqlite3_bind_null(insert_stmt, 9);
+                _ = sqlite.sqlite3_bind_null(insert_stmt, 10);
+                _ = sqlite.sqlite3_bind_int64(insert_stmt, 11, t.quantity);
+                var target_buf: [32]u8 = undefined;
+                format_uuid_compact(&target_buf, t.target_id);
+                _ = sqlite.sqlite3_bind_text(insert_stmt, 12, &target_buf, 32, sqlite.SQLITE_STATIC);
+            },
+            else => {
+                _ = sqlite.sqlite3_bind_null(insert_stmt, 6);
+                _ = sqlite.sqlite3_bind_null(insert_stmt, 7);
+                _ = sqlite.sqlite3_bind_null(insert_stmt, 8);
+                _ = sqlite.sqlite3_bind_null(insert_stmt, 9);
+                _ = sqlite.sqlite3_bind_null(insert_stmt, 10);
+                _ = sqlite.sqlite3_bind_null(insert_stmt, 11);
+                _ = sqlite.sqlite3_bind_null(insert_stmt, 12);
+            },
+        }
+
+        _ = sqlite.sqlite3_step(insert_stmt);
+    }
+
+    _ = sqlite.sqlite3_exec(db, "COMMIT", null, null, null);
+
+    write_stderr("loaded {d} entries\n", .{entry_count - 1});
+
+    // Execute the user's SQL query.
+    var query_stmt: ?*sqlite.sqlite3_stmt = null;
+    if (sqlite.sqlite3_prepare_v2(db, args.sql.ptr, @intCast(args.sql.len), &query_stmt, null) != sqlite.SQLITE_OK) {
+        const err_msg = sqlite.sqlite3_errmsg(db);
+        write_stderr("SQL error: {s}\n", .{std.mem.span(err_msg)});
+        std.process.exit(1);
+    }
+    defer _ = sqlite.sqlite3_finalize(query_stmt);
+
+    const col_count: usize = @intCast(sqlite.sqlite3_column_count(query_stmt));
+    const stdout = std.io.getStdOut().writer();
+
+    // Print column headers.
+    for (0..col_count) |i| {
+        if (i > 0) stdout.print("\t", .{}) catch return;
+        const name = sqlite.sqlite3_column_name(query_stmt, @intCast(i));
+        stdout.print("{s}", .{std.mem.span(name)}) catch return;
+    }
+    stdout.print("\n", .{}) catch return;
+
+    // Print rows.
+    while (sqlite.sqlite3_step(query_stmt) == sqlite.SQLITE_ROW) {
+        for (0..col_count) |i| {
+            if (i > 0) stdout.print("\t", .{}) catch return;
+            const col_type = sqlite.sqlite3_column_type(query_stmt, @intCast(i));
+            switch (col_type) {
+                sqlite.SQLITE_NULL => stdout.print("NULL", .{}) catch return,
+                sqlite.SQLITE_INTEGER => {
+                    const val = sqlite.sqlite3_column_int64(query_stmt, @intCast(i));
+                    stdout.print("{d}", .{val}) catch return;
+                },
+                else => {
+                    const text = sqlite.sqlite3_column_text(query_stmt, @intCast(i));
+                    if (text) |t| {
+                        stdout.print("{s}", .{std.mem.span(t)}) catch return;
+                    } else {
+                        stdout.print("NULL", .{}) catch return;
+                    }
+                },
+            }
+        }
+        stdout.print("\n", .{}) catch return;
+    }
+}
+
+/// Format a u128 as 32 lowercase hex chars (no dashes).
+fn format_uuid_compact(buf: *[32]u8, value: u128) void {
+    const bytes: [16]u8 = @bitCast(value);
+    const hex_chars = "0123456789abcdef";
+    // Big-endian: most significant byte first.
+    var pos: usize = 0;
+    var i: usize = 16;
+    while (i > 0) {
+        i -= 1;
+        buf[pos] = hex_chars[bytes[i] >> 4];
+        buf[pos + 1] = hex_chars[bytes[i] & 0xf];
+        pos += 2;
     }
 }
 
