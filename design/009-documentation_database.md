@@ -18,8 +18,10 @@ is intentional.
 
 Two pieces:
 
-- **`schema.sql`** — the current schema, captured from prod after each
-  deploy. Fresh databases load this on first startup via `@embedFile`.
+- **`schema.sql`** — the current prod schema. Fresh databases load this
+  on first startup via `@embedFile`. After each deploy, capture it from
+  prod: `sqlite3 prod.db .schema > schema.sql`. This file is never
+  hand-maintained from scratch — it always comes from production.
 - **`next_migration`** — a function pointer in `storage.zig`. `null`
   when there's nothing to migrate. Set to a function when the next
   deploy needs a schema change. Runs on every startup (prod and dev).
