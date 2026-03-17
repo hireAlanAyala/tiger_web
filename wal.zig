@@ -17,8 +17,19 @@
 //! match what this code produces, the WAL was written by an incompatible
 //! version.
 //!
-//! On crash, the tail may be truncated. The replay tool reads entries
-//! sequentially and stops at the first invalid checksum.
+//! Completeness gap: the server appends to the WAL *after* committing
+//! to SQLite. A crash between commit and append loses the last entry.
+//! This is intentional — appending before commit would record mutations
+//! that never happened, which is worse. The gap is exactly one entry
+//! wide and only exists during a process crash. If you're reconstructing
+//! from a snapshot + WAL after both a crash and SQLite corruption, the
+//! WAL may be missing the final mutation — but at that point SQLite
+//! corruption is the bigger problem. During normal operation, clean
+//! shutdown, and even kill -9 followed by restart, the gap doesn't
+//! matter because SQLite is the authority and has the data.
+//!
+//! On crash, the tail may also be truncated mid-write. The replay tool
+//! reads entries sequentially and stops at the first invalid checksum.
 //!
 //! If a write fails (disk full, IO error), the WAL disables itself and
 //! logs a warning. The server continues serving — the WAL is secondary.
