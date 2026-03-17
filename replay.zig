@@ -52,9 +52,11 @@ const VerifyArgs = struct {
 
 const InspectArgs = struct {
     filter: ?[]const u8 = null,
+    id: ?[]const u8 = null,
     after: ?u64 = null,
     before: ?u64 = null,
     user: ?[]const u8 = null,
+    verbose: bool = false,
     @"--": void,
     path: []const u8,
 };
@@ -206,6 +208,11 @@ fn inspect(args: InspectArgs) void {
     else
         null;
 
+    const filter_id: ?u128 = if (args.id) |i|
+        stdx.parse_uuid(i) orelse fatal_fmt("invalid entity UUID: '{s}' (expected 32 hex chars)", .{i})
+    else
+        null;
+
     const stdout = std.io.getStdOut().writer();
 
     var slot: u64 = 1; // skip root
@@ -227,19 +234,76 @@ fn inspect(args: InspectArgs) void {
         if (filter_user) |u| {
             if (entry.user_id != u) continue;
         }
+        if (filter_id) |i| {
+            if (entity_id(&entry) != i) continue;
+        }
 
         var id_buf: [36]u8 = undefined;
         var user_buf: [36]u8 = undefined;
         format_uuid(&id_buf, entity_id(&entry));
         format_uuid(&user_buf, entry.user_id);
 
-        stdout.print("op={d:<6} t={d}  {s:<24} id={s}  user={s}\n", .{
+        stdout.print("op={d:<6} t={d}  {s:<24} id={s}  user={s}", .{
             entry.op,
             entry.timestamp,
             @tagName(entry.operation),
             &id_buf,
             &user_buf,
         }) catch return;
+
+        if (args.verbose) {
+            write_body_summary(stdout, &entry);
+        }
+
+        stdout.print("\n", .{}) catch return;
+    }
+}
+
+/// Print key body fields for the entry's operation type.
+fn write_body_summary(w: anytype, entry: *const Message) void {
+    switch (entry.operation) {
+        .create_product => {
+            const p = entry.body_as(message.Product);
+            w.print("  name=\"{s}\" price={d} stock={d} ver={d}", .{
+                p.name_slice(), p.price_cents, p.inventory, p.version,
+            }) catch return;
+        },
+        .update_product => {
+            const p = entry.body_as(message.Product);
+            w.print("  name=\"{s}\" price={d} ver={d}", .{
+                p.name_slice(), p.price_cents, p.version,
+            }) catch return;
+        },
+        .delete_product, .get_product => {
+            // Header-only operations — id is already shown.
+        },
+        .create_collection => {
+            const c = entry.body_as(message.ProductCollection);
+            w.print("  name=\"{s}\"", .{c.name_slice()}) catch return;
+        },
+        .delete_collection, .get_collection => {},
+        .add_collection_member, .remove_collection_member => {
+            const product_id = entry.body_as(u128).*;
+            var buf: [36]u8 = undefined;
+            format_uuid(&buf, product_id);
+            w.print("  product={s}", .{&buf}) catch return;
+        },
+        .create_order => {
+            const o = entry.body_as(message.OrderRequest);
+            w.print("  items={d}", .{o.items_len}) catch return;
+        },
+        .complete_order, .cancel_order, .get_order => {},
+        .transfer_inventory => {
+            const t = entry.body_as(message.InventoryTransfer);
+            var buf: [36]u8 = undefined;
+            format_uuid(&buf, t.target_id);
+            w.print("  target={s} qty={d}", .{ &buf, t.quantity }) catch return;
+        },
+        .list_products, .list_collections, .list_orders,
+        .get_product_inventory, .search_products,
+        .page_load_dashboard,
+        => {},
+        .root => {},
     }
 }
 
