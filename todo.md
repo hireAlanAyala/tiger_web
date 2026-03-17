@@ -38,3 +38,5 @@ Ticket 1: JSON parser rejects whitespace around colons
 
   2. The price_cents on the created product came back as $0.09 instead of $9.99. I sent "price_cents":999 but the response shows price_cents:9. The Datastar payload serializer might be
   nesting the JSON differently than codec.zig expects — or the curl Content-Length was wrong and the body got truncated. Worth investigating.
+
+Test a deployment with database+schema updates
