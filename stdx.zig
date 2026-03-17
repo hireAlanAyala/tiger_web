@@ -163,6 +163,19 @@ pub fn parse_uuid(s: []const u8) ?u128 {
     return result;
 }
 
+comptime {
+    // Roundtrip: parse_uuid and write_uuid_to_buf are inverse functions.
+    // If either changes digit order, the build breaks immediately.
+    const expected: u128 = 0x0123456789abcdef_0123456789abcdef;
+    const parsed = parse_uuid("0123456789abcdef0123456789abcdef");
+    assert(parsed != null);
+    assert(parsed.? == expected);
+
+    var buf: [32]u8 = undefined;
+    write_uuid_to_buf(&buf, expected);
+    assert(std.mem.eql(u8, &buf, "0123456789abcdef0123456789abcdef"));
+}
+
 /// Write a u128 as 32-char lowercase hex into a caller-provided buffer.
 pub fn write_uuid_to_buf(buf: *[32]u8, val: u128) void {
     const hex = "0123456789abcdef";

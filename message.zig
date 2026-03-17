@@ -116,6 +116,22 @@ pub const Operation = enum(u8) {
         };
     }
 
+    comptime {
+        // Both partitions are non-empty — if either is zero, the
+        // classifier is vacuous and something was mis-categorized.
+        var mutations: u32 = 0;
+        var reads: u32 = 0;
+        for (std.enums.values(Operation)) |op| {
+            if (op.is_mutation()) mutations += 1 else reads += 1;
+        }
+        assert(mutations > 0);
+        assert(reads > 0);
+
+        // Root is never a mutation — the WAL sentinel must not be
+        // replayed as an application operation.
+        assert(!Operation.root.is_mutation());
+    }
+
     pub fn event_tag(op: Operation) EventTag {
         return switch (op) {
             inline else => |comptime_op| comptime switch (comptime_op.EventType()) {

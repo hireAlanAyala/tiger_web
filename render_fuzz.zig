@@ -46,7 +46,7 @@ pub fn main(allocator: std.mem.Allocator, args: FuzzArgs) !void {
         const gen = gen_response(&prng);
 
         // SSE mutations go through encode_followup, not encode_response.
-        if (gen.is_datastar_request and render.is_mutation(gen.operation)) {
+        if (gen.is_datastar_request and gen.operation.is_mutation()) {
             const dashboard = message.PageLoadDashboardResult{
                 .products = gen_product_list(&prng, message.dashboard_list_max),
                 .collections = gen_collection_list(&prng, message.dashboard_list_max),

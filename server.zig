@@ -221,7 +221,7 @@ pub fn ServerType(comptime IO: type, comptime Storage: type) type {
                 // WAL: log mutations after execute. No fsync — SQLite is the authority.
                 // If the WAL is disabled (write failure), skip silently.
                 if (server.wal) |wal| {
-                    if (!wal.disabled and render.is_mutation(msg.operation)) {
+                    if (!wal.disabled and msg.operation.is_mutation()) {
                         const timestamp = server.state_machine.now;
                         const entry = wal.prepare(msg, timestamp);
                         wal.append(&entry);
@@ -231,7 +231,7 @@ pub fn ServerType(comptime IO: type, comptime Storage: type) type {
                 // SSE mutations: defer rendering to process_followups.
                 // Store the result status so the follow-up can include an error
                 // message alongside the dashboard refresh.
-                if (conn.is_datastar_request and render.is_mutation(msg.operation)) {
+                if (conn.is_datastar_request and msg.operation.is_mutation()) {
                     log.mark.debug("SSE mutation: deferring to follow-up fd={d}", .{conn.fd});
                     conn.pending_followup = true;
                     conn.followup_status = resp.status;
@@ -270,7 +270,7 @@ pub fn ServerType(comptime IO: type, comptime Storage: type) type {
                 if (!conn.pending_followup) continue;
                 assert(conn.state == .ready);
                 assert(conn.is_datastar_request);
-                assert(render.is_mutation(conn.followup_operation));
+                assert(conn.followup_operation.is_mutation());
 
                 const msg = message.Message.init(.page_load_dashboard, 0, 0, {});
 

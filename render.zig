@@ -213,7 +213,7 @@ pub fn encode_followup(
     set_cookie_header: ?[]const u8,
 ) Response {
     assert(send_buf.len >= http.send_buf_max);
-    assert(is_mutation(original_operation));
+    assert(original_operation.is_mutation());
 
     var w = HtmlWriter{ .buf = send_buf, .pos = 0 };
     encode_sse_headers(&w, set_cookie_header);
@@ -249,7 +249,7 @@ fn encode_sse_response(send_buf: []u8, operation: message.Operation, resp: messa
         assert(result_matches_operation(operation, resp.result));
 
         // Mutations over SSE are handled by encode_followup, not this path.
-        assert(!is_mutation(operation));
+        assert(!operation.is_mutation());
         encode_sse_headers(&w, set_cookie_header);
 
         switch (resp.result) {
@@ -812,12 +812,6 @@ fn encode_sse_error(w: *HtmlWriter, operation: message.Operation, status: messag
     w.raw(status_to_string(status));
     w.raw("</div>");
     sse_event_end(w);
-}
-
-/// Pair assertion: the result variant must match the operation that produced it.
-/// Catches misrouted responses — e.g. a product result on a collection operation.
-pub fn is_mutation(operation: message.Operation) bool {
-    return operation.is_mutation();
 }
 
 fn result_matches_operation(operation: message.Operation, result: message.Result) bool {

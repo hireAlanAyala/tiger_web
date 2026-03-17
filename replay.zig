@@ -91,7 +91,9 @@ pub fn main() !void {
         .query => |q| query(q),
         .replay => |r| {
             if (r.trace) log_level_runtime = .debug;
-            replay(r);
+            const replayed = replay(r);
+            const stdout = std.io.getStdOut().writer();
+            stdout.print("replay complete: {d} entries\n", .{replayed}) catch {};
         },
     }
 }
@@ -596,7 +598,7 @@ fn write_json_string(w: anytype, s: []const u8) !void {
 // Replay
 // =====================================================================
 
-fn replay(args: ReplayArgs) void {
+fn replay(args: ReplayArgs) u64 {
     const StateMachine = state_machine.StateMachineType(SqliteStorage);
 
     // Copy snapshot to a work path derived from the WAL path so
@@ -680,8 +682,7 @@ fn replay(args: ReplayArgs) void {
         replayed += 1;
     }
 
-    const stdout = std.io.getStdOut().writer();
-    stdout.print("replay complete: {d} entries\n", .{replayed}) catch {};
+    return replayed;
 }
 
 /// Derive a work database path from the WAL path: "<wal-path>.replay.db\0".
@@ -752,6 +753,7 @@ fn open_wal(path: []const u8) std.posix.fd_t {
 
 /// Copy a slice into a caller-owned buffer with null terminator.
 fn to_sentinel(buf: *[4096]u8, path: []const u8) [:0]const u8 {
+    assert(path.len > 0); // Empty path is never valid for posix.open.
     if (path.len >= buf.len) fatal("path too long");
     @memcpy(buf[0..path.len], path);
     buf[path.len] = 0;
@@ -1205,13 +1207,14 @@ test "replay: full round-trip" {
         snap_storage.deinit();
     }
 
-    replay(ReplayArgs{
+    const replayed = replay(ReplayArgs{
         .@"stop-at" = null,
         .trace = false,
         .@"--" = {},
         .path = replay_wal_path,
         .snapshot = replay_snap_path,
     });
+    try testing.expectEqual(replayed, 3);
 
     // Phase 3: Verify the replayed database has the correct state.
     var verify_storage = try SqliteStorage.init(replay_work_path);
@@ -1275,13 +1278,14 @@ test "replay: stop-at limits entries" {
         snap_storage.deinit();
     }
 
-    replay(ReplayArgs{
+    const replayed = replay(ReplayArgs{
         .@"stop-at" = 2,
         .trace = false,
         .@"--" = {},
         .path = replay_wal_path,
         .snapshot = replay_snap_path,
     });
+    try testing.expectEqual(replayed, 2);
 
     // Verify: products 1 and 2 exist, product 3 does not.
     var verify_storage = try SqliteStorage.init(replay_work_path);
