@@ -349,6 +349,54 @@ test "WAL root deterministic" {
     try testing.expectEqual(a.checksum, 0xC12AC0E2DD6948D3353BBB83E282A889);
 }
 
+test "WAL root sentinel detects same-size field swaps" {
+    // The sentinel exists to catch same-size field reorders that an
+    // all-zero body would miss. Simulate swapping price_cents and
+    // inventory (both u32) — the root checksum must change.
+    const root_entry = Wal.root();
+
+    // Construct a root with swapped fields.
+    var swapped_sentinel: message.Product = .{
+        .id = 0x0101010101010101_0101010101010101,
+        .description = [_]u8{0x02} ** message.product_description_max,
+        .name = [_]u8{0x03} ** message.product_name_max,
+        .price_cents = 0x05050505, // was 0x04040404 (swapped with inventory)
+        .inventory = 0x04040404, // was 0x05050505 (swapped with price_cents)
+        .version = 0x06060606,
+        .description_len = 0x0707,
+        .name_len = 0x08,
+        .flags = @bitCast(@as(u8, 0x09)),
+    };
+
+    var swapped_entry = std.mem.zeroes(Message);
+    swapped_entry.operation = .root;
+    @memcpy(swapped_entry.body[0..@sizeOf(message.Product)], std.mem.asBytes(&swapped_sentinel));
+    swapped_entry.set_checksum();
+
+    // The checksums must differ — this is the whole point of the sentinel.
+    try testing.expect(swapped_entry.checksum != root_entry.checksum);
+    try testing.expect(swapped_entry.checksum_body != root_entry.checksum_body);
+
+    // Also verify swapping name_len and flags (both 1 byte) is detected.
+    var swapped2 = std.mem.zeroes(message.Product);
+    swapped2.id = 0x0101010101010101_0101010101010101;
+    swapped2.description = [_]u8{0x02} ** message.product_description_max;
+    swapped2.name = [_]u8{0x03} ** message.product_name_max;
+    swapped2.price_cents = 0x04040404;
+    swapped2.inventory = 0x05050505;
+    swapped2.version = 0x06060606;
+    swapped2.description_len = 0x0707;
+    swapped2.name_len = 0x09; // was 0x08 (swapped with flags)
+    swapped2.flags = @bitCast(@as(u8, 0x08)); // was 0x09 (swapped with name_len)
+
+    var swapped2_entry = std.mem.zeroes(Message);
+    swapped2_entry.operation = .root;
+    @memcpy(swapped2_entry.body[0..@sizeOf(message.Product)], std.mem.asBytes(&swapped2));
+    swapped2_entry.set_checksum();
+
+    try testing.expect(swapped2_entry.checksum != root_entry.checksum);
+}
+
 test "WAL hash chain" {
     cleanup();
     defer cleanup();

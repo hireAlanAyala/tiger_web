@@ -741,6 +741,35 @@ test "Operation event_tag derived from EventType" {
     try std.testing.expectEqual(Operation.event_tag(.delete_product), .none);
 }
 
+test "Operation is_mutation pinned classification" {
+    // Pin the expected set. If someone moves an operation to the wrong
+    // arm, this test catches it — the comptime partition assertion only
+    // checks that both sets are non-empty, not that they're correct.
+    const mutations = [_]Operation{
+        .create_product, .update_product, .delete_product,
+        .create_collection, .delete_collection,
+        .add_collection_member, .remove_collection_member,
+        .create_order, .complete_order, .cancel_order,
+        .transfer_inventory,
+    };
+    const reads = [_]Operation{
+        .root, .page_load_dashboard,
+        .list_products, .list_collections, .list_orders,
+        .get_product, .get_collection, .get_order,
+        .get_product_inventory, .search_products,
+    };
+
+    for (mutations) |op| {
+        try std.testing.expect(op.is_mutation());
+    }
+    for (reads) |op| {
+        try std.testing.expect(!op.is_mutation());
+    }
+
+    // Every operation is accounted for.
+    try std.testing.expectEqual(mutations.len + reads.len, std.enums.values(Operation).len);
+}
+
 test "Message extern struct layout" {
     comptime {
         assert(stdx.no_padding(Message));
