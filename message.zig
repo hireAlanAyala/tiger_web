@@ -1,6 +1,7 @@
 const std = @import("std");
 const assert = std.debug.assert;
 const stdx = @import("stdx.zig");
+const cs = @import("checksum.zig");
 
 /// `maybe` is the dual of `assert`: it signals that a condition is sometimes
 /// true and sometimes false, and that's fine. Pure documentation — compiles
@@ -28,6 +29,10 @@ pub const Status = enum(u8) {
 /// following TigerBeetle's pattern. Adding a new entity type means adding
 /// new variants here; the compiler forces every switch site to handle them.
 pub const Operation = enum(u8) {
+    // WAL root entry — deterministic sentinel at op 0.
+    // Not a valid application operation. Follows TigerBeetle's .root pattern.
+    root = 0,
+
     // Products
     create_product = 1,
     get_product = 2,
@@ -74,6 +79,7 @@ pub const Operation = enum(u8) {
             .list_collections,
             .list_orders,
             => ListParams,
+            .root,
             .get_product,
             .delete_product,
             .get_product_inventory,
@@ -86,11 +92,11 @@ pub const Operation = enum(u8) {
         };
     }
 
-    /// Runtime equivalent of EventType — returns the expected Event tag
+    /// Runtime equivalent of EventType — returns the expected EventTag
     /// for this operation. Derived from EventType via inline else so the
-    /// mapping is never duplicated. Used by pair assertions to validate
-    /// event-to-operation pairing at the consumption boundary.
-    pub fn event_tag(op: Operation) std.meta.Tag(Event) {
+    /// mapping is never duplicated. Used by body_as pair assertions to
+    /// validate operation-to-body-type pairing at the consumption boundary.
+    pub fn event_tag(op: Operation) EventTag {
         return switch (op) {
             inline else => |comptime_op| comptime switch (comptime_op.EventType()) {
                 Product => .product,
@@ -425,47 +431,132 @@ pub const ListParams = extern struct {
     }
 };
 
-/// Event payload — tagged union carrying operation-specific input data.
-/// The state machine never sees HTTP or JSON — only Message with this Event.
-pub const Event = union(enum) {
-    product: Product,
-    collection: ProductCollection,
-    member_id: u128, // product_id for add/remove member
-    transfer: InventoryTransfer,
-    order: OrderRequest,
-    completion: OrderCompletion,
-    search: SearchQuery,
-    list: ListParams,
-    none: void,
+/// Event tag — identifies which type the message body carries.
+/// Standalone enum (not tied to a tagged union) for use with body_as assertions.
+pub const EventTag = enum {
+    product,
+    collection,
+    member_id,
+    transfer,
+    order,
+    completion,
+    search,
+    list,
+    none,
 
-    /// Extract the typed event value matching an operation's EventType.
-    /// Comptime T selects the union field; the tagged union panics at
-    /// runtime if the active field doesn't match. This is the analog of
-    /// TigerBeetle's `bytes_as_slice(EventType, raw_bytes)` — type-safe
-    /// extraction driven by comptime operation dispatch.
-    pub fn unwrap(self: Event, comptime T: type) T {
-        const field_name = comptime switch (T) {
-            Product => "product",
-            ProductCollection => "collection",
-            u128 => "member_id",
-            InventoryTransfer => "transfer",
-            OrderRequest => "order",
-            OrderCompletion => "completion",
-            SearchQuery => "search",
-            ListParams => "list",
-            void => "none",
-            else => @compileError("Event.unwrap: unhandled type"),
+    /// Map a comptime type back to its EventTag.
+    pub fn from_type(comptime T: type) EventTag {
+        return switch (T) {
+            Product => .product,
+            ProductCollection => .collection,
+            u128 => .member_id,
+            InventoryTransfer => .transfer,
+            OrderRequest => .order,
+            OrderCompletion => .completion,
+            SearchQuery => .search,
+            ListParams => .list,
+            else => @compileError("EventTag.from_type: unhandled type"),
         };
-        return @field(self, field_name);
     }
 };
 
-/// Typed message from the codec layer to the state machine.
-pub const Message = struct {
-    operation: Operation,
-    id: u128, // primary entity ID (0 for list/create)
+/// Maximum body size — fits our largest event type (OrderRequest).
+/// All EventType sizes are verified at comptime.
+pub const body_max = @sizeOf(OrderRequest);
+
+comptime {
+    assert(body_max == 672);
+    for (std.enums.values(Operation)) |op| {
+        if (op.EventType() != void) {
+            assert(@sizeOf(op.EventType()) <= body_max);
+        }
+    }
+}
+
+/// Fixed-size message — extern struct with no padding for WAL serialization.
+/// The operation field determines the body's type; access through body_as().
+///
+/// Fields ordered largest-to-smallest alignment to avoid padding gaps.
+/// WAL fields (checksum, checksum_body, parent, op, timestamp) are populated
+/// by wal.zig at commit time. Zeroed when constructed by codec/fuzz/tests.
+pub const Message = extern struct {
+    checksum: u128,
+    checksum_body: u128,
+    parent: u128,
+    id: u128,
     user_id: u128,
-    event: Event,
+    op: u64,
+    timestamp: i64,
+    operation: Operation,
+    reserved: [15]u8,
+    body: [body_max]u8,
+
+    /// Byte offset where the body begins. Header = [16..body_offset], body = [body_offset..].
+    pub const body_offset = @offsetOf(Message, "body");
+
+    comptime {
+        assert(stdx.no_padding(Message));
+        assert(@sizeOf(Message) == 784);
+        assert(body_offset == 112);
+    }
+
+    /// Construct a message with a typed event value copied into the body.
+    /// Zeroes all fields first — WAL fields default to 0.
+    pub fn init(operation: Operation, id: u128, user_id: u128, event: anytype) Message {
+        var msg = std.mem.zeroes(Message);
+        msg.operation = operation;
+        msg.id = id;
+        msg.user_id = user_id;
+        const T = @TypeOf(event);
+        if (T != void) {
+            comptime assert(@sizeOf(T) <= body_max);
+            @memcpy(msg.body[0..@sizeOf(T)], std.mem.asBytes(&event));
+        }
+        return msg;
+    }
+
+    /// Typed read access to the body region. Returns a pointer into the
+    /// message's body — no copy. Runtime assert checks the operation's
+    /// event tag matches T (pair assertion with init).
+    pub fn body_as(self: *const Message, comptime T: type) *const T {
+        comptime {
+            assert(@sizeOf(T) > 0);
+            assert(@sizeOf(T) <= body_max);
+        }
+        assert(self.operation.event_tag() == comptime EventTag.from_type(T));
+        return @ptrCast(@alignCast(&self.body));
+    }
+
+    /// Compute checksum_body over body, then checksum over the header
+    /// region only (bytes [16..body_offset]). Follows TigerBeetle's
+    /// set_checksum_body() then set_checksum() pattern.
+    ///
+    /// checksum covers the header (which includes checksum_body), so it
+    /// transitively covers the body. But the two checksums are independent:
+    /// checksum validates the header, checksum_body validates the body.
+    pub fn set_checksum(self: *Message) void {
+        self.checksum_body = cs.checksum(&self.body);
+        const checksum_size = @sizeOf(@TypeOf(self.checksum));
+        self.checksum = cs.checksum(std.mem.asBytes(self)[checksum_size..body_offset]);
+    }
+
+    /// Validate header checksum only (bytes [16..body_offset]).
+    /// Sufficient for recovery scanning — one Aegis pass over the
+    /// header region, not the full entry.
+    pub fn valid_checksum_header(self: *const Message) bool {
+        const checksum_size = @sizeOf(@TypeOf(self.checksum));
+        return self.checksum == cs.checksum(std.mem.asBytes(self)[checksum_size..body_offset]);
+    }
+
+    /// Validate body checksum independently.
+    pub fn valid_checksum_body(self: *const Message) bool {
+        return self.checksum_body == cs.checksum(&self.body);
+    }
+
+    /// Validate both checksums. Header first (cheap reject), then body.
+    pub fn valid_checksum(self: *const Message) bool {
+        return self.valid_checksum_header() and self.valid_checksum_body();
+    }
 };
 
 /// Maximum number of items returned in a single list response.
@@ -598,6 +689,7 @@ test "Operation EventType comptime resolution" {
 
 test "Operation event_tag derived from EventType" {
     // Runtime function — verify it agrees with EventType for every operation.
+    // EventTag is a standalone enum; event_tag derives from EventType at comptime.
     try std.testing.expectEqual(Operation.event_tag(.create_product), .product);
     try std.testing.expectEqual(Operation.event_tag(.update_product), .product);
     try std.testing.expectEqual(Operation.event_tag(.create_collection), .collection);
@@ -611,6 +703,29 @@ test "Operation event_tag derived from EventType" {
     try std.testing.expectEqual(Operation.event_tag(.get_order), .none);
     try std.testing.expectEqual(Operation.event_tag(.get_product), .none);
     try std.testing.expectEqual(Operation.event_tag(.delete_product), .none);
+}
+
+test "Message extern struct layout" {
+    comptime {
+        assert(stdx.no_padding(Message));
+        assert(@sizeOf(Message) == 784);
+    }
+}
+
+test "Message.init and body_as roundtrip" {
+    const p = std.mem.zeroes(Product);
+    const msg = Message.init(.create_product, 42, 7, p);
+    try std.testing.expectEqual(msg.operation, .create_product);
+    try std.testing.expectEqual(msg.id, 42);
+    try std.testing.expectEqual(msg.user_id, 7);
+    try std.testing.expectEqual(msg.body_as(Product).id, 0);
+}
+
+test "Message.init void event" {
+    const msg = Message.init(.get_product, 42, 7, {});
+    try std.testing.expectEqual(msg.operation, .get_product);
+    try std.testing.expectEqual(msg.id, 42);
+    try std.testing.expect(stdx.zeroed(&msg.body));
 }
 
 test "extern struct byte-wise equality" {

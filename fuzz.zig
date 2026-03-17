@@ -80,7 +80,8 @@ pub fn main(allocator: std.mem.Allocator, args: FuzzArgs) !void {
 
     // Swarm testing: random weights per seed so different seeds stress
     // different operation mixes (TigerBeetle workload pattern).
-    const op_weights = fuzz_lib.random_enum_weights(&prng, message.Operation);
+    var op_weights = fuzz_lib.random_enum_weights(&prng, message.Operation);
+    op_weights.root = 0; // .root is a WAL sentinel, not an application operation.
 
     var coverage = OperationCoverage{};
     var features = FeatureCoverage{};
@@ -153,14 +154,14 @@ pub const FeatureCoverage = struct {
     pub fn record_message(self: *FeatureCoverage, msg: message.Message, resp: message.MessageResponse) void {
         switch (msg.operation) {
             .list_products, .list_collections, .list_orders => {
-                const lp = msg.event.list;
+                const lp = msg.body_as(message.ListParams);
                 if (lp.name_prefix_len > 0) self.list_with_name_prefix = true;
                 if (lp.price_min > 0 or lp.price_max > 0) self.list_with_price_filter = true;
                 if (lp.active_filter != .any) self.list_with_active_filter = true;
                 if (lp.cursor != 0) self.list_with_cursor = true;
             },
             .create_product => {
-                const p = msg.event.product;
+                const p = msg.body_as(message.Product);
                 if (resp.status == .ok) {
                     for (p.name[0..p.name_len]) |b| {
                         if (b >= 0x80) {
@@ -211,156 +212,62 @@ pub fn gen_message(prng: *PRNG, operation: message.Operation, pools: IdPools) ?m
     }
 
     const user_id = prng.int(u128) | 1;
+    const M = message.Message;
     return switch (operation) {
-        .create_product => .{
-            .operation = .create_product,
-            .id = 0,
-            .user_id = user_id,
-            .event = .{ .product = gen_product(prng) },
-        },
-        .get_product, .get_product_inventory => .{
-            .operation = operation,
-            .id = pick_or_random_id(prng, pools.product_ids),
-            .user_id = user_id,
-            .event = .{ .none = {} },
-        },
-        .list_products => .{
-            .operation = .list_products,
-            .id = 0,
-            .user_id = user_id,
-            .event = .{ .list = gen_list_params(prng) },
-        },
+        .root => unreachable,
+        .create_product => M.init(.create_product, 0, user_id, gen_product(prng)),
+        .get_product, .get_product_inventory => M.init(operation, pick_or_random_id(prng, pools.product_ids), user_id, {}),
+        .list_products => M.init(.list_products, 0, user_id, gen_list_params(prng)),
         .update_product => blk: {
             const id = pick_or_random_id(prng, pools.product_ids);
-            break :blk .{
-                .operation = .update_product,
-                .id = id,
-                .user_id = user_id,
-                .event = .{ .product = gen_product_with_id(prng, id) },
-            };
+            break :blk M.init(.update_product, id, user_id, gen_product_with_id(prng, id));
         },
-        .delete_product => .{
-            .operation = .delete_product,
-            .id = pick_or_random_id(prng, pools.product_ids),
-            .user_id = user_id,
-            .event = .{ .none = {} },
-        },
+        .delete_product => M.init(.delete_product, pick_or_random_id(prng, pools.product_ids), user_id, {}),
         .transfer_inventory => blk: {
             if (pools.product_ids.len < 2) return null;
             const src_idx = prng.int_inclusive(usize, pools.product_ids.len - 1);
             var dst_idx = prng.int_inclusive(usize, pools.product_ids.len - 1);
             if (dst_idx == src_idx) dst_idx = (src_idx + 1) % pools.product_ids.len;
-            break :blk .{
-                .operation = .transfer_inventory,
-                .id = pools.product_ids[src_idx],
-                .user_id = user_id,
-                .event = .{ .transfer = .{
-                    .target_id = pools.product_ids[dst_idx],
-                    .quantity = prng.range_inclusive(u32, 1, 1000),
-                    .reserved = .{0} ** 12,
-                } },
-            };
+            break :blk M.init(.transfer_inventory, pools.product_ids[src_idx], user_id, message.InventoryTransfer{
+                .target_id = pools.product_ids[dst_idx],
+                .quantity = prng.range_inclusive(u32, 1, 1000),
+                .reserved = .{0} ** 12,
+            });
         },
         .create_order => blk: {
             if (pools.product_ids.len == 0) return null;
-            break :blk .{
-                .operation = .create_order,
-                .id = 0,
-                .user_id = user_id,
-                .event = .{ .order = gen_order(prng, pools.product_ids) },
-            };
+            break :blk M.init(.create_order, 0, user_id, gen_order(prng, pools.product_ids));
         },
         .complete_order => blk: {
             if (pools.order_ids.len == 0) return null;
             const result: message.OrderCompletion.OrderCompletionResult = if (prng.boolean()) .confirmed else .failed;
             var completion = std.mem.zeroes(message.OrderCompletion);
             completion.result = result;
-            // ~50% chance of including a payment ref on confirmed completions.
             if (result == .confirmed and prng.boolean()) {
                 completion.payment_ref_len = prng.range_inclusive(u8, 1, message.payment_ref_max);
                 for (completion.payment_ref[0..completion.payment_ref_len]) |*byte| {
                     byte.* = 'a' + @as(u8, @intCast(prng.int_inclusive(u8, 25)));
                 }
             }
-            break :blk .{
-                .operation = .complete_order,
-                .id = pick_or_random_id(prng, pools.order_ids),
-                .user_id = user_id,
-                .event = .{ .completion = completion },
-            };
+            break :blk M.init(.complete_order, pick_or_random_id(prng, pools.order_ids), user_id, completion);
         },
-        .cancel_order => .{
-            .operation = .cancel_order,
-            .id = pick_or_random_id(prng, pools.order_ids),
-            .user_id = user_id,
-            .event = .{ .none = {} },
-        },
-        .search_products => .{
-            .operation = .search_products,
-            .id = 0,
-            .user_id = user_id,
-            .event = .{ .search = gen_search_query(prng) },
-        },
-        .get_order => .{
-            .operation = .get_order,
-            .id = pick_or_random_id(prng, pools.order_ids),
-            .user_id = user_id,
-            .event = .{ .none = {} },
-        },
-        .list_orders => .{
-            .operation = .list_orders,
-            .id = 0,
-            .user_id = user_id,
-            .event = .{ .list = gen_list_params(prng) },
-        },
-        .create_collection => .{
-            .operation = .create_collection,
-            .id = 0,
-            .user_id = user_id,
-            .event = .{ .collection = gen_collection(prng) },
-        },
-        .get_collection => .{
-            .operation = .get_collection,
-            .id = pick_or_random_id(prng, pools.collection_ids),
-            .user_id = user_id,
-            .event = .{ .none = {} },
-        },
-        .list_collections => .{
-            .operation = .list_collections,
-            .id = 0,
-            .user_id = user_id,
-            .event = .{ .list = gen_list_params(prng) },
-        },
-        .delete_collection => .{
-            .operation = .delete_collection,
-            .id = pick_or_random_id(prng, pools.collection_ids),
-            .user_id = user_id,
-            .event = .{ .none = {} },
-        },
+        .cancel_order => M.init(.cancel_order, pick_or_random_id(prng, pools.order_ids), user_id, {}),
+        .search_products => M.init(.search_products, 0, user_id, gen_search_query(prng)),
+        .get_order => M.init(.get_order, pick_or_random_id(prng, pools.order_ids), user_id, {}),
+        .list_orders => M.init(.list_orders, 0, user_id, gen_list_params(prng)),
+        .create_collection => M.init(.create_collection, 0, user_id, gen_collection(prng)),
+        .get_collection => M.init(.get_collection, pick_or_random_id(prng, pools.collection_ids), user_id, {}),
+        .list_collections => M.init(.list_collections, 0, user_id, gen_list_params(prng)),
+        .delete_collection => M.init(.delete_collection, pick_or_random_id(prng, pools.collection_ids), user_id, {}),
         .add_collection_member => blk: {
             if (pools.collection_ids.len == 0 or pools.product_ids.len == 0) return null;
-            break :blk .{
-                .operation = .add_collection_member,
-                .id = pools.collection_ids[prng.int_inclusive(usize, pools.collection_ids.len - 1)],
-                .user_id = user_id,
-                .event = .{ .member_id = pools.product_ids[prng.int_inclusive(usize, pools.product_ids.len - 1)] },
-            };
+            break :blk M.init(.add_collection_member, pools.collection_ids[prng.int_inclusive(usize, pools.collection_ids.len - 1)], user_id, pools.product_ids[prng.int_inclusive(usize, pools.product_ids.len - 1)]);
         },
         .remove_collection_member => blk: {
             if (pools.collection_ids.len == 0 or pools.product_ids.len == 0) return null;
-            break :blk .{
-                .operation = .remove_collection_member,
-                .id = pools.collection_ids[prng.int_inclusive(usize, pools.collection_ids.len - 1)],
-                .user_id = user_id,
-                .event = .{ .member_id = pools.product_ids[prng.int_inclusive(usize, pools.product_ids.len - 1)] },
-            };
+            break :blk M.init(.remove_collection_member, pools.collection_ids[prng.int_inclusive(usize, pools.collection_ids.len - 1)], user_id, pools.product_ids[prng.int_inclusive(usize, pools.product_ids.len - 1)]);
         },
-        .page_load_dashboard => .{
-            .operation = .page_load_dashboard,
-            .id = 0,
-            .user_id = user_id,
-            .event = .{ .none = {} },
-        },
+        .page_load_dashboard => M.init(.page_load_dashboard, 0, user_id, {}),
     };
 }
 
@@ -443,8 +350,11 @@ pub fn gen_order(prng: *PRNG, product_ids: []const u128) message.OrderRequest {
 pub fn gen_random_message(prng: *PRNG, operation: message.Operation) message.Message {
     // Use random scalars for each field rather than prng.fill on the whole
     // struct — avoids undefined behavior from invalid enum/bool bit patterns.
-    const event: message.Event = switch (operation.event_tag()) {
-        .product => .{ .product = blk: {
+    const id = prng.int(u128);
+    const user_id = prng.int(u128) | 1;
+    const M = message.Message;
+    return switch (operation.event_tag()) {
+        .product => M.init(operation, id, user_id, blk: {
             var p = std.mem.zeroes(message.Product);
             p.id = prng.int(u128);
             p.name_len = prng.int(u8);
@@ -453,20 +363,18 @@ pub fn gen_random_message(prng: *PRNG, operation: message.Operation) message.Mes
             p.inventory = prng.int(u32);
             p.version = prng.int(u32);
             p.flags = .{ .active = prng.boolean() };
-            // Fill name/description with random bytes — exercises UTF-8 validation.
             prng.fill(&p.name);
             prng.fill(&p.description);
             break :blk p;
-        } },
-        .collection => .{ .collection = blk: {
+        }),
+        .collection => M.init(operation, id, user_id, blk: {
             var c = std.mem.zeroes(message.ProductCollection);
             c.id = prng.int(u128);
             c.name_len = prng.int(u8);
-            // Fill name with random bytes — exercises UTF-8 validation.
             prng.fill(&c.name);
             break :blk c;
-        } },
-        .order => .{ .order = blk: {
+        }),
+        .order => M.init(operation, id, user_id, blk: {
             var o = std.mem.zeroes(message.OrderRequest);
             o.id = prng.int(u128);
             o.items_len = prng.int(u8);
@@ -479,43 +387,36 @@ pub fn gen_random_message(prng: *PRNG, operation: message.Operation) message.Mes
                 };
             }
             break :blk o;
-        } },
-        .transfer => .{ .transfer = .{
+        }),
+        .transfer => M.init(operation, id, user_id, message.InventoryTransfer{
             .target_id = prng.int(u128),
             .quantity = prng.int(u32),
             .reserved = .{0} ** 12,
-        } },
-        .completion => .{ .completion = blk: {
+        }),
+        .completion => M.init(operation, id, user_id, blk: {
             var comp = std.mem.zeroes(message.OrderCompletion);
             comp.result = prng.enum_uniform(message.OrderCompletion.OrderCompletionResult);
             comp.payment_ref_len = prng.int(u8);
             prng.fill(&comp.payment_ref);
             break :blk comp;
-        } },
-        .search => .{ .search = blk: {
+        }),
+        .search => M.init(operation, id, user_id, blk: {
             var sq = std.mem.zeroes(message.SearchQuery);
             sq.query_len = prng.int(u8);
             prng.fill(&sq.query);
             break :blk sq;
-        } },
-        .member_id => .{ .member_id = prng.int(u128) },
-        .list => .{ .list = blk: {
+        }),
+        .member_id => M.init(operation, id, user_id, prng.int(u128)),
+        .list => M.init(operation, id, user_id, blk: {
             var lp = std.mem.zeroes(message.ListParams);
             lp.active_filter = prng.enum_uniform(message.ListParams.ActiveFilter);
             lp.price_min = prng.int(u32);
             lp.price_max = prng.int(u32);
             lp.name_prefix_len = prng.int(u8);
-            // Fill prefix with random bytes — exercises UTF-8 and NUL validation.
             prng.fill(&lp.name_prefix);
             break :blk lp;
-        } },
-        .none => .{ .none = {} },
-    };
-    return .{
-        .operation = operation,
-        .id = prng.int(u128),
-        .user_id = prng.int(u128) | 1,
-        .event = event,
+        }),
+        .none => M.init(operation, id, user_id, {}),
     };
 }
 

@@ -26,7 +26,7 @@ pub const page_shell_max = blk: {
     @setEvalBranchQuota(100_000);
     var buf: [64 * 1024]u8 = undefined;
     var w = HtmlWriter{ .buf = &buf, .pos = 0 };
-    encode_full_page(&w, &empty_dashboard);
+    encode_full_page(&w, &empty_dashboard, std.math.maxInt(u128));
     break :blk w.pos;
 };
 
@@ -190,7 +190,7 @@ const header_reserve: u32 = 384;
 
 /// The result variant drives success encoding. For errors, `operation`
 /// selects which UI panel to show the error in.
-pub fn encode_response(send_buf: []u8, operation: message.Operation, resp: message.MessageResponse, is_datastar_request: bool, set_cookie_header: ?[]const u8) Response {
+pub fn encode_response(send_buf: []u8, operation: message.Operation, resp: message.MessageResponse, is_datastar_request: bool, set_cookie_header: ?[]const u8, user_id: u128) Response {
     assert(send_buf.len >= http.send_buf_max);
 
     // SSE responses write headers + body sequentially from offset 0.
@@ -198,7 +198,7 @@ pub fn encode_response(send_buf: []u8, operation: message.Operation, resp: messa
     if (is_datastar_request) {
         return encode_sse_response(send_buf, operation, resp, set_cookie_header);
     } else {
-        return encode_html_response(send_buf, operation, resp, set_cookie_header);
+        return encode_html_response(send_buf, operation, resp, set_cookie_header, user_id);
     }
 }
 
@@ -300,18 +300,18 @@ fn encode_sse_response(send_buf: []u8, operation: message.Operation, resp: messa
 
 /// Non-SSE path: write body first at header_reserve, then backfill
 /// headers with Content-Length. Enables HTTP keep-alive.
-fn encode_html_response(send_buf: []u8, operation: message.Operation, resp: message.MessageResponse, set_cookie_header: ?[]const u8) Response {
+fn encode_html_response(send_buf: []u8, operation: message.Operation, resp: message.MessageResponse, set_cookie_header: ?[]const u8, user_id: u128) Response {
     var w = HtmlWriter{ .buf = send_buf, .pos = header_reserve };
 
     if (resp.status != .ok) {
         assert(resp.result == .empty);
         // Render the full dashboard — gives the user navigation instead
         // of a dead-end error page.
-        encode_full_page(&w, &empty_dashboard);
+        encode_full_page(&w, &empty_dashboard, user_id);
     } else {
         assert(result_matches_operation(operation, resp.result));
         switch (resp.result) {
-            .page_load_dashboard => |dashboard| encode_full_page(&w, &dashboard),
+            .page_load_dashboard => |dashboard| encode_full_page(&w, &dashboard, user_id),
             .product_list => |list| render_product_cards(&w, &list),
             .collection_list => |list| render_collection_cards(&w, &list),
             .order_list => |list| render_order_cards(&w, &list),
@@ -370,7 +370,7 @@ fn backfill_headers(send_buf: []u8, body_len: usize, set_cookie_header: ?[]const
 
 // --- Full HTML page ---
 
-fn encode_full_page(w: *HtmlWriter, dashboard: *const message.PageLoadDashboardResult) void {
+fn encode_full_page(w: *HtmlWriter, dashboard: *const message.PageLoadDashboardResult, user_id: u128) void {
     // DOCTYPE + head
     w.raw("<!DOCTYPE html>\n<html>\n<head>\n" ++
         "<meta charset=\"utf-8\">\n" ++
@@ -410,7 +410,12 @@ fn encode_full_page(w: *HtmlWriter, dashboard: *const message.PageLoadDashboardR
         "  }\"\n" ++
         ">\n\n");
 
-    w.raw("<h1>Tiger Web</h1>\n\n");
+    w.raw("<h1>Tiger Web</h1>\n");
+    w.raw("<div class=\"meta\">identity: ");
+    var uid_hex: [32]u8 = undefined;
+    stdx.write_uuid_to_buf(&uid_hex, user_id);
+    w.raw(&uid_hex);
+    w.raw("</div>\n\n");
 
     // Refresh All
     w.raw("<div class=\"row\">\n" ++
@@ -813,6 +818,7 @@ fn encode_sse_error(w: *HtmlWriter, operation: message.Operation, status: messag
 /// Catches misrouted responses — e.g. a product result on a collection operation.
 pub fn is_mutation(operation: message.Operation) bool {
     return switch (operation) {
+        .root,
         .page_load_dashboard,
         .list_products, .list_collections, .list_orders,
         .get_product, .get_collection, .get_order,
@@ -829,6 +835,7 @@ pub fn is_mutation(operation: message.Operation) bool {
 
 fn result_matches_operation(operation: message.Operation, result: message.Result) bool {
     return switch (operation) {
+        .root => unreachable,
         .page_load_dashboard => result == .page_load_dashboard,
         .list_products => result == .product_list,
         .list_collections => result == .collection_list,
@@ -849,6 +856,7 @@ fn result_matches_operation(operation: message.Operation, result: message.Result
 
 pub fn error_selector(operation: message.Operation) []const u8 {
     return switch (operation) {
+        .root => unreachable,
         .create_product, .update_product, .get_product,
         .delete_product, .get_product_inventory,
         .transfer_inventory, .search_products,
@@ -984,7 +992,7 @@ test "encode_response full page — empty dashboard" {
             .orders = .{ .items = undefined, .len = 0 },
         } },
     };
-    const r = encode_response(&send_buf, .page_load_dashboard, resp, false, null);
+    const r = encode_response(&send_buf, .page_load_dashboard, resp, false, null, 1);
     assert(r.len > 0);
     assert(r.offset + r.len <= send_buf.len);
     const output = send_buf[r.offset..][0..r.len];
@@ -1004,7 +1012,7 @@ test "encode_response SSE — empty dashboard" {
             .orders = .{ .items = undefined, .len = 0 },
         } },
     };
-    const r = encode_response(&send_buf, .page_load_dashboard, resp, true, null);
+    const r = encode_response(&send_buf, .page_load_dashboard, resp, true, null, 1);
     assert(r.len > 0);
     const output = send_buf[r.offset..][0..r.len];
     assert(std.mem.startsWith(u8, output, "HTTP/1.1 200 OK\r\n"));
@@ -1016,7 +1024,7 @@ test "encode_response SSE — empty dashboard" {
 test "encode_response error — renders dashboard page for recovery" {
     var send_buf: [http.send_buf_max]u8 = undefined;
     const resp = message.MessageResponse.storage_error;
-    const r = encode_response(&send_buf, .page_load_dashboard, resp, false, null);
+    const r = encode_response(&send_buf, .page_load_dashboard, resp, false, null, 1);
     assert(r.len > 0);
     const output = send_buf[r.offset..][0..r.len];
     assert(std.mem.startsWith(u8, output, "HTTP/1.1 200 OK\r\n"));
@@ -1035,7 +1043,7 @@ test "Set-Cookie header included in HTML response" {
         } },
     };
     const cookie_hdr = "Set-Cookie: tiger_id=test; Path=/; HttpOnly; SameSite=Lax\r\n";
-    const r = encode_response(&send_buf, .page_load_dashboard, resp, false, cookie_hdr);
+    const r = encode_response(&send_buf, .page_load_dashboard, resp, false, cookie_hdr, 1);
     assert(r.len > 0);
     const output = send_buf[r.offset..][0..r.len];
     assert(std.mem.startsWith(u8, output, "HTTP/1.1 200 OK\r\n"));
@@ -1047,7 +1055,7 @@ test "Set-Cookie header included in SSE response" {
     var send_buf: [http.send_buf_max]u8 = undefined;
     const resp = message.MessageResponse.storage_error;
     const cookie_hdr = "Set-Cookie: tiger_id=test; Path=/; HttpOnly; SameSite=Lax\r\n";
-    const r = encode_response(&send_buf, .page_load_dashboard, resp, true, cookie_hdr);
+    const r = encode_response(&send_buf, .page_load_dashboard, resp, true, cookie_hdr, 1);
     assert(r.len > 0);
     const output = send_buf[r.offset..][0..r.len];
     assert(std.mem.startsWith(u8, output, "HTTP/1.1 200 OK\r\n"));
@@ -1075,7 +1083,7 @@ test "encode_response with products" {
             .orders = .{ .items = undefined, .len = 0 },
         } },
     };
-    const r = encode_response(&send_buf, .page_load_dashboard, resp, false, null);
+    const r = encode_response(&send_buf, .page_load_dashboard, resp, false, null, 1);
     assert(r.len > 0);
     const output = send_buf[r.offset..][0..r.len];
     assert(std.mem.indexOf(u8, output, "Widget") != null);
@@ -1098,7 +1106,7 @@ test "encode_response SSE — product list" {
         .status = .ok,
         .result = .{ .product_list = products },
     };
-    const r = encode_response(&send_buf, .list_products, resp, true, null);
+    const r = encode_response(&send_buf, .list_products, resp, true, null, 1);
     assert(r.len > 0);
     const output = send_buf[r.offset..][0..r.len];
     assert(std.mem.indexOf(u8, output, "text/event-stream") != null);
@@ -1120,7 +1128,7 @@ test "encode_response SSE — collection detail" {
             .products = .{ .items = undefined, .len = 0 },
         } },
     };
-    const r = encode_response(&send_buf, .get_collection, resp, true, null);
+    const r = encode_response(&send_buf, .get_collection, resp, true, null, 1);
     assert(r.len > 0);
     const output = send_buf[r.offset..][0..r.len];
     assert(std.mem.indexOf(u8, output, "#col-cc000000000000000000000000000001") != null);
@@ -1145,7 +1153,7 @@ test "encode_response SSE — order detail" {
         .status = .ok,
         .result = .{ .order = order },
     };
-    const r = encode_response(&send_buf, .get_order, resp, true, null);
+    const r = encode_response(&send_buf, .get_order, resp, true, null, 1);
     assert(r.len > 0);
     const output = send_buf[r.offset..][0..r.len];
     assert(std.mem.indexOf(u8, output, "#od-ee000000000000000000000000000001") != null);
@@ -1159,7 +1167,7 @@ test "encode_response SSE error — targets correct selector" {
     const resp = message.MessageResponse.not_found;
 
     // list_orders error should target #order-list
-    const r = encode_response(&send_buf, .list_orders, resp, true, null);
+    const r = encode_response(&send_buf, .list_orders, resp, true, null, 1);
     assert(r.len > 0);
     const output = send_buf[r.offset..][0..r.len];
     assert(std.mem.indexOf(u8, output, "#order-list") != null);
@@ -1224,14 +1232,14 @@ test "Content-Length matches body length — full page" {
             .orders = .{ .items = undefined, .len = 0 },
         } },
     };
-    const r = encode_response(&send_buf, .page_load_dashboard, resp, false, null);
+    const r = encode_response(&send_buf, .page_load_dashboard, resp, false, null, 1);
     const output = send_buf[r.offset..][0..r.len];
     assert_content_length_matches(output);
 }
 
 test "Content-Length matches body length — error dashboard" {
     var send_buf: [http.send_buf_max]u8 = undefined;
-    const r = encode_response(&send_buf, .page_load_dashboard, message.MessageResponse.storage_error, false, null);
+    const r = encode_response(&send_buf, .page_load_dashboard, message.MessageResponse.storage_error, false, null, 1);
     const output = send_buf[r.offset..][0..r.len];
     assert_content_length_matches(output);
 }
@@ -1244,7 +1252,7 @@ test "Content-Length matches body length — non-SSE product" {
     @memcpy(p.name[0..4], "Test");
     p.flags = .{ .active = true };
     p.version = 1;
-    const r = encode_response(&send_buf, .get_product, .{ .status = .ok, .result = .{ .product = p } }, false, null);
+    const r = encode_response(&send_buf, .get_product, .{ .status = .ok, .result = .{ .product = p } }, false, null, 1);
     const output = send_buf[r.offset..][0..r.len];
     assert_content_length_matches(output);
 }

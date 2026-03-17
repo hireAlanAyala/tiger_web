@@ -17,12 +17,7 @@ pub fn translate(method: http.Method, raw_path: []const u8, body: []const u8) ?m
     // GET / → page_load_dashboard
     if (path.len == 0) {
         if (method != .get) return null;
-        return .{
-            .operation = .page_load_dashboard,
-            .id = 0,
-            .user_id = 0,
-            .event = .{ .none = {} },
-        };
+        return message.Message.init(.page_load_dashboard, 0, 0, {});
     }
 
     // Split path from query string.
@@ -110,16 +105,11 @@ fn translate_products(method: http.Method, seg: PathSegments, body: []const u8, 
             if (quantity == 0) return reject("transfer_inventory: quantity is zero");
             if (seg.id == 0 or seg.sub_id == 0) return reject("transfer_inventory: invalid id in path");
             if (seg.id == seg.sub_id) return reject("transfer_inventory: source and target are the same");
-            return .{
-                .operation = .transfer_inventory,
-                .id = seg.id,
-                .user_id = 0,
-                .event = .{ .transfer = .{
-                    .target_id = seg.sub_id,
-                    .quantity = quantity,
-                    .reserved = .{0} ** 12,
-                } },
-            };
+            return message.Message.init(.transfer_inventory, seg.id, 0, message.InventoryTransfer{
+                .target_id = seg.sub_id,
+                .quantity = quantity,
+                .reserved = .{0} ** 12,
+            });
         }
         return reject("products: unknown sub-resource for POST");
     }
@@ -150,7 +140,7 @@ fn translate_products(method: http.Method, seg: PathSegments, body: []const u8, 
             var sq = std.mem.zeroes(message.SearchQuery);
             @memcpy(sq.query[0..q.len], q);
             sq.query_len = @intCast(q.len);
-            return .{ .operation = .search_products, .id = 0, .user_id = 0, .event = .{ .search = sq } };
+            return message.Message.init(.search_products, 0, 0, sq);
         },
         .list_products => {
             if (body.len != 0) return reject("list_products: unexpected body");
@@ -158,23 +148,18 @@ fn translate_products(method: http.Method, seg: PathSegments, body: []const u8, 
             // Default to active_only — soft-deleted items hidden unless
             // the client explicitly passes ?active=false or ?active=all.
             if (!has_active_param) params.active_filter = .active_only;
-            return .{ .operation = operation, .id = 0, .user_id = 0, .event = .{ .list = params } };
+            return message.Message.init(operation, 0, 0, params);
         },
         .get_product, .delete_product, .get_product_inventory => {
             if (body.len != 0) return reject("get/delete product: unexpected body");
-            return .{ .operation = operation, .id = seg.id, .user_id = 0, .event = .{ .none = {} } };
+            return message.Message.init(operation, seg.id, 0, {});
         },
         .create_product, .update_product => {
             if (body.len == 0) return reject("create/update product: missing body");
             const product = parse_product_json(body) orelse return reject("create/update product: invalid JSON");
             // create requires a client-provided ID; update requires a path ID.
             if (operation == .create_product and product.id == 0) return reject("create_product: missing id in body");
-            return .{
-                .operation = operation,
-                .id = seg.id,
-                .user_id = 0,
-                .event = .{ .product = product },
-            };
+            return message.Message.init(operation, seg.id, 0, product);
         },
         else => return null,
     }
@@ -193,12 +178,7 @@ fn translate_collections(method: http.Method, seg: PathSegments, body: []const u
         };
 
         if (body.len != 0) return reject("collection_member: unexpected body");
-        return .{
-            .operation = operation,
-            .id = seg.id,
-            .user_id = 0,
-            .event = .{ .member_id = seg.sub_id },
-        };
+        return message.Message.init(operation, seg.id, 0, seg.sub_id);
     }
 
     const operation: message.Operation = switch (method) {
@@ -211,20 +191,15 @@ fn translate_collections(method: http.Method, seg: PathSegments, body: []const u
     switch (operation) {
         .list_collections => {
             if (body.len != 0) return reject("list_collections: unexpected body");
-            return .{ .operation = operation, .id = 0, .user_id = 0, .event = .{ .list = list_params } };
+            return message.Message.init(operation, 0, 0, list_params);
         },
         .get_collection, .delete_collection => {
             if (body.len != 0) return reject("get/delete collection: unexpected body");
-            return .{ .operation = operation, .id = seg.id, .user_id = 0, .event = .{ .none = {} } };
+            return message.Message.init(operation, seg.id, 0, {});
         },
         .create_collection => {
             if (body.len == 0) return reject("create_collection: missing body");
-            return .{
-                .operation = operation,
-                .id = seg.id,
-                .user_id = 0,
-                .event = .{ .collection = parse_collection_json(body) orelse return reject("create_collection: invalid JSON") },
-            };
+            return message.Message.init(operation, seg.id, 0, parse_collection_json(body) orelse return reject("create_collection: invalid JSON"));
         },
         else => return null,
     }
@@ -235,9 +210,9 @@ fn translate_orders(method: http.Method, seg: PathSegments, body: []const u8, li
         .get => {
             if (body.len != 0) return reject("get orders: unexpected body");
             if (seg.has_id) {
-                return .{ .operation = .get_order, .id = seg.id, .user_id = 0, .event = .{ .none = {} } };
+                return message.Message.init(.get_order, seg.id, 0, {});
             } else {
-                return .{ .operation = .list_orders, .id = 0, .user_id = 0, .event = .{ .list = list_params } };
+                return message.Message.init(.list_orders, 0, 0, list_params);
             }
         },
         .post => {
@@ -245,32 +220,17 @@ fn translate_orders(method: http.Method, seg: PathSegments, body: []const u8, li
             if (seg.has_id and seg.sub_resource.len > 0 and std.mem.eql(u8, seg.sub_resource, "complete")) {
                 if (body.len == 0) return reject("complete_order: missing body");
                 const completion = parse_completion_json(body) orelse return reject("complete_order: invalid JSON");
-                return .{
-                    .operation = .complete_order,
-                    .id = seg.id,
-                    .user_id = 0,
-                    .event = .{ .completion = completion },
-                };
+                return message.Message.init(.complete_order, seg.id, 0, completion);
             }
             // POST /orders/:id/cancel — client cancellation
             if (seg.has_id and seg.sub_resource.len > 0 and std.mem.eql(u8, seg.sub_resource, "cancel")) {
-                return .{
-                    .operation = .cancel_order,
-                    .id = seg.id,
-                    .user_id = 0,
-                    .event = .{ .none = {} },
-                };
+                return message.Message.init(.cancel_order, seg.id, 0, {});
             }
             // POST /orders — create order
             if (seg.has_id) return reject("create_order: unexpected id in path");
             if (body.len == 0) return reject("create_order: missing body");
             const order = parse_order_json(body) orelse return reject("create_order: invalid JSON");
-            return .{
-                .operation = .create_order,
-                .id = order.id,
-                .user_id = 0,
-                .event = .{ .order = order },
-            };
+            return message.Message.init(.create_order, order.id, 0, order);
         },
         else => return reject("orders: unsupported method"),
     }
@@ -610,13 +570,13 @@ test "GET /products (list)" {
     const msg = test_translate(.get, "/products", "").?;
     try std.testing.expectEqual(msg.operation, .list_products);
     try std.testing.expectEqual(msg.id, 0);
-    try std.testing.expectEqual(msg.event.list.cursor, 0);
-    try std.testing.expectEqual(msg.event.list.active_filter, .active_only);
+    try std.testing.expectEqual(msg.body_as(message.ListParams).cursor, 0);
+    try std.testing.expectEqual(msg.body_as(message.ListParams).active_filter, .active_only);
 }
 
 test "GET /products?active=all shows all" {
     const msg = test_translate(.get, "/products?active=all", "").?;
-    try std.testing.expectEqual(msg.event.list.active_filter, .any);
+    try std.testing.expectEqual(msg.body_as(message.ListParams).active_filter, .any);
 }
 
 test "GET /products/:id (get)" {
@@ -632,7 +592,7 @@ test "POST /products (create)" {
     const msg = test_translate(.post, "/products", body).?;
     try std.testing.expectEqual(msg.operation, .create_product);
     try std.testing.expectEqual(msg.id, 0);
-    const p = msg.event.product;
+    const p = msg.body_as(message.Product).*;
     try std.testing.expectEqual(p.id, test_uuid);
     try std.testing.expectEqualSlices(u8, p.name_slice(), "Widget");
     try std.testing.expectEqualSlices(u8, p.description_slice(), "A small widget");
@@ -647,7 +607,7 @@ test "PUT /products/:id (update)" {
     ).?;
     try std.testing.expectEqual(msg.operation, .update_product);
     try std.testing.expectEqual(msg.id, test_uuid);
-    try std.testing.expect(msg.event == .product);
+    try std.testing.expectEqual(msg.operation, .update_product);
 }
 
 test "DELETE /products/:id (delete)" {
@@ -691,47 +651,47 @@ test "rejects invalid UUID in path" {
 test "strips query string" {
     const msg = test_translate(.get, "/products?page=1", "").?;
     try std.testing.expectEqual(msg.operation, .list_products);
-    try std.testing.expectEqual(msg.event.list.cursor, 0);
+    try std.testing.expectEqual(msg.body_as(message.ListParams).cursor, 0);
     // Products default to active_only when ?active not specified.
-    try std.testing.expectEqual(msg.event.list.active_filter, .active_only);
+    try std.testing.expectEqual(msg.body_as(message.ListParams).active_filter, .active_only);
 }
 
 test "parses after cursor from query string" {
     const msg = test_translate(.get, "/products?after=00000000000000000000000000000abc", "").?;
     try std.testing.expectEqual(msg.operation, .list_products);
-    try std.testing.expectEqual(msg.event.list.cursor, 0xabc);
+    try std.testing.expectEqual(msg.body_as(message.ListParams).cursor, 0xabc);
 }
 
 test "cursor with other query params" {
     const msg = test_translate(.get, "/products?limit=10&after=00000000000000000000000000000042&foo=bar", "").?;
-    try std.testing.expectEqual(msg.event.list.cursor, 0x42);
+    try std.testing.expectEqual(msg.body_as(message.ListParams).cursor, 0x42);
 }
 
 test "invalid cursor ignored" {
     const msg = test_translate(.get, "/products?after=notauuid", "").?;
-    try std.testing.expectEqual(msg.event.list.cursor, 0);
+    try std.testing.expectEqual(msg.body_as(message.ListParams).cursor, 0);
 }
 
 test "parses active filter from query string" {
     const msg1 = test_translate(.get, "/products?active=true", "").?;
-    try std.testing.expectEqual(msg1.event.list.active_filter, .active_only);
+    try std.testing.expectEqual(msg1.body_as(message.ListParams).active_filter, .active_only);
 
     const msg2 = test_translate(.get, "/products?active=false", "").?;
-    try std.testing.expectEqual(msg2.event.list.active_filter, .inactive_only);
+    try std.testing.expectEqual(msg2.body_as(message.ListParams).active_filter, .inactive_only);
 
     const msg3 = test_translate(.get, "/products?active=maybe", "").?;
-    try std.testing.expectEqual(msg3.event.list.active_filter, .any);
+    try std.testing.expectEqual(msg3.body_as(message.ListParams).active_filter, .any);
 }
 
 test "parses price range from query string" {
     const msg = test_translate(.get, "/products?price_min=500&price_max=2000", "").?;
-    try std.testing.expectEqual(msg.event.list.price_min, 500);
-    try std.testing.expectEqual(msg.event.list.price_max, 2000);
+    try std.testing.expectEqual(msg.body_as(message.ListParams).price_min, 500);
+    try std.testing.expectEqual(msg.body_as(message.ListParams).price_max, 2000);
 }
 
 test "parses name prefix from query string" {
     const msg = test_translate(.get, "/products?name_prefix=Widget", "").?;
-    try std.testing.expectEqualSlices(u8, msg.event.list.name_prefix_slice(), "Widget");
+    try std.testing.expectEqualSlices(u8, msg.body_as(message.ListParams).name_prefix_slice(), "Widget");
 }
 
 test "GET rejects non-empty body" {
@@ -792,7 +752,7 @@ test "GET /products/:id/inventory (get_inventory)" {
     const msg = test_translate(.get, "/products/" ++ test_uuid_str ++ "/inventory", "").?;
     try std.testing.expectEqual(msg.operation, .get_product_inventory);
     try std.testing.expectEqual(msg.id, test_uuid);
-    try std.testing.expectEqual(msg.event, .none);
+    try std.testing.expectEqual(msg.operation, .get_product_inventory);
 }
 
 test "rejects unknown sub-resource" {
@@ -808,8 +768,8 @@ test "POST /products/:id/transfer-inventory/:target_id" {
     ).?;
     try std.testing.expectEqual(msg.operation, .transfer_inventory);
     try std.testing.expectEqual(msg.id, test_uuid);
-    try std.testing.expectEqual(msg.event.transfer.target_id, test_uuid2);
-    try std.testing.expectEqual(msg.event.transfer.quantity, 10);
+    try std.testing.expectEqual(msg.body_as(message.InventoryTransfer).target_id, test_uuid2);
+    try std.testing.expectEqual(msg.body_as(message.InventoryTransfer).quantity, 10);
 }
 
 test "transfer-inventory rejects zero quantity" {
@@ -840,7 +800,7 @@ test "POST /orders (create_order)" {
     ;
     const msg = test_translate(.post, "/orders", body).?;
     try std.testing.expectEqual(msg.operation, .create_order);
-    const order = msg.event.order;
+    const order = msg.body_as(message.OrderRequest).*;
     try std.testing.expectEqual(order.id, 0xeeee0000000000000000000000000001);
     try std.testing.expectEqual(order.items_len, 2);
     try std.testing.expectEqual(order.items[0].product_id, test_uuid);
@@ -949,7 +909,7 @@ test "seeded: translate valid product JSON roundtrip" {
 
         const msg = test_translate(.post, "/products", body) orelse continue;
         try std.testing.expectEqual(msg.operation, .create_product);
-        try std.testing.expectEqual(msg.event.product.id, id);
-        try std.testing.expectEqualSlices(u8, msg.event.product.name_slice(), name);
+        try std.testing.expectEqual(msg.body_as(message.Product).id, id);
+        try std.testing.expectEqualSlices(u8, msg.body_as(message.Product).name_slice(), name);
     }
 }

@@ -49,7 +49,8 @@ pub fn main(allocator: std.mem.Allocator, args: FuzzArgs) !void {
     var auditor = try Auditor.init(allocator);
     defer auditor.deinit(allocator);
 
-    const op_weights = fuzz_lib.random_enum_weights(&prng, message.Operation);
+    var op_weights = fuzz_lib.random_enum_weights(&prng, message.Operation);
+    op_weights.root = 0; // .root is a WAL sentinel, not an application operation.
 
     var coverage = gen.OperationCoverage{};
     var features = gen.FeatureCoverage{};

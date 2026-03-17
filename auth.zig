@@ -15,13 +15,12 @@ pub const cookie_name = "tiger_id";
 pub const cookie_value_max = 32 + 1 + 64;
 
 /// Full Set-Cookie header line including CRLF.
-/// "Set-Cookie: tiger_id=" (21) + value (97) + "; Path=/; HttpOnly; SameSite=Lax\r\n" (34) = 152.
 pub const set_cookie_header_max = "Set-Cookie: ".len + cookie_name.len + "=".len +
-    cookie_value_max + "; Path=/; HttpOnly; SameSite=Lax\r\n".len;
+    cookie_value_max + "; Path=/; HttpOnly; SameSite=Lax; Max-Age=31536000\r\n".len;
 
 comptime {
     assert(cookie_value_max == 97);
-    assert(set_cookie_header_max == 152);
+    assert(set_cookie_header_max == 170);
 }
 
 /// Sign a cookie value: "<32-hex-user_id>.<64-hex-hmac>".
@@ -81,7 +80,7 @@ pub fn format_set_cookie_header(buf: *[set_cookie_header_max]u8, user_id: u128, 
     @memcpy(buf[pos..][0..cookie_val.len], cookie_val);
     pos += cookie_val.len;
 
-    const suffix = "; Path=/; HttpOnly; SameSite=Lax\r\n";
+    const suffix = "; Path=/; HttpOnly; SameSite=Lax; Max-Age=31536000\r\n";
     @memcpy(buf[pos..][0..suffix.len], suffix);
     pos += suffix.len;
 
@@ -186,10 +185,10 @@ test "format_set_cookie_header produces valid header" {
     var buf: [set_cookie_header_max]u8 = undefined;
     const hdr = format_set_cookie_header(&buf, 42, test_key);
     try std.testing.expect(std.mem.startsWith(u8, hdr, "Set-Cookie: tiger_id="));
-    try std.testing.expect(std.mem.endsWith(u8, hdr, "; Path=/; HttpOnly; SameSite=Lax\r\n"));
+    try std.testing.expect(std.mem.endsWith(u8, hdr, "; Path=/; HttpOnly; SameSite=Lax; Max-Age=31536000\r\n"));
     // The cookie value within should verify.
     const prefix = "Set-Cookie: tiger_id=";
-    const suffix = "; Path=/; HttpOnly; SameSite=Lax\r\n";
+    const suffix = "; Path=/; HttpOnly; SameSite=Lax; Max-Age=31536000\r\n";
     const cookie_val = hdr[prefix.len .. hdr.len - suffix.len];
     try std.testing.expectEqual(verify_cookie(cookie_val, test_key).?, 42);
 }

@@ -41,12 +41,7 @@ test "benchmark: state machine" {
     for (0..entity_count * 2) |_| {
         if (product_count >= entity_count) break;
         const p = fuzz.gen_product(&prng);
-        const msg = message.Message{
-            .operation = .create_product,
-            .id = 0,
-            .user_id = 1,
-            .event = .{ .product = p },
-        };
+        const msg = message.Message.init(.create_product, 0, 1, p);
         if (!StateMachine.input_valid(msg)) continue;
         assert(sm.prefetch(msg));
         const resp = sm.commit(msg);
@@ -69,12 +64,7 @@ test "benchmark: state machine" {
         for (&durations) |*dur| {
             bench.start();
             for (0..ops) |i| {
-                const msg = message.Message{
-                    .operation = .get_product,
-                    .id = product_ids[i % product_count],
-                    .user_id = 1,
-                    .event = .{ .none = {} },
-                };
+                const msg = message.Message.init(.get_product, product_ids[i % product_count], 1, {});
                 assert(sm.prefetch(msg));
                 const resp = sm.commit(msg);
                 checksum +%= @intFromEnum(resp.status);
@@ -92,12 +82,7 @@ test "benchmark: state machine" {
         for (&durations) |*dur| {
             bench.start();
             for (0..ops) |_| {
-                const msg = message.Message{
-                    .operation = .list_products,
-                    .id = 0,
-                    .user_id = 1,
-                    .event = .{ .list = params },
-                };
+                const msg = message.Message.init(.list_products, 0, 1, params);
                 assert(sm.prefetch(msg));
                 const resp = sm.commit(msg);
                 checksum +%= @intFromEnum(resp.status);
@@ -120,12 +105,7 @@ test "benchmark: state machine" {
             bench.start();
             for (0..ops) |i| {
                 update_payload.id = product_ids[i % product_count];
-                const msg = message.Message{
-                    .operation = .update_product,
-                    .id = update_payload.id,
-                    .user_id = 1,
-                    .event = .{ .product = update_payload },
-                };
+                const msg = message.Message.init(.update_product, update_payload.id, 1, update_payload);
                 assert(sm.prefetch(msg));
                 const resp = sm.commit(msg);
                 checksum +%= @intFromEnum(resp.status);

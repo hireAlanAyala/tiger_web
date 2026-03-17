@@ -81,7 +81,8 @@ pub fn main(allocator: std.mem.Allocator, args: FuzzArgs) !void {
             continue;
         }
 
-        const resp = render.encode_response(&send_buf, gen.operation, gen.resp, gen.is_datastar_request, set_cookie_header);
+        const user_id = prng.int(u128) | 1;
+        const resp = render.encode_response(&send_buf, gen.operation, gen.resp, gen.is_datastar_request, set_cookie_header, user_id);
 
         // Core invariants.
         assert(resp.len > 0);
@@ -195,6 +196,7 @@ fn gen_response(prng: *PRNG) GenResult {
     }
 
     const resp: message.MessageResponse = switch (operation) {
+        .root => unreachable,
         .page_load_dashboard => .{
             .status = .ok,
             .result = .{ .page_load_dashboard = .{

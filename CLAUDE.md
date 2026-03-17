@@ -46,7 +46,7 @@ http.zig → codec.zig → message.zig → state_machine.zig → storage
 | `http.zig` | HTTP/1.0+1.1 request parser (pure parser, no response encoding — see design/002-always-200.md) |
 | `codec.zig` | Route parsing, JSON request → typed struct translation, UUID parsing |
 | `render.zig` | HTML + SSE response renderer — always 200, body-first with Content-Length backfill (keep-alive), SSE from offset 0 (Connection: close), Set-Cookie for new visitors |
-| `message.zig` | Types: Product, ProductCollection, flat Operation enum with EventType, Message, MessageResponse |
+| `message.zig` | Types: Product, ProductCollection, flat Operation enum with EventType, Message (extern struct, WAL-writable), MessageResponse |
 | `state_machine.zig` | `StateMachineType(Storage)` — inline dispatch in execute, flat switch in prefetch, `MemoryStorage` |
 | `storage.zig` | `SqliteStorage` — SQLite backend with prepared statements, WAL mode |
 | `io.zig` | epoll IO layer (real syscalls) |
@@ -60,6 +60,8 @@ http.zig → codec.zig → message.zig → state_machine.zig → storage
 | `render_fuzz.zig` | Render fuzzer — random operations/results through encode_response, asserts framing and keep-alive invariants |
 | `auditor.zig` | Auditor oracle — independent reference model that validates state machine responses (TB pattern) |
 | `storage_fuzz.zig` | Storage equivalence fuzzer — runs MemoryStorage vs SqliteStorage vs Auditor, asserts agreement |
+| `checksum.zig` | Aegis128L checksum — zero-key MAC, matches TB's vsr/checksum.zig |
+| `wal.zig` | Append-only replay log — writes Message entries after commit(), no fsync |
 | `stdx.zig` | Ported from TB's stdx — `no_padding`, `equal_bytes`, `has_unique_representation` |
 | `prng.zig` | Xoshiro256++ PRNG with Ratio, Combination, Reservoir — matches TigerBeetle's stdx.PRNG |
 | `bench.zig` | Micro benchmarking harness — smoke/benchmark dual mode, matches TB's testing/bench.zig |

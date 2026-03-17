@@ -12,6 +12,7 @@ const Time = @import("time.zig").Time;
 const marks = @import("marks.zig");
 const log = marks.wrap_log(std.log.scoped(.server));
 const PRNG = @import("prng.zig");
+const Wal = @import("wal.zig").Wal;
 
 /// The server orchestrator, parameterized on the IO and Storage types.
 /// In production, IO is the real epoll-based implementation and Storage is SqliteStorage.
@@ -45,6 +46,7 @@ pub fn ServerType(comptime IO: type, comptime Storage: type) type {
 
         secret_key: *const [auth.key_length]u8,
         prng: PRNG,
+        wal: ?*Wal,
 
         tick_count: u32,
 
@@ -55,7 +57,7 @@ pub fn ServerType(comptime IO: type, comptime Storage: type) type {
         pub const request_timeout_ticks = 3000;
 
         /// Initialize the server. Allocates the connection pool on the heap.
-        pub fn init(allocator: std.mem.Allocator, io: *IO, state_machine: *StateMachine, listen_fd: IO.fd_t, time: Time, secret_key: *const [auth.key_length]u8, prng_seed: u64) !Server {
+        pub fn init(allocator: std.mem.Allocator, io: *IO, state_machine: *StateMachine, listen_fd: IO.fd_t, time: Time, secret_key: *const [auth.key_length]u8, prng_seed: u64, wal: ?*Wal) !Server {
             const connections = try allocator.alloc(Connection, max_connections);
             errdefer allocator.free(connections);
 
@@ -74,6 +76,7 @@ pub fn ServerType(comptime IO: type, comptime Storage: type) type {
                 .connections_used = 0,
                 .secret_key = secret_key,
                 .prng = PRNG.from_seed(prng_seed),
+                .wal = wal,
                 .tick_count = 0,
             };
         }
@@ -215,6 +218,16 @@ pub fn ServerType(comptime IO: type, comptime Storage: type) type {
                 server.state_machine.tracer.stop(.execute, msg.operation);
                 server.state_machine.tracer.trace_log(msg.operation, resp.status, conn.fd);
 
+                // WAL: log mutations after execute. No fsync — SQLite is the authority.
+                // If the WAL is disabled (write failure), skip silently.
+                if (server.wal) |wal| {
+                    if (!wal.disabled and render.is_mutation(msg.operation)) {
+                        const timestamp = server.state_machine.now;
+                        const entry = wal.prepare(msg, timestamp);
+                        wal.append(&entry);
+                    }
+                }
+
                 // SSE mutations: defer rendering to process_followups.
                 // Store the result status so the follow-up can include an error
                 // message alongside the dashboard refresh.
@@ -232,7 +245,7 @@ pub fn ServerType(comptime IO: type, comptime Storage: type) type {
                     auth.format_set_cookie_header(&cookie_hdr_buf, conn.set_cookie_user_id, server.secret_key)
                 else
                     null;
-                const r = render.encode_response(&conn.send_buf, msg.operation, resp, conn.is_datastar_request, cookie_hdr);
+                const r = render.encode_response(&conn.send_buf, msg.operation, resp, conn.is_datastar_request, cookie_hdr, user_id);
                 conn.set_response(r.offset, r.len);
                 conn.keep_alive = r.keep_alive;
             }
@@ -259,12 +272,7 @@ pub fn ServerType(comptime IO: type, comptime Storage: type) type {
                 assert(conn.is_datastar_request);
                 assert(render.is_mutation(conn.followup_operation));
 
-                const msg = message.Message{
-                    .operation = .page_load_dashboard,
-                    .id = 0,
-                    .user_id = 0,
-                    .event = .{ .none = {} },
-                };
+                const msg = message.Message.init(.page_load_dashboard, 0, 0, {});
 
                 // Prefetch. Storage busy → skip, retry next tick.
                 server.state_machine.tracer.start(.prefetch);

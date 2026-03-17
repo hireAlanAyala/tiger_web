@@ -94,6 +94,7 @@ pub const Auditor = struct {
     /// Returns true if MemoryStorage is near capacity for this operation.
     pub fn at_capacity(self: *const Auditor, operation: message.Operation) bool {
         return switch (operation) {
+            .root => unreachable,
             .create_product => self.product_count >= capacity_threshold(product_capacity),
             .create_collection => self.collection_count >= capacity_threshold(collection_capacity),
             .create_order => self.order_count >= capacity_threshold(order_capacity),
@@ -132,23 +133,24 @@ pub const Auditor = struct {
         if (resp.status == .storage_error) return;
 
         switch (msg.operation) {
-            .create_product => self.on_create_product(msg.event.product, resp),
+            .root => unreachable,
+            .create_product => self.on_create_product(msg.body_as(message.Product).*, resp),
             .get_product => self.on_get_product(msg.id, resp),
             .get_product_inventory => self.on_get_inventory(msg.id, resp),
-            .update_product => self.on_update_product(msg.id, msg.event.product, resp),
+            .update_product => self.on_update_product(msg.id, msg.body_as(message.Product).*, resp),
             .delete_product => self.on_delete_product(msg.id, resp),
-            .transfer_inventory => self.on_transfer_inventory(msg.id, msg.event.transfer, resp),
-            .create_order => self.on_create_order(msg.event.order, resp),
-            .complete_order => self.on_complete_order(msg.id, msg.event.completion, resp),
+            .transfer_inventory => self.on_transfer_inventory(msg.id, msg.body_as(message.InventoryTransfer).*, resp),
+            .create_order => self.on_create_order(msg.body_as(message.OrderRequest).*, resp),
+            .complete_order => self.on_complete_order(msg.id, msg.body_as(message.OrderCompletion).*, resp),
             .cancel_order => self.on_cancel_order(msg.id, resp),
             .get_order => self.on_get_order(msg.id, resp),
-            .create_collection => self.on_create_collection(msg.event.collection, resp),
+            .create_collection => self.on_create_collection(msg.body_as(message.ProductCollection).*, resp),
             .get_collection => self.on_get_collection(msg.id, resp),
             .delete_collection => self.on_delete_collection(msg.id, resp),
-            .add_collection_member => self.on_add_member(msg.id, msg.event.member_id, resp),
-            .remove_collection_member => self.on_remove_member(msg.id, msg.event.member_id, resp),
+            .add_collection_member => self.on_add_member(msg.id, msg.body_as(u128).*, resp),
+            .remove_collection_member => self.on_remove_member(msg.id, msg.body_as(u128).*, resp),
             .list_products => self.on_list_products(resp),
-            .search_products => self.on_search_products(msg.event.search, resp),
+            .search_products => self.on_search_products(msg.body_as(message.SearchQuery).*, resp),
             .list_collections => self.on_list_collections(resp),
             .list_orders => self.on_list_orders(resp),
             .page_load_dashboard => self.on_page_load_dashboard(resp),

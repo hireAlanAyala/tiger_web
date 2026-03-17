@@ -6,6 +6,7 @@ zig/
 *.db
 *.db-wal
 *.db-shm
+*.wal
 
 # Visualization build artifacts (regenerate with ./graph --json, ./graph_comptime, dot)
 graph

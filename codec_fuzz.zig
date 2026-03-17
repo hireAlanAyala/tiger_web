@@ -60,9 +60,6 @@ fn fuzz_translate(prng: *PRNG) bool {
     // Core invariant: if translate returns a result, the message must pass input_valid.
     if (msg) |m| {
         assert(StateMachine.input_valid(m));
-
-        // Pair assertion: event tag matches operation.
-        assert(m.event == m.operation.event_tag());
         return true;
     }
     return false;

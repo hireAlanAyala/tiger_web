@@ -7,6 +7,7 @@ const ServerType = @import("server.zig").ServerType;
 const TimeReal = @import("time.zig").TimeReal;
 const auth = @import("auth.zig");
 const flags = @import("flags.zig");
+const Wal = @import("wal.zig").Wal;
 
 const Server = ServerType(IO, SqliteStorage);
 const marks = @import("marks.zig");
@@ -67,11 +68,14 @@ pub fn main() !void {
 
     const listen_fd = try IO.open_listener(address);
 
+    var wal = Wal.init("tiger_web.wal");
+    defer wal.deinit();
+
     const prng_seed: u64 = @truncate(std.crypto.random.int(u128));
     var time_real = TimeReal{};
-    var server = try Server.init(std.heap.page_allocator, &io, &sm, listen_fd, time_real.time(), secret_key, prng_seed);
+    var server = try Server.init(std.heap.page_allocator, &io, &sm, listen_fd, time_real.time(), secret_key, prng_seed, &wal);
 
-    log.info("storage=sqlite tick_interval={d}ms connections={d}", .{
+    log.info("storage=sqlite wal=tiger_web.wal tick_interval={d}ms connections={d}", .{
         tick_ns / std.time.ns_per_ms,
         Server.max_connections,
     });
