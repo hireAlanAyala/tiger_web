@@ -15,10 +15,7 @@ image processing design (decided):
 - worker reads from filesystem, resizes, does domain logic (diff, color scan), posts result back
 - result is small (histogram, diff score, pixel count) — fits in fixed-size struct
 
-Migration
-you test it by running against a prod copy — that's the workflow.
-The migration arm (e.g., 1 => exec(db, "ALTER TABLE ...")) won't exist until you write your first real migration.
-Testing it now would mean testing a no-op. When you write a real migration,
+Migration — DONE, see design/009-documentation_database.md
 
 Ticket 1: JSON parser rejects whitespace around colons                                                                                                                                       
                                                                          
@@ -39,4 +36,6 @@ Ticket 1: JSON parser rejects whitespace around colons
   2. The price_cents on the created product came back as $0.09 instead of $9.99. I sent "price_cents":999 but the response shows price_cents:9. The Datastar payload serializer might be
   nesting the JSON differently than codec.zig expects — or the curl Content-Length was wrong and the body got truncated. Worth investigating.
 
-Test a deployment with database+schema updates
+domain logic should assert their inputs and outputs to preserve business logic
+
+- stress test architcture what would happen if x% of the processing was external api calls. would this break determinism
