@@ -249,9 +249,11 @@ fn inspect(args: InspectArgs) void {
 fn replay(args: ReplayArgs) void {
     const StateMachine = state_machine.StateMachineType(SqliteStorage);
 
-    // Derive work path from WAL path so concurrent replays don't collide.
+    // Copy snapshot to a work path derived from the WAL path so
+    // concurrent replays don't collide and the original is never modified.
     var work_buf: [4096]u8 = undefined;
     const work_path = derive_work_path(&work_buf, args.path);
+    copy_file(args.snapshot, work_path);
 
     var storage = SqliteStorage.init(work_path) catch |err| {
         fatal_fmt("failed to open snapshot copy: {}", .{err});
