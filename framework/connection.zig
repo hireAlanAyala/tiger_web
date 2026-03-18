@@ -1,17 +1,16 @@
 const std = @import("std");
 const assert = std.debug.assert;
-const message = @import("message.zig");
-const maybe = message.maybe;
-const http = @import("framework/http.zig");
-const marks = @import("framework/marks.zig");
+const stdx = @import("stdx.zig");
+const http = @import("http.zig");
+const marks = @import("marks.zig");
 const log = marks.wrap_log(std.log.scoped(.connection));
 
-/// Per-connection state machine. Parameterized on IO type so the same
-/// connection logic works with real epoll IO or simulated IO.
+/// Per-connection state machine. Parameterized on IO type and a FollowupState
+/// type so the same connection logic works with real epoll IO or simulated IO.
 ///
 /// IO callbacks only update buffers and set state. They never call into
 /// the application state machine — that's the server tick's job.
-pub fn ConnectionType(comptime IO: type) type {
+pub fn ConnectionType(comptime IO: type, comptime FollowupState: type) type {
     return struct {
         const Connection = @This();
 
@@ -67,7 +66,7 @@ pub fn ConnectionType(comptime IO: type) type {
         // original mutation's auth decision as an opaque blob — the connection
         // never reads or branches on the fields. How auth works is domain
         // logic (state machine); that auth exists is framework logic (here).
-        followup: ?message.FollowupState,
+        followup: ?FollowupState,
 
         pub fn init_free() Connection {
             return .{
@@ -171,7 +170,7 @@ pub fn ConnectionType(comptime IO: type) type {
             assert(conn.state == .receiving);
             defer conn.invariants();
             // Peer may close or error at any time.
-            maybe(result <= 0);
+            stdx.maybe(result <= 0);
             if (result <= 0) {
                 log.mark.debug("recv: peer closed or error fd={d} result={d}", .{ conn.fd, result });
                 conn.state = .closing;
@@ -251,7 +250,7 @@ pub fn ConnectionType(comptime IO: type) type {
             assert(conn.state == .sending);
             defer conn.invariants();
             // Peer may close or error at any time.
-            maybe(result <= 0);
+            stdx.maybe(result <= 0);
             if (result <= 0) {
                 log.mark.debug("send: error fd={d} result={d}", .{ conn.fd, result });
                 conn.state = .closing;
@@ -263,12 +262,12 @@ pub fn ConnectionType(comptime IO: type) type {
             conn.send_activity = true;
 
             // Partial sends are expected — TCP may accept fewer bytes than requested.
-            maybe(conn.send_pos < conn.send_len);
+            stdx.maybe(conn.send_pos < conn.send_len);
 
             if (conn.send_pos >= conn.send_len) {
                 // Fully sent.
                 // Client may or may not want keep-alive.
-                maybe(conn.keep_alive);
+                stdx.maybe(conn.keep_alive);
                 if (!conn.keep_alive) {
                     // HTTP/1.0 or Connection: close — close the connection.
                     conn.state = .closing;
@@ -280,7 +279,7 @@ pub fn ConnectionType(comptime IO: type) type {
                 assert(conn.request_consumed <= conn.recv_pos);
                 const remaining = conn.recv_pos - conn.request_consumed;
                 // Pipelined data may or may not be present.
-                maybe(remaining > 0);
+                stdx.maybe(remaining > 0);
                 if (remaining > 0) {
                     std.mem.copyForwards(
                         u8,

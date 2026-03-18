@@ -5,17 +5,18 @@ const SqliteStorage = @import("storage.zig").SqliteStorage;
 const state_machine = @import("state_machine.zig");
 const MemoryStorage = state_machine.MemoryStorage;
 const ServerType = @import("server.zig").ServerType;
-const ConnectionType = @import("connection.zig").ConnectionType;
+const ConnectionType = @import("framework/connection.zig").ConnectionType;
 
 // Production instantiations.
 const ProdStateMachine = state_machine.StateMachineType(SqliteStorage);
 const ProdServer = ServerType(IO, SqliteStorage);
-const ProdConnection = ConnectionType(IO);
+const message = @import("message.zig");
+const ProdConnection = ConnectionType(IO, message.FollowupState);
 
 // Test/sim instantiations.
 const TestStateMachine = state_machine.StateMachineType(MemoryStorage);
 const TestServer = ServerType(SimIO, MemoryStorage);
-const TestConnection = ConnectionType(SimIO);
+const TestConnection = ConnectionType(SimIO, message.FollowupState);
 
 /// Comptime: build the full type introspection map as a JSON string.
 /// This enumerates every declaration on each generic instantiation,

@@ -1,6 +1,13 @@
 const std = @import("std");
 const assert = std.debug.assert;
 
+/// `maybe` is the dual of `assert`: it signals that a condition is sometimes
+/// true and sometimes false, and that's fine. Pure documentation — compiles
+/// to a tautology. See TigerBeetle's stdx.maybe().
+pub fn maybe(ok: bool) void {
+    assert(ok or !ok);
+}
+
 /// Returns true if T has no implicit padding bytes — every byte in
 /// @sizeOf(T) is accounted for by a field. Requires extern or packed
 /// layout; auto-layout structs always return false because the compiler

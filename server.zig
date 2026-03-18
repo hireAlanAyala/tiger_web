@@ -1,11 +1,11 @@
 const std = @import("std");
 const assert = std.debug.assert;
-const maybe = @import("message.zig").maybe;
+const stdx = @import("framework/stdx.zig");
 const message = @import("message.zig");
 const codec = @import("codec.zig");
 const http = @import("framework/http.zig");
 const StateMachineType = @import("state_machine.zig").StateMachineType;
-const ConnectionType = @import("connection.zig").ConnectionType;
+const ConnectionType = @import("framework/connection.zig").ConnectionType;
 const render = @import("render.zig");
 const Time = @import("framework/time.zig").Time;
 const marks = @import("framework/marks.zig");
@@ -19,7 +19,7 @@ const Wal = @import("wal.zig").Wal;
 /// This is the equivalent of TigerBeetle's Replica — it owns all connections,
 /// drives the tick loop, and mediates between network IO and the state machine.
 pub fn ServerType(comptime IO: type, comptime Storage: type) type {
-    const Connection = ConnectionType(IO);
+    const Connection = ConnectionType(IO, message.FollowupState);
     const StateMachine = StateMachineType(Storage);
 
     return struct {
@@ -142,7 +142,7 @@ pub fn ServerType(comptime IO: type, comptime Storage: type) type {
             defer assert(conn.state == .receiving or conn.state == .free);
 
             // Accept may fail due to resource exhaustion or client abort.
-            maybe(result < 0);
+            stdx.maybe(result < 0);
             if (result < 0) {
                 log.mark.warn("accept failed: result={d}", .{result});
                 conn.on_accept_error();

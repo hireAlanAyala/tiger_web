@@ -3,12 +3,7 @@ const assert = std.debug.assert;
 const stdx = @import("framework/stdx.zig");
 const cs = @import("framework/checksum.zig");
 
-/// `maybe` is the dual of `assert`: it signals that a condition is sometimes
-/// true and sometimes false, and that's fine. Pure documentation — compiles
-/// to a tautology. See TigerBeetle's stdx.maybe().
-pub fn maybe(ok: bool) void {
-    assert(ok or !ok);
-}
+pub const maybe = stdx.maybe;
 
 /// Tracer counters — one per response status. Defined here next to Status
 /// so they stay in sync. Passed to TracerType as a comptime parameter.
