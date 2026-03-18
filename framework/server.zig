@@ -22,7 +22,7 @@ const WalType = @import("wal.zig").WalType;
 /// drives the tick loop, and mediates between network IO and the state machine.
 pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type) type {
     comptime {
-        // Validate App interface — good errors at the boundary, not inside the guts.
+        // Validate App declarations — good errors at the boundary, not inside the guts.
         assert(@hasDecl(App, "Message"));
         assert(@hasDecl(App, "MessageResponse"));
         assert(@hasDecl(App, "FollowupState"));
@@ -32,6 +32,15 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
         assert(@hasDecl(App, "encode_response"));
         assert(@hasDecl(App, "encode_followup"));
         assert(@hasDecl(App, "refresh_message"));
+
+        // Framework contracts on App types.
+        // Status must have .ok — framework uses it for control flow (render vs close).
+        assert(@hasField(App.Status, "ok"));
+        // Message must have .operation field and .set_credential method.
+        assert(@hasField(App.Message, "operation"));
+        assert(@hasDecl(App.Message, "set_credential"));
+        // Operation must have .is_mutation() — framework uses it for WAL decisions.
+        assert(@hasDecl(App.Operation, "is_mutation"));
     }
 
     const Connection = ConnectionType(IO, App.FollowupState);
