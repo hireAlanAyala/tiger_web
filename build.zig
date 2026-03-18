@@ -4,6 +4,19 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
+    // Framework as a local package dependency.
+    const framework = b.dependency("tiger_framework", .{
+        .target = target,
+        .optimize = optimize,
+    }).module("tiger_framework");
+
+    // Helper: add framework module + system libs to a compile step.
+    const addFramework = struct {
+        fn apply(mod: *std.Build.Module, fw: *std.Build.Module) void {
+            mod.addImport("tiger_framework", fw);
+        }
+    }.apply;
+
     // --- Main executable ---
     const exe = b.addExecutable(.{
         .name = "tiger-web",
@@ -11,6 +24,7 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
+    addFramework(exe.root_module, framework);
     exe.linkSystemLibrary("sqlite3");
     exe.linkLibC();
     b.installArtifact(exe);
@@ -28,6 +42,7 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
+    addFramework(worker_exe.root_module, framework);
     b.installArtifact(worker_exe);
 
     const worker_cmd = b.addRunArtifact(worker_exe);
@@ -43,6 +58,7 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
+    addFramework(replay_exe.root_module, framework);
     replay_exe.linkSystemLibrary("sqlite3");
     replay_exe.linkLibC();
     b.installArtifact(replay_exe);
@@ -59,6 +75,7 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
+    addFramework(sim_tests.root_module, framework);
     const run_sim_tests = b.addRunArtifact(sim_tests);
     const test_step = b.step("test", "Run simulation tests");
     test_step.dependOn(&run_sim_tests.step);
@@ -70,6 +87,7 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
+    addFramework(fuzz_exe.root_module, framework);
     fuzz_exe.linkSystemLibrary("sqlite3");
     fuzz_exe.linkLibC();
     b.installArtifact(fuzz_exe);
@@ -87,13 +105,6 @@ pub fn build(b: *std.Build) void {
         "codec.zig",
         "render.zig",
         "wal_test.zig",
-        "framework/tracer.zig",
-        "framework/http.zig",
-        "framework/marks.zig",
-        "framework/prng.zig",
-        "framework/time.zig",
-        "framework/auth.zig",
-        "framework/checksum.zig",
     };
     const unit_test_step = b.step("unit-test", "Run unit tests");
     for (modules) |mod| {
@@ -102,6 +113,7 @@ pub fn build(b: *std.Build) void {
             .target = target,
             .optimize = optimize,
         });
+        addFramework(unit_test.root_module, framework);
         const run_unit_test = b.addRunArtifact(unit_test);
         unit_test_step.dependOn(&run_unit_test.step);
     }
@@ -113,8 +125,28 @@ pub fn build(b: *std.Build) void {
             .target = target,
             .optimize = optimize,
         });
+        addFramework(unit_test.root_module, framework);
         unit_test.linkSystemLibrary("sqlite3");
         unit_test.linkLibC();
+        unit_test_step.dependOn(&b.addRunArtifact(unit_test).step);
+    }
+
+    // Framework unit tests (run from the framework's own test targets).
+    const fw_test_modules = [_][]const u8{
+        "framework/tracer.zig",
+        "framework/http.zig",
+        "framework/marks.zig",
+        "framework/prng.zig",
+        "framework/time.zig",
+        "framework/auth.zig",
+        "framework/checksum.zig",
+    };
+    for (fw_test_modules) |mod| {
+        const unit_test = b.addTest(.{
+            .root_source_file = b.path(mod),
+            .target = target,
+            .optimize = optimize,
+        });
         unit_test_step.dependOn(&b.addRunArtifact(unit_test).step);
     }
 
@@ -127,6 +159,7 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
+    addFramework(bench_smoke.root_module, framework);
     bench_smoke.root_module.addOptions("bench_options", bench_smoke_options);
     unit_test_step.dependOn(&b.addRunArtifact(bench_smoke).step);
 
@@ -138,6 +171,7 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
+    addFramework(bench_real.root_module, framework);
     bench_real.root_module.addOptions("bench_options", bench_real_options);
     const bench_run = b.addRunArtifact(bench_real);
     bench_run.has_side_effects = true;

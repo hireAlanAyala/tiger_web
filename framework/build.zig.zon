@@ -1,7 +1,7 @@
 .{
-    .name = .@"tiger-framework",
+    .name = .tiger_framework,
     .version = "0.1.0",
-    .fingerprint = 0xa36e60d2ba1d5f88,
+    .fingerprint = 0x2f27471f8e923b68,
     .minimum_zig_version = "0.14.1",
     .paths = .{
         "auth.zig",
