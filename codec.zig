@@ -20,6 +20,17 @@ pub fn translate(method: http.Method, raw_path: []const u8, body: []const u8) ?m
         return message.Message.init(.page_load_dashboard, 0, 0, {});
     }
 
+    // /login routes
+    if (std.mem.startsWith(u8, path, "login")) {
+        return translate_login(method, path, body);
+    }
+
+    // POST /logout
+    if (std.mem.eql(u8, path, "logout")) {
+        if (method != .post) return null;
+        return message.Message.init(.logout, 0, 0, {});
+    }
+
     // Split path from query string.
     const query_sep = std.mem.indexOf(u8, path, "?");
     const path_clean = if (query_sep) |q| path[0..q] else path;
@@ -234,6 +245,60 @@ fn translate_orders(method: http.Method, seg: PathSegments, body: []const u8, li
         },
         else => return reject("orders: unsupported method"),
     }
+}
+
+fn translate_login(method: http.Method, path: []const u8, body: []const u8) ?message.Message {
+    // GET /login → page_load_login
+    if (std.mem.eql(u8, path, "login")) {
+        if (method != .get) return reject("login: unsupported method");
+        if (body.len != 0) return reject("login: unexpected body");
+        return message.Message.init(.page_load_login, 0, 0, {});
+    }
+
+    // POST /login/code → request_login_code
+    if (std.mem.eql(u8, path, "login/code")) {
+        if (method != .post) return reject("login/code: unsupported method");
+        if (body.len == 0) return reject("login/code: missing body");
+        return parse_login_code_request(body);
+    }
+
+    // POST /login/verify → verify_login_code
+    if (std.mem.eql(u8, path, "login/verify")) {
+        if (method != .post) return reject("login/verify: unsupported method");
+        if (body.len == 0) return reject("login/verify: missing body");
+        return parse_login_verify_request(body);
+    }
+
+    return reject("login: unknown sub-path");
+}
+
+fn parse_login_code_request(body: []const u8) ?message.Message {
+    const email = json_string_field(body, "email") orelse return reject("login: missing email");
+    if (email.len == 0 or email.len > message.email_max) return reject("login: email too long or empty");
+    // Basic email validation: must contain @.
+    if (std.mem.indexOf(u8, email, "@") == null) return reject("login: invalid email");
+
+    var ev = std.mem.zeroes(message.LoginCodeRequest);
+    @memcpy(ev.email[0..email.len], email);
+    ev.email_len = @intCast(email.len);
+    return message.Message.init(.request_login_code, 0, 0, ev);
+}
+
+fn parse_login_verify_request(body: []const u8) ?message.Message {
+    const email = json_string_field(body, "email") orelse return reject("verify: missing email");
+    if (email.len == 0 or email.len > message.email_max) return reject("verify: email too long or empty");
+    const code = json_string_field(body, "code") orelse return reject("verify: missing code");
+    if (code.len != message.code_length) return reject("verify: code wrong length");
+    // Validate all digits.
+    for (code) |c| {
+        if (c < '0' or c > '9') return reject("verify: code not digits");
+    }
+
+    var ev = std.mem.zeroes(message.LoginVerification);
+    @memcpy(ev.email[0..email.len], email);
+    ev.email_len = @intCast(email.len);
+    @memcpy(&ev.code, code[0..message.code_length]);
+    return message.Message.init(.verify_login_code, 0, 0, ev);
 }
 
 /// Parse a JSON body into an OrderCompletion.

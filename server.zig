@@ -194,14 +194,18 @@ pub fn ServerType(comptime IO: type, comptime Storage: type) type {
                 conn.is_datastar_request = parsed.is_datastar_request;
 
                 // Cookie identity resolution — every visitor gets an identity.
-                const existing = if (parsed.identity_cookie) |cv| auth.verify_cookie(cv, server.secret_key) else null;
-                const user_id = existing orelse mint_user_id(&server.prng);
+                const verified = if (parsed.identity_cookie) |cv| auth.verify_cookie(cv, server.secret_key) else null;
+                const user_id = if (verified) |v| v.user_id else mint_user_id(&server.prng);
+                const cookie_kind: auth.CookieKind = if (verified) |v| v.kind else .anonymous;
                 assert(user_id != 0);
                 msg.user_id = user_id;
-                if (existing == null) {
+                if (verified == null) {
                     assert(conn.set_cookie_user_id == 0);
                     conn.set_cookie_user_id = user_id;
+                    conn.set_cookie_kind = .anonymous;
                 }
+
+                const is_authenticated = cookie_kind == .authenticated;
 
                 // Prefetch. Storage busy → skip, retry next tick.
                 server.state_machine.tracer.start(.prefetch);
@@ -228,10 +232,14 @@ pub fn ServerType(comptime IO: type, comptime Storage: type) type {
                     }
                 }
 
-                // SSE mutations: defer rendering to process_followups.
-                // Store the result status so the follow-up can include an error
-                // message alongside the dashboard refresh.
-                if (conn.is_datastar_request and msg.operation.is_mutation()) {
+                // SSE mutations: defer rendering to process_followups for
+                // dashboard refresh. Login/auth mutations are self-contained —
+                // their response carries everything needed for rendering.
+                const needs_followup = conn.is_datastar_request and
+                    msg.operation.is_mutation() and
+                    resp.cookie_action == .none and
+                    resp.result != .login;
+                if (needs_followup) {
                     log.mark.debug("SSE mutation: deferring to follow-up fd={d}", .{conn.fd});
                     conn.pending_followup = true;
                     conn.followup_status = resp.status;
@@ -239,13 +247,56 @@ pub fn ServerType(comptime IO: type, comptime Storage: type) type {
                     continue;
                 }
 
-                // Encode response.
-                var cookie_hdr_buf: [auth.set_cookie_header_max]u8 = undefined;
-                const cookie_hdr: ?[]const u8 = if (conn.set_cookie_user_id != 0)
-                    auth.format_set_cookie_header(&cookie_hdr_buf, conn.set_cookie_user_id, server.secret_key)
-                else
-                    null;
-                const r = render.encode_response(&conn.send_buf, msg.operation, resp, conn.is_datastar_request, cookie_hdr, user_id);
+                // Cookie actions — the state machine signals what to do
+                // with the session cookie. The server acts generically.
+                switch (resp.cookie_action) {
+                    .set_authenticated => {
+                        const login_result = resp.result.login;
+                        assert(login_result.user_id != 0);
+                        conn.set_cookie_user_id = login_result.user_id;
+                        conn.set_cookie_kind = .authenticated;
+                    },
+                    .clear => {
+                        conn.set_cookie_user_id = user_id;
+                        conn.set_cookie_kind = cookie_kind;
+                    },
+                    .none => {},
+                }
+
+                // Log login codes to console (dev mode — no email sending yet).
+                // Generic check: if the result carries a non-zero code, log it.
+                if (resp.result == .login) {
+                    const login_result = resp.result.login;
+                    const zero_code: [message.code_length]u8 = .{0} ** message.code_length;
+                    if (!std.mem.eql(u8, &login_result.code, &zero_code)) {
+                        log.info("login code for {s}: {s}", .{
+                            login_result.email[0..login_result.email_len],
+                            login_result.code,
+                        });
+                    }
+                }
+
+                // Encode response. Render handles auth gating — shows login
+                // page for unauthenticated users on protected routes.
+                const cookie_hdr_buf_size = @max(auth.set_cookie_header_max, auth.clear_cookie_header_max);
+                var cookie_hdr_buf: [cookie_hdr_buf_size]u8 = undefined;
+                const cookie_hdr: ?[]const u8 = if (conn.set_cookie_user_id != 0) blk: {
+                    if (resp.cookie_action == .clear) {
+                        break :blk auth.format_clear_cookie_header(
+                            cookie_hdr_buf[0..auth.clear_cookie_header_max],
+                            conn.set_cookie_user_id,
+                            conn.set_cookie_kind,
+                            server.secret_key,
+                        );
+                    }
+                    break :blk auth.format_set_cookie_header(
+                        cookie_hdr_buf[0..auth.set_cookie_header_max],
+                        conn.set_cookie_user_id,
+                        conn.set_cookie_kind,
+                        server.secret_key,
+                    );
+                } else null;
+                const r = render.encode_response(&conn.send_buf, msg.operation, resp, conn.is_datastar_request, cookie_hdr, user_id, is_authenticated);
                 conn.set_response(r.offset, r.len);
                 conn.keep_alive = r.keep_alive;
             }
@@ -299,7 +350,7 @@ pub fn ServerType(comptime IO: type, comptime Storage: type) type {
 
                 var cookie_hdr_buf: [auth.set_cookie_header_max]u8 = undefined;
                 const cookie_hdr: ?[]const u8 = if (conn.set_cookie_user_id != 0)
-                    auth.format_set_cookie_header(&cookie_hdr_buf, conn.set_cookie_user_id, server.secret_key)
+                    auth.format_set_cookie_header(&cookie_hdr_buf, conn.set_cookie_user_id, conn.set_cookie_kind, server.secret_key)
                 else
                     null;
                 const r = render.encode_followup(

@@ -190,7 +190,7 @@ const header_reserve: u32 = 384;
 
 /// The result variant drives success encoding. For errors, `operation`
 /// selects which UI panel to show the error in.
-pub fn encode_response(send_buf: []u8, operation: message.Operation, resp: message.MessageResponse, is_datastar_request: bool, set_cookie_header: ?[]const u8, user_id: u128) Response {
+pub fn encode_response(send_buf: []u8, operation: message.Operation, resp: message.MessageResponse, is_datastar_request: bool, set_cookie_header: ?[]const u8, user_id: u128, is_authenticated: bool) Response {
     assert(send_buf.len >= http.send_buf_max);
 
     // SSE responses write headers + body sequentially from offset 0.
@@ -198,7 +198,7 @@ pub fn encode_response(send_buf: []u8, operation: message.Operation, resp: messa
     if (is_datastar_request) {
         return encode_sse_response(send_buf, operation, resp, set_cookie_header);
     } else {
-        return encode_html_response(send_buf, operation, resp, set_cookie_header, user_id);
+        return encode_html_response(send_buf, operation, resp, set_cookie_header, user_id, is_authenticated);
     }
 }
 
@@ -247,9 +247,6 @@ fn encode_sse_response(send_buf: []u8, operation: message.Operation, resp: messa
         encode_sse_error(&w, operation, resp.status, set_cookie_header);
     } else {
         assert(result_matches_operation(operation, resp.result));
-
-        // Mutations over SSE are handled by encode_followup, not this path.
-        assert(!operation.is_mutation());
         encode_sse_headers(&w, set_cookie_header);
 
         switch (resp.result) {
@@ -291,7 +288,23 @@ fn encode_sse_response(send_buf: []u8, operation: message.Operation, resp: messa
                 w.write_u32(inv);
                 sse_event_end(&w);
             },
-            .empty => unreachable,
+            .login => |login_result| {
+                sse_event_begin(&w, "#login-box");
+                if (login_result.user_id != 0) {
+                    // verify success — redirect to dashboard.
+                    w.raw("<script>window.location.href='/';</script>");
+                } else {
+                    // request_login_code success — replace with verify form.
+                    encode_verify_form_fragment(&w, login_result.email[0..login_result.email_len]);
+                }
+                sse_event_end(&w);
+            },
+            .empty => {
+                // Logout via SSE — redirect to login page.
+                sse_event_begin(&w, "#login-box");
+                w.raw("<script>window.location.href='/login';</script>");
+                sse_event_end(&w);
+            },
         }
     }
     assert(w.pos > 0);
@@ -300,14 +313,25 @@ fn encode_sse_response(send_buf: []u8, operation: message.Operation, resp: messa
 
 /// Non-SSE path: write body first at header_reserve, then backfill
 /// headers with Content-Length. Enables HTTP keep-alive.
-fn encode_html_response(send_buf: []u8, operation: message.Operation, resp: message.MessageResponse, set_cookie_header: ?[]const u8, user_id: u128) Response {
+fn encode_html_response(send_buf: []u8, operation: message.Operation, resp: message.MessageResponse, set_cookie_header: ?[]const u8, user_id: u128, is_authenticated: bool) Response {
     var w = HtmlWriter{ .buf = send_buf, .pos = header_reserve };
 
-    if (resp.status != .ok) {
+    // Auth gating: unauthenticated users see the login page for protected routes.
+    const is_login_route = switch (operation) {
+        .page_load_login, .request_login_code, .verify_login_code, .logout => true,
+        else => false,
+    };
+    if (!is_authenticated and !is_login_route) {
+        encode_login_page_body(&w, null);
+    } else if (resp.status != .ok) {
         assert(resp.result == .empty);
-        // Render the full dashboard — gives the user navigation instead
-        // of a dead-end error page.
-        encode_full_page(&w, &empty_dashboard, user_id);
+        if (is_login_route) {
+            encode_login_page_body(&w, status_to_string(resp.status));
+        } else {
+            // Render the full dashboard — gives the user navigation instead
+            // of a dead-end error page.
+            encode_full_page(&w, &empty_dashboard, user_id);
+        }
     } else {
         assert(result_matches_operation(operation, resp.result));
         switch (resp.result) {
@@ -322,8 +346,21 @@ fn encode_html_response(send_buf: []u8, operation: message.Operation, resp: mess
                 w.raw("inventory: ");
                 w.write_u32(inv);
             },
+            .login => |login_result| {
+                if (login_result.user_id != 0) {
+                    // verify_login_code success — redirect to dashboard.
+                    encode_login_success_page(&w);
+                } else {
+                    // request_login_code success — show verify form.
+                    encode_verify_page_body(&w, login_result.email[0..login_result.email_len]);
+                }
+            },
             .empty => {
-                w.raw("OK");
+                if (operation == .page_load_login or operation == .logout) {
+                    encode_login_page_body(&w, null);
+                } else {
+                    w.raw("OK");
+                }
             },
         }
     }
@@ -366,6 +403,95 @@ fn backfill_headers(send_buf: []u8, body_len: usize, set_cookie_header: ?[]const
         .len = @intCast(h.pos + body_len),
         .keep_alive = true,
     };
+}
+
+// --- Login pages ---
+
+fn login_page_head(w: *HtmlWriter) void {
+    w.raw("<!DOCTYPE html>\n<html>\n<head>\n" ++
+        "<meta charset=\"utf-8\">\n" ++
+        "<title>Tiger Web — Login</title>\n" ++
+        "<script type=\"module\" src=\"https://cdn.jsdelivr.net/gh/starfederation/datastar@1.0.0-RC.7/bundles/datastar.js\"></script>\n" ++
+        "<style>\n" ++
+        "* { box-sizing: border-box; margin: 0; padding: 0; }\n" ++
+        "body { font-family: system-ui, sans-serif; background: #f5f5f5; color: #333; " ++
+        "display: flex; justify-content: center; align-items: center; min-height: 100vh; }\n" ++
+        ".login-box { background: #fff; border: 1px solid #ddd; border-radius: 8px; " ++
+        "padding: 32px; width: 360px; }\n" ++
+        "h1 { margin-bottom: 24px; font-size: 22px; text-align: center; }\n" ++
+        "label { display: block; margin-bottom: 4px; font-size: 14px; }\n" ++
+        "input { width: 100%; padding: 8px 12px; border: 1px solid #ccc; border-radius: 4px; " ++
+        "font-size: 14px; margin-bottom: 16px; }\n" ++
+        "button { width: 100%; padding: 10px; border: none; border-radius: 4px; " ++
+        "background: #333; color: #fff; font-size: 14px; cursor: pointer; }\n" ++
+        "button:hover { background: #555; }\n" ++
+        ".error { color: #e44; margin-bottom: 12px; font-size: 14px; }\n" ++
+        ".meta { color: #888; font-size: 12px; text-align: center; margin-top: 12px; }\n" ++
+        "</style>\n" ++
+        "</head>\n");
+}
+
+fn encode_login_page_body(w: *HtmlWriter, error_msg: ?[]const u8) void {
+    login_page_head(w);
+    w.raw("<body data-signals=\"{_email: ''}\">\n<div id=\"login-box\" class=\"login-box\">\n");
+    w.raw("<h1>Tiger Web</h1>\n");
+    w.raw("<div id=\"login-error\">");
+    if (error_msg) |err| {
+        w.raw("<div class=\"error\">");
+        w.html_escaped(err);
+        w.raw("</div>");
+    }
+    w.raw("</div>\n");
+    w.raw("<label for=\"email\">Email</label>\n");
+    w.raw("<input type=\"email\" id=\"email\" data-bind:_email placeholder=\"you@example.com\">\n");
+    w.raw("<button data-on:click=\"@post('/login/code', {payload: {email: $_email}})\">Send Login Code</button>\n");
+    w.raw("</div>\n</body>\n</html>\n");
+}
+
+fn encode_verify_page_body(w: *HtmlWriter, email: []const u8) void {
+    login_page_head(w);
+    w.raw("<body data-signals=\"{_code: ''}\">\n<div id=\"login-box\" class=\"login-box\">\n");
+    w.raw("<h1>Tiger Web</h1>\n");
+    w.raw("<p class=\"meta\">Code sent to ");
+    w.html_escaped(email);
+    w.raw("</p>\n");
+    w.raw("<div id=\"login-error\"></div>\n");
+    w.raw("<label for=\"code\">6-digit code</label>\n");
+    w.raw("<input type=\"text\" id=\"code\" data-bind:_code maxlength=\"6\" " ++
+        "placeholder=\"000000\" " ++
+        "style=\"text-align:center;font-size:24px;letter-spacing:8px\">\n");
+    w.raw("<button data-on:click=\"@post('/login/verify', {payload: {email: '");
+    w.js_escaped(email);
+    w.raw("', code: $_code}})\">Verify</button>\n");
+    w.raw("</div>\n</body>\n</html>\n");
+}
+
+/// SSE fragment: verify form content for #login-box replacement.
+/// No page wrapper — just the inner content. Datastar merges this
+/// into the existing page via the SSE selector.
+fn encode_verify_form_fragment(w: *HtmlWriter, email: []const u8) void {
+    w.raw("<h1>Tiger Web</h1>\n");
+    w.raw("<p class=\"meta\">Code sent to ");
+    w.html_escaped(email);
+    w.raw("</p>\n");
+    w.raw("<div id=\"login-error\"></div>\n");
+    w.raw("<label for=\"code\">6-digit code</label>\n");
+    w.raw("<input type=\"text\" id=\"code\" data-bind:_code maxlength=\"6\" " ++
+        "placeholder=\"000000\" " ++
+        "style=\"text-align:center;font-size:24px;letter-spacing:8px\">\n");
+    w.raw("<button data-on:click=\"@post('/login/verify', {payload: {email: '");
+    w.js_escaped(email);
+    w.raw("', code: $_code}})\">Verify</button>\n");
+}
+
+fn encode_login_success_page(w: *HtmlWriter) void {
+    w.raw("<!DOCTYPE html>\n<html>\n<head>\n" ++
+        "<meta charset=\"utf-8\">\n" ++
+        "<meta http-equiv=\"refresh\" content=\"0;url=/\">\n" ++
+        "<title>Logged In</title>\n" ++
+        "</head>\n<body>\n" ++
+        "<p>Logged in. <a href=\"/\">Continue</a></p>\n" ++
+        "</body>\n</html>\n");
 }
 
 // --- Full HTML page ---
@@ -832,6 +958,8 @@ fn result_matches_operation(operation: message.Operation, result: message.Result
         .delete_product, .delete_collection,
         .add_collection_member, .remove_collection_member,
         => result == .empty,
+        .request_login_code, .verify_login_code => result == .login,
+        .page_load_login, .logout => result == .empty,
     };
 }
 
@@ -851,6 +979,8 @@ pub fn error_selector(operation: message.Operation) []const u8 {
         .get_order, .list_orders,
         => "#order-list",
         .page_load_dashboard => "#product-list",
+        .request_login_code, .verify_login_code => "#login-error",
+        .page_load_login, .logout => "#login-error",
     };
 }
 
@@ -863,6 +993,8 @@ fn status_to_string(status: message.Status) []const u8 {
         .version_conflict => "Version Conflict",
         .order_expired => "Order Expired",
         .order_not_pending => "Order Not Pending",
+        .invalid_code => "Invalid Code",
+        .code_expired => "Code Expired",
     };
 }
 
@@ -973,7 +1105,7 @@ test "encode_response full page — empty dashboard" {
             .orders = .{ .items = undefined, .len = 0 },
         } },
     };
-    const r = encode_response(&send_buf, .page_load_dashboard, resp, false, null, 1);
+    const r = encode_response(&send_buf, .page_load_dashboard, resp, false, null, 1, true);
     assert(r.len > 0);
     assert(r.offset + r.len <= send_buf.len);
     const output = send_buf[r.offset..][0..r.len];
@@ -993,7 +1125,7 @@ test "encode_response SSE — empty dashboard" {
             .orders = .{ .items = undefined, .len = 0 },
         } },
     };
-    const r = encode_response(&send_buf, .page_load_dashboard, resp, true, null, 1);
+    const r = encode_response(&send_buf, .page_load_dashboard, resp, true, null, 1, true);
     assert(r.len > 0);
     const output = send_buf[r.offset..][0..r.len];
     assert(std.mem.startsWith(u8, output, "HTTP/1.1 200 OK\r\n"));
@@ -1005,7 +1137,7 @@ test "encode_response SSE — empty dashboard" {
 test "encode_response error — renders dashboard page for recovery" {
     var send_buf: [http.send_buf_max]u8 = undefined;
     const resp = message.MessageResponse.storage_error;
-    const r = encode_response(&send_buf, .page_load_dashboard, resp, false, null, 1);
+    const r = encode_response(&send_buf, .page_load_dashboard, resp, false, null, 1, true);
     assert(r.len > 0);
     const output = send_buf[r.offset..][0..r.len];
     assert(std.mem.startsWith(u8, output, "HTTP/1.1 200 OK\r\n"));
@@ -1024,7 +1156,7 @@ test "Set-Cookie header included in HTML response" {
         } },
     };
     const cookie_hdr = "Set-Cookie: tiger_id=test; Path=/; HttpOnly; SameSite=Lax\r\n";
-    const r = encode_response(&send_buf, .page_load_dashboard, resp, false, cookie_hdr, 1);
+    const r = encode_response(&send_buf, .page_load_dashboard, resp, false, cookie_hdr, 1, true);
     assert(r.len > 0);
     const output = send_buf[r.offset..][0..r.len];
     assert(std.mem.startsWith(u8, output, "HTTP/1.1 200 OK\r\n"));
@@ -1036,7 +1168,7 @@ test "Set-Cookie header included in SSE response" {
     var send_buf: [http.send_buf_max]u8 = undefined;
     const resp = message.MessageResponse.storage_error;
     const cookie_hdr = "Set-Cookie: tiger_id=test; Path=/; HttpOnly; SameSite=Lax\r\n";
-    const r = encode_response(&send_buf, .page_load_dashboard, resp, true, cookie_hdr, 1);
+    const r = encode_response(&send_buf, .page_load_dashboard, resp, true, cookie_hdr, 1, true);
     assert(r.len > 0);
     const output = send_buf[r.offset..][0..r.len];
     assert(std.mem.startsWith(u8, output, "HTTP/1.1 200 OK\r\n"));
@@ -1064,7 +1196,7 @@ test "encode_response with products" {
             .orders = .{ .items = undefined, .len = 0 },
         } },
     };
-    const r = encode_response(&send_buf, .page_load_dashboard, resp, false, null, 1);
+    const r = encode_response(&send_buf, .page_load_dashboard, resp, false, null, 1, true);
     assert(r.len > 0);
     const output = send_buf[r.offset..][0..r.len];
     assert(std.mem.indexOf(u8, output, "Widget") != null);
@@ -1087,7 +1219,7 @@ test "encode_response SSE — product list" {
         .status = .ok,
         .result = .{ .product_list = products },
     };
-    const r = encode_response(&send_buf, .list_products, resp, true, null, 1);
+    const r = encode_response(&send_buf, .list_products, resp, true, null, 1, true);
     assert(r.len > 0);
     const output = send_buf[r.offset..][0..r.len];
     assert(std.mem.indexOf(u8, output, "text/event-stream") != null);
@@ -1109,7 +1241,7 @@ test "encode_response SSE — collection detail" {
             .products = .{ .items = undefined, .len = 0 },
         } },
     };
-    const r = encode_response(&send_buf, .get_collection, resp, true, null, 1);
+    const r = encode_response(&send_buf, .get_collection, resp, true, null, 1, true);
     assert(r.len > 0);
     const output = send_buf[r.offset..][0..r.len];
     assert(std.mem.indexOf(u8, output, "#col-cc000000000000000000000000000001") != null);
@@ -1134,7 +1266,7 @@ test "encode_response SSE — order detail" {
         .status = .ok,
         .result = .{ .order = order },
     };
-    const r = encode_response(&send_buf, .get_order, resp, true, null, 1);
+    const r = encode_response(&send_buf, .get_order, resp, true, null, 1, true);
     assert(r.len > 0);
     const output = send_buf[r.offset..][0..r.len];
     assert(std.mem.indexOf(u8, output, "#od-ee000000000000000000000000000001") != null);
@@ -1148,7 +1280,7 @@ test "encode_response SSE error — targets correct selector" {
     const resp = message.MessageResponse.not_found;
 
     // list_orders error should target #order-list
-    const r = encode_response(&send_buf, .list_orders, resp, true, null, 1);
+    const r = encode_response(&send_buf, .list_orders, resp, true, null, 1, true);
     assert(r.len > 0);
     const output = send_buf[r.offset..][0..r.len];
     assert(std.mem.indexOf(u8, output, "#order-list") != null);
@@ -1213,14 +1345,14 @@ test "Content-Length matches body length — full page" {
             .orders = .{ .items = undefined, .len = 0 },
         } },
     };
-    const r = encode_response(&send_buf, .page_load_dashboard, resp, false, null, 1);
+    const r = encode_response(&send_buf, .page_load_dashboard, resp, false, null, 1, true);
     const output = send_buf[r.offset..][0..r.len];
     assert_content_length_matches(output);
 }
 
 test "Content-Length matches body length — error dashboard" {
     var send_buf: [http.send_buf_max]u8 = undefined;
-    const r = encode_response(&send_buf, .page_load_dashboard, message.MessageResponse.storage_error, false, null, 1);
+    const r = encode_response(&send_buf, .page_load_dashboard, message.MessageResponse.storage_error, false, null, 1, true);
     const output = send_buf[r.offset..][0..r.len];
     assert_content_length_matches(output);
 }
@@ -1233,7 +1365,7 @@ test "Content-Length matches body length — non-SSE product" {
     @memcpy(p.name[0..4], "Test");
     p.flags = .{ .active = true };
     p.version = 1;
-    const r = encode_response(&send_buf, .get_product, .{ .status = .ok, .result = .{ .product = p } }, false, null, 1);
+    const r = encode_response(&send_buf, .get_product, .{ .status = .ok, .result = .{ .product = p } }, false, null, 1, true);
     const output = send_buf[r.offset..][0..r.len];
     assert_content_length_matches(output);
 }
