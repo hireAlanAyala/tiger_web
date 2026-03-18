@@ -122,6 +122,82 @@ deterministic (no non-determinism in the spec except explicit random
 imports, which the framework controls). A WASM sidecar gets assured
 determinism back. Unix socket sidecars in interpreted languages do not.
 
+## Sidecar language binding: 1:1 mirror, not a DSL
+
+The sidecar code mirrors the Zig app structure exactly. Same files,
+same functions, same explicit switches. No magic prefetch inference,
+no declarative routing, no hidden conventions. The Zig API is the
+abstraction — the sidecar language is just another syntax for it.
+
+```
+message.ts       ← generated from message.zig (types, Operation, Status)
+codec.ts         ← same translate function, same explicit routing
+state_machine.ts ← same prefetch/execute split, same explicit handlers
+render.ts        ← same HTML functions
+```
+
+Why 1:1 and not a DSL: we prototyped a declarative model (inferred
+prefetch, `Prefetched<T>`, route declarations). It worked for simple
+CRUD but broke on multi-entity operations (create_order needs N products),
+dependency-chain prefetch (complete_order fetches order then its products),
+and cross-entity pages (dashboard). The Zig API already solves these
+cases explicitly. Adding abstractions on top created edge cases the
+Zig code doesn't have.
+
+## Annotation-based binding
+
+The developer is free to organize files however they want. The binding
+between functions and operations is a comment annotation, not a file
+structure:
+
+```typescript
+// orders/checkout.ts
+
+// [execute] .create_order
+export function createOrder(cache: PrefetchCache, msg: Message) {
+  // ...
+}
+
+// orders/render.ts
+
+// [render] .create_order
+// [render] .get_order
+export function renderOrderDetail(order: OrderResult): string {
+  // ...
+}
+```
+
+One annotation can cover multiple operations (same as Zig where
+execute_get handles four operations). The function name and file path
+don't matter. The annotation is the contract.
+
+## Build step enforces exhaustiveness
+
+The build step scans all sidecar source files for annotations:
+
+1. Collects all `// [execute]`, `// [prefetch]`, `// [render]`,
+   `// [translate]` annotations
+2. Knows all Operation variants from the Zig source (generated)
+3. Missing operation → build error
+4. Duplicate operation → build error
+5. Generates the dispatch that routes operations to annotated functions
+
+This preserves the exhaustiveness guarantee. Adding a new operation
+to the Zig Operation enum fails the sidecar build until the developer
+adds the corresponding annotated handler. Same safety as Zig's
+exhaustive switch, different mechanism.
+
+## LSP and type checking
+
+Annotations are comments — the language server ignores them. The
+function signatures use generated types (from the Zig source).
+Autocomplete, hover, go-to-definition, rename all work normally.
+
+The annotations tell the build step which function handles which
+operation. The type imports tell the developer — if a function takes
+`OrderRequest`, you know what operation it handles without reading
+the comment. The comment is for the machine, the type is for the human.
+
 ## What moves to the sidecar
 
 The execute decision: given this operation and this cached data, what's
