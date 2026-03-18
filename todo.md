@@ -119,3 +119,23 @@ Inspect later: framework split decisions
      Operation.needs_followup() is an exhaustive switch — adding a new mutation
      forces a decision. Verify this stays correct as new operations are added.
      The server now reads resp.followup without inspecting which operation ran.
+
+---
+Ticket 8: Defer writes to end of tick (pure execute)
+
+  Execute handlers currently call storage.put/delete/insert during execute().
+  This means operations processed earlier in the tick are visible to later
+  operations in the same tick — an accidental ordering dependency.
+
+  Change execute() to return {response, writes[]} instead of calling storage
+  directly. The framework collects all writes from all operations in the tick,
+  then applies them in one batch after all executes complete.
+
+  This fixes intra-tick visibility (operations see tick-start state, not each
+  other's writes) and enables the sidecar execute model (see design/012).
+
+  Write failures after execute: framework overrides the response with
+  storage_error and rolls back the transaction. Same pattern as prefetch
+  errors today.
+
+  Do this before implementing the sidecar — it's the same change.
