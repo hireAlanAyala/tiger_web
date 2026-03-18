@@ -41,13 +41,6 @@ domain logic should assert their inputs and outputs to preserve business logic
 - stress test architcture what would happen if x% of the processing was external api calls. would this break determinism
 
 ---
-Ticket 3: Replay test "full round-trip" fails — pre-existing
-
-  The replay.zig "replay: full round-trip" test panics with "replay: storage error at op 1: create_product". The test creates products via MemoryStorage, writes them to a WAL, then replays the WAL into a fresh SqliteStorage. The first create_product returns a storage error from SqliteStorage during replay. This failure predates the login feature — it reproduces on a clean main checkout. Likely cause: stale test artifacts, schema mismatch between the WAL entries and the fresh DB, or a SqliteStorage.init issue in the test environment.
-
-  Fix: reproduce with a fresh /tmp path, check if ensure_schema runs correctly on the replay work DB, verify the WAL entries have valid checksums and the correct product body layout.
-
----
 Ticket 4: Middleware primitive for pluggable auth
 
   Cookie handling (resolution, header formatting, cookie_action dispatch) is baked into server.zig's process_inbox. The server checks cookie_kind for is_authenticated, formats Set-Cookie/clear-cookie headers, and reads resp.cookie_action. If auth changes (OAuth, API keys, no auth), server.zig needs rewriting.
@@ -71,3 +64,45 @@ Ticket 5: Render-owned refresh() for SSE mutations
   Requires: render needs access to the state machine (or a callback) to run follow-up queries. The server currently mediates this. Design the boundary carefully — render should request data, not call prefetch/execute directly.
 
   Interim debt: server.zig's followup condition checks `resp.cookie_action == .none and resp.result != .login` to skip followup for login mutations. This is the server inspecting result types — domain logic in the framework. Once refresh is opt-in, remove this condition and the needs_dashboard_refresh field on MessageResponse (added but unused pending this ticket). Each operation's render path calls refresh explicitly or not.
+
+- what is the error handling at the framework level? how does it work when does it trigger?
+
+---
+Ticket 6: Split replay tests into framework vs application
+
+  The replay module mixes framework-level tests (WAL integrity, hash chain, truncation recovery) with application-level tests (product round-trip, updates/deletes, stop-at). The application tests depend on Product, make_product, and specific field assertions (price_cents, version, name). If Product changes, framework tests break even though the framework didn't change.
+
+  Split:
+  - Framework side (replay.zig): WAL create/recover, root deterministic, hash chain validation, truncation recovery, version mismatch, verify valid/corrupt, read_batch, derive_work_path, format_uuid, body_to_json, write_json_string. replay_entries stays here — it's Message-generic.
+  - Application side: "full round-trip", "stop-at", "updates and deletes" move out. replay_fuzz.zig stays application-side — it knows about products, collections, orders, login codes.
+
+  Same code coverage, same test count. The split is module ownership, not new work. Framework tests never import application types. Application tests call replay_entries from the application side.
+
+---
+Ticket 7: Missing replay test coverage
+
+  kcov shows replay.zig at 94.7% (409/432 lines). The uncovered paths:
+
+  1. query() — the most complex untested function. Loads WAL entries into an in-memory SQLite table, runs user SQL, prints results. Zero test coverage. Fixed-input test: create a WAL with known entries, run "SELECT count(*) FROM entries", "SELECT * FROM entries WHERE operation = 'create_product'", assert output matches. Also test: empty WAL (only root), invalid SQL (error message).
+
+  2. replay_entries() via the fuzzer — kcov marks some lines as uncovered due to debug info artifacts, but the fuzzer does exercise this path. Confirm by running kcov on the fuzz binary with a fixed seed.
+
+  3. entity_id() — exhaustive switch mapping operations to their entity ID. Tested indirectly through inspect, but no direct test that each branch extracts the correct ID. Fixed-input test: construct a Message for each operation type that carries an entity ID in the body (create_product, create_collection, create_order), assert entity_id returns the body's ID, not msg.id.
+
+  query() is the priority — it's real untested logic, not debug info noise.
+
+  Aggregate coverage (kcov, unit + fuzz + sim merged):
+    checksum.zig       100.0%    auth.zig           100.0%
+    http.zig            99.4%    render.zig          99.1%
+    state_machine.zig   99.0%    message.zig         98.8%
+    connection.zig      98.2%    wal.zig             95.9%
+    auditor.zig         95.3%    sim.zig             95.1%
+    replay.zig          94.7%    server.zig          94.5%
+    codec.zig           94.2%    storage.zig         93.3%
+    tracer.zig          90.1%    io.zig              28.6%
+    TOTAL               96.8%   (9634/9958 lines)
+
+  io.zig is 28.6% — expected, it's the real epoll layer. Tests use SimIO.
+  Fuzz + sim add the most to storage.zig (+18%) and codec.zig (+16%).
+
+- stressor (multi tenant user)
