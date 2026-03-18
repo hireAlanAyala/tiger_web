@@ -47,6 +47,18 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
     const StateMachine = App.StateMachineType(Storage);
     const Wal = App.Wal;
 
+    comptime {
+        // Validate StateMachine interface — framework calls these in the tick loop.
+        assert(@hasDecl(StateMachine, "set_time"));
+        assert(@hasDecl(StateMachine, "begin_batch"));
+        assert(@hasDecl(StateMachine, "commit_batch"));
+        assert(@hasDecl(StateMachine, "prefetch"));
+        assert(@hasDecl(StateMachine, "commit"));
+        assert(@hasField(StateMachine, "tracer"));
+        assert(@hasField(StateMachine, "secret_key"));
+        assert(@hasField(StateMachine, "now"));
+    }
+
     return struct {
         const Server = @This();
 

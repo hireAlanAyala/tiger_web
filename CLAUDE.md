@@ -38,20 +38,36 @@ http.zig → codec.zig → message.zig → state_machine.zig → storage
                                           (HTML page or SSE fragments)
 ```
 
+### Framework (`framework/`) — domain-free, parameterized on App
+
 | File | Role |
 |---|---|
-| `main.zig` | Entry point, tick loop, runtime log level filtering, CLI parsing |
-| `server.zig` | `ServerType(IO, Storage)` — accepts connections, drives prefetch→execute |
-| `connection.zig` | Per-connection state machine (accepting → receiving → ready → sending) |
-| `http.zig` | HTTP/1.0+1.1 request parser (pure parser, no response encoding — see design/002-always-200.md) |
+| `framework/server.zig` | `ServerType(App, IO, Storage)` — tick loop, connection pool, accepts, prefetch→execute orchestration |
+| `framework/connection.zig` | `ConnectionType(IO, FollowupState)` — per-connection state machine (accepting → receiving → ready → sending) |
+| `framework/http.zig` | HTTP/1.0+1.1 request parser (pure parser, no response encoding — see design/002-always-200.md) |
+| `framework/io.zig` | epoll IO layer (real syscalls) |
+| `framework/wal.zig` | `WalType(Message, root_fn)` — append-only replay log, writes Message entries after commit(), no fsync |
+| `framework/tracer.zig` | `TracerType(Operation, Counter)` — gauges, counters, span timings, trace logging |
+| `framework/auth.zig` | Cookie signing/verification (HMAC-SHA256), session management |
+| `framework/marks.zig` | Coverage marks — links log sites to test assertions |
+| `framework/stdx.zig` | Ported from TB's stdx — `no_padding`, `equal_bytes`, `maybe`, `format_u32`, `parse_uuid` |
+| `framework/checksum.zig` | Aegis128L checksum — zero-key MAC, matches TB's vsr/checksum.zig |
+| `framework/prng.zig` | Xoshiro256++ PRNG with Ratio, Combination, Reservoir — matches TigerBeetle's stdx.PRNG |
+| `framework/time.zig` | Wall-clock time (real + simulated) |
+| `framework/flags.zig` | CLI argument parser — struct-driven `--key=value` parsing, ported from TigerBeetle's stdx/flags.zig |
+| `framework/bench.zig` | Micro benchmarking harness — smoke/benchmark dual mode, matches TB's testing/bench.zig |
+
+### Application (root) — domain types, handlers, templates
+
+| File | Role |
+|---|---|
+| `app.zig` | App binding — wires domain modules to the framework's comptime interface |
+| `main.zig` | Entry point, runtime log level filtering, CLI parsing |
+| `message.zig` | Types: Product, ProductCollection, flat Operation enum with EventType, Message (extern struct, WAL-writable), MessageResponse |
 | `codec.zig` | Route parsing, JSON request → typed struct translation, UUID parsing |
 | `render.zig` | HTML + SSE response renderer — always 200, body-first with Content-Length backfill (keep-alive), SSE from offset 0 (Connection: close), Set-Cookie for new visitors |
-| `message.zig` | Types: Product, ProductCollection, flat Operation enum with EventType, Message (extern struct, WAL-writable), MessageResponse |
 | `state_machine.zig` | `StateMachineType(Storage)` — inline dispatch in execute, flat switch in prefetch, `MemoryStorage` |
 | `storage.zig` | `SqliteStorage` — SQLite backend with prepared statements, WAL mode |
-| `io.zig` | epoll IO layer (real syscalls) |
-| `marks.zig` | Coverage marks — links log sites to test assertions |
-| `tracer.zig` | Minimal tracer — gauges, counters, span timings, trace logging. All metrics flow through `emit()` |
 | `sim.zig` | `SimIO` + `MemoryStorage` with PRNG-driven fault injection |
 | `fuzz_tests.zig` | Fuzz test dispatcher — single binary routing to all fuzzers, matches TB's fuzz_tests.zig |
 | `fuzz_lib.zig` | Shared fuzz utilities — `FuzzArgs` struct, `random_enum_weights`, matches TB's testing/fuzz.zig |
@@ -60,13 +76,11 @@ http.zig → codec.zig → message.zig → state_machine.zig → storage
 | `render_fuzz.zig` | Render fuzzer — random operations/results through encode_response, asserts framing and keep-alive invariants |
 | `auditor.zig` | Auditor oracle — independent reference model that validates state machine responses (TB pattern) |
 | `storage_fuzz.zig` | Storage equivalence fuzzer — runs MemoryStorage vs SqliteStorage vs Auditor, asserts agreement |
-| `checksum.zig` | Aegis128L checksum — zero-key MAC, matches TB's vsr/checksum.zig |
-| `wal.zig` | Append-only replay log — writes Message entries after commit(), no fsync |
-| `stdx.zig` | Ported from TB's stdx — `no_padding`, `equal_bytes`, `has_unique_representation` |
-| `prng.zig` | Xoshiro256++ PRNG with Ratio, Combination, Reservoir — matches TigerBeetle's stdx.PRNG |
-| `bench.zig` | Micro benchmarking harness — smoke/benchmark dual mode, matches TB's testing/bench.zig |
+| `replay.zig` | WAL replay tool — verify, inspect, query, replay operations |
+| `replay_fuzz.zig` | Replay round-trip fuzzer — WAL serialization boundary verification |
 | `state_machine_benchmark.zig` | State machine benchmark — per-operation prefetch/commit throughput, regression detector |
-| `flags.zig` | CLI argument parser — struct-driven `--key=value` parsing, ported from TigerBeetle's stdx/flags.zig |
+| `worker.zig` | Worker process — polls server for pending orders, simulates external API calls |
+| `wal_test.zig` | WAL integration tests — instantiates WalType with domain types |
 
 ## Conventions
 

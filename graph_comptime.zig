@@ -32,17 +32,17 @@ const type_map_json = blk: {
     // Production types.
     w.dumpType("StateMachine<SqliteStorage>", "state_machine.zig", ProdStateMachine);
     w.raw(",");
-    w.dumpType("Server<IO,SqliteStorage>", "server.zig", ProdServer);
+    w.dumpType("Server<IO,SqliteStorage>", "framework/server.zig", ProdServer);
     w.raw(",");
-    w.dumpType("Connection<IO>", "connection.zig", ProdConnection);
+    w.dumpType("Connection<IO>", "framework/connection.zig", ProdConnection);
     w.raw(",");
 
     // Test types.
     w.dumpType("StateMachine<MemoryStorage>", "state_machine.zig", TestStateMachine);
     w.raw(",");
-    w.dumpType("Server<SimIO,MemoryStorage>", "server.zig", TestServer);
+    w.dumpType("Server<SimIO,MemoryStorage>", "framework/server.zig", TestServer);
     w.raw(",");
-    w.dumpType("Connection<SimIO>", "connection.zig", TestConnection);
+    w.dumpType("Connection<SimIO>", "framework/connection.zig", TestConnection);
     w.raw(",");
 
     // Concrete (non-generic) types.
