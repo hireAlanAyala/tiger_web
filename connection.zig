@@ -3,6 +3,7 @@ const assert = std.debug.assert;
 const message = @import("message.zig");
 const maybe = message.maybe;
 const http = @import("http.zig");
+const auth = @import("auth.zig");
 const marks = @import("marks.zig");
 const log = marks.wrap_log(std.log.scoped(.connection));
 
@@ -65,6 +66,7 @@ pub fn ConnectionType(comptime IO: type) type {
         // Cookie identity: when non-zero, render.zig emits a Set-Cookie header.
         // Reset on keep-alive transition. Assert == 0 in .free state.
         set_cookie_user_id: u128,
+        set_cookie_kind: auth.CookieKind,
 
         // SSE follow-up state: after a Datastar mutation commits, the server
         // stores the result and renders a full dashboard refresh next tick.
@@ -91,6 +93,7 @@ pub fn ConnectionType(comptime IO: type) type {
                 .keep_alive = true,
                 .is_datastar_request = false,
                 .set_cookie_user_id = 0,
+                .set_cookie_kind = .anonymous,
                 .pending_followup = false,
                 .followup_status = .ok,
                 .followup_operation = .page_load_dashboard,
@@ -300,6 +303,7 @@ pub fn ConnectionType(comptime IO: type) type {
                 conn.request_consumed = 0;
                 conn.is_datastar_request = false;
                 conn.set_cookie_user_id = 0;
+                conn.set_cookie_kind = .anonymous;
                 conn.state = .receiving;
 
                 // Try to parse pipelined data immediately. If a complete
