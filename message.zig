@@ -823,6 +823,31 @@ pub const MessageResponse = struct {
     };
 };
 
+/// WAL root entry — deterministic sentinel at op 0. Contains a Product
+/// with distinct values in every numeric field so field-reorder bugs are
+/// caught by checksum mismatch. Domain-specific; passed to WalType.
+pub fn wal_root() Message {
+    var entry = std.mem.zeroes(Message);
+    entry.operation = .root;
+    const sentinel: Product = .{
+        .id = 0x0101010101010101_0101010101010101,
+        .description = [_]u8{0x02} ** product_description_max,
+        .name = [_]u8{0x03} ** product_name_max,
+        .price_cents = 0x04040404,
+        .inventory = 0x05050505,
+        .version = 0x06060606,
+        .description_len = 0x0707,
+        .name_len = 0x08,
+        .flags = @bitCast(@as(u8, 0x09)),
+    };
+    @memcpy(entry.body[0..@sizeOf(Product)], std.mem.asBytes(&sentinel));
+    entry.set_checksum();
+    assert(entry.valid_checksum());
+    assert(entry.operation == .root);
+    assert(!entry.operation.is_mutation());
+    return entry;
+}
+
 // =====================================================================
 // Tests
 // =====================================================================

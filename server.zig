@@ -10,7 +10,7 @@ const render = @import("render.zig");
 const Time = @import("framework/time.zig").Time;
 const marks = @import("framework/marks.zig");
 const log = marks.wrap_log(std.log.scoped(.server));
-const Wal = @import("wal.zig").Wal;
+const Wal = @import("framework/wal.zig").WalType(message.Message, message.wal_root);
 
 /// The server orchestrator, parameterized on the IO and Storage types.
 /// In production, IO is the real epoll-based implementation and Storage is SqliteStorage.

@@ -4,10 +4,11 @@ const state_machine = @import("state_machine.zig");
 const SqliteStorage = @import("storage.zig").SqliteStorage;
 const StateMachine = state_machine.StateMachineType(SqliteStorage);
 const ServerType = @import("server.zig").ServerType;
+const message = @import("message.zig");
 const TimeReal = @import("framework/time.zig").TimeReal;
 const auth = @import("framework/auth.zig");
 const flags = @import("framework/flags.zig");
-const Wal = @import("wal.zig").Wal;
+const Wal = @import("framework/wal.zig").WalType(message.Message, message.wal_root);
 
 const Server = ServerType(IO, SqliteStorage);
 const marks = @import("framework/marks.zig");
