@@ -85,7 +85,7 @@ pub fn build(b: *std.Build) void {
         "message.zig",
         "state_machine.zig",
         "codec.zig",
-        "tracer.zig",
+        "framework/tracer.zig",
         "render.zig",
         "wal.zig",
         "framework/http.zig",

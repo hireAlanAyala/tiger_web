@@ -10,6 +10,20 @@ pub fn maybe(ok: bool) void {
     assert(ok or !ok);
 }
 
+/// Tracer counters — one per response status. Defined here next to Status
+/// so they stay in sync. Passed to TracerType as a comptime parameter.
+pub const Counter = enum {
+    requests_ok,
+    requests_not_found,
+    requests_storage_error,
+    requests_insufficient_inventory,
+    requests_version_conflict,
+    requests_order_expired,
+    requests_order_not_pending,
+    requests_invalid_code,
+    requests_code_expired,
+};
+
 /// Response status — named results, not generic error buckets.
 /// Each business logic failure gets its own variant (TigerBeetle style).
 /// render.zig maps these to HTML error strings.

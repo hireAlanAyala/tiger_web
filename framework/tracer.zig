@@ -15,90 +15,80 @@
 //!
 const std = @import("std");
 const assert = std.debug.assert;
-const message = @import("message.zig");
-const marks = @import("framework/marks.zig");
+const marks = @import("marks.zig");
 const log = marks.wrap_log(std.log.scoped(.tracer));
 
-/// Timed spans. Each span is a start/stop pair around a phase of request processing.
-pub const Span = enum {
-    prefetch,
-    execute,
-};
-
-const span_count = std.meta.fields(Span).len;
-
-/// Per-operation timing aggregate — min/max/sum/count.
-/// Reset after each emission.
-pub const OperationTiming = struct {
-    duration_min_ns: u64,
-    duration_max_ns: u64,
-    duration_sum_ns: u64,
-    count: u64,
-};
-
-/// Array size: one slot per possible Operation integer value.
-const operation_slots = blk: {
-    var max: u8 = 0;
-    for (std.meta.fields(message.Operation)) |f| {
-        if (f.value > max) max = f.value;
-    }
-    break :blk @as(usize, max) + 1;
-};
-
-/// Gauges — point-in-time values, last-set wins. Pushed by server at emission time.
-pub const Gauge = enum {
-    connections_active,
-    connections_receiving,
-    connections_ready,
-    connections_sending,
-};
-
-const gauge_count = std.meta.fields(Gauge).len;
-
-/// Counters — cumulative per-interval, saturating add. Called per-event.
-pub const Counter = enum {
-    requests_ok,
-    requests_not_found,
-    requests_storage_error,
-    requests_insufficient_inventory,
-    requests_version_conflict,
-    requests_order_expired,
-    requests_order_not_pending,
-    requests_invalid_code,
-    requests_code_expired,
-};
-
-const counter_count = std.meta.fields(Counter).len;
-
-/// Adaptive time unit threshold — below 5ms show microseconds, above show milliseconds.
-/// Same threshold as TigerBeetle's us_log_threshold_ns.
-const duration_threshold_ns = 5 * std.time.ns_per_ms;
-
-const Instant = std.time.Instant;
-
-timings: [span_count][operation_slots]?OperationTiming,
-started: [span_count]?Instant,
-/// Last completed duration per span — for trace logging the current request.
-last_duration_ns: [span_count]u64,
-gauges: [gauge_count]?u64,
-counters: [counter_count]u64,
-log_trace: bool,
-
-pub fn init(log_trace: bool) @This() {
-    return .{
-        .timings = [_][operation_slots]?OperationTiming{
-            [_]?OperationTiming{null} ** operation_slots,
-        } ** span_count,
-        .started = [_]?Instant{null} ** span_count,
-        .last_duration_ns = [_]u64{0} ** span_count,
-        .gauges = [_]?u64{null} ** gauge_count,
-        .counters = [_]u64{0} ** counter_count,
-        .log_trace = log_trace,
+pub fn TracerType(comptime Operation: type, comptime Counter: type) type {
+    // Array size: one slot per possible Operation integer value.
+    const operation_slots = blk: {
+        var max: u8 = 0;
+        for (std.meta.fields(Operation)) |f| {
+            if (f.value > max) max = f.value;
+        }
+        break :blk @as(usize, max) + 1;
     };
-}
+
+    const counter_count = std.meta.fields(Counter).len;
+
+    return struct {
+        const Tracer = @This();
+
+        /// Timed spans. Each span is a start/stop pair around a phase of request processing.
+        pub const Span = enum {
+            prefetch,
+            execute,
+        };
+
+        const span_count = std.meta.fields(Span).len;
+
+        /// Per-operation timing aggregate — min/max/sum/count.
+        /// Reset after each emission.
+        pub const OperationTiming = struct {
+            duration_min_ns: u64,
+            duration_max_ns: u64,
+            duration_sum_ns: u64,
+            count: u64,
+        };
+
+        /// Gauges — point-in-time values, last-set wins. Pushed by server at emission time.
+        pub const Gauge = enum {
+            connections_active,
+            connections_receiving,
+            connections_ready,
+            connections_sending,
+        };
+
+        const gauge_count = std.meta.fields(Gauge).len;
+
+        /// Adaptive time unit threshold — below 5ms show microseconds, above show milliseconds.
+        /// Same threshold as TigerBeetle's us_log_threshold_ns.
+        const duration_threshold_ns = 5 * std.time.ns_per_ms;
+
+        const Instant = std.time.Instant;
+
+        timings: [span_count][operation_slots]?OperationTiming,
+        started: [span_count]?Instant,
+        /// Last completed duration per span — for trace logging the current request.
+        last_duration_ns: [span_count]u64,
+        gauges: [gauge_count]?u64,
+        counters: [counter_count]u64,
+        log_trace: bool,
+
+        pub fn init(log_trace: bool) Tracer {
+            return .{
+                .timings = [_][operation_slots]?OperationTiming{
+                    [_]?OperationTiming{null} ** operation_slots,
+                } ** span_count,
+                .started = [_]?Instant{null} ** span_count,
+                .last_duration_ns = [_]u64{0} ** span_count,
+                .gauges = [_]?u64{null} ** gauge_count,
+                .counters = [_]u64{0} ** counter_count,
+                .log_trace = log_trace,
+            };
+        }
 
 /// Mark the beginning of a span. Asserts the span is not already started.
-pub fn start(self: *@This(), span: Span) void {
+pub fn start(self: *Tracer, span: Span) void {
     const slot = @intFromEnum(span);
     assert(self.started[slot] == null);
     self.started[slot] = Instant.now() catch unreachable;
@@ -106,7 +96,7 @@ pub fn start(self: *@This(), span: Span) void {
 
 /// Cancel a started span without recording. Used when prefetch returns
 /// busy — the span never completed, so no timing is recorded.
-pub fn cancel(self: *@This(), span: Span) void {
+pub fn cancel(self: *Tracer, span: Span) void {
     const slot = @intFromEnum(span);
     assert(self.started[slot] != null);
     self.started[slot] = null;
@@ -114,7 +104,7 @@ pub fn cancel(self: *@This(), span: Span) void {
 
 /// Mark the end of a span. Records duration into the per-operation aggregate.
 /// Asserts the span was started.
-pub fn stop(self: *@This(), span: Span, op: message.Operation) void {
+pub fn stop(self: *Tracer, span: Span, op: Operation) void {
     const slot = @intFromEnum(span);
     const start_time = self.started[slot].?;
     self.started[slot] = null;
@@ -126,18 +116,18 @@ pub fn stop(self: *@This(), span: Span, op: message.Operation) void {
 
 /// Set a gauge to a point-in-time value. Last-set wins — only the final value
 /// before emit() is logged. Called by server at emission time, not per-event.
-pub fn gauge(self: *@This(), g: Gauge, value: u64) void {
+pub fn gauge(self: *Tracer, g: Gauge, value: u64) void {
     self.gauges[@intFromEnum(g)] = value;
 }
 
 /// Increment a counter. Cumulative within an emission interval, reset on emit.
 /// Saturating add — counters never overflow.
-pub fn count(self: *@This(), c: Counter, value: u64) void {
+pub fn count(self: *Tracer, c: Counter, value: u64) void {
     self.counters[@intFromEnum(c)] +|= value;
 }
 
 /// Record a duration directly (for callers that manage their own timestamps).
-fn record(self: *@This(), span: Span, op: message.Operation, duration_ns: u64) void {
+fn record(self: *Tracer, span: Span, op: Operation, duration_ns: u64) void {
     const op_slot = @intFromEnum(op);
     const span_slot = @intFromEnum(span);
     if (self.timings[span_slot][op_slot]) |*t| {
@@ -157,11 +147,11 @@ fn record(self: *@This(), span: Span, op: message.Operation, duration_ns: u64) v
 
 /// Emit per-request trace log. Called after both spans complete.
 /// Uses last_duration_ns from the most recent stop() calls.
-pub fn trace_log(self: *@This(), op: message.Operation, status: message.Status, fd: i32) void {
+pub fn trace_log(self: *Tracer, op: Operation, status: anytype, fd: i32) void {
     if (!self.log_trace) return;
 
-    const prefetch_ns = self.last_duration_ns[@intFromEnum(Span.prefetch)];
-    const execute_ns = self.last_duration_ns[@intFromEnum(Span.execute)];
+    const prefetch_ns = self.last_duration_ns[@intFromEnum(TestSpan.prefetch)];
+    const execute_ns = self.last_duration_ns[@intFromEnum(TestSpan.execute)];
     const total_ns = prefetch_ns +| execute_ns;
 
     log.debug("{s}: status={s} prefetch={d}{s} execute={d}{s} total={d}{s} fd={d}", .{
@@ -179,7 +169,7 @@ pub fn trace_log(self: *@This(), op: message.Operation, status: message.Status, 
 
 /// Emit all metrics (gauges, counters, timings) and reset.
 /// Returns true if any metrics were emitted.
-pub fn emit(self: *@This()) bool {
+pub fn emit(self: *Tracer) bool {
     var emitted = false;
 
     // Gauges — point-in-time snapshot, always emitted if set.
@@ -206,7 +196,7 @@ pub fn emit(self: *@This()) bool {
         const span_slot = span_field.value;
         for (&self.timings[span_slot], 0..) |*timing_opt, op_slot| {
             const t = timing_opt.* orelse continue;
-            const op: message.Operation = @enumFromInt(op_slot);
+            const op: Operation = @enumFromInt(op_slot);
             log.info("timing: span={s} op={s} count={d} min={d}us max={d}us avg={d}us", .{
                 span_field.name,
                 @tagName(op),
@@ -234,88 +224,104 @@ fn format_unit(ns: u64) []const u8 {
     return if (ns < duration_threshold_ns) "us" else "ms";
 }
 
+    }; // return struct
+} // TracerType
+
 // =====================================================================
 // Tests
 // =====================================================================
 
+const TestOp = enum(u8) {
+    get_product = 1,
+    create_product = 2,
+};
+
+const TestCounter = enum {
+    requests_ok,
+};
+
+const TestTracer = TracerType(TestOp, TestCounter);
+const TestSpan = TestTracer.Span;
+const TestGauge = TestTracer.Gauge;
+
 test "start/stop records timing" {
-    var tracer = init(false);
+    var tracer = TestTracer.init(false);
     tracer.start(.prefetch);
     tracer.stop(.prefetch, .get_product);
 
-    const slot = @intFromEnum(message.Operation.get_product);
-    const t = tracer.timings[@intFromEnum(Span.prefetch)][slot].?;
+    const slot = @intFromEnum(TestOp.get_product);
+    const t = tracer.timings[@intFromEnum(TestSpan.prefetch)][slot].?;
     try std.testing.expect(t.count == 1);
     try std.testing.expect(t.duration_min_ns == t.duration_max_ns);
 }
 
 test "multiple stops accumulate" {
-    var tracer = init(false);
+    var tracer = TestTracer.init(false);
 
     tracer.start(.execute);
     tracer.stop(.execute, .create_product);
     tracer.start(.execute);
     tracer.stop(.execute, .create_product);
 
-    const slot = @intFromEnum(message.Operation.create_product);
-    const t = tracer.timings[@intFromEnum(Span.execute)][slot].?;
+    const slot = @intFromEnum(TestOp.create_product);
+    const t = tracer.timings[@intFromEnum(TestSpan.execute)][slot].?;
     try std.testing.expect(t.count == 2);
     try std.testing.expect(t.duration_sum_ns >= t.duration_min_ns);
 }
 
 test "emit resets timings" {
-    var tracer = init(false);
+    var tracer = TestTracer.init(false);
     tracer.start(.prefetch);
     tracer.stop(.prefetch, .get_product);
     try std.testing.expect(tracer.emit());
 
-    const slot = @intFromEnum(message.Operation.get_product);
-    try std.testing.expect(tracer.timings[@intFromEnum(Span.prefetch)][slot] == null);
+    const slot = @intFromEnum(TestOp.get_product);
+    try std.testing.expect(tracer.timings[@intFromEnum(TestSpan.prefetch)][slot] == null);
 }
 
 test "emit with no data returns false" {
-    var tracer = init(false);
+    var tracer = TestTracer.init(false);
     try std.testing.expect(!tracer.emit());
 }
 
 test "gauge last-set wins" {
-    var tracer = init(false);
+    var tracer = TestTracer.init(false);
     tracer.gauge(.connections_active, 5);
     tracer.gauge(.connections_active, 3);
-    try std.testing.expectEqual(tracer.gauges[@intFromEnum(Gauge.connections_active)].?, 3);
+    try std.testing.expectEqual(tracer.gauges[@intFromEnum(TestGauge.connections_active)].?, 3);
 }
 
 test "gauge reset after emit" {
-    var tracer = init(false);
+    var tracer = TestTracer.init(false);
     tracer.gauge(.connections_active, 5);
     try std.testing.expect(tracer.emit());
-    try std.testing.expect(tracer.gauges[@intFromEnum(Gauge.connections_active)] == null);
+    try std.testing.expect(tracer.gauges[@intFromEnum(TestGauge.connections_active)] == null);
 }
 
 test "counter accumulates" {
-    var tracer = init(false);
+    var tracer = TestTracer.init(false);
     tracer.count(.requests_ok, 1);
     tracer.count(.requests_ok, 1);
-    try std.testing.expectEqual(tracer.counters[@intFromEnum(Counter.requests_ok)], 2);
+    try std.testing.expectEqual(tracer.counters[@intFromEnum(TestCounter.requests_ok)], 2);
 }
 
 test "counter reset after emit" {
-    var tracer = init(false);
+    var tracer = TestTracer.init(false);
     tracer.count(.requests_ok, 3);
     try std.testing.expect(tracer.emit());
-    try std.testing.expectEqual(tracer.counters[@intFromEnum(Counter.requests_ok)], 0);
+    try std.testing.expectEqual(tracer.counters[@intFromEnum(TestCounter.requests_ok)], 0);
 }
 
 test "separate spans are independent" {
-    var tracer = init(false);
+    var tracer = TestTracer.init(false);
     tracer.start(.prefetch);
     tracer.stop(.prefetch, .get_product);
     tracer.start(.execute);
     tracer.stop(.execute, .get_product);
 
-    const op_slot = @intFromEnum(message.Operation.get_product);
-    try std.testing.expect(tracer.timings[@intFromEnum(Span.prefetch)][op_slot] != null);
-    try std.testing.expect(tracer.timings[@intFromEnum(Span.execute)][op_slot] != null);
-    try std.testing.expectEqual(tracer.timings[@intFromEnum(Span.prefetch)][op_slot].?.count, 1);
-    try std.testing.expectEqual(tracer.timings[@intFromEnum(Span.execute)][op_slot].?.count, 1);
+    const op_slot = @intFromEnum(TestOp.get_product);
+    try std.testing.expect(tracer.timings[@intFromEnum(TestSpan.prefetch)][op_slot] != null);
+    try std.testing.expect(tracer.timings[@intFromEnum(TestSpan.execute)][op_slot] != null);
+    try std.testing.expectEqual(tracer.timings[@intFromEnum(TestSpan.prefetch)][op_slot].?.count, 1);
+    try std.testing.expectEqual(tracer.timings[@intFromEnum(TestSpan.execute)][op_slot].?.count, 1);
 }
