@@ -212,35 +212,13 @@ pub fn ServerType(comptime IO: type, comptime Storage: type) type {
                     }
                 }
 
-                // SSE mutations: defer rendering to process_followups for
-                // dashboard refresh. Login/auth mutations are self-contained —
-                // their response carries everything needed for rendering.
-                const needs_followup = conn.is_datastar_request and
-                    msg.operation.is_mutation() and
-                    msg.operation != .logout and
-                    resp.result != .login;
-                if (needs_followup) {
-                    log.mark.debug("SSE mutation: deferring to follow-up fd={d}", .{conn.fd});
-                    conn.followup = .{
-                        .operation = msg.operation,
-                        .status = resp.status,
-                        .user_id = resp.user_id,
-                        .kind = resp.kind,
-                        .session_action = resp.session_action,
-                        .is_new_visitor = resp.is_new_visitor,
-                    };
-                    continue;
-                }
-
-                // Log login codes at the boundary (dev mode — no email sending yet).
-                if (resp.result == .login) {
-                    const login_result = resp.result.login;
-                    const zero_code: [message.code_length]u8 = .{0} ** message.code_length;
-                    if (!std.mem.eql(u8, &login_result.code, &zero_code)) {
-                        log.info("login code for {s}: {s}", .{
-                            login_result.email[0..login_result.email_len],
-                            login_result.code,
-                        });
+                // SSE mutations that need a dashboard refresh carry a followup
+                // on the response. The state machine decides — server just reads it.
+                if (conn.is_datastar_request) {
+                    if (resp.followup) |_| {
+                        log.mark.debug("SSE mutation: deferring to follow-up fd={d}", .{conn.fd});
+                        conn.followup = resp.followup;
+                        continue;
                     }
                 }
 

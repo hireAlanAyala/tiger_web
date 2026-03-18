@@ -310,6 +310,21 @@ pub fn StateMachineType(comptime Storage: type) type {
 
             self.apply_auth_response(&resp);
 
+            // SSE followup: mutations that modify data need a dashboard refresh.
+            // Self-contained mutations (login, logout) render their own response
+            // and leave followup null. The server reads resp.followup without
+            // inspecting which operation ran.
+            if (msg.operation.needs_followup() and resp.followup == null) {
+                resp.followup = .{
+                    .operation = msg.operation,
+                    .status = resp.status,
+                    .user_id = resp.user_id,
+                    .kind = resp.kind,
+                    .session_action = resp.session_action,
+                    .is_new_visitor = resp.is_new_visitor,
+                };
+            }
+
             // Cross-cutting: count every response status. No handler opts
             // in or out — the commit loop guarantees it.
             self.tracer.count(switch (resp.status) {

@@ -106,3 +106,16 @@ Ticket 7: Missing replay test coverage
   Fuzz + sim add the most to storage.zig (+18%) and codec.zig (+16%).
 
 - stressor (multi tenant user)
+
+---
+Inspect later: framework split decisions
+
+  1. Login code logging removed from server.zig. Currently no way to see login codes
+     without querying the DB directly or using tiger-replay inspect. Need a worker
+     that polls for pending login codes and sends them (email service or logs).
+     Schema needs a "sent" flag on login_codes table, plus a list endpoint.
+
+  2. Followup decision moved from server.zig into state_machine commit().
+     Operation.needs_followup() is an exhaustive switch — adding a new mutation
+     forces a decision. Verify this stays correct as new operations are added.
+     The server now reads resp.followup without inspecting which operation ran.

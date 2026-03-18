@@ -139,6 +139,28 @@ pub const Operation = enum(u8) {
         };
     }
 
+    /// Whether this mutation needs an SSE dashboard refresh after commit.
+    /// Self-contained mutations (login, logout) render their own response.
+    /// All other mutations need the server to re-fetch the dashboard.
+    pub fn needs_followup(op: Operation) bool {
+        return switch (op) {
+            .create_product, .update_product, .delete_product,
+            .create_collection, .delete_collection,
+            .add_collection_member, .remove_collection_member,
+            .create_order, .complete_order, .cancel_order,
+            .transfer_inventory,
+            => true,
+            .root,
+            .page_load_dashboard, .page_load_login,
+            .logout,
+            .list_products, .list_collections, .list_orders,
+            .get_product, .get_collection, .get_order,
+            .get_product_inventory, .search_products,
+            .request_login_code, .verify_login_code,
+            => false,
+        };
+    }
+
     comptime {
         // Both partitions are non-empty — if either is zero, the
         // classifier is vacuous and something was mis-categorized.
@@ -781,6 +803,10 @@ pub const MessageResponse = struct {
     is_authenticated: bool = false,
     kind: SessionKind = .anonymous,
     is_new_visitor: bool = false,
+    /// SSE follow-up: when set, the server defers rendering and runs a
+    /// dashboard refresh next tick. The state machine decides — the server
+    /// reads the field without inspecting which operation ran.
+    followup: ?FollowupState = null,
 
     pub const SessionKind = enum(u8) {
         anonymous = 0,
