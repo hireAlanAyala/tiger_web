@@ -121,21 +121,14 @@ Inspect later: framework split decisions
      The server now reads resp.followup without inspecting which operation ran.
 
 ---
-Ticket 8: Defer writes to end of tick (pure execute)
+Ticket 8: Defer writes to end of tick (pure execute) — DONE
 
-  Execute handlers currently call storage.put/delete/insert during execute().
-  This means operations processed earlier in the tick are visible to later
-  operations in the same tick — an accidental ordering dependency.
+  Execute handlers return ExecuteResult (response + writes[]). The dispatch
+  loop applies writes via apply_write(). Handlers never call storage directly.
+  Write union covers put/update for all entity types. No deletes — soft-delete
+  via flags, expiry via timestamps.
 
-  Change execute() to return {response, writes[]} instead of calling storage
-  directly. The framework collects all writes from all operations in the tick,
-  then applies them in one batch after all executes complete.
-
-  This fixes intra-tick visibility (operations see tick-start state, not each
-  other's writes) and enables the sidecar execute model (see design/012).
-
-  Write failures after execute: framework overrides the response with
-  storage_error and rolls back the transaction. Same pattern as prefetch
-  errors today.
-
-  Do this before implementing the sidecar — it's the same change.
+  Remaining: intra-tick visibility not yet fixed. Writes are applied per-operation
+  (after each execute), not batched at end of tick. Operations later in the tick
+  still see earlier operations' writes. Fix this when it matters — the architecture
+  supports it, just move the apply loop outside the connection for-loop.
