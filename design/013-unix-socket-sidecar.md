@@ -2,47 +2,121 @@
 
 ## Prerequisite
 
-Ticket 8: pure execute. Execute handlers return `{response, writes[]}`,
-dispatch loop applies writes. All in Zig, all tests passing. No sidecar
-code until this is done.
+Pure execute (Ticket 8): done. Execute handlers return
+`{response, writes[]}`, dispatch loop applies writes. Handlers
+never call storage directly.
 
 ## Overview
 
-The Zig framework connects to a sidecar process over a unix domain
-socket. The sidecar runs the execute phase in any language. The
-framework owns everything else: HTTP, IO, WAL, auth, storage reads,
-storage writes, rendering.
+The sidecar handles all user-space logic: translate (routing),
+execute (business logic), and render (HTML). The framework owns
+everything else: HTTP parsing, connections, IO, storage, WAL, auth
+cookies, SSE framing.
 
-Default is Zig-native (no socket). Sidecar is opt-in via CLI flag:
+Default is Zig-native. Sidecar is opt-in:
 `--sidecar /tmp/tiger-web.sock`
+
+The sidecar code mirrors the Zig app 1:1 — same files, same
+functions, same explicit switches. No DSL, no magic. See design/012
+for why.
+
+## Pipeline: two round trips
+
+Storage (SQLite) lives in Zig. Prefetch must happen in Zig. This
+creates a natural two-phase protocol per request:
+
+```
+                    Zig (framework)              Sidecar
+                    ───────────────              ───────
+HTTP arrives    →   parse HTTP
+                    send {method, path, body} →  translate()
+                    ← {operation, id, body}      (or null = unmapped)
+
+                    prefetch from storage
+
+                    send {op, id, body, cache} → execute() + render()
+                    ← {status, writes[], html}
+
+                    validate response
+                    apply_writes to storage
+                    wrap HTML with HTTP headers
+                    set cookie, WAL append
+                    send to client
+```
+
+Two round trips: ~40-100μs total. SQLite write is ~50-100μs.
+The sidecar hop is noise — storage is the bottleneck.
 
 ## Protocol
 
-Fixed-size binary. No JSON, no framing negotiation. One request, one
-response, synchronous. The Zig server is single-threaded — one
-connection to the sidecar is enough.
+Fixed-size binary. No JSON, no framing. Synchronous — one request,
+one response. Single connection (server is single-threaded).
+
+### Round trip 1: translate
 
 **Request (Zig → sidecar):**
 ```
-operation:      u8
-id:             u128
-body:           [body_max]u8
-prefetch_cache: [cache_size]u8   (serialized, fixed layout)
+tag:    u8 = 0x01 (translate)
+method: u8 (GET=1, POST=2, PUT=3, DELETE=4)
+path:   [path_max]u8
+path_len: u16
+body:   [body_max]u8
+body_len: u16
 ```
+
+**Response (sidecar → Zig):**
+```
+found:     u8 (0 = unmapped, 1 = mapped)
+operation: u8
+id:        u128
+body:      [body_max]u8
+```
+
+If `found == 0`, the framework closes the connection (unmapped
+request). Same as `codec.translate` returning null today.
+
+### Round trip 2: execute + render
+
+**Request (Zig → sidecar):**
+```
+tag:        u8 = 0x02 (execute_render)
+operation:  u8
+id:         u128
+body:       [body_max]u8
+cache:      [cache_max]u8 (prefetch cache, serialized)
+is_sse:     u8 (0 = full page, 1 = SSE fragment)
+```
+
+The prefetch cache is flattened into a fixed buffer. Each optional
+field has a 1-byte presence flag (0 = null, 1 = present) followed
+by the value bytes if present. Lists have a length prefix (u16)
+followed by N items. Layout is deterministic — derived from the
+cache struct definition at comptime.
 
 **Response (sidecar → Zig):**
 ```
 status:     u8
 result:     [result_max]u8
 writes_len: u8
-writes:     [writes_max]Write
+writes:     [writes_max * write_size]u8 (Write union, serialized)
+html_len:   u32
+html:       [html_max]u8
 ```
 
-The Message body and all domain types are extern structs with
-no_padding — byte-copyable with known field offsets. The prefetch
-cache is flattened into a fixed-size buffer with presence flags
-for optional fields (1 byte per optional: 0 = null, 1 = present,
-followed by the value bytes).
+The framework reads `html[0..html_len]` and wraps it with HTTP
+headers (Content-Type, Content-Length, Connection, Set-Cookie).
+The sidecar produces the HTML body; the framework owns HTTP framing.
+
+### SSE followup
+
+The server detects `resp.followup != null` on the execute response.
+Next tick, it sends a second execute_render for the refresh operation
+(page_load_dashboard). The sidecar renders the dashboard HTML +
+mutation status fragment. Same protocol, same round trip.
+
+The followup state (operation, status, user_id, kind, session_action,
+is_new_visitor) is sent as part of the execute_render request so the
+sidecar can render error fragments targeting the right panel.
 
 ## Comptime-generated validation
 
@@ -50,88 +124,130 @@ The Zig compiler knows the exact byte layout of every type at
 comptime via `@typeInfo`. The validator is generated from the same
 type definitions the Zig handlers use:
 
-- Status byte must be a valid `Status` enum value
+- Status byte must be a valid enum value
 - Each write must target a valid table index
 - Each write key must be non-zero
-- Response size must match `@sizeOf(ExecuteResult)`
+- writes_len must be <= writes_max
+- html_len must be <= html_max
 - Field offsets match the extern struct layout
 
-The validator is always in sync with the types because it IS the
-types — generated from comptime `@typeInfo`. Change a field in Zig,
-the validator changes automatically. No manual protocol versioning.
+Change a field in Zig, the validator changes automatically. No
+manual protocol versioning. A structurally correct TypeScript
+object with wrong serialization offsets is caught at the framework
+boundary with an exact error message.
 
-This is stronger than a sidecar-language type check: TypeScript
-checks structural shape, the Zig validator checks byte-level layout.
-A structurally correct TypeScript object with wrong serialization
-offsets is caught. The error message says exactly which field or
-value is wrong.
+## Zig side implementation
 
-## Zig side
+### Socket client (`sidecar.zig`)
 
-**Socket client.** Connect at startup if `--sidecar` flag is set.
-Reconnect on failure with backoff.
+New file in the app (not framework — the protocol is domain-specific).
+Provides the same interface as the direct Zig modules:
 
-**Sidecar execute path.** In `commit()`, if sidecar is connected:
-serialize inputs → send → recv → validate → apply_writes. If not
-connected or call fails: return storage_error (same handling as
-SQLite write failure).
+```
+pub fn translate(method, path, body) ?Message
+pub fn execute_render(op, id, body, cache, is_sse) SidecarResponse
+```
 
-**Fallback.** No automatic fallback to Zig-native. The sidecar is
-either the execute path or it isn't. Mixing would break determinism —
-some operations through Zig, some through the sidecar, different
-results for the same input. If the sidecar is down, requests fail
-until it's back. The operator restarts it, same as restarting any
-other dependency.
+Internally: connect to unix socket at startup. send/recv per call.
+Reconnect with backoff on failure.
 
-**Spot-check.** Every N commits, also run the Zig-native execute on
-the same inputs. Compare response + writes byte-for-byte with sidecar
-output. Log divergence as an error. Catches non-determinism from GC,
+### App binding (`app.zig`)
+
+The App binding switches between Zig-native and sidecar based on
+a comptime or init-time flag:
+
+```
+// Zig-native (current)
+pub fn translate(...) ?Message { return codec.translate(...); }
+
+// Sidecar
+pub fn translate(...) ?Message { return sidecar.translate(...); }
+```
+
+The framework never changes. The App implementation decides.
+
+### No fallback
+
+The sidecar is either the execute path or it isn't. No mixing.
+If the sidecar is down, requests fail with storage_error until
+it's back. Mixing Zig-native and sidecar would break determinism —
+different code paths for the same input.
+
+### Spot-check
+
+Every N commits, run both Zig-native execute AND sidecar execute
+on the same inputs. Compare response + writes byte-for-byte.
+Log divergence as an error. Catches non-determinism from GC,
 HashMap ordering, runtime version changes.
 
-## TypeScript sidecar
+## TypeScript sidecar implementation
 
-**Socket server.** Node.js `net.createServer` on the unix socket
-path. Single connection. Read binary request, call user handler,
-write binary response.
+### Socket server (`sidecar.ts`)
+
+Node.js `net.createServer` on the unix socket path. Single
+connection. Reads binary requests, dispatches to user handlers,
+writes binary responses.
+
+Generated — the user doesn't write this. `zig build codegen`
+produces it from the protocol definition.
 
 **Startup:** `node sidecar.js --socket /tmp/tiger-web.sock`
 
-**User code structure mirrors Zig 1:1.** Same files, same functions,
-same explicit switches. No DSL, no inferred prefetch, no magic. The
-Zig API is the abstraction — TypeScript is just another syntax for it.
+### User code
 
-## Type generation
+The developer writes three files that mirror the Zig app 1:1:
 
-`zig build codegen` reads the app's Zig types at comptime and emits
-TypeScript files. Same comptime introspection as `graph_comptime.zig`.
+**`codec.ts`** — translate function with explicit routing:
+```typescript
+export function translate(method: string, path: string, body: string): Message | null {
+  // same explicit routing as codec.zig
+}
+```
 
-**Generated files:**
-- `types.generated.ts` — domain structs as TypeScript interfaces
+**`handlers.ts`** — execute functions with explicit switches:
+```typescript
+// [execute] .create_product
+export function createProduct(cache: PrefetchCache, body: Product): ExecuteResult {
+  // same logic as state_machine.zig
+}
+```
+
+**`render.ts`** — HTML rendering with explicit dispatch:
+```typescript
+export function encodeResponse(op: Operation, status: Status, result: any, isSse: boolean): string {
+  // same switch as render.zig
+}
+```
+
+Annotation-based binding (// [execute] .operation) connects
+functions to operations. The build step enforces exhaustiveness —
+missing operation → build error. See design/012 for details.
+
+### Generated files (`zig build codegen`)
+
+Reads Zig types at comptime, emits TypeScript:
+
+- **`types.generated.ts`** — domain structs as TS interfaces
   (Product, Order, Collection, etc.)
-- `protocol.generated.ts` — Operation and Status as string unions,
-  PrefetchCache interface, Write union, ExecuteResult type
-- `serde.generated.ts` — binary ↔ TypeScript serialization functions
+- **`protocol.generated.ts`** — Operation and Status as string
+  unions, PrefetchCache interface, Write union, ExecuteResult type
+- **`serde.generated.ts`** — binary ↔ TypeScript serialization
   (field offsets derived from Zig extern struct layout)
+- **`sidecar.generated.ts`** — socket server, request dispatch,
+  calls user-annotated handlers
 
-The generated types give the TypeScript developer full LSP support:
-autocomplete, hover, go-to-definition, rename. The type imports tell
-the developer what operation a function handles — if it takes
-`OrderRequest`, you know.
+The developer never writes serialization code. The generated serde
+functions handle binary ↔ TypeScript object conversion. The
+generated sidecar server handles the socket protocol. The developer
+writes business logic and HTML.
 
 ## Dynamic language support
 
 The unix socket doesn't care what's on the other end. Python, Ruby,
 Lua — anything that reads and writes the binary protocol works.
-
-What you lose without TypeScript's generated types:
-- No compile-time type checking (field typos, wrong shapes)
-- No IDE autocomplete on domain types
-- Codegen for each language must be built separately
-
-What you keep regardless of language:
-- Comptime-generated Zig validation catches every invalid response
-- Spot-checks catch non-determinism
-- WAL replay works (framework-only, sidecar not needed)
+Without generated types: no compile-time checking, no IDE
+autocomplete. The framework's runtime validation catches everything
+regardless.
 
 | Sidecar language | Wrong return type caught by       |
 |------------------|-----------------------------------|
@@ -139,21 +255,108 @@ What you keep regardless of language:
 | TypeScript       | TS compiler via generated types   |
 | Python/Ruby/Lua  | Framework validation, first call  |
 
-## Build order
+## Implementation plan
 
-```
-1. Ticket 8: pure execute           ← no sidecar, Zig only
-2. Protocol design                   ← nail down binary format
-3. Type generation (zig build codegen)
-4. TypeScript sidecar                ← socket server + serde + handlers
-5. Zig socket client + validation    ← connect, send, recv, validate
-6. Spot-check                        ← determinism verification
-```
+### Step 1: Type generation (`zig build codegen`)
 
-Each step is independently testable. Type generation is useful on
-its own (documentation, external tooling). The sidecar can be tested
-by sending manual binary requests. The Zig socket client can be
-tested with a mock sidecar.
+Build a comptime tool (like `graph_comptime.zig`) that walks the
+app's domain types and emits TypeScript files. Test by generating
+types and compiling them with `tsc`.
+
+Independently useful — generated types serve as documentation and
+enable external tooling even without the sidecar.
+
+### Step 2: Serde generation
+
+Extend codegen to emit binary ↔ TypeScript serialization functions.
+For each extern struct: read/write functions that map field offsets
+to object properties. Test with round-trip: TS object → binary →
+TS object, assert equality.
+
+### Step 3: Protocol wire format
+
+Define exact byte layouts for the two round trips. Implement in
+Zig (send/recv helpers) and TypeScript (generated serde). Test with
+a mock: Zig sends a translate request, TypeScript echoes it back,
+Zig validates.
+
+### Step 4: Sidecar socket server (generated)
+
+Generate `sidecar.generated.ts` — the Node.js socket server that
+reads requests, dispatches to user-annotated handlers, writes
+responses. The user never touches this file.
+
+### Step 5: Zig socket client (`sidecar.zig`)
+
+Connect to unix socket. Send translate requests. Send execute_render
+requests. Receive and validate responses. Handle connection failures
+(return storage_error). Test with the TypeScript sidecar from step 4.
+
+### Step 6: App binding switch
+
+Wire `app.zig` to use sidecar.zig when `--sidecar` flag is set.
+Run the full test suite through the sidecar path. All existing
+tests must pass — the sidecar produces the same results as
+Zig-native.
+
+### Step 7: Spot-check
+
+Implement the determinism spot-check in the commit path. Every N
+operations, run both paths, compare byte-for-byte. Test by
+introducing a deliberate non-determinism in a TypeScript handler
+and verifying the spot-check catches it.
+
+### Step 8: Annotation scanner
+
+Build the `zig build codegen` step that scans TypeScript files
+for `// [execute]`, `// [translate]`, `// [render]` annotations.
+Verify exhaustiveness against the Operation enum. Missing operation
+→ build error. Duplicate → build error.
+
+## Zig validation vs TypeScript validation
+
+The Zig framework validates sidecar responses at the byte level using
+comptime-derived knowledge. This catches things TypeScript cannot:
+
+**Byte layout correctness.** TypeScript checks structural shape (`obj.price_cents`
+is a number). Zig checks the byte at offset 48 is a valid u32 encoding.
+A TypeScript object can be structurally correct but serialize to wrong
+byte offsets — Zig catches this, TypeScript cannot.
+
+**Enum value ranges.** TypeScript union types (`"ok" | "not_found"`) are
+erased at runtime — `JSON.stringify` doesn't check. Zig validates the
+status byte against the comptime-known enum values. An invalid status
+byte (e.g., 0 or 255) is caught immediately with the exact value.
+
+**Fixed-size buffer overflow.** Zig knows `html_max`, `writes_max`,
+`body_max` at comptime. If `html_len` exceeds `html_max`, the
+validator rejects before reading. TypeScript has no concept of fixed
+buffer sizes — it allocates dynamically and hopes for the best.
+
+**Write command integrity.** Each write targets a table, a key, and
+a value. Zig validates: table index is in range (comptime-known table
+count), key is non-zero (assertion), value bytes match the table's
+row type layout (comptime `@sizeOf`). TypeScript can check field
+names but not byte-level layout of the serialized value.
+
+**Padding and alignment.** Extern structs have no_padding — every byte
+is accounted for. The validator checks that optional fields have valid
+presence flags (0 or 1, nothing else). Uninitialized or garbage bytes
+in padding positions are impossible in the Zig type system but easy to
+produce from TypeScript serialization bugs.
+
+**Cross-field invariants.** `writes_len` must match the number of
+populated write slots. `name_len` must be <= `name_max`. The items
+in an order write must have non-zero `product_id` and `quantity`.
+These are comptime-derivable from the type definitions and checked
+in the validator. TypeScript relies on the developer to check these
+manually.
+
+**What TypeScript catches that Zig doesn't at this boundary:**
+structural type errors in the developer's handler code (wrong field
+name, wrong argument type). These are caught before the bytes reach
+the socket. The two systems are complementary — TypeScript catches
+errors at write time, Zig catches errors at the protocol boundary.
 
 ## Not in scope
 
@@ -165,8 +368,10 @@ tested with a mock sidecar.
 
 ## Performance
 
-SQLite write (WAL mode): ~50-100μs. Unix socket round trip: ~20-50μs.
-The sidecar hop is noise — storage is the bottleneck. At 50μs per
-call, the framework handles 20,000 ops/second through the sidecar.
-A busy ecommerce site does 50-100 orders per minute. Three orders of
-magnitude of headroom.
+Two round trips per request: ~40-100μs total.
+SQLite write (WAL mode): ~50-100μs.
+The sidecar hop is noise — storage is the bottleneck.
+
+At 50μs per call, 20,000 ops/second through the sidecar.
+A busy ecommerce site does 50-100 orders per minute.
+Three orders of magnitude of headroom.
