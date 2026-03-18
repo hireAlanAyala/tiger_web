@@ -39,3 +39,35 @@ Ticket 1: JSON parser rejects whitespace around colons
 domain logic should assert their inputs and outputs to preserve business logic
 
 - stress test architcture what would happen if x% of the processing was external api calls. would this break determinism
+
+---
+Ticket 3: Replay test "full round-trip" fails — pre-existing
+
+  The replay.zig "replay: full round-trip" test panics with "replay: storage error at op 1: create_product". The test creates products via MemoryStorage, writes them to a WAL, then replays the WAL into a fresh SqliteStorage. The first create_product returns a storage error from SqliteStorage during replay. This failure predates the login feature — it reproduces on a clean main checkout. Likely cause: stale test artifacts, schema mismatch between the WAL entries and the fresh DB, or a SqliteStorage.init issue in the test environment.
+
+  Fix: reproduce with a fresh /tmp path, check if ensure_schema runs correctly on the replay work DB, verify the WAL entries have valid checksums and the correct product body layout.
+
+---
+Ticket 4: Middleware primitive for pluggable auth
+
+  Cookie handling (resolution, header formatting, cookie_action dispatch) is baked into server.zig's process_inbox. The server checks cookie_kind for is_authenticated, formats Set-Cookie/clear-cookie headers, and reads resp.cookie_action. If auth changes (OAuth, API keys, no auth), server.zig needs rewriting.
+
+  A middleware layer between HTTP parsing and the codec would let auth be pluggable:
+  - Pre-codec middleware: resolve identity from request headers (cookies, bearer tokens, API keys)
+  - Post-render middleware: format response headers (Set-Cookie, WWW-Authenticate)
+  - The server stays generic: accept, recv, tick, send
+
+  Not urgent — there's only one auth strategy today. The cookie_action enum and is_authenticated bool are the seam where middleware would plug in. Revisit when a second auth strategy is needed.
+
+---
+Ticket 5: Render-owned refresh() for SSE mutations
+
+  The SSE followup mechanism is baked into server.zig. After every SSE mutation, the server defers rendering, runs a second state machine round-trip (page_load_dashboard), and sends three list fragments. This is a specific rendering choice hard-coded in the framework.
+
+  The render layer should own a refresh() primitive that re-fetches the queries used to build the current page. Dashboard mutations call refresh (re-fetches product/collection/order lists). Login mutations skip it — they return their own fragment. Future pages with different queries get their own refresh logic.
+
+  This replaces the server's followup deferral entirely. The server just renders the response. The render layer decides what to re-fetch, if anything. The needs_dashboard_refresh bool on MessageResponse is the interim seam — replace it when render owns the refresh.
+
+  Requires: render needs access to the state machine (or a callback) to run follow-up queries. The server currently mediates this. Design the boundary carefully — render should request data, not call prefetch/execute directly.
+
+  Interim debt: server.zig's followup condition checks `resp.cookie_action == .none and resp.result != .login` to skip followup for login mutations. This is the server inspecting result types — domain logic in the framework. Once refresh is opt-in, remove this condition and the needs_dashboard_refresh field on MessageResponse (added but unused pending this ticket). Each operation's render path calls refresh explicitly or not.

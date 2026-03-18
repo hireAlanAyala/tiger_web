@@ -21,9 +21,24 @@ const product_capacity = MemoryStorage.product_capacity;
 const collection_capacity = MemoryStorage.collection_capacity;
 const membership_capacity = MemoryStorage.membership_capacity;
 const order_capacity = MemoryStorage.order_capacity;
+const login_code_capacity = MemoryStorage.login_code_capacity;
+const user_capacity = MemoryStorage.user_capacity;
 const id_pool_capacity = gen.id_pool_capacity;
 
 const Membership = struct { collection_id: u128, product_id: u128 };
+
+const AuditorLoginCode = struct {
+    email: [message.email_max]u8,
+    email_len: u8,
+    code: [message.code_length]u8,
+    expires_at: i64,
+};
+
+const AuditorUser = struct {
+    user_id: u128,
+    email: [message.email_max]u8,
+    email_len: u8,
+};
 
 pub const Auditor = struct {
     products: *[product_capacity]?message.Product,
@@ -37,6 +52,9 @@ pub const Auditor = struct {
 
     orders: *[order_capacity]?message.OrderResult,
     order_count: u32,
+
+    login_codes: [login_code_capacity]?AuditorLoginCode,
+    users: [user_capacity]?AuditorUser,
 
     // ID pools for gen_message — bounded sample of known IDs.
     product_ids: [id_pool_capacity]u128,
@@ -65,6 +83,8 @@ pub const Auditor = struct {
             .membership_count = 0,
             .orders = orders,
             .order_count = 0,
+            .login_codes = [_]?AuditorLoginCode{null} ** login_code_capacity,
+            .users = [_]?AuditorUser{null} ** user_capacity,
             .product_ids = undefined,
             .product_id_count = 0,
             .collection_ids = undefined,
@@ -115,6 +135,10 @@ pub const Auditor = struct {
             .list_orders,
             .transfer_inventory,
             .page_load_dashboard,
+            .page_load_login,
+            .request_login_code,
+            .verify_login_code,
+            .logout,
             => false,
         };
     }
@@ -154,6 +178,13 @@ pub const Auditor = struct {
             .list_collections => self.on_list_collections(resp),
             .list_orders => self.on_list_orders(resp),
             .page_load_dashboard => self.on_page_load_dashboard(resp),
+            .page_load_login => assert(resp.status == .ok),
+            .logout => {
+                assert(resp.status == .ok);
+                assert(resp.cookie_action == .clear);
+            },
+            .request_login_code => self.on_request_login_code(msg, resp),
+            .verify_login_code => self.on_verify_login_code(msg, resp),
         }
     }
 
@@ -723,6 +754,151 @@ pub const Auditor = struct {
         for (self.memberships, 0..) |slot, i| {
             if (slot) |m| {
                 if (m.collection_id == collection_id and m.product_id == product_id) return i;
+            }
+        }
+        return null;
+    }
+
+    // =================================================================
+    // Login handlers
+    // =================================================================
+
+    fn on_request_login_code(self: *Auditor, msg: message.Message, resp: message.MessageResponse) void {
+        assert(resp.status == .ok);
+        assert(resp.cookie_action == .none);
+
+        const result = resp.result.login;
+        const event = msg.body_as(message.LoginCodeRequest);
+
+        // Result email matches request email.
+        assert(result.email_len == event.email_len);
+        assert(std.mem.eql(u8, result.email[0..result.email_len], event.email[0..event.email_len]));
+
+        // Code is non-zero (all digits).
+        const zero_code: [message.code_length]u8 = .{0} ** message.code_length;
+        assert(!std.mem.eql(u8, &result.code, &zero_code));
+        for (result.code) |c| {
+            assert(c >= '0' and c <= '9');
+        }
+
+        // user_id must be 0 for code request (no authentication yet).
+        assert(result.user_id == 0);
+
+        // Store in model — overwrite any existing code for this email.
+        const email = event.email[0..event.email_len];
+        for (&self.login_codes) |*slot| {
+            if (slot.*) |*existing| {
+                if (existing.email_len == email.len and
+                    std.mem.eql(u8, existing.email[0..existing.email_len], email))
+                {
+                    existing.code = result.code;
+                    existing.expires_at = std.math.maxInt(i64); // auditor doesn't track time
+                    return;
+                }
+            }
+        }
+        for (&self.login_codes) |*slot| {
+            if (slot.* == null) {
+                slot.* = .{
+                    .email = event.email,
+                    .email_len = event.email_len,
+                    .code = result.code,
+                    .expires_at = std.math.maxInt(i64),
+                };
+                return;
+            }
+        }
+        // Login code capacity exceeded — not a bug, just a test limit.
+    }
+
+    fn on_verify_login_code(self: *Auditor, msg: message.Message, resp: message.MessageResponse) void {
+        const event = msg.body_as(message.LoginVerification);
+        const email = event.email[0..event.email_len];
+
+        // Find stored code for this email.
+        const stored = self.find_login_code(email);
+
+        if (stored == null) {
+            // No code stored → must be invalid_code.
+            assert(resp.status == .invalid_code);
+            return;
+        }
+
+        if (!std.mem.eql(u8, &stored.?.code, &event.code)) {
+            // Wrong code → must be invalid_code.
+            assert(resp.status == .invalid_code);
+            return;
+        }
+
+        // Note: we don't track time expiry in the auditor (the fuzzer
+        // sets sm.now but the auditor doesn't model it). Code expired
+        // responses are accepted without assertion.
+        if (resp.status == .code_expired) return;
+
+        // Correct code → must succeed.
+        assert(resp.status == .ok);
+        assert(resp.cookie_action == .set_authenticated);
+
+        const result = resp.result.login;
+        assert(result.user_id != 0);
+        assert(result.email_len == event.email_len);
+        assert(std.mem.eql(u8, result.email[0..result.email_len], email));
+
+        // Code consumed — remove from model.
+        self.remove_login_code(email);
+
+        // Validate user_id consistency: same email → same user_id.
+        if (self.find_user_by_email(email)) |existing_user| {
+            assert(result.user_id == existing_user.user_id);
+        } else {
+            // New user — store in model.
+            for (&self.users) |*slot| {
+                if (slot.* == null) {
+                    slot.* = .{
+                        .user_id = result.user_id,
+                        .email = event.email,
+                        .email_len = event.email_len,
+                    };
+                    break;
+                }
+            }
+        }
+    }
+
+    fn find_login_code(self: *const Auditor, email: []const u8) ?AuditorLoginCode {
+        for (self.login_codes) |slot| {
+            if (slot) |entry| {
+                if (entry.email_len == email.len and
+                    std.mem.eql(u8, entry.email[0..entry.email_len], email))
+                {
+                    return entry;
+                }
+            }
+        }
+        return null;
+    }
+
+    fn remove_login_code(self: *Auditor, email: []const u8) void {
+        for (&self.login_codes) |*slot| {
+            if (slot.*) |entry| {
+                if (entry.email_len == email.len and
+                    std.mem.eql(u8, entry.email[0..entry.email_len], email))
+                {
+                    slot.* = null;
+                    return;
+                }
+            }
+        }
+    }
+
+    fn find_user_by_email(self: *const Auditor, email: []const u8) ?AuditorUser {
+        for (self.users) |slot| {
+            if (slot) |entry| {
+                if (entry.email_len == email.len and
+                    std.mem.eql(u8, entry.email[0..entry.email_len], email))
+                {
+                    return entry;
+                }
             }
         }
         return null;

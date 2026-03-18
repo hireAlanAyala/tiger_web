@@ -40,7 +40,7 @@ pub fn main(allocator: std.mem.Allocator, args: FuzzArgs) !void {
         var cookie_hdr_buf: [auth.set_cookie_header_max]u8 = undefined;
         const set_cookie_header: ?[]const u8 = if (prng.chance(PRNG.ratio(1, 5))) blk: {
             const uid = prng.int(u128) | 1;
-            break :blk auth.format_set_cookie_header(&cookie_hdr_buf, uid, test_key);
+            break :blk auth.format_set_cookie_header(&cookie_hdr_buf, uid, .anonymous, test_key);
         } else null;
 
         const gen = gen_response(&prng);
@@ -82,7 +82,7 @@ pub fn main(allocator: std.mem.Allocator, args: FuzzArgs) !void {
         }
 
         const user_id = prng.int(u128) | 1;
-        const resp = render.encode_response(&send_buf, gen.operation, gen.resp, gen.is_datastar_request, set_cookie_header, user_id);
+        const resp = render.encode_response(&send_buf, gen.operation, gen.resp, gen.is_datastar_request, set_cookie_header, user_id, true);
 
         // Core invariants.
         assert(resp.len > 0);
@@ -178,6 +178,10 @@ fn gen_response(prng: *PRNG) GenResult {
         .create_order,
         .complete_order,
         .cancel_order,
+        .page_load_login,
+        .request_login_code,
+        .verify_login_code,
+        .logout,
     };
     const operation = all_ops[prng.int_inclusive(usize, all_ops.len - 1)];
 
@@ -251,9 +255,24 @@ fn gen_response(prng: *PRNG) GenResult {
         },
         .delete_product, .delete_collection,
         .add_collection_member, .remove_collection_member,
+        .page_load_login, .logout,
         => .{
             .status = .ok,
             .result = .{ .empty = {} },
+        },
+        .request_login_code, .verify_login_code => .{
+            .status = .ok,
+            .result = .{ .login = .{
+                .user_id = prng.int(u128),
+                .email = blk: {
+                    var e: [message.email_max]u8 = undefined;
+                    @memset(&e, 0);
+                    @memcpy(e[0..9], "t@est.com");
+                    break :blk e;
+                },
+                .code = "123456".*,
+                .email_len = 9,
+            } },
         },
     };
 

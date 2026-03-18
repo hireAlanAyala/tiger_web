@@ -612,7 +612,7 @@ fn replay(args: ReplayArgs) u64 {
     };
     defer storage.deinit();
 
-    var sm = StateMachine.init(&storage, args.trace);
+    var sm = StateMachine.init(&storage, args.trace, 0);
 
     // Open WAL and verify root.
     const fd = open_wal(args.path);
@@ -823,6 +823,10 @@ fn entity_id(entry: *const Message) u128 {
         .list_orders,
         .search_products,
         .page_load_dashboard,
+        .page_load_login,
+        .request_login_code,
+        .verify_login_code,
+        .logout,
         => entry.id,
     };
 }
@@ -1183,7 +1187,7 @@ test "replay: full round-trip" {
         defer mem_storage.deinit(std.heap.page_allocator);
 
         const MemSM = state_machine.StateMachineType(state_machine.MemoryStorage);
-        var sm = MemSM.init(&mem_storage, false);
+        var sm = MemSM.init(&mem_storage, false, 0);
 
         var timestamp: i64 = 1_700_000_000;
         for (products) |prod| {
@@ -1220,7 +1224,7 @@ test "replay: full round-trip" {
     // Phase 3: Verify the replayed database has the correct state.
     var verify_storage = try SqliteStorage.init(replay_work_path);
     defer verify_storage.deinit();
-    var verify_sm = StateMachine.init(&verify_storage, false);
+    var verify_sm = StateMachine.init(&verify_storage, false, 0);
 
     // Read back each product.
     for (products) |prod| {
@@ -1253,7 +1257,7 @@ test "replay: stop-at limits entries" {
         defer mem_storage.deinit(std.heap.page_allocator);
 
         const MemSM = state_machine.StateMachineType(state_machine.MemoryStorage);
-        var sm = MemSM.init(&mem_storage, false);
+        var sm = MemSM.init(&mem_storage, false, 0);
 
         var timestamp: i64 = 1_700_000_000;
         for (1..4) |i| {
@@ -1291,7 +1295,7 @@ test "replay: stop-at limits entries" {
     // Verify: products 1 and 2 exist, product 3 does not.
     var verify_storage = try SqliteStorage.init(replay_work_path);
     defer verify_storage.deinit();
-    var verify_sm = StateMachine.init(&verify_storage, false);
+    var verify_sm = StateMachine.init(&verify_storage, false, 0);
 
     for ([_]u128{ 1, 2 }) |id| {
         verify_sm.set_time(1_700_000_000);

@@ -70,7 +70,7 @@ pub fn main(allocator: std.mem.Allocator, args: FuzzArgs) !void {
         events_max,
     });
 
-    var sm = StateMachine.init(&storage, false);
+    var sm = StateMachine.init(&storage, false, seed);
     sm.now = 1_700_000_000;
 
     // Auditor: independent reference model that validates every response.
@@ -268,6 +268,9 @@ pub fn gen_message(prng: *PRNG, operation: message.Operation, pools: IdPools) ?m
             break :blk M.init(.remove_collection_member, pools.collection_ids[prng.int_inclusive(usize, pools.collection_ids.len - 1)], user_id, pools.product_ids[prng.int_inclusive(usize, pools.product_ids.len - 1)]);
         },
         .page_load_dashboard => M.init(.page_load_dashboard, 0, user_id, {}),
+        .page_load_login, .logout => M.init(operation, 0, user_id, {}),
+        .request_login_code => M.init(.request_login_code, 0, user_id, gen_login_code_request(prng)),
+        .verify_login_code => M.init(.verify_login_code, 0, user_id, gen_login_verification(prng)),
     };
 }
 
@@ -416,8 +419,35 @@ pub fn gen_random_message(prng: *PRNG, operation: message.Operation) message.Mes
             prng.fill(&lp.name_prefix);
             break :blk lp;
         }),
+        .login_request => M.init(operation, id, user_id, gen_login_code_request(prng)),
+        .login_verify => M.init(operation, id, user_id, gen_login_verification(prng)),
         .none => M.init(operation, id, user_id, {}),
     };
+}
+
+fn gen_login_code_request(prng: *PRNG) message.LoginCodeRequest {
+    var ev = std.mem.zeroes(message.LoginCodeRequest);
+    const email_len = prng.range_inclusive(u8, 5, 32);
+    ev.email_len = email_len;
+    for (ev.email[0..email_len]) |*byte| {
+        byte.* = 'a' + @as(u8, @intCast(prng.int(u8) % 26));
+    }
+    if (email_len > 3) ev.email[email_len / 2] = '@';
+    return ev;
+}
+
+fn gen_login_verification(prng: *PRNG) message.LoginVerification {
+    var ev = std.mem.zeroes(message.LoginVerification);
+    const email_len = prng.range_inclusive(u8, 5, 32);
+    ev.email_len = email_len;
+    for (ev.email[0..email_len]) |*byte| {
+        byte.* = 'a' + @as(u8, @intCast(prng.int(u8) % 26));
+    }
+    if (email_len > 3) ev.email[email_len / 2] = '@';
+    for (&ev.code) |*c| {
+        c.* = '0' + @as(u8, @intCast(prng.int(u8) % 10));
+    }
+    return ev;
 }
 
 /// Fill buf with random UTF-8 text between min_len and max_len bytes.

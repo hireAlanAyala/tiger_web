@@ -39,9 +39,9 @@ pub fn main(allocator: std.mem.Allocator, args: FuzzArgs) !void {
     var sql_storage = try SqliteStorage.init(":memory:");
     defer sql_storage.deinit();
 
-    var mem_sm = MemSM.init(&mem_storage, false);
+    var mem_sm = MemSM.init(&mem_storage, false, seed);
     mem_sm.now = 1_700_000_000;
-    var sql_sm = SqlSM.init(&sql_storage, false);
+    var sql_sm = SqlSM.init(&sql_storage, false, seed);
     sql_sm.now = 1_700_000_000;
 
     // Auditor: third independent reference model — pure-logic state
@@ -138,6 +138,12 @@ fn assert_response_equal(
             assert_product_list_equal(&md.products, &sd.products, event_i, operation);
             assert_collection_list_equal(&md.collections, &sd.collections, event_i, operation);
             assert_order_list_equal(&md.orders, &sd.orders, event_i, operation);
+        },
+        .login => |ml| {
+            const sl = sql.result.login;
+            if (ml.user_id != sl.user_id) {
+                std.debug.panic("login user_id mismatch at event {}", .{event_i});
+            }
         },
     }
 }
