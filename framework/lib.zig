@@ -39,4 +39,5 @@ pub const checksum = @import("checksum.zig");
 pub const marks = @import("marks.zig");
 pub const prng = @import("prng.zig");
 pub const flags = @import("flags.zig");
+pub const parse = @import("parse.zig");
 // bench.zig requires build-time bench_options — import directly, not through the module.

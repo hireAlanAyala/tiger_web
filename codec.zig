@@ -1,8 +1,10 @@
 const std = @import("std");
 const assert = std.debug.assert;
-const stdx = @import("tiger_framework").stdx;
+const fw = @import("tiger_framework");
+const stdx = fw.stdx;
+const parse = fw.parse;
 const message = @import("message.zig");
-const http = @import("tiger_framework").http;
+const http = fw.http;
 
 const log = std.log.scoped(.codec);
 
@@ -40,10 +42,10 @@ pub fn translate(method: http.Method, raw_path: []const u8, body: []const u8) ?m
     const list_params = parse_list_params(query_string);
 
     // Split path into up to 4 segments: /resource/:id/sub/:sub_id
-    const segments = split_path(path_clean) orelse return null;
+    const segments = parse.split_path(path_clean) orelse return null;
 
     // Products default to active_only when ?active is not specified.
-    const has_active_param = query_param(query_string, "active") != null;
+    const has_active_param = parse.query_param(query_string, "active") != null;
 
     // Match resource and resolve to flat operation.
     return if (std.mem.eql(u8, segments.collection, "products"))
@@ -63,56 +65,14 @@ fn reject(comptime reason: []const u8) ?message.Message {
     return null;
 }
 
-const PathSegments = struct {
-    collection: []const u8,
-    id: u128,
-    has_id: bool,
-    sub_resource: []const u8,
-    sub_id: u128,
-    has_sub_id: bool,
-};
-
-/// Split a path into up to 4 segments. Returns null if any UUID segment
-/// is present but fails to parse.
-fn split_path(path: []const u8) ?PathSegments {
-    // Segment 1: collection name.
-    const s1 = std.mem.indexOf(u8, path, "/");
-    const collection = if (s1) |s| path[0..s] else path;
-    const rest1 = if (s1) |s| path[s + 1 ..] else "";
-
-    // Segment 2: primary ID.
-    const s2 = if (rest1.len > 0) std.mem.indexOf(u8, rest1, "/") else null;
-    const id_str = if (s2) |s| rest1[0..s] else rest1;
-    const rest2 = if (s2) |s| rest1[s + 1 ..] else "";
-
-    // Segment 3: sub-resource name.
-    const s3 = if (rest2.len > 0) std.mem.indexOf(u8, rest2, "/") else null;
-    const sub_resource = if (s3) |s| rest2[0..s] else rest2;
-    const rest3 = if (s3) |s| rest2[s + 1 ..] else "";
-
-    // Segment 4: sub-resource ID.
-    const sub_id_str = rest3;
-
-    // Parse UUIDs — return null on malformed.
-    const id: u128 = if (id_str.len > 0) parse_uuid(id_str) orelse return null else 0;
-    const sub_id: u128 = if (sub_id_str.len > 0) parse_uuid(sub_id_str) orelse return null else 0;
-
-    return .{
-        .collection = collection,
-        .id = id,
-        .has_id = id_str.len > 0,
-        .sub_resource = sub_resource,
-        .sub_id = sub_id,
-        .has_sub_id = sub_id_str.len > 0,
-    };
-}
+const PathSegments = parse.PathSegments;
 
 fn translate_products(method: http.Method, seg: PathSegments, body: []const u8, list_params: message.ListParams, has_active_param: bool, query_string: []const u8) ?message.Message {
     // POST /products/:id/transfer-inventory/:target_id — uses sub_id for target.
     if (seg.has_id and seg.sub_resource.len > 0 and method == .post) {
         if (std.mem.eql(u8, seg.sub_resource, "transfer-inventory") and seg.has_sub_id) {
             if (body.len == 0) return reject("transfer_inventory: missing body");
-            const quantity = json_u32_field(body, "quantity") orelse return reject("transfer_inventory: missing or invalid quantity");
+            const quantity = parse.json_u32_field(body, "quantity") orelse return reject("transfer_inventory: missing or invalid quantity");
             if (quantity == 0) return reject("transfer_inventory: quantity is zero");
             if (seg.id == 0 or seg.sub_id == 0) return reject("transfer_inventory: invalid id in path");
             if (seg.id == seg.sub_id) return reject("transfer_inventory: source and target are the same");
@@ -133,7 +93,7 @@ fn translate_products(method: http.Method, seg: PathSegments, body: []const u8, 
             }
             if (!seg.has_id) {
                 // GET /products?q=... → full-text search.
-                if (query_param(query_string, "q")) |_| break :blk .search_products;
+                if (parse.query_param(query_string, "q")) |_| break :blk .search_products;
                 break :blk .list_products;
             }
             break :blk .get_product;
@@ -146,7 +106,7 @@ fn translate_products(method: http.Method, seg: PathSegments, body: []const u8, 
     switch (operation) {
         .search_products => {
             if (body.len != 0) return reject("search_products: unexpected body");
-            const q = query_param(query_string, "q") orelse return reject("search_products: missing q param");
+            const q = parse.query_param(query_string, "q") orelse return reject("search_products: missing q param");
             if (q.len == 0 or q.len > message.search_query_max) return reject("search_products: q empty or too long");
             var sq = std.mem.zeroes(message.SearchQuery);
             @memcpy(sq.query[0..q.len], q);
@@ -273,7 +233,7 @@ fn translate_login(method: http.Method, path: []const u8, body: []const u8) ?mes
 }
 
 fn parse_login_code_request(body: []const u8) ?message.Message {
-    const email = json_string_field(body, "email") orelse return reject("login: missing email");
+    const email = parse.json_string_field(body, "email") orelse return reject("login: missing email");
     if (email.len == 0 or email.len > message.email_max) return reject("login: email too long or empty");
     // Basic email validation: must contain @.
     if (std.mem.indexOf(u8, email, "@") == null) return reject("login: invalid email");
@@ -285,9 +245,9 @@ fn parse_login_code_request(body: []const u8) ?message.Message {
 }
 
 fn parse_login_verify_request(body: []const u8) ?message.Message {
-    const email = json_string_field(body, "email") orelse return reject("verify: missing email");
+    const email = parse.json_string_field(body, "email") orelse return reject("verify: missing email");
     if (email.len == 0 or email.len > message.email_max) return reject("verify: email too long or empty");
-    const code = json_string_field(body, "code") orelse return reject("verify: missing code");
+    const code = parse.json_string_field(body, "code") orelse return reject("verify: missing code");
     if (code.len != message.code_length) return reject("verify: code wrong length");
     // Validate all digits.
     for (code) |c| {
@@ -304,7 +264,7 @@ fn parse_login_verify_request(body: []const u8) ?message.Message {
 /// Parse a JSON body into an OrderCompletion.
 /// Expected format: {"result":"confirmed","payment_ref":"ch_xxx"} or {"result":"failed"}
 fn parse_completion_json(body: []const u8) ?message.OrderCompletion {
-    const result_str = json_string_field(body, "result") orelse return null;
+    const result_str = parse.json_string_field(body, "result") orelse return null;
     const result: message.OrderCompletion.OrderCompletionResult =
         if (std.mem.eql(u8, result_str, "confirmed"))
             .confirmed
@@ -317,7 +277,7 @@ fn parse_completion_json(body: []const u8) ?message.OrderCompletion {
     completion.result = result;
 
     // Optional payment_ref — typically present on confirmed completions.
-    if (json_string_field(body, "payment_ref")) |ref| {
+    if (parse.json_string_field(body, "payment_ref")) |ref| {
         if (ref.len > 0 and ref.len <= message.payment_ref_max) {
             @memcpy(completion.payment_ref[0..ref.len], ref);
             completion.payment_ref_len = @intCast(ref.len);
@@ -334,7 +294,7 @@ fn parse_order_json(body: []const u8) ?message.OrderRequest {
     var order = std.mem.zeroes(message.OrderRequest);
 
     // ID is required.
-    const id_str = json_string_field(body, "id") orelse return null;
+    const id_str = parse.json_string_field(body, "id") orelse return null;
     order.id = parse_uuid(id_str) orelse return null;
     if (order.id == 0) return null;
 
@@ -353,10 +313,10 @@ fn parse_order_json(body: []const u8) ?message.OrderRequest {
 
         if (order.items_len >= message.order_items_max) return null;
 
-        const pid_str = json_string_field(obj, "product_id") orelse return null;
+        const pid_str = parse.json_string_field(obj, "product_id") orelse return null;
         const pid = parse_uuid(pid_str) orelse return null;
         if (pid == 0) return null;
-        const qty = json_u32_field(obj, "quantity") orelse return null;
+        const qty = parse.json_u32_field(obj, "quantity") orelse return null;
         if (qty == 0) return null;
 
         // Reject duplicate product IDs within the same order.
@@ -389,40 +349,40 @@ fn parse_product_json(body: []const u8) ?message.Product {
     product.flags = .{ .active = true };
 
     // ID is optional in the body (used for create).
-    if (json_string_field(body, "id")) |id_str| {
+    if (parse.json_string_field(body, "id")) |id_str| {
         product.id = parse_uuid(id_str) orelse return null;
     }
 
     // Name is required.
-    const name = json_string_field(body, "name") orelse return null;
+    const name = parse.json_string_field(body, "name") orelse return null;
     if (name.len == 0 or name.len > message.product_name_max) return null;
     @memcpy(product.name[0..name.len], name);
     product.name_len = @intCast(name.len);
 
     // Description is optional.
-    if (json_string_field(body, "description")) |desc| {
+    if (parse.json_string_field(body, "description")) |desc| {
         if (desc.len > message.product_description_max) return null;
         @memcpy(product.description[0..desc.len], desc);
         product.description_len = @intCast(desc.len);
     }
 
     // price_cents is optional (defaults to 0).
-    if (json_u32_field(body, "price_cents")) |price| {
+    if (parse.json_u32_field(body, "price_cents")) |price| {
         product.price_cents = price;
     }
 
     // inventory is optional (defaults to 0).
-    if (json_u32_field(body, "inventory")) |inv| {
+    if (parse.json_u32_field(body, "inventory")) |inv| {
         product.inventory = inv;
     }
 
     // version is optional (defaults to 0 — ignored on create, required on update).
-    if (json_u32_field(body, "version")) |v| {
+    if (parse.json_u32_field(body, "version")) |v| {
         product.version = v;
     }
 
     // active is optional (defaults to true).
-    if (json_bool_field(body, "active")) |a| {
+    if (parse.json_bool_field(body, "active")) |a| {
         product.flags.active = a;
     }
 
@@ -435,11 +395,11 @@ fn parse_product_json(body: []const u8) ?message.Product {
 fn parse_collection_json(body: []const u8) ?message.ProductCollection {
     var col = std.mem.zeroes(message.ProductCollection);
 
-    const id_str = json_string_field(body, "id") orelse return null;
+    const id_str = parse.json_string_field(body, "id") orelse return null;
     col.id = parse_uuid(id_str) orelse return null;
     if (col.id == 0) return null;
 
-    const name = json_string_field(body, "name") orelse return null;
+    const name = parse.json_string_field(body, "name") orelse return null;
     if (name.len == 0 or name.len > message.collection_name_max) return null;
     @memcpy(col.name[0..name.len], name);
     col.name_len = @intCast(name.len);
@@ -447,140 +407,27 @@ fn parse_collection_json(body: []const u8) ?message.ProductCollection {
     return col;
 }
 
-// =====================================================================
-// JSON field extractors — find known fields in a JSON object
-// =====================================================================
-
-/// Find a string field: "field_name":"value"
-/// Returns the unescaped value or null if not found.
-/// Does NOT handle escaped quotes inside values (sufficient for product names).
-fn json_string_field(json: []const u8, field: []const u8) ?[]const u8 {
-    // Search for "field":
-    var pos: usize = 0;
-    while (pos < json.len) {
-        // Find next quote.
-        const q = std.mem.indexOf(u8, json[pos..], "\"") orelse return null;
-        const abs_q = pos + q;
-
-        // Check if field name matches.
-        if (abs_q + 1 + field.len + 3 > json.len) {
-            pos = abs_q + 1;
-            continue;
-        }
-
-        if (std.mem.eql(u8, json[abs_q + 1 ..][0..field.len], field)) {
-            const after_field = abs_q + 1 + field.len;
-            if (after_field + 3 <= json.len and std.mem.eql(u8, json[after_field..][0..3], "\":\"")) {
-                const val_start = after_field + 3;
-                // Find closing quote (simple — no escape handling).
-                const val_end = std.mem.indexOf(u8, json[val_start..], "\"") orelse return null;
-                return json[val_start..][0..val_end];
-            }
-        }
-        pos = abs_q + 1;
-    }
-    return null;
-}
-
-/// Find a numeric field: "field_name":12345
-fn json_u32_field(json: []const u8, field: []const u8) ?u32 {
-    // Search for "field":
-    var pos: usize = 0;
-    while (pos < json.len) {
-        const q = std.mem.indexOf(u8, json[pos..], "\"") orelse return null;
-        const abs_q = pos + q;
-
-        if (abs_q + 1 + field.len + 2 > json.len) {
-            pos = abs_q + 1;
-            continue;
-        }
-
-        if (std.mem.eql(u8, json[abs_q + 1 ..][0..field.len], field)) {
-            const after_field = abs_q + 1 + field.len;
-            if (after_field + 2 <= json.len and std.mem.eql(u8, json[after_field..][0..2], "\":")) {
-                const val_start = after_field + 2;
-                // Find end of number (next non-digit).
-                var end = val_start;
-                while (end < json.len and json[end] >= '0' and json[end] <= '9') {
-                    end += 1;
-                }
-                if (end == val_start) return null;
-                return std.fmt.parseInt(u32, json[val_start..end], 10) catch return null;
-            }
-        }
-        pos = abs_q + 1;
-    }
-    return null;
-}
-
-/// Find a boolean field: "field_name":true or "field_name":false
-fn json_bool_field(json: []const u8, field: []const u8) ?bool {
-    var pos: usize = 0;
-    while (pos < json.len) {
-        const q = std.mem.indexOf(u8, json[pos..], "\"") orelse return null;
-        const abs_q = pos + q;
-
-        if (abs_q + 1 + field.len + 2 > json.len) {
-            pos = abs_q + 1;
-            continue;
-        }
-
-        if (std.mem.eql(u8, json[abs_q + 1 ..][0..field.len], field)) {
-            const after_field = abs_q + 1 + field.len;
-            if (after_field + 2 <= json.len and std.mem.eql(u8, json[after_field..][0..2], "\":")) {
-                const val_start = after_field + 2;
-                if (val_start + 4 <= json.len and std.mem.eql(u8, json[val_start..][0..4], "true")) return true;
-                if (val_start + 5 <= json.len and std.mem.eql(u8, json[val_start..][0..5], "false")) return false;
-                return null;
-            }
-        }
-        pos = abs_q + 1;
-    }
-    return null;
-}
-
-/// Extract the value of a query parameter by key. Returns null if not found.
-fn query_param(query: []const u8, key: []const u8) ?[]const u8 {
-    var pos: usize = 0;
-    while (pos < query.len) {
-        // Skip leading/consecutive '&' separators.
-        if (query[pos] == '&') {
-            pos += 1;
-            continue;
-        }
-        const rest = query[pos..];
-        if (rest.len > key.len and std.mem.startsWith(u8, rest, key) and rest[key.len] == '=') {
-            const value_start = pos + key.len + 1;
-            const value_end = std.mem.indexOf(u8, query[value_start..], "&") orelse query.len - value_start;
-            return query[value_start..][0..value_end];
-        }
-        pos = if (std.mem.indexOfPos(u8, query, pos, "&")) |amp| amp + 1 else query.len;
-    }
-    return null;
-}
-
 /// Parse list parameters from a query string: pagination cursor and filters.
 fn parse_list_params(query: []const u8) message.ListParams {
     var params = std.mem.zeroes(message.ListParams);
 
-    if (query_param(query, "after")) |v| {
+    if (parse.query_param(query, "after")) |v| {
         params.cursor = parse_uuid(v) orelse 0;
     }
-    if (query_param(query, "active")) |v| {
+    if (parse.query_param(query, "active")) |v| {
         if (std.mem.eql(u8, v, "true")) {
             params.active_filter = .active_only;
         } else if (std.mem.eql(u8, v, "false")) {
             params.active_filter = .inactive_only;
         }
-        // "all" or any unrecognized value → .any (no filter).
     }
-    if (query_param(query, "price_min")) |v| {
-        params.price_min = parse_query_u32(v);
+    if (parse.query_param(query, "price_min")) |v| {
+        params.price_min = parse.parse_query_u32(v);
     }
-    if (query_param(query, "price_max")) |v| {
-        params.price_max = parse_query_u32(v);
+    if (parse.query_param(query, "price_max")) |v| {
+        params.price_max = parse.parse_query_u32(v);
     }
-    if (query_param(query, "name_prefix")) |v| {
+    if (parse.query_param(query, "name_prefix")) |v| {
         if (v.len > 0 and v.len <= message.product_name_max) {
             @memcpy(params.name_prefix[0..v.len], v);
             params.name_prefix_len = @intCast(v.len);
@@ -590,22 +437,7 @@ fn parse_list_params(query: []const u8) message.ListParams {
     return params;
 }
 
-/// Parse a decimal string as u32. Returns 0 on invalid input.
-fn parse_query_u32(s: []const u8) u32 {
-    if (s.len == 0 or s.len > 10) return 0;
-    var result: u32 = 0;
-    for (s) |c| {
-        if (c < '0' or c > '9') return 0;
-        result = std.math.mul(u32, result, 10) catch return 0;
-        result = std.math.add(u32, result, c - '0') catch return 0;
-    }
-    return result;
-}
-
 const parse_uuid = stdx.parse_uuid;
-
-/// Format a u128 as a 32-character lowercase hex string.
-// format_u32, format_u64, write_uuid_to_buf are in stdx.zig.
 
 // =====================================================================
 // Tests
@@ -759,33 +591,6 @@ test "POST rejects missing name" {
     try std.testing.expect(test_translate(.post, "/products",
         \\{"id":"aabbccdd11223344aabbccdd11223344","price_cents":100}
     ) == null);
-}
-
-test "json_string_field extracts value" {
-    const json =
-        \\{"name":"hello","other":"world"}
-    ;
-    const val = json_string_field(json, "name").?;
-    try std.testing.expectEqualSlices(u8, val, "hello");
-    const other = json_string_field(json, "other").?;
-    try std.testing.expectEqualSlices(u8, other, "world");
-}
-
-test "json_u32_field extracts number" {
-    const json =
-        \\{"price_cents":1999,"inventory":42}
-    ;
-    try std.testing.expectEqual(json_u32_field(json, "price_cents").?, 1999);
-    try std.testing.expectEqual(json_u32_field(json, "inventory").?, 42);
-}
-
-test "json_bool_field extracts boolean" {
-    try std.testing.expectEqual(json_bool_field(
-        \\{"active":true}
-    , "active").?, true);
-    try std.testing.expectEqual(json_bool_field(
-        \\{"active":false}
-    , "active").?, false);
 }
 
 test "parse_uuid and write_uuid roundtrip" {

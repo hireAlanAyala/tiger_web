@@ -140,6 +140,7 @@ pub fn build(b: *std.Build) void {
         "framework/time.zig",
         "framework/auth.zig",
         "framework/checksum.zig",
+        "framework/parse.zig",
     };
     for (fw_test_modules) |mod| {
         const unit_test = b.addTest(.{

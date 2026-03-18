@@ -4,7 +4,7 @@ const stdx = @import("tiger_framework").stdx;
 const message = @import("message.zig");
 const auth = @import("tiger_framework").auth;
 const TracerType = @import("tiger_framework").tracer.TracerType;
-const Tracer = TracerType(message.Operation, message.Counter);
+const Tracer = TracerType(message.Operation, message.Status);
 const marks = @import("tiger_framework").marks;
 const log = marks.wrap_log(std.log.scoped(.state_machine));
 const PRNG = @import("tiger_framework").prng;
@@ -327,17 +327,7 @@ pub fn StateMachineType(comptime Storage: type) type {
 
             // Cross-cutting: count every response status. No handler opts
             // in or out — the commit loop guarantees it.
-            self.tracer.count(switch (resp.status) {
-                .ok => .requests_ok,
-                .not_found => .requests_not_found,
-                .storage_error => .requests_storage_error,
-                .insufficient_inventory => .requests_insufficient_inventory,
-                .version_conflict => .requests_version_conflict,
-                .order_expired => .requests_order_expired,
-                .order_not_pending => .requests_order_not_pending,
-                .invalid_code => .requests_invalid_code,
-                .code_expired => .requests_code_expired,
-            }, 1);
+            self.tracer.count_status(resp.status);
 
             return resp;
         }

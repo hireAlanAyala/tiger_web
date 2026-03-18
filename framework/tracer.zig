@@ -18,7 +18,22 @@ const assert = std.debug.assert;
 const marks = @import("marks.zig");
 const log = marks.wrap_log(std.log.scoped(.tracer));
 
-pub fn TracerType(comptime Operation: type, comptime Counter: type) type {
+pub fn TracerType(comptime Operation: type, comptime Status: type) type {
+    // Derive counter enum from Status — one counter per status variant,
+    // named "requests_" ++ status tag name. Eliminates manual Counter enum.
+    const Counter = comptime blk: {
+        const status_fields = std.meta.fields(Status);
+        var counter_fields: [status_fields.len]std.builtin.Type.EnumField = undefined;
+        for (status_fields, 0..) |sf, i| {
+            counter_fields[i] = .{ .name = "requests_" ++ sf.name, .value = i };
+        }
+        break :blk @Type(.{ .@"enum" = .{
+            .tag_type = std.math.IntFittingRange(0, status_fields.len - 1),
+            .fields = &counter_fields,
+            .decls = &.{},
+            .is_exhaustive = true,
+        } });
+    };
     // Array size: one slot per possible Operation integer value.
     const operation_slots = blk: {
         var max: u8 = 0;
@@ -124,6 +139,20 @@ pub fn gauge(self: *Tracer, g: Gauge, value: u64) void {
 /// Saturating add — counters never overflow.
 pub fn count(self: *Tracer, c: Counter, value: u64) void {
     self.counters[@intFromEnum(c)] +|= value;
+}
+
+/// Count a response by status. Maps Status → Counter automatically
+/// using the derived "requests_<status>" counter names.
+/// Uses field index (not enum value) since Status values may be non-contiguous.
+pub fn count_status(self: *Tracer, status: Status) void {
+    switch (status) {
+        inline else => |comptime_status| {
+            const field_index = comptime for (std.meta.fields(Status), 0..) |f, i| {
+                if (f.value == @intFromEnum(comptime_status)) break i;
+            } else unreachable;
+            self.counters[field_index] +|= 1;
+        },
+    }
 }
 
 /// Record a duration directly (for callers that manage their own timestamps).
@@ -236,11 +265,11 @@ const TestOp = enum(u8) {
     create_product = 2,
 };
 
-const TestCounter = enum {
-    requests_ok,
+const TestStatus = enum(u8) {
+    ok = 1,
 };
 
-const TestTracer = TracerType(TestOp, TestCounter);
+const TestTracer = TracerType(TestOp, TestStatus);
 const TestSpan = TestTracer.Span;
 const TestGauge = TestTracer.Gauge;
 
@@ -300,16 +329,18 @@ test "gauge reset after emit" {
 
 test "counter accumulates" {
     var tracer = TestTracer.init(false);
-    tracer.count(.requests_ok, 1);
-    tracer.count(.requests_ok, 1);
-    try std.testing.expectEqual(tracer.counters[@intFromEnum(TestCounter.requests_ok)], 2);
+    tracer.count_status(.ok);
+    tracer.count_status(.ok);
+    try std.testing.expectEqual(tracer.counters[0], 2);
 }
 
 test "counter reset after emit" {
     var tracer = TestTracer.init(false);
-    tracer.count(.requests_ok, 3);
+    tracer.count_status(.ok);
+    tracer.count_status(.ok);
+    tracer.count_status(.ok);
     try std.testing.expect(tracer.emit());
-    try std.testing.expectEqual(tracer.counters[@intFromEnum(TestCounter.requests_ok)], 0);
+    try std.testing.expectEqual(tracer.counters[0], 0);
 }
 
 test "separate spans are independent" {

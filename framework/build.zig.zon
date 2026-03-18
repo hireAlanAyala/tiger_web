@@ -18,6 +18,7 @@
         "stdx.zig",
         "time.zig",
         "tracer.zig",
+        "parse.zig",
         "wal.zig",
         "build.zig.zon",
     },
