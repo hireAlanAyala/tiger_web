@@ -38,3 +38,14 @@ CREATE TABLE order_items (
     line_total_cents INTEGER NOT NULL,
     PRIMARY KEY (order_id, product_id)
 );
+
+CREATE TABLE login_codes (
+    email TEXT NOT NULL PRIMARY KEY,
+    code TEXT NOT NULL,
+    expires_at INTEGER NOT NULL
+);
+
+CREATE TABLE users (
+    user_id BLOB(16) PRIMARY KEY,
+    email TEXT NOT NULL UNIQUE
+);

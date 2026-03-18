@@ -23,6 +23,7 @@ pub fn StateMachineType(comptime Storage: type) type {
 
         storage: *Storage,
         tracer: Tracer,
+        prng: PRNG,
 
         /// Wall-clock time (seconds since epoch). Set by the server before
         /// each process_inbox call. Used for order timeout_at.
@@ -41,12 +42,15 @@ pub fn StateMachineType(comptime Storage: type) type {
         prefetch_collection_list: message.CollectionList,
         prefetch_order: ?message.OrderResult,
         prefetch_order_list: message.OrderSummaryList,
+        prefetch_login_code_entry: ?Storage.LoginCodeEntry,
+        prefetch_user_by_email: ?u128,
         prefetch_result: ?StorageResult,
 
-        pub fn init(storage: *Storage, log_trace: bool) StateMachine {
+        pub fn init(storage: *Storage, log_trace: bool, prng_seed: u64) StateMachine {
             return .{
                 .storage = storage,
                 .tracer = Tracer.init(log_trace),
+                .prng = PRNG.from_seed(prng_seed),
                 .now = 0,
                 .prefetch_product = null,
                 .prefetch_product_list = .{ .items = undefined, .len = 0 },
@@ -55,6 +59,8 @@ pub fn StateMachineType(comptime Storage: type) type {
                 .prefetch_collection_list = .{ .items = undefined, .len = 0 },
                 .prefetch_order = null,
                 .prefetch_order_list = .{ .items = undefined, .len = 0 },
+                .prefetch_login_code_entry = null,
+                .prefetch_user_by_email = null,
                 .prefetch_result = null,
             };
         }
@@ -129,10 +135,25 @@ pub fn StateMachineType(comptime Storage: type) type {
                 .delete_collection,
                 .get_order,
                 .page_load_dashboard,
+                .page_load_login,
+                .logout,
                 => {},
                 .add_collection_member,
                 .remove_collection_member,
                 => {},
+                .request_login_code => {
+                    const ev = msg.body_as(message.LoginCodeRequest);
+                    if (ev.email_len == 0 or ev.email_len > message.email_max) return false;
+                    if (!std.unicode.utf8ValidateSlice(ev.email[0..ev.email_len])) return false;
+                },
+                .verify_login_code => {
+                    const ev = msg.body_as(message.LoginVerification);
+                    if (ev.email_len == 0 or ev.email_len > message.email_max) return false;
+                    if (!std.unicode.utf8ValidateSlice(ev.email[0..ev.email_len])) return false;
+                    for (ev.code[0..message.code_length]) |c| {
+                        if (c < '0' or c > '9') return false;
+                    }
+                },
                 .list_products,
                 .list_collections,
                 .list_orders,
@@ -201,6 +222,9 @@ pub fn StateMachineType(comptime Storage: type) type {
                 .complete_order, .cancel_order => self.prefetch_order_with_products(msg.id),
                 .list_orders => self.prefetch_list_all_orders(msg.body_as(message.ListParams).*),
                 .page_load_dashboard => self.prefetch_dashboard(),
+                .page_load_login, .logout => .ok,
+                .request_login_code => self.prefetch_login_code(msg.body_as(message.LoginCodeRequest).*),
+                .verify_login_code => self.prefetch_verify_login(msg.body_as(message.LoginVerification).*),
                 .transfer_inventory => blk: {
                     const transfer = msg.body_as(message.InventoryTransfer);
                     assert(msg.id > 0);
@@ -279,6 +303,8 @@ pub fn StateMachineType(comptime Storage: type) type {
                 .version_conflict => .requests_version_conflict,
                 .order_expired => .requests_order_expired,
                 .order_not_pending => .requests_order_not_pending,
+                .invalid_code => .requests_invalid_code,
+                .code_expired => .requests_code_expired,
             }, 1);
 
             return resp;
@@ -346,6 +372,19 @@ pub fn StateMachineType(comptime Storage: type) type {
                 .cancel_order => self.execute_cancel_order(msg.id, result),
 
                 .page_load_dashboard => self.execute_dashboard(result),
+                .page_load_login => message.MessageResponse.empty_ok,
+                .logout => .{ .status = .ok, .result = .{ .empty = {} }, .cookie_action = .clear },
+
+                .request_login_code => self.execute_request_login_code(
+                    msg.body_as(message.LoginCodeRequest).*,
+                    result,
+                ),
+
+                .verify_login_code => self.execute_verify_login_code(
+                    msg.body_as(message.LoginVerification).*,
+                    msg.user_id,
+                    result,
+                ),
             };
         }
 
@@ -709,6 +748,115 @@ pub fn StateMachineType(comptime Storage: type) type {
             };
         }
 
+        // --- Login / auth handlers ---
+
+        fn prefetch_login_code(self: *StateMachine, event: message.LoginCodeRequest) StorageResult {
+            // Read existing code for this email (to overwrite).
+            var entry: Storage.LoginCodeEntry = undefined;
+            const r = self.storage.get_login_code(event.email[0..event.email_len], &entry);
+            switch (r) {
+                .ok => self.prefetch_login_code_entry = entry,
+                .not_found => self.prefetch_login_code_entry = null,
+                .busy => return .busy,
+                .err => return .err,
+                .corruption => @panic("storage corruption in prefetch_login_code"),
+            }
+            return .ok;
+        }
+
+        fn prefetch_verify_login(self: *StateMachine, event: message.LoginVerification) StorageResult {
+            // Read the stored code.
+            var entry: Storage.LoginCodeEntry = undefined;
+            const r1 = self.storage.get_login_code(event.email[0..event.email_len], &entry);
+            switch (r1) {
+                .ok => self.prefetch_login_code_entry = entry,
+                .not_found => return .not_found,
+                .busy => return .busy,
+                .err => return .err,
+                .corruption => @panic("storage corruption in prefetch_verify_login"),
+            }
+            // Read existing user for this email (may or may not exist).
+            var user_id: u128 = undefined;
+            const r2 = self.storage.get_user_by_email(event.email[0..event.email_len], &user_id);
+            switch (r2) {
+                .ok => self.prefetch_user_by_email = user_id,
+                .not_found => self.prefetch_user_by_email = null,
+                .busy => return .busy,
+                .err => return .err,
+                .corruption => @panic("storage corruption in prefetch_verify_login"),
+            }
+            return .ok;
+        }
+
+        fn execute_request_login_code(self: *StateMachine, event: message.LoginCodeRequest, result: StorageResult) message.MessageResponse {
+            assert(result == .ok);
+            const email = event.email[0..event.email_len];
+            const expires_at = self.now + 300; // 5 minutes
+            const code = self.generate_login_code();
+
+            const write_result = self.storage.put_login_code(email, &code, expires_at);
+            return switch (write_result) {
+                .ok => .{
+                    .status = .ok,
+                    .result = .{ .login = .{
+                        .user_id = 0,
+                        .email = event.email,
+                        .code = code,
+                        .email_len = event.email_len,
+                    } },
+                },
+                .busy, .err => message.MessageResponse.storage_error,
+                .not_found => unreachable,
+                .corruption => @panic("storage corruption in execute_request_login_code"),
+            };
+        }
+
+        fn execute_verify_login_code(self: *StateMachine, event: message.LoginVerification, msg_user_id: u128, result: StorageResult) message.MessageResponse {
+            if (result == .not_found) return message.MessageResponse.invalid_code;
+            assert(result == .ok);
+
+            const entry = self.prefetch_login_code_entry.?;
+
+            // Check expiry first.
+            if (self.now > entry.expires_at) return message.MessageResponse.code_expired;
+
+            // Check code matches.
+            if (!std.mem.eql(u8, &entry.code, &event.code)) return message.MessageResponse.invalid_code;
+
+            // Code is valid — consume it.
+            const email = event.email[0..event.email_len];
+            _ = self.storage.delete_login_code(email);
+
+            // Find or create user.
+            const user_id = if (self.prefetch_user_by_email) |existing|
+                existing
+            else blk: {
+                assert(msg_user_id != 0);
+                const wr = self.storage.put_user(msg_user_id, email);
+                if (wr != .ok) return message.MessageResponse.storage_error;
+                break :blk msg_user_id;
+            };
+
+            return .{
+                .status = .ok,
+                .result = .{ .login = .{
+                    .user_id = user_id,
+                    .email = event.email,
+                    .code = .{0} ** message.code_length,
+                    .email_len = event.email_len,
+                } },
+                .cookie_action = .set_authenticated,
+            };
+        }
+
+        fn generate_login_code(self: *StateMachine) [message.code_length]u8 {
+            var code: [message.code_length]u8 = undefined;
+            for (&code) |*c| {
+                c.* = '0' + @as(u8, @intCast(self.prng.int(u8) % 10));
+            }
+            return code;
+        }
+
         fn reset_prefetch_cache(self: *StateMachine) void {
             self.prefetch_product = null;
             self.prefetch_product_list.len = 0;
@@ -717,6 +865,8 @@ pub fn StateMachineType(comptime Storage: type) type {
             self.prefetch_collection_list.len = 0;
             self.prefetch_order = null;
             self.prefetch_order_list.len = 0;
+            self.prefetch_login_code_entry = null;
+            self.prefetch_user_by_email = null;
         }
 
         fn reset_prefetch(self: *StateMachine) void {
@@ -734,6 +884,8 @@ pub fn StateMachineType(comptime Storage: type) type {
             assert(self.prefetch_collection_list.len == 0);
             assert(self.prefetch_order == null);
             assert(self.prefetch_order_list.len == 0);
+            assert(self.prefetch_login_code_entry == null);
+            assert(self.prefetch_user_by_email == null);
             for (self.prefetch_products) |slot| assert(slot == null);
         }
 
@@ -884,6 +1036,8 @@ pub const MemoryStorage = struct {
     pub const collection_capacity = 256;
     pub const membership_capacity = 1024;
     pub const order_capacity = 256;
+    pub const login_code_capacity = 64;
+    pub const user_capacity = 256;
 
     const ProductEntry = struct {
         product: message.Product,
@@ -906,10 +1060,27 @@ pub const MemoryStorage = struct {
         occupied: bool,
     };
 
+    pub const LoginCodeEntry = struct {
+        email: [message.email_max]u8,
+        email_len: u8,
+        code: [message.code_length]u8,
+        expires_at: i64,
+        occupied: bool,
+    };
+
+    const UserEntry = struct {
+        user_id: u128,
+        email: [message.email_max]u8,
+        email_len: u8,
+        occupied: bool,
+    };
+
     const empty_product = ProductEntry{ .product = undefined, .occupied = false };
     const empty_collection = CollectionEntry{ .collection = undefined, .occupied = false };
     const empty_membership = MembershipEntry{ .collection_id = 0, .product_id = 0, .occupied = false };
     const empty_order = OrderEntry{ .order = undefined, .occupied = false };
+    const empty_login_code = LoginCodeEntry{ .email = undefined, .email_len = 0, .code = undefined, .expires_at = 0, .occupied = false };
+    const empty_user = UserEntry{ .user_id = 0, .email = undefined, .email_len = 0, .occupied = false };
 
     products: *[product_capacity]ProductEntry,
     product_count: u32,
@@ -918,6 +1089,8 @@ pub const MemoryStorage = struct {
     memberships: *[membership_capacity]MembershipEntry,
     orders: *[order_capacity]OrderEntry,
     order_count: u32,
+    login_codes: [login_code_capacity]LoginCodeEntry,
+    users: [user_capacity]UserEntry,
 
     // Fault injection — PRNG-driven, same pattern as SimIO.
     prng: PRNG,
@@ -941,6 +1114,8 @@ pub const MemoryStorage = struct {
             .memberships = memberships,
             .orders = orders,
             .order_count = 0,
+            .login_codes = [_]LoginCodeEntry{empty_login_code} ** login_code_capacity,
+            .users = [_]UserEntry{empty_user} ** user_capacity,
             .prng = PRNG.from_seed(0),
             .busy_fault_probability = PRNG.Ratio.zero(),
             .err_fault_probability = PRNG.Ratio.zero(),
@@ -962,6 +1137,8 @@ pub const MemoryStorage = struct {
         @memset(self.memberships, empty_membership);
         @memset(self.orders, empty_order);
         self.order_count = 0;
+        self.login_codes = [_]LoginCodeEntry{empty_login_code} ** login_code_capacity;
+        self.users = [_]UserEntry{empty_user} ** user_capacity;
     }
 
     pub fn begin(_: *MemoryStorage) void {}
@@ -1249,6 +1426,96 @@ pub const MemoryStorage = struct {
         // else: item.id >= all current IDs and buffer is full — skip.
     }
 
+    // --- Login code storage ---
+
+    pub fn get_login_code(self: *MemoryStorage, email: []const u8, out: *LoginCodeEntry) StorageResult {
+        if (self.fault()) |f| return f;
+        for (&self.login_codes) |*entry| {
+            if (entry.occupied and entry.email_len == email.len and
+                std.mem.eql(u8, entry.email[0..entry.email_len], email))
+            {
+                out.* = entry.*;
+                return .ok;
+            }
+        }
+        return .not_found;
+    }
+
+    pub fn put_login_code(self: *MemoryStorage, email: []const u8, code: *const [message.code_length]u8, expires_at: i64) StorageResult {
+        // Overwrite existing code for this email.
+        for (&self.login_codes) |*entry| {
+            if (entry.occupied and entry.email_len == email.len and
+                std.mem.eql(u8, entry.email[0..entry.email_len], email))
+            {
+                entry.code = code.*;
+                entry.expires_at = expires_at;
+                return .ok;
+            }
+        }
+        // Insert into first free slot.
+        for (&self.login_codes) |*entry| {
+            if (!entry.occupied) {
+                entry.occupied = true;
+                entry.email_len = @intCast(email.len);
+                @memset(&entry.email, 0);
+                @memcpy(entry.email[0..email.len], email);
+                entry.code = code.*;
+                entry.expires_at = expires_at;
+                return .ok;
+            }
+        }
+        return .err; // full
+    }
+
+    pub fn delete_login_code(self: *MemoryStorage, email: []const u8) StorageResult {
+        for (&self.login_codes) |*entry| {
+            if (entry.occupied and entry.email_len == email.len and
+                std.mem.eql(u8, entry.email[0..entry.email_len], email))
+            {
+                entry.* = empty_login_code;
+                return .ok;
+            }
+        }
+        return .not_found;
+    }
+
+    // --- User storage ---
+
+    pub fn get_user_by_email(self: *MemoryStorage, email: []const u8, out: *u128) StorageResult {
+        if (self.fault()) |f| return f;
+        for (&self.users) |*entry| {
+            if (entry.occupied and entry.email_len == email.len and
+                std.mem.eql(u8, entry.email[0..entry.email_len], email))
+            {
+                out.* = entry.user_id;
+                return .ok;
+            }
+        }
+        return .not_found;
+    }
+
+    pub fn put_user(self: *MemoryStorage, user_id: u128, email: []const u8) StorageResult {
+        // Reject duplicate email.
+        for (&self.users) |*entry| {
+            if (entry.occupied and entry.email_len == email.len and
+                std.mem.eql(u8, entry.email[0..entry.email_len], email))
+            {
+                return .err;
+            }
+        }
+        for (&self.users) |*entry| {
+            if (!entry.occupied) {
+                entry.occupied = true;
+                entry.user_id = user_id;
+                entry.email_len = @intCast(email.len);
+                @memset(&entry.email, 0);
+                @memcpy(entry.email[0..email.len], email);
+                return .ok;
+            }
+        }
+        return .err; // full
+    }
+
     /// Roll PRNG against fault probabilities. Returns a fault result or null.
     fn fault(self: *MemoryStorage) ?StorageResult {
         if (self.prng.chance(self.busy_fault_probability)) {
@@ -1307,7 +1574,7 @@ fn test_execute(sm: *TestStateMachine, msg: message.Message) message.MessageResp
 test "create and get" {
     var storage = try MemoryStorage.init(std.testing.allocator);
     defer storage.deinit(std.testing.allocator);
-    var sm = TestStateMachine.init(&storage, false);
+    var sm = TestStateMachine.init(&storage, false, 0);
 
     const test_id: u128 = 0xaabbccdd11223344aabbccdd11223344;
     const create_resp = test_execute(&sm, message.Message.init(.create_product, 0, 1, make_test_product(test_id, "Widget", 999)));
@@ -1325,7 +1592,7 @@ test "create and get" {
 test "get missing" {
     var storage = try MemoryStorage.init(std.testing.allocator);
     defer storage.deinit(std.testing.allocator);
-    var sm = TestStateMachine.init(&storage, false);
+    var sm = TestStateMachine.init(&storage, false, 0);
 
     const resp = test_execute(&sm, message.Message.init(.get_product, 0x00000000000000000000000000000063, 1, {}));
     try std.testing.expectEqual(resp.status, .not_found);
@@ -1334,7 +1601,7 @@ test "get missing" {
 test "update" {
     var storage = try MemoryStorage.init(std.testing.allocator);
     defer storage.deinit(std.testing.allocator);
-    var sm = TestStateMachine.init(&storage, false);
+    var sm = TestStateMachine.init(&storage, false, 0);
 
     const test_id: u128 = 0x11111111111111111111111111111111;
     const create_resp = test_execute(&sm, message.Message.init(.create_product, 0, 1, make_test_product(test_id, "Old Name", 100)));
@@ -1350,7 +1617,7 @@ test "update" {
 test "delete" {
     var storage = try MemoryStorage.init(std.testing.allocator);
     defer storage.deinit(std.testing.allocator);
-    var sm = TestStateMachine.init(&storage, false);
+    var sm = TestStateMachine.init(&storage, false, 0);
 
     const test_id: u128 = 0x22222222222222222222222222222222;
     const create_resp = test_execute(&sm, message.Message.init(.create_product, 0, 1, make_test_product(test_id, "Doomed", 100)));
@@ -1366,7 +1633,7 @@ test "delete" {
 test "delete missing" {
     var storage = try MemoryStorage.init(std.testing.allocator);
     defer storage.deinit(std.testing.allocator);
-    var sm = TestStateMachine.init(&storage, false);
+    var sm = TestStateMachine.init(&storage, false, 0);
 
     const resp = test_execute(&sm, message.Message.init(.delete_product, 0x00000000000000000000000000000063, 1, {}));
     try std.testing.expectEqual(resp.status, .not_found);
@@ -1375,7 +1642,7 @@ test "delete missing" {
 test "soft delete preserves product in storage" {
     var storage = try MemoryStorage.init(std.testing.allocator);
     defer storage.deinit(std.testing.allocator);
-    var sm = TestStateMachine.init(&storage, false);
+    var sm = TestStateMachine.init(&storage, false, 0);
 
     const test_id: u128 = 0x33333333333333333333333333333333;
     _ = test_execute(&sm, message.Message.init(.create_product, 0, 1, make_test_product(test_id, "SoftDel", 100)));
@@ -1402,7 +1669,7 @@ test "soft delete preserves product in storage" {
 test "list" {
     var storage = try MemoryStorage.init(std.testing.allocator);
     defer storage.deinit(std.testing.allocator);
-    var sm = TestStateMachine.init(&storage, false);
+    var sm = TestStateMachine.init(&storage, false, 0);
 
     _ = test_execute(&sm, message.Message.init(.create_product, 0, 1, make_test_product(0xaaaa0000000000000000000000000001, "A", 100)));
     _ = test_execute(&sm, message.Message.init(.create_product, 0, 1, make_test_product(0xaaaa0000000000000000000000000002, "B", 200)));
@@ -1417,7 +1684,7 @@ test "list" {
 test "list returns results sorted by ID regardless of insertion order" {
     var storage = try MemoryStorage.init(std.testing.allocator);
     defer storage.deinit(std.testing.allocator);
-    var sm = TestStateMachine.init(&storage, false);
+    var sm = TestStateMachine.init(&storage, false, 0);
 
     // Insert in descending ID order — the opposite of sorted.
     const id_high: u128 = 0xff;
@@ -1440,7 +1707,7 @@ test "list returns results sorted by ID regardless of insertion order" {
 test "list pagination returns the smallest IDs when more than list_max exist" {
     var storage = try MemoryStorage.init(std.testing.allocator);
     defer storage.deinit(std.testing.allocator);
-    var sm = TestStateMachine.init(&storage, false);
+    var sm = TestStateMachine.init(&storage, false, 0);
 
     // Create list_max + 10 products with IDs from 1..list_max+10,
     // inserted in reverse order to stress the sort.
@@ -1470,7 +1737,7 @@ test "list pagination returns the smallest IDs when more than list_max exist" {
 test "list with cursor skips earlier items" {
     var storage = try MemoryStorage.init(std.testing.allocator);
     defer storage.deinit(std.testing.allocator);
-    var sm = TestStateMachine.init(&storage, false);
+    var sm = TestStateMachine.init(&storage, false, 0);
 
     const id1: u128 = 0x00000000000000000000000000000001;
     const id2: u128 = 0x00000000000000000000000000000002;
@@ -1500,7 +1767,7 @@ test "list with cursor skips earlier items" {
 test "list filters by active status" {
     var storage = try MemoryStorage.init(std.testing.allocator);
     defer storage.deinit(std.testing.allocator);
-    var sm = TestStateMachine.init(&storage, false);
+    var sm = TestStateMachine.init(&storage, false, 0);
 
     var active = make_test_product(0x01, "Active", 100);
     active.flags.active = true;
@@ -1528,7 +1795,7 @@ test "list filters by active status" {
 test "list filters by price range" {
     var storage = try MemoryStorage.init(std.testing.allocator);
     defer storage.deinit(std.testing.allocator);
-    var sm = TestStateMachine.init(&storage, false);
+    var sm = TestStateMachine.init(&storage, false, 0);
 
     _ = test_execute(&sm, message.Message.init(.create_product, 0, 1, make_test_product(0x01, "Cheap", 500)));
     _ = test_execute(&sm, message.Message.init(.create_product, 0, 1, make_test_product(0x02, "Mid", 1500)));
@@ -1551,7 +1818,7 @@ test "list filters by price range" {
 test "list filters by name prefix" {
     var storage = try MemoryStorage.init(std.testing.allocator);
     defer storage.deinit(std.testing.allocator);
-    var sm = TestStateMachine.init(&storage, false);
+    var sm = TestStateMachine.init(&storage, false, 0);
 
     _ = test_execute(&sm, message.Message.init(.create_product, 0, 1, make_test_product(0x01, "Widget A", 100)));
     _ = test_execute(&sm, message.Message.init(.create_product, 0, 1, make_test_product(0x02, "Widget B", 200)));
@@ -1569,7 +1836,7 @@ test "list filters by name prefix" {
 test "client-provided IDs" {
     var storage = try MemoryStorage.init(std.testing.allocator);
     defer storage.deinit(std.testing.allocator);
-    var sm = TestStateMachine.init(&storage, false);
+    var sm = TestStateMachine.init(&storage, false, 0);
 
     const id1: u128 = 0xaabbccddaabbccddaabbccddaabbccd1;
     const id2: u128 = 0xaabbccddaabbccddaabbccddaabbccd2;
@@ -1582,7 +1849,7 @@ test "client-provided IDs" {
 test "transfer inventory — success" {
     var storage = try MemoryStorage.init(std.testing.allocator);
     defer storage.deinit(std.testing.allocator);
-    var sm = TestStateMachine.init(&storage, false);
+    var sm = TestStateMachine.init(&storage, false, 0);
 
     const id_a: u128 = 0xaaaa0000000000000000000000000001;
     const id_b: u128 = 0xaaaa0000000000000000000000000002;
@@ -1612,7 +1879,7 @@ test "transfer inventory — success" {
 test "transfer inventory — insufficient stock" {
     var storage = try MemoryStorage.init(std.testing.allocator);
     defer storage.deinit(std.testing.allocator);
-    var sm = TestStateMachine.init(&storage, false);
+    var sm = TestStateMachine.init(&storage, false, 0);
 
     const id_a: u128 = 0xbbbb0000000000000000000000000001;
     const id_b: u128 = 0xbbbb0000000000000000000000000002;
@@ -1633,7 +1900,7 @@ test "transfer inventory — insufficient stock" {
 test "transfer inventory — source not found" {
     var storage = try MemoryStorage.init(std.testing.allocator);
     defer storage.deinit(std.testing.allocator);
-    var sm = TestStateMachine.init(&storage, false);
+    var sm = TestStateMachine.init(&storage, false, 0);
 
     const id_b: u128 = 0xcccc0000000000000000000000000002;
     _ = test_execute(&sm, message.Message.init(.create_product, 0, 1, make_test_product(id_b, "Target", 0)));
@@ -1645,7 +1912,7 @@ test "transfer inventory — source not found" {
 test "transfer inventory — target not found" {
     var storage = try MemoryStorage.init(std.testing.allocator);
     defer storage.deinit(std.testing.allocator);
-    var sm = TestStateMachine.init(&storage, false);
+    var sm = TestStateMachine.init(&storage, false, 0);
 
     const id_a: u128 = 0xdddd0000000000000000000000000001;
     var prod_a = make_test_product(id_a, "Source", 0);
@@ -1671,7 +1938,7 @@ fn make_order_request(id: u128, items: []const struct { id: u128, qty: u32 }) me
 test "create order — success" {
     var storage = try MemoryStorage.init(std.testing.allocator);
     defer storage.deinit(std.testing.allocator);
-    var sm = TestStateMachine.init(&storage, false);
+    var sm = TestStateMachine.init(&storage, false, 0);
 
     const id_a: u128 = 0xaaaa0000000000000000000000000001;
     const id_b: u128 = 0xaaaa0000000000000000000000000002;
@@ -1711,7 +1978,7 @@ test "create order — success" {
 test "create order — insufficient inventory rolls back all" {
     var storage = try MemoryStorage.init(std.testing.allocator);
     defer storage.deinit(std.testing.allocator);
-    var sm = TestStateMachine.init(&storage, false);
+    var sm = TestStateMachine.init(&storage, false, 0);
 
     const id_a: u128 = 0xbbbb0000000000000000000000000001;
     const id_b: u128 = 0xbbbb0000000000000000000000000002;
@@ -1741,7 +2008,7 @@ test "create order — insufficient inventory rolls back all" {
 test "create order — product not found" {
     var storage = try MemoryStorage.init(std.testing.allocator);
     defer storage.deinit(std.testing.allocator);
-    var sm = TestStateMachine.init(&storage, false);
+    var sm = TestStateMachine.init(&storage, false, 0);
 
     const id_a: u128 = 0xcccc0000000000000000000000000001;
     var prod_a = make_test_product(id_a, "Exists", 100);
@@ -1759,7 +2026,7 @@ test "create order — product not found" {
 test "create order — persisted and retrievable" {
     var storage = try MemoryStorage.init(std.testing.allocator);
     defer storage.deinit(std.testing.allocator);
-    var sm = TestStateMachine.init(&storage, false);
+    var sm = TestStateMachine.init(&storage, false, 0);
 
     const id_a: u128 = 0xaaaa0000000000000000000000000001;
     var prod_a = make_test_product(id_a, "Widget", 1000);
@@ -1793,7 +2060,7 @@ test "create order — persisted and retrievable" {
 test "get order — not found" {
     var storage = try MemoryStorage.init(std.testing.allocator);
     defer storage.deinit(std.testing.allocator);
-    var sm = TestStateMachine.init(&storage, false);
+    var sm = TestStateMachine.init(&storage, false, 0);
 
     const resp = test_execute(&sm, message.Message.init(.get_order, 0x00000000000000000000000000000099, 1, {}));
     try std.testing.expectEqual(resp.status, .not_found);
@@ -1802,7 +2069,7 @@ test "get order — not found" {
 test "create sets version to 1" {
     var storage = try MemoryStorage.init(std.testing.allocator);
     defer storage.deinit(std.testing.allocator);
-    var sm = TestStateMachine.init(&storage, false);
+    var sm = TestStateMachine.init(&storage, false, 0);
 
     const test_id: u128 = 0xffff0000000000000000000000000001;
     const resp = test_execute(&sm, message.Message.init(.create_product, 0, 1, make_test_product(test_id, "Versioned", 100)));
@@ -1813,7 +2080,7 @@ test "create sets version to 1" {
 test "update increments version" {
     var storage = try MemoryStorage.init(std.testing.allocator);
     defer storage.deinit(std.testing.allocator);
-    var sm = TestStateMachine.init(&storage, false);
+    var sm = TestStateMachine.init(&storage, false, 0);
 
     const test_id: u128 = 0xffff0000000000000000000000000002;
     _ = test_execute(&sm, message.Message.init(.create_product, 0, 1, make_test_product(test_id, "V1", 100)));
@@ -1829,7 +2096,7 @@ test "update increments version" {
 test "update with wrong version returns conflict" {
     var storage = try MemoryStorage.init(std.testing.allocator);
     defer storage.deinit(std.testing.allocator);
-    var sm = TestStateMachine.init(&storage, false);
+    var sm = TestStateMachine.init(&storage, false, 0);
 
     const test_id: u128 = 0xffff0000000000000000000000000003;
     _ = test_execute(&sm, message.Message.init(.create_product, 0, 1, make_test_product(test_id, "Original", 100)));
@@ -1849,7 +2116,7 @@ test "update with wrong version returns conflict" {
 test "update with version 0 skips check" {
     var storage = try MemoryStorage.init(std.testing.allocator);
     defer storage.deinit(std.testing.allocator);
-    var sm = TestStateMachine.init(&storage, false);
+    var sm = TestStateMachine.init(&storage, false, 0);
 
     const test_id: u128 = 0xffff0000000000000000000000000004;
     _ = test_execute(&sm, message.Message.init(.create_product, 0, 1, make_test_product(test_id, "NoCheck", 100)));
@@ -1865,7 +2132,7 @@ test "update with version 0 skips check" {
 test "duplicate ID rejected" {
     var storage = try MemoryStorage.init(std.testing.allocator);
     defer storage.deinit(std.testing.allocator);
-    var sm = TestStateMachine.init(&storage, false);
+    var sm = TestStateMachine.init(&storage, false, 0);
 
     const test_id: u128 = 0x33333333333333333333333333333333;
     const r1 = test_execute(&sm, message.Message.init(.create_product, 0, 1, make_test_product(test_id, "A", 1)));
@@ -1877,7 +2144,7 @@ test "duplicate ID rejected" {
 test "capacity exhaustion — returns storage_error" {
     var storage = try MemoryStorage.init(std.testing.allocator);
     defer storage.deinit(std.testing.allocator);
-    var sm = TestStateMachine.init(&storage, false);
+    var sm = TestStateMachine.init(&storage, false, 0);
 
     // Fill storage to capacity.
     for (0..MemoryStorage.product_capacity) |i| {
@@ -1903,7 +2170,7 @@ fn make_test_collection(id: u128, name: []const u8) message.ProductCollection {
 test "delete collection cascades memberships but not products" {
     var storage = try MemoryStorage.init(std.testing.allocator);
     defer storage.deinit(std.testing.allocator);
-    var sm = TestStateMachine.init(&storage, false);
+    var sm = TestStateMachine.init(&storage, false, 0);
 
     const product_id: u128 = 0xaaaa0000000000000000000000000001;
     const col_id: u128 = 0xcccc0000000000000000000000000001;
@@ -1945,7 +2212,7 @@ test "delete collection cascades memberships but not products" {
 test "seeded: transfer inventory conserves total" {
     var storage = try MemoryStorage.init(std.testing.allocator);
     defer storage.deinit(std.testing.allocator);
-    var sm = TestStateMachine.init(&storage, false);
+    var sm = TestStateMachine.init(&storage, false, 0);
     var prng = PRNG.from_seed_testing();
 
     const num_products = 8;
@@ -1988,7 +2255,7 @@ test "seeded: transfer inventory conserves total" {
 test "seeded: create order arithmetic" {
     var storage = try MemoryStorage.init(std.testing.allocator);
     defer storage.deinit(std.testing.allocator);
-    var sm = TestStateMachine.init(&storage, false);
+    var sm = TestStateMachine.init(&storage, false, 0);
     var prng = PRNG.from_seed_testing();
 
     // Create products with random prices and inventories.
@@ -2066,7 +2333,7 @@ test "seeded: create order arithmetic" {
 test "seeded: list filters match predicate" {
     var storage = try MemoryStorage.init(std.testing.allocator);
     defer storage.deinit(std.testing.allocator);
-    var sm = TestStateMachine.init(&storage, false);
+    var sm = TestStateMachine.init(&storage, false, 0);
     var prng = PRNG.from_seed_testing();
 
     const prefixes = [_][]const u8{ "Alpha", "Beta", "Gamma", "Delta" };
@@ -2155,7 +2422,7 @@ test "seeded: list filters match predicate" {
 test "seeded: update versioning monotonicity" {
     var storage = try MemoryStorage.init(std.testing.allocator);
     defer storage.deinit(std.testing.allocator);
-    var sm = TestStateMachine.init(&storage, false);
+    var sm = TestStateMachine.init(&storage, false, 0);
     var prng = PRNG.from_seed_testing();
 
     const test_id: u128 = 0xffff0000000000000000000000000099;
@@ -2210,7 +2477,7 @@ const TestEnv = struct {
 
     fn init(self: *TestEnv) !void {
         self.storage = try MemoryStorage.init(std.testing.allocator);
-        self.sm = TestStateMachine.init(&self.storage, false);
+        self.sm = TestStateMachine.init(&self.storage, false, 0);
     }
 
     fn deinit(self: *TestEnv) void {

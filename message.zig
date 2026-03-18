@@ -23,6 +23,8 @@ pub const Status = enum(u8) {
     version_conflict = 11,
     order_expired = 12,
     order_not_pending = 13,
+    invalid_code = 14,
+    code_expired = 15,
 };
 
 /// Flat operation enum — encodes entity type AND action in a single tag,
@@ -62,6 +64,12 @@ pub const Operation = enum(u8) {
 
     // Pages
     page_load_dashboard = 20,
+    page_load_login = 24,
+
+    // Auth
+    request_login_code = 21,
+    verify_login_code = 22,
+    logout = 23,
 
     /// Input event type — what the message body carries for this operation.
     /// Called with comptime operation (via inline dispatch) to resolve types
@@ -75,6 +83,8 @@ pub const Operation = enum(u8) {
             .create_order => OrderRequest,
             .complete_order => OrderCompletion,
             .search_products => SearchQuery,
+            .request_login_code => LoginCodeRequest,
+            .verify_login_code => LoginVerification,
             .list_products,
             .list_collections,
             .list_orders,
@@ -88,6 +98,8 @@ pub const Operation = enum(u8) {
             .get_collection,
             .delete_collection,
             .page_load_dashboard,
+            .page_load_login,
+            .logout,
             => void,
         };
     }
@@ -102,7 +114,8 @@ pub const Operation = enum(u8) {
     pub fn is_mutation(op: Operation) bool {
         return switch (op) {
             .root,
-            .page_load_dashboard,
+            .page_load_dashboard, .page_load_login,
+            .logout,
             .list_products, .list_collections, .list_orders,
             .get_product, .get_collection, .get_order,
             .get_product_inventory, .search_products,
@@ -112,6 +125,7 @@ pub const Operation = enum(u8) {
             .add_collection_member, .remove_collection_member,
             .create_order, .complete_order, .cancel_order,
             .transfer_inventory,
+            .request_login_code, .verify_login_code,
             => true,
         };
     }
@@ -143,6 +157,8 @@ pub const Operation = enum(u8) {
                 OrderCompletion => .completion,
                 SearchQuery => .search,
                 ListParams => .list,
+                LoginCodeRequest => .login_request,
+                LoginVerification => .login_verify,
                 void => .none,
                 else => @compileError("unhandled EventType"),
             },
@@ -467,6 +483,47 @@ pub const ListParams = extern struct {
     }
 };
 
+pub const email_max = 128;
+pub const code_length = 6;
+
+/// Request a login code — carries only the email.
+/// The state machine generates the code via its PRNG.
+pub const LoginCodeRequest = extern struct {
+    email: [email_max]u8,
+    email_len: u8,
+    reserved: [15]u8,
+
+    comptime {
+        assert(stdx.no_padding(LoginCodeRequest));
+        assert(@sizeOf(LoginCodeRequest) == 144);
+        assert(email_max > 0);
+        assert(email_max <= std.math.maxInt(u8));
+    }
+
+    pub fn email_slice(self: *const LoginCodeRequest) []const u8 {
+        return self.email[0..self.email_len];
+    }
+};
+
+/// Verify a login code — carries the email and the client-provided code.
+pub const LoginVerification = extern struct {
+    email: [email_max]u8,
+    code: [code_length]u8,
+    email_len: u8,
+    reserved: [9]u8,
+
+    comptime {
+        assert(stdx.no_padding(LoginVerification));
+        assert(@sizeOf(LoginVerification) == 144);
+        assert(email_max > 0);
+        assert(email_max <= std.math.maxInt(u8));
+    }
+
+    pub fn email_slice(self: *const LoginVerification) []const u8 {
+        return self.email[0..self.email_len];
+    }
+};
+
 /// Event tag — identifies which type the message body carries.
 /// Standalone enum (not tied to a tagged union) for use with body_as assertions.
 pub const EventTag = enum {
@@ -478,6 +535,8 @@ pub const EventTag = enum {
     completion,
     search,
     list,
+    login_request,
+    login_verify,
     none,
 
     /// Map a comptime type back to its EventTag.
@@ -491,6 +550,8 @@ pub const EventTag = enum {
             OrderCompletion => .completion,
             SearchQuery => .search,
             ListParams => .list,
+            LoginCodeRequest => .login_request,
+            LoginVerification => .login_verify,
             else => @compileError("EventTag.from_type: unhandled type"),
         };
     }
@@ -641,6 +702,15 @@ pub const PageLoadDashboardResult = struct {
     }
 };
 
+/// Login result — email for the verify page, user_id for session,
+/// code for server-side logging (dev mode).
+pub const LoginResult = struct {
+    user_id: u128,
+    email: [email_max]u8,
+    code: [code_length]u8,
+    email_len: u8,
+};
+
 /// Result payload — self-describing tagged union for response encoding.
 /// The encoder switches on the variant — no external context needed.
 pub const Result = union(enum) {
@@ -652,6 +722,7 @@ pub const Result = union(enum) {
     order: OrderResult,
     order_list: OrderSummaryList,
     page_load_dashboard: PageLoadDashboardResult,
+    login: LoginResult,
     empty: void,
 };
 
@@ -659,6 +730,20 @@ pub const Result = union(enum) {
 pub const MessageResponse = struct {
     status: Status,
     result: Result,
+    /// Cookie instruction — the state machine tells the server what to do
+    /// with the session cookie. The server acts generically on this signal
+    /// without checking which operation produced it.
+    cookie_action: CookieAction = .none,
+
+    pub const CookieAction = enum {
+        /// Don't touch the cookie.
+        none,
+        /// Set an authenticated session cookie. The user_id comes from
+        /// the login result.
+        set_authenticated,
+        /// Clear the cookie (logout).
+        clear,
+    };
 
     pub const empty_ok = MessageResponse{
         .status = .ok,
@@ -672,6 +757,16 @@ pub const MessageResponse = struct {
 
     pub const storage_error = MessageResponse{
         .status = .storage_error,
+        .result = .{ .empty = {} },
+    };
+
+    pub const invalid_code = MessageResponse{
+        .status = .invalid_code,
+        .result = .{ .empty = {} },
+    };
+
+    pub const code_expired = MessageResponse{
+        .status = .code_expired,
         .result = .{ .empty = {} },
     };
 };
@@ -751,9 +846,11 @@ test "Operation is_mutation pinned classification" {
         .add_collection_member, .remove_collection_member,
         .create_order, .complete_order, .cancel_order,
         .transfer_inventory,
+        .request_login_code, .verify_login_code,
     };
     const reads = [_]Operation{
-        .root, .page_load_dashboard,
+        .root, .page_load_dashboard, .page_load_login,
+        .logout,
         .list_products, .list_collections, .list_orders,
         .get_product, .get_collection, .get_order,
         .get_product_inventory, .search_products,

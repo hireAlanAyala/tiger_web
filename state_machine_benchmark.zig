@@ -30,7 +30,7 @@ test "benchmark: state machine" {
 
     var storage = try MemoryStorage.init(std.heap.page_allocator);
     defer storage.deinit(std.heap.page_allocator);
-    var sm = StateMachine.init(&storage, false);
+    var sm = StateMachine.init(&storage, false, 0);
 
     // --- Seed phase (untimed) ---
 

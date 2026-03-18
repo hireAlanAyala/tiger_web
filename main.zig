@@ -64,7 +64,8 @@ pub fn main() !void {
 
     var storage = try SqliteStorage.init("tiger_web.db");
     defer storage.deinit();
-    var sm = StateMachine.init(&storage, cli.log_trace);
+    const sm_seed: u64 = @truncate(std.crypto.random.int(u128));
+    var sm = StateMachine.init(&storage, cli.log_trace, sm_seed);
 
     const listen_fd = try IO.open_listener(address);
 

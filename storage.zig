@@ -13,6 +13,14 @@ const c = @cImport({
 /// SQLite-backed persistent storage. Uses prepared statements for all
 /// operations. WAL mode for concurrent reads. IDs stored as 16-byte BLOBs.
 pub const SqliteStorage = struct {
+    pub const LoginCodeEntry = struct {
+        email: [message.email_max]u8,
+        email_len: u8,
+        code: [message.code_length]u8,
+        expires_at: i64,
+        occupied: bool,
+    };
+
     db: *c.sqlite3,
     stmt_get: *c.sqlite3_stmt,
     stmt_put: *c.sqlite3_stmt,
@@ -34,6 +42,11 @@ pub const SqliteStorage = struct {
     stmt_list_orders: *c.sqlite3_stmt,
     stmt_update_order_completion: *c.sqlite3_stmt,
     stmt_search_products: *c.sqlite3_stmt,
+    stmt_get_login_code: *c.sqlite3_stmt,
+    stmt_put_login_code: *c.sqlite3_stmt,
+    stmt_delete_login_code: *c.sqlite3_stmt,
+    stmt_get_user_by_email: *c.sqlite3_stmt,
+    stmt_put_user: *c.sqlite3_stmt,
 
     pub fn init(path: [*:0]const u8) !SqliteStorage {
         var db: ?*c.sqlite3 = null;
@@ -127,6 +140,23 @@ pub const SqliteStorage = struct {
             " ORDER BY id;",
         );
 
+        // Prepare login/auth statements.
+        const stmt_get_login_code = prepare(real_db,
+            "SELECT email, code, expires_at FROM login_codes WHERE email = ?1;",
+        );
+        const stmt_put_login_code = prepare(real_db,
+            "INSERT OR REPLACE INTO login_codes (email, code, expires_at) VALUES (?1, ?2, ?3);",
+        );
+        const stmt_delete_login_code = prepare(real_db,
+            "DELETE FROM login_codes WHERE email = ?1;",
+        );
+        const stmt_get_user_by_email = prepare(real_db,
+            "SELECT user_id FROM users WHERE email = ?1;",
+        );
+        const stmt_put_user = prepare(real_db,
+            "INSERT INTO users (user_id, email) VALUES (?1, ?2);",
+        );
+
         log.info("storage initialized: {s}", .{path});
 
         return .{
@@ -151,6 +181,11 @@ pub const SqliteStorage = struct {
             .stmt_list_orders = stmt_list_orders,
             .stmt_update_order_completion = stmt_update_order_completion,
             .stmt_search_products = stmt_search_products,
+            .stmt_get_login_code = stmt_get_login_code,
+            .stmt_put_login_code = stmt_put_login_code,
+            .stmt_delete_login_code = stmt_delete_login_code,
+            .stmt_get_user_by_email = stmt_get_user_by_email,
+            .stmt_put_user = stmt_put_user,
         };
     }
 
@@ -623,6 +658,88 @@ pub const SqliteStorage = struct {
         out.line_total_cents = @intCast(c.sqlite3_column_int64(stmt, 4));
     }
 
+    // --- Login/auth operations ---
+
+    pub fn get_login_code(self: *SqliteStorage, email: []const u8, out: *LoginCodeEntry) StorageResult {
+        const stmt = self.stmt_get_login_code;
+        defer reset_stmt(stmt);
+        _ = c.sqlite3_bind_text(stmt, 1, email.ptr, @intCast(email.len), c.SQLITE_TRANSIENT);
+        return switch (step_result(stmt)) {
+            .row => {
+                out.occupied = true;
+                out.email_len = @intCast(email.len);
+                @memset(&out.email, 0);
+                @memcpy(out.email[0..email.len], email);
+                // Read code (TEXT).
+                const code_ptr = c.sqlite3_column_text(stmt, 1);
+                const code_len = c.sqlite3_column_bytes(stmt, 1);
+                if (code_len != message.code_length) return .err;
+                @memcpy(&out.code, code_ptr[0..message.code_length]);
+                out.expires_at = c.sqlite3_column_int64(stmt, 2);
+                return .ok;
+            },
+            .done => .not_found,
+            .busy => .busy,
+            .err => .err,
+            .corruption => .corruption,
+        };
+    }
+
+    pub fn put_login_code(self: *SqliteStorage, email: []const u8, code: *const [message.code_length]u8, expires_at: i64) StorageResult {
+        const stmt = self.stmt_put_login_code;
+        defer reset_stmt(stmt);
+        _ = c.sqlite3_bind_text(stmt, 1, email.ptr, @intCast(email.len), c.SQLITE_TRANSIENT);
+        _ = c.sqlite3_bind_text(stmt, 2, code, message.code_length, c.SQLITE_TRANSIENT);
+        _ = c.sqlite3_bind_int64(stmt, 3, expires_at);
+        return switch (step_result(stmt)) {
+            .done => .ok,
+            .busy => .busy,
+            .row, .err => .err,
+            .corruption => .corruption,
+        };
+    }
+
+    pub fn delete_login_code(self: *SqliteStorage, email: []const u8) StorageResult {
+        const stmt = self.stmt_delete_login_code;
+        defer reset_stmt(stmt);
+        _ = c.sqlite3_bind_text(stmt, 1, email.ptr, @intCast(email.len), c.SQLITE_TRANSIENT);
+        return switch (step_result(stmt)) {
+            .done => .ok,
+            .busy => .busy,
+            .row, .err => .err,
+            .corruption => .corruption,
+        };
+    }
+
+    pub fn get_user_by_email(self: *SqliteStorage, email: []const u8, out: *u128) StorageResult {
+        const stmt = self.stmt_get_user_by_email;
+        defer reset_stmt(stmt);
+        _ = c.sqlite3_bind_text(stmt, 1, email.ptr, @intCast(email.len), c.SQLITE_TRANSIENT);
+        return switch (step_result(stmt)) {
+            .row => {
+                out.* = read_uuid(stmt, 0);
+                return .ok;
+            },
+            .done => .not_found,
+            .busy => .busy,
+            .err => .err,
+            .corruption => .corruption,
+        };
+    }
+
+    pub fn put_user(self: *SqliteStorage, user_id: u128, email: []const u8) StorageResult {
+        const stmt = self.stmt_put_user;
+        defer reset_stmt(stmt);
+        bind_uuid(stmt, 1, user_id);
+        _ = c.sqlite3_bind_text(stmt, 2, email.ptr, @intCast(email.len), c.SQLITE_TRANSIENT);
+        return switch (step_result(stmt)) {
+            .done => .ok,
+            .busy => .busy,
+            .row, .err => .err,
+            .corruption => .corruption,
+        };
+    }
+
     // --- Internal helpers ---
 
     const StepResult = enum { row, done, busy, err, corruption };
@@ -643,6 +760,11 @@ pub const SqliteStorage = struct {
     fn reset_stmt(stmt: *c.sqlite3_stmt) void {
         _ = c.sqlite3_reset(stmt);
         _ = c.sqlite3_clear_bindings(stmt);
+    }
+
+    fn read_uuid(stmt: *c.sqlite3_stmt, col: c_int) u128 {
+        const blob: [*]const u8 = @ptrCast(c.sqlite3_column_blob(stmt, col));
+        return std.mem.readInt(u128, blob[0..16], .big);
     }
 
     fn bind_uuid(stmt: *c.sqlite3_stmt, col: c_int, id: u128) void {
@@ -736,7 +858,7 @@ pub const SqliteStorage = struct {
     fn ensure_schema(db: *c.sqlite3) void {
         if (get_schema_version(db) == 0) {
             exec(db, @embedFile("schema.sql"));
-            set_schema_version(db, 1);
+            set_schema_version(db, 2);
         }
         if (next_migration) |migrate| {
             migrate(db);
@@ -756,6 +878,24 @@ pub const SqliteStorage = struct {
         var buf: [64]u8 = undefined;
         const sql = std.fmt.bufPrint(&buf, "PRAGMA user_version = {d};\x00", .{version}) catch unreachable;
         exec(db, @ptrCast(sql.ptr));
+    }
+
+    fn migrate_v2_login(db: *c.sqlite3) void {
+        if (get_schema_version(db) >= 2) return;
+        exec(db,
+            "CREATE TABLE IF NOT EXISTS login_codes (" ++
+            "  email TEXT NOT NULL PRIMARY KEY," ++
+            "  code TEXT NOT NULL," ++
+            "  expires_at INTEGER NOT NULL" ++
+            ");",
+        );
+        exec(db,
+            "CREATE TABLE IF NOT EXISTS users (" ++
+            "  user_id BLOB(16) PRIMARY KEY," ++
+            "  email TEXT NOT NULL UNIQUE" ++
+            ");",
+        );
+        set_schema_version(db, 2);
     }
 };
 
