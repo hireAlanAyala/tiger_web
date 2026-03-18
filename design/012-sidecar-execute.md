@@ -251,90 +251,16 @@ data), there's no library to import and nothing the sidecar language
 adds that Zig doesn't provide. Build the sidecar when someone needs
 it — the architecture supports it. Ship Zig-native by default.
 
-## Implementation approach: incremental, state-machine-local
+## Current state
 
-Start by making execute pure inside `state_machine.zig`. No framework
-changes until the sidecar transport exists.
+Pure execute is implemented. Handlers return `ExecuteResult`
+(response + writes). The dispatch loop applies writes via
+`apply_write()`. Handlers never call storage directly. No deletes —
+soft-delete via flags, expiry via timestamps. Write union covers
+put/update for all entity types.
 
-### Phase 1a: Define Write union and ExecuteResult
-
-Add the types to `state_machine.zig`. No behavior change.
-
-```
-const writes_max = 1 + message.order_items_max; // 21
-
-const Write = union(enum) {
-    put_product: message.Product,
-    update_product: struct { id: u128, value: message.Product },
-    put_collection: message.ProductCollection,
-    update_collection: struct { id: u128, value: message.ProductCollection },
-    put_membership: struct { collection_id: u128, product_id: u128 },
-    update_membership: struct { collection_id: u128, product_id: u128, removed: bool },
-    put_order: message.OrderResult,
-    update_order: message.OrderResult,
-    put_login_code: LoginCodeEntry,
-    put_user: struct { user_id: u128, email: [message.email_max]u8, email_len: u8 },
-};
-
-// Two primitives only: put (insert, fails if exists) and update
-// (replace, fails if not found). No deletes — soft-delete via
-// flags, expiry via timestamps.
-
-const ExecuteResult = struct {
-    response: message.MessageResponse,
-    writes: [writes_max]Write,
-    writes_len: u8,
-};
-```
-
-Worst case is `create_order`: 1 put_order + N update_product for
-inventory decrements (N <= order_items_max = 20). `complete_order`
-with failure: 1 update_order + N update_product for inventory
-restore. Both fit in writes_max = 21.
-
-### Phase 1b: Eliminate deletes
-
-Independent of the pure-execute refactor. Changes storage and
-execute handlers:
-
-- **Collections** get a soft-delete flag, same as products.
-  `delete_collection` becomes `update_collection` with flag flip.
-- **Collection membership** gets a `removed: bool` flag on the
-  junction row. `remove_from_collection` becomes `update_membership`.
-- **Login codes** stop being deleted after verification. Storage
-  ignores expired codes on read via `expires_at`.
-
-### Phase 1c: Pure execute handlers
-
-Each handler returns `ExecuteResult` instead of calling
-`self.storage.*`. The dispatch loop in `execute()` applies the
-writes after the handler returns:
-
-```
-fn execute(...) MessageResponse {
-    const result = switch (msg.operation) {
-        .create_product => self.execute_create_product(...),
-        // ...
-    };
-    for (result.writes[0..result.writes_len]) |w| {
-        self.apply_write(w);
-    }
-    return result.response;
-}
-```
-
-Same behavior, same storage calls, all existing tests pass. The
-change is structural: execute handlers become pure functions that
-return decisions. The state machine applies them.
-
-### Phase 2: Sidecar transport
-
-Unix socket or WASM transport layer. Type boundary serialization.
-Determinism spot-checks and offline replay audits. The framework
-receives writes from the sidecar and passes them to the same
-`state_machine.apply_writes()` method — no code moves to the
-framework. The state machine owns apply because the Write union
-and storage methods are domain-specific.
+See design/013-unix-socket-sidecar.md for the transport implementation
+scope.
 
 ## What moves to the sidecar
 
