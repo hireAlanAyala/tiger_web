@@ -82,6 +82,46 @@ sidecar's language from the Zig source.
 Tick loop, connection pool, epoll IO, HTTP parsing, WAL, auth/cookies,
 storage reads, storage writes, response rendering, fuzz infrastructure.
 
+## Determinism: assured → probabilistic
+
+In native Zig, determinism is assured. The compiler enforces no hidden
+state, no allocations, no syscalls in execute. The PRNG is seeded and
+reproducible. Replay is guaranteed to produce identical results.
+
+Moving execute to a sidecar trades assured determinism for probabilistic
+determinism. The sidecar's language runtime may have:
+- Floating point differences across platforms
+- HashMap iteration order varying between versions
+- Garbage collector non-determinism affecting timing
+- Hidden global state (thread locals, locale, timezone)
+- Library upgrades that change behavior for the same inputs
+
+The framework cannot enforce determinism across a process boundary.
+It can only verify it after the fact.
+
+**Required: determinism assertion.** The framework must assert that
+sidecar execute is deterministic by replaying a subset of committed
+operations and comparing results. Two strategies:
+
+1. **Online spot-check.** After every N commits, re-execute the last
+   operation with the same inputs and assert the response and writes
+   match byte-for-byte. Catches non-determinism as it happens. Cost:
+   one extra sidecar call per N operations.
+
+2. **Offline replay audit.** Periodically replay the full WAL through
+   the sidecar and assert every response matches. Catches drift from
+   runtime upgrades, library changes, or platform differences. Run as
+   a CI job or pre-deploy check.
+
+Both are needed. Online catches immediate non-determinism (HashMap
+ordering, GC timing). Offline catches slow drift (library upgrades,
+platform migration).
+
+WASM has an advantage here — WASM execution is specified to be
+deterministic (no non-determinism in the spec except explicit random
+imports, which the framework controls). A WASM sidecar gets assured
+determinism back. Unix socket sidecars in interpreted languages do not.
+
 ## What moves to the sidecar
 
 The execute decision: given this operation and this cached data, what's
