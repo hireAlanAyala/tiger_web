@@ -1,12 +1,12 @@
 const std = @import("std");
 const assert = std.debug.assert;
-const stdx = @import("stdx.zig");
+const stdx = @import("framework/stdx.zig");
 const message = @import("message.zig");
-const auth = @import("auth.zig");
+const auth = @import("framework/auth.zig");
 const Tracer = @import("tracer.zig");
-const marks = @import("marks.zig");
+const marks = @import("framework/marks.zig");
 const log = marks.wrap_log(std.log.scoped(.state_machine));
-const PRNG = @import("prng.zig");
+const PRNG = @import("framework/prng.zig");
 
 /// Storage result type — shared by all storage backends.
 pub const StorageResult = enum { ok, not_found, err, busy, corruption };

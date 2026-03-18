@@ -9,13 +9,13 @@ const assert = std.debug.assert;
 const math = std.math;
 const message = @import("message.zig");
 const state_machine = @import("state_machine.zig");
-const auth = @import("auth.zig");
+const auth = @import("framework/auth.zig");
 const fuzz_lib = @import("fuzz_lib.zig");
 const FuzzArgs = fuzz_lib.FuzzArgs;
 const MemoryStorage = state_machine.MemoryStorage;
 const StateMachine = state_machine.StateMachineType(MemoryStorage);
 const Auditor = @import("auditor.zig").Auditor;
-const PRNG = @import("prng.zig");
+const PRNG = @import("framework/prng.zig");
 
 const fuzz_test_key: *const [auth.key_length]u8 = "tiger-web-test-key-0123456789ab!";
 

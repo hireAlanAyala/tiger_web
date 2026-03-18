@@ -3,12 +3,12 @@ const assert = std.debug.assert;
 const maybe = @import("message.zig").maybe;
 const message = @import("message.zig");
 const codec = @import("codec.zig");
-const http = @import("http.zig");
+const http = @import("framework/http.zig");
 const StateMachineType = @import("state_machine.zig").StateMachineType;
 const ConnectionType = @import("connection.zig").ConnectionType;
 const render = @import("render.zig");
-const Time = @import("time.zig").Time;
-const marks = @import("marks.zig");
+const Time = @import("framework/time.zig").Time;
+const marks = @import("framework/marks.zig");
 const log = marks.wrap_log(std.log.scoped(.server));
 const Wal = @import("wal.zig").Wal;
 

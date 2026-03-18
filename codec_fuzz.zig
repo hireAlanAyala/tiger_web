@@ -10,11 +10,11 @@ const std = @import("std");
 const assert = std.debug.assert;
 const math = std.math;
 const codec = @import("codec.zig");
-const http = @import("http.zig");
+const http = @import("framework/http.zig");
 const message = @import("message.zig");
 const state_machine = @import("state_machine.zig");
 const FuzzArgs = @import("fuzz_lib.zig").FuzzArgs;
-const PRNG = @import("prng.zig");
+const PRNG = @import("framework/prng.zig");
 
 const StateMachine = state_machine.StateMachineType(state_machine.MemoryStorage);
 

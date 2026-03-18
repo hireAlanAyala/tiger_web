@@ -2,8 +2,8 @@ const std = @import("std");
 const assert = std.debug.assert;
 const message = @import("message.zig");
 const maybe = message.maybe;
-const http = @import("http.zig");
-const marks = @import("marks.zig");
+const http = @import("framework/http.zig");
+const marks = @import("framework/marks.zig");
 const log = marks.wrap_log(std.log.scoped(.connection));
 
 /// Per-connection state machine. Parameterized on IO type so the same

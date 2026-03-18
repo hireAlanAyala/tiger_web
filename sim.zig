@@ -1,16 +1,16 @@
 const std = @import("std");
 const assert = std.debug.assert;
 const message = @import("message.zig");
-const http = @import("http.zig");
+const http = @import("framework/http.zig");
 const state_machine = @import("state_machine.zig");
 const MemoryStorage = state_machine.MemoryStorage;
 const StateMachine = state_machine.StateMachineType(MemoryStorage);
 const ServerType = @import("server.zig").ServerType;
 const ConnectionType = @import("connection.zig").ConnectionType;
-const marks = @import("marks.zig");
-const PRNG = @import("prng.zig");
-const TimeSim = @import("time.zig").TimeSim;
-const auth = @import("auth.zig");
+const marks = @import("framework/marks.zig");
+const PRNG = @import("framework/prng.zig");
+const TimeSim = @import("framework/time.zig").TimeSim;
+const auth = @import("framework/auth.zig");
 
 /// Simulated IO that replaces the real epoll-based IO for deterministic testing.
 /// All operations complete synchronously during `run_for_ns`. A seeded PRNG

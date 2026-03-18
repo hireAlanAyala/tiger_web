@@ -1,5 +1,5 @@
 const std = @import("std");
-const IO = @import("io.zig").IO;
+const IO = @import("framework/io.zig").IO;
 const SimIO = @import("sim.zig").SimIO;
 const SqliteStorage = @import("storage.zig").SqliteStorage;
 const state_machine = @import("state_machine.zig");

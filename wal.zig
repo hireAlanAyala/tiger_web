@@ -52,7 +52,7 @@ const std = @import("std");
 const assert = std.debug.assert;
 const message = @import("message.zig");
 const Message = message.Message;
-const cs = @import("checksum.zig");
+const cs = @import("framework/checksum.zig");
 
 const log = std.log.scoped(.wal);
 

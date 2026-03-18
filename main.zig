@@ -1,16 +1,16 @@
 const std = @import("std");
-const IO = @import("io.zig").IO;
+const IO = @import("framework/io.zig").IO;
 const state_machine = @import("state_machine.zig");
 const SqliteStorage = @import("storage.zig").SqliteStorage;
 const StateMachine = state_machine.StateMachineType(SqliteStorage);
 const ServerType = @import("server.zig").ServerType;
-const TimeReal = @import("time.zig").TimeReal;
-const auth = @import("auth.zig");
-const flags = @import("flags.zig");
+const TimeReal = @import("framework/time.zig").TimeReal;
+const auth = @import("framework/auth.zig");
+const flags = @import("framework/flags.zig");
 const Wal = @import("wal.zig").Wal;
 
 const Server = ServerType(IO, SqliteStorage);
-const marks = @import("marks.zig");
+const marks = @import("framework/marks.zig");
 const log = marks.wrap_log(std.log.scoped(.main));
 
 /// Tick interval in nanoseconds (10ms).

@@ -14,7 +14,7 @@ const assert = std.debug.assert;
 const message = @import("message.zig");
 const state_machine = @import("state_machine.zig");
 const MemoryStorage = state_machine.MemoryStorage;
-const stdx = @import("stdx.zig");
+const stdx = @import("framework/stdx.zig");
 const gen = @import("fuzz.zig");
 
 const product_capacity = MemoryStorage.product_capacity;

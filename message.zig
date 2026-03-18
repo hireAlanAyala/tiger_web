@@ -1,7 +1,7 @@
 const std = @import("std");
 const assert = std.debug.assert;
-const stdx = @import("stdx.zig");
-const cs = @import("checksum.zig");
+const stdx = @import("framework/stdx.zig");
+const cs = @import("framework/checksum.zig");
 
 /// `maybe` is the dual of `assert`: it signals that a condition is sometimes
 /// true and sometimes false, and that's fine. Pure documentation — compiles

@@ -16,7 +16,7 @@
 const std = @import("std");
 const assert = std.debug.assert;
 const message = @import("message.zig");
-const marks = @import("marks.zig");
+const marks = @import("framework/marks.zig");
 const log = marks.wrap_log(std.log.scoped(.tracer));
 
 /// Timed spans. Each span is a start/stop pair around a phase of request processing.

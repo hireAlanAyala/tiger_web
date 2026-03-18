@@ -2,7 +2,7 @@
 
 const std = @import("std");
 const assert = std.debug.assert;
-const PRNG = @import("prng.zig");
+const PRNG = @import("framework/prng.zig");
 
 pub const FuzzArgs = struct {
     seed: u64,

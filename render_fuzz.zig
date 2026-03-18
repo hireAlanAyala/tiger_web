@@ -8,11 +8,11 @@
 const std = @import("std");
 const assert = std.debug.assert;
 const render = @import("render.zig");
-const http = @import("http.zig");
+const http = @import("framework/http.zig");
 const message = @import("message.zig");
-const auth = @import("auth.zig");
+const auth = @import("framework/auth.zig");
 const FuzzArgs = @import("fuzz_lib.zig").FuzzArgs;
-const PRNG = @import("prng.zig");
+const PRNG = @import("framework/prng.zig");
 
 const log = std.log.scoped(.fuzz);
 

@@ -84,16 +84,16 @@ pub fn build(b: *std.Build) void {
     const modules = [_][]const u8{
         "message.zig",
         "state_machine.zig",
-        "http.zig",
-        "marks.zig",
         "codec.zig",
         "tracer.zig",
-        "prng.zig",
-        "time.zig",
-        "auth.zig",
         "render.zig",
-        "checksum.zig",
         "wal.zig",
+        "framework/http.zig",
+        "framework/marks.zig",
+        "framework/prng.zig",
+        "framework/time.zig",
+        "framework/auth.zig",
+        "framework/checksum.zig",
     };
     const unit_test_step = b.step("unit-test", "Run unit tests");
     for (modules) |mod| {
