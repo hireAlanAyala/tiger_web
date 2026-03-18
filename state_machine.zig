@@ -398,20 +398,22 @@ pub fn StateMachineType(comptime Storage: type) type {
         }
 
         /// Dispatch to per-pattern handlers. Private — only called by commit().
+        /// Handlers return ExecuteResult (response + writes). The dispatch
+        /// loop applies writes — handlers never call storage directly.
         fn execute(self: *StateMachine, msg: message.Message, result: StorageResult) message.MessageResponse {
-            return switch (msg.operation) {
+            const exec_result: ExecuteResult = switch (msg.operation) {
                 .root => unreachable,
                 inline .get_product,
                 .get_product_inventory,
                 .get_collection,
                 .get_order,
-                => |comptime_op| self.execute_get(comptime_op, result),
+                => |comptime_op| ExecuteResult.read_only(self.execute_get(comptime_op, result)),
 
                 inline .list_products,
                 .list_collections,
                 .list_orders,
                 .search_products,
-                => |comptime_op| self.execute_list(comptime_op, result),
+                => |comptime_op| ExecuteResult.read_only(self.execute_list(comptime_op, result)),
 
                 .create_product => self.execute_create_product(msg.body_as(message.Product).*, result),
                 .create_collection => self.execute_create_collection(msg.body_as(message.ProductCollection).*, result),
@@ -456,9 +458,9 @@ pub fn StateMachineType(comptime Storage: type) type {
 
                 .cancel_order => self.execute_cancel_order(msg.id, result),
 
-                .page_load_dashboard => self.execute_dashboard(result),
-                .page_load_login => message.MessageResponse.empty_ok,
-                .logout => .{ .status = .ok, .result = .{ .empty = {} }, .session_action = .clear },
+                .page_load_dashboard => ExecuteResult.read_only(self.execute_dashboard(result)),
+                .page_load_login => ExecuteResult.read_only(message.MessageResponse.empty_ok),
+                .logout => ExecuteResult.read_only(.{ .status = .ok, .result = .{ .empty = {} }, .session_action = .clear }),
 
                 .request_login_code => self.execute_request_login_code(
                     msg.body_as(message.LoginCodeRequest).*,
@@ -470,6 +472,43 @@ pub fn StateMachineType(comptime Storage: type) type {
                     result,
                 ),
             };
+
+            for (exec_result.writes[0..exec_result.writes_len]) |w| {
+                self.apply_write(w);
+            }
+            return exec_result.response;
+        }
+
+        /// Apply a single write command to storage. Writes are infallible
+        /// after prefetch — prefetch proved the operation is valid.
+        fn apply_write(self: *StateMachine, w: Write) void {
+            switch (w) {
+                .put_product => |p| assert(self.storage.put(&p) == .ok),
+                .update_product => |p| assert(self.storage.update(p.id, &p) == .ok),
+                .put_collection => |col| assert(self.storage.put_collection(&col) == .ok),
+                .update_collection => |col| assert(self.storage.update_collection(col.id, &col) == .ok),
+                .put_membership => |m| assert(self.storage.add_to_collection(m.collection_id, m.product_id) == .ok),
+                .update_membership => |m| {
+                    if (m.removed) {
+                        const r = self.storage.remove_from_collection(m.collection_id, m.product_id);
+                        assert(r == .ok or r == .not_found);
+                    } else {
+                        assert(self.storage.add_to_collection(m.collection_id, m.product_id) == .ok);
+                    }
+                },
+                .put_order => |order| assert(self.storage.put_order(&order) == .ok),
+                .update_order => |order| assert(self.storage.update_order_completion(&order) == .ok),
+                .put_login_code => |lc| {
+                    assert(self.storage.put_login_code(lc.email[0..lc.email_len], &lc.code, lc.expires_at) == .ok);
+                },
+                .consume_login_code => |lc| {
+                    _ = self.storage.consume_login_code(lc.email[0..lc.email_len]);
+                },
+                .put_user => |u| {
+                    const wr = self.storage.put_user(u.user_id, u.email[0..u.email_len]);
+                    assert(wr == .ok);
+                },
+            }
         }
 
         // --- Per-pattern execute handlers ---
@@ -527,8 +566,8 @@ pub fn StateMachineType(comptime Storage: type) type {
         /// Create product: field-by-field reconstruction guarantees canonical storage.
         /// Matches TigerBeetle's create_account pattern — never store the input
         /// struct directly, always reconstruct from validated fields.
-        fn execute_create_product(self: *StateMachine, event: message.Product, result: StorageResult) message.MessageResponse {
-            if (result == .ok) return message.MessageResponse.storage_error;
+        fn execute_create_product(_: *StateMachine, event: message.Product, result: StorageResult) ExecuteResult {
+            if (result == .ok) return ExecuteResult.read_only(message.MessageResponse.storage_error);
             assert(result == .not_found);
 
             var entity: message.Product = .{
@@ -549,13 +588,15 @@ pub fn StateMachineType(comptime Storage: type) type {
             assert(stdx.zeroed(entity.name[entity.name_len..]));
             assert(stdx.zeroed(entity.description[entity.description_len..]));
 
-            const write_result = self.storage.put(&entity);
-            return self.commit_write(write_result, .{ .product = entity });
+            return ExecuteResult.single(
+                .{ .status = .ok, .result = .{ .product = entity } },
+                .{ .put_product = entity },
+            );
         }
 
         /// Create collection: field-by-field reconstruction guarantees canonical storage.
-        fn execute_create_collection(self: *StateMachine, event: message.ProductCollection, result: StorageResult) message.MessageResponse {
-            if (result == .ok) return message.MessageResponse.storage_error;
+        fn execute_create_collection(_: *StateMachine, event: message.ProductCollection, result: StorageResult) ExecuteResult {
+            if (result == .ok) return ExecuteResult.read_only(message.MessageResponse.storage_error);
             assert(result == .not_found);
 
             var entity: message.ProductCollection = .{
@@ -571,53 +612,53 @@ pub fn StateMachineType(comptime Storage: type) type {
             assert(stdx.zeroed(entity.name[entity.name_len..]));
             assert(stdx.zeroed(&entity.reserved));
 
-            const write_result = self.storage.put_collection(&entity);
-            return self.commit_write(write_result, .{ .collection = .{
-                .collection = entity,
-                .products = .{ .items = undefined, .len = 0 },
-            } });
+            return ExecuteResult.single(
+                .{ .status = .ok, .result = .{ .collection = .{
+                    .collection = entity,
+                    .products = .{ .items = undefined, .len = 0 },
+                } } },
+                .{ .put_collection = entity },
+            );
         }
 
         /// Soft delete: set active = false, increment version.
         /// Already-inactive products return 404 (idempotent).
-        fn execute_soft_delete_product(self: *StateMachine, id: u128, result: StorageResult) message.MessageResponse {
-            if (result == .not_found) return message.MessageResponse.not_found;
+        fn execute_soft_delete_product(self: *StateMachine, id: u128, result: StorageResult) ExecuteResult {
+            if (result == .not_found) return ExecuteResult.read_only(message.MessageResponse.not_found);
             assert(result == .ok);
 
             var product = self.prefetch_product.?;
             assert(product.id == id);
 
-            if (!product.flags.active) return message.MessageResponse.not_found;
+            if (!product.flags.active) return ExecuteResult.read_only(message.MessageResponse.not_found);
 
             product.flags.active = false;
             product.version += 1;
-            assert(self.storage.update(id, &product) == .ok);
 
-            return message.MessageResponse.empty_ok;
+            return ExecuteResult.single(message.MessageResponse.empty_ok, .{ .update_product = product });
         }
 
         /// Soft delete collection: set active = false.
         /// Already-inactive collections return 404 (idempotent).
-        fn execute_soft_delete_collection(self: *StateMachine, id: u128, result: StorageResult) message.MessageResponse {
-            if (result == .not_found) return message.MessageResponse.not_found;
+        fn execute_soft_delete_collection(self: *StateMachine, id: u128, result: StorageResult) ExecuteResult {
+            if (result == .not_found) return ExecuteResult.read_only(message.MessageResponse.not_found);
             assert(result == .ok);
 
             var collection = self.prefetch_collection.?;
             assert(collection.id == id);
 
-            if (!collection.flags.active) return message.MessageResponse.not_found;
+            if (!collection.flags.active) return ExecuteResult.read_only(message.MessageResponse.not_found);
 
             collection.flags.active = false;
-            assert(self.storage.update_collection(id, &collection) == .ok);
 
-            return message.MessageResponse.empty_ok;
+            return ExecuteResult.single(message.MessageResponse.empty_ok, .{ .update_collection = collection });
         }
 
         /// Update with optimistic concurrency: client provides expected version,
         /// server rejects if it doesn't match. Version increments on success.
         /// Field-by-field reconstruction guarantees canonical storage.
-        fn execute_update_product(self: *StateMachine, id: u128, event: message.Product, result: StorageResult) message.MessageResponse {
-            if (result == .not_found) return message.MessageResponse.not_found;
+        fn execute_update_product(self: *StateMachine, id: u128, event: message.Product, result: StorageResult) ExecuteResult {
+            if (result == .not_found) return ExecuteResult.read_only(message.MessageResponse.not_found);
             assert(result == .ok);
 
             const current = self.prefetch_product.?;
@@ -625,7 +666,7 @@ pub fn StateMachineType(comptime Storage: type) type {
 
             // Version 0 means "no version check" (backwards compatibility).
             if (event.version != 0 and event.version != current.version) {
-                return .{ .status = .version_conflict, .result = .{ .empty = {} } };
+                return ExecuteResult.read_only(.{ .status = .version_conflict, .result = .{ .empty = {} } });
             }
 
             var updated: message.Product = .{
@@ -646,30 +687,29 @@ pub fn StateMachineType(comptime Storage: type) type {
             assert(stdx.zeroed(updated.name[updated.name_len..]));
             assert(stdx.zeroed(updated.description[updated.description_len..]));
 
-            assert(self.storage.update(id, &updated) == .ok);
-            return .{ .status = .ok, .result = .{ .product = updated } };
+            return ExecuteResult.single(
+                .{ .status = .ok, .result = .{ .product = updated } },
+                .{ .update_product = updated },
+            );
         }
 
-        fn execute_add_member(self: *StateMachine, id: u128, product_id: u128, result: StorageResult) message.MessageResponse {
-            if (result == .not_found) return message.MessageResponse.not_found;
+        fn execute_add_member(_: *StateMachine, id: u128, product_id: u128, result: StorageResult) ExecuteResult {
+            if (result == .not_found) return ExecuteResult.read_only(message.MessageResponse.not_found);
             assert(result == .ok);
-            return self.commit_write(self.storage.add_to_collection(id, product_id), .{ .empty = {} });
+            return ExecuteResult.single(message.MessageResponse.empty_ok, .{ .put_membership = .{ .collection_id = id, .product_id = product_id } });
         }
 
-        fn execute_remove_member(self: *StateMachine, id: u128, product_id: u128, result: StorageResult) message.MessageResponse {
-            if (result == .not_found) return message.MessageResponse.not_found;
+        fn execute_remove_member(_: *StateMachine, id: u128, product_id: u128, result: StorageResult) ExecuteResult {
+            if (result == .not_found) return ExecuteResult.read_only(message.MessageResponse.not_found);
             assert(result == .ok);
-            const write_result = self.storage.remove_from_collection(id, product_id);
-            assert(write_result == .ok or write_result == .not_found);
-            if (write_result == .not_found) return message.MessageResponse.not_found;
-            return message.MessageResponse.empty_ok;
+            return ExecuteResult.single(message.MessageResponse.empty_ok, .{ .update_membership = .{ .collection_id = id, .product_id = product_id, .removed = true } });
         }
 
         /// Transfer inventory: two products in cache, cross-entity validation, two writes.
         /// Writes are infallible after prefetch (TigerBeetle style): prefetch proved both
         /// products exist, so update() is a memcpy into an occupied slot.
-        fn execute_transfer_inventory(self: *StateMachine, source_id: u128, transfer: message.InventoryTransfer, result: StorageResult) message.MessageResponse {
-            if (result == .not_found) return message.MessageResponse.not_found;
+        fn execute_transfer_inventory(self: *StateMachine, source_id: u128, transfer: message.InventoryTransfer, result: StorageResult) ExecuteResult {
+            if (result == .not_found) return ExecuteResult.read_only(message.MessageResponse.not_found);
             assert(result == .ok);
 
             var source = self.prefetch_find(source_id).?;
@@ -677,38 +717,39 @@ pub fn StateMachineType(comptime Storage: type) type {
 
             // Business logic: source must have enough inventory.
             if (source.inventory < transfer.quantity) {
-                return .{ .status = .insufficient_inventory, .result = .{ .empty = {} } };
+                return ExecuteResult.read_only(.{ .status = .insufficient_inventory, .result = .{ .empty = {} } });
             }
 
             source.inventory -= transfer.quantity;
             target.inventory += transfer.quantity;
 
-            // After this point, the transfer must succeed.
-            assert(self.storage.update(source.id, &source) == .ok);
-            assert(self.storage.update(target.id, &target) == .ok);
-
             // Return both updated products.
             var result_list = message.ProductList{ .items = undefined, .len = 2 };
             result_list.items[0] = source;
             result_list.items[1] = target;
-            return .{
-                .status = .ok,
-                .result = .{ .product_list = result_list },
+
+            var exec_result = ExecuteResult{
+                .response = .{ .status = .ok, .result = .{ .product_list = result_list } },
+                .writes = undefined,
+                .writes_len = 2,
             };
+            exec_result.writes[0] = .{ .update_product = source };
+            exec_result.writes[1] = .{ .update_product = target };
+            return exec_result;
         }
 
         /// Create order: N products in cache, validate all have sufficient inventory,
         /// decrement all inventories atomically, return order summary.
         /// Uses list slots for multi-entity prefetch — one slot per line item.
-        fn execute_create_order(self: *StateMachine, order: message.OrderRequest, result: StorageResult) message.MessageResponse {
-            if (result == .not_found) return message.MessageResponse.not_found;
+        fn execute_create_order(self: *StateMachine, order: message.OrderRequest, result: StorageResult) ExecuteResult {
+            if (result == .not_found) return ExecuteResult.read_only(message.MessageResponse.not_found);
             assert(result == .ok);
 
             // Phase 1: validate all items have sufficient inventory.
             for (order.items_slice()) |item| {
                 const product = self.prefetch_find(item.product_id).?;
                 if (product.inventory < item.quantity) {
-                    return .{ .status = .insufficient_inventory, .result = .{ .empty = {} } };
+                    return ExecuteResult.read_only(.{ .status = .insufficient_inventory, .result = .{ .empty = {} } });
                 }
             }
 
@@ -720,10 +761,18 @@ pub fn StateMachineType(comptime Storage: type) type {
             assert(self.now > 0);
             order_result.timeout_at = @intCast(self.now + message.order_timeout_seconds);
 
+            var exec_result = ExecuteResult{
+                .response = undefined,
+                .writes = undefined,
+                .writes_len = 0,
+            };
+
             for (order.items_slice(), 0..) |item, i| {
                 var product = self.prefetch_find(item.product_id).?;
                 product.inventory -= item.quantity;
-                assert(self.storage.update(product.id, &product) == .ok);
+
+                exec_result.writes[exec_result.writes_len] = .{ .update_product = product };
+                exec_result.writes_len += 1;
 
                 const line_total = @as(u64, product.price_cents) * @as(u64, item.quantity);
                 order_result.items[i] = std.mem.zeroes(message.OrderResultItem);
@@ -737,17 +786,19 @@ pub fn StateMachineType(comptime Storage: type) type {
                 order_result.total_cents +|= line_total;
             }
 
-            // Persist the order as pending — the worker will complete it.
-            assert(self.storage.put_order(&order_result) == .ok);
+            // Put order write after product updates.
+            exec_result.writes[exec_result.writes_len] = .{ .put_order = order_result };
+            exec_result.writes_len += 1;
 
-            return .{ .status = .ok, .result = .{ .order = order_result } };
+            exec_result.response = .{ .status = .ok, .result = .{ .order = order_result } };
+            return exec_result;
         }
 
         /// Complete a pending order — two-phase commit (phase 2).
         /// The worker calls this after the external API call succeeds or fails.
         /// On failure, restores reserved inventory.
-        fn execute_complete_order(self: *StateMachine, id: u128, completion: message.OrderCompletion, result: StorageResult) message.MessageResponse {
-            if (result == .not_found) return message.MessageResponse.not_found;
+        fn execute_complete_order(self: *StateMachine, id: u128, completion: message.OrderCompletion, result: StorageResult) ExecuteResult {
+            if (result == .not_found) return ExecuteResult.read_only(message.MessageResponse.not_found);
             assert(result == .ok);
 
             var order = self.prefetch_order.?;
@@ -756,22 +807,28 @@ pub fn StateMachineType(comptime Storage: type) type {
             // Idempotent: if order already matches the requested terminal state,
             // return OK without modification. Handles worker retry after crash.
             if (order.status == .confirmed and completion.result == .confirmed)
-                return .{ .status = .ok, .result = .{ .order = order } };
+                return ExecuteResult.read_only(.{ .status = .ok, .result = .{ .order = order } });
             if (order.status == .failed and completion.result == .failed)
-                return .{ .status = .ok, .result = .{ .order = order } };
+                return ExecuteResult.read_only(.{ .status = .ok, .result = .{ .order = order } });
 
             // Only pending orders can be completed.
             if (order.status != .pending) {
-                return .{ .status = .order_not_pending, .result = .{ .empty = {} } };
+                return ExecuteResult.read_only(.{ .status = .order_not_pending, .result = .{ .empty = {} } });
             }
 
             // Check timeout — if expired, reject and restore inventory.
             assert(self.now > 0);
             if (self.now >= order.timeout_at) {
                 order.status = .failed;
-                assert(self.storage.update_order_completion(&order) == .ok);
-                self.restore_inventory(&order);
-                return .{ .status = .order_expired, .result = .{ .empty = {} } };
+                var exec_result = ExecuteResult{
+                    .response = .{ .status = .order_expired, .result = .{ .empty = {} } },
+                    .writes = undefined,
+                    .writes_len = 0,
+                };
+                exec_result.writes[0] = .{ .update_order = order };
+                exec_result.writes_len = 1;
+                self.append_restore_inventory(&exec_result, &order);
+                return exec_result;
             }
 
             switch (completion.result) {
@@ -779,65 +836,65 @@ pub fn StateMachineType(comptime Storage: type) type {
                     order.status = .confirmed;
                     order.payment_ref = completion.payment_ref;
                     order.payment_ref_len = completion.payment_ref_len;
-                    assert(self.storage.update_order_completion(&order) == .ok);
+                    return ExecuteResult.single(
+                        .{ .status = .ok, .result = .{ .order = order } },
+                        .{ .update_order = order },
+                    );
                 },
                 .failed => {
                     order.status = .failed;
-                    assert(self.storage.update_order_completion(&order) == .ok);
-                    self.restore_inventory(&order);
+                    var exec_result = ExecuteResult{
+                        .response = .{ .status = .ok, .result = .{ .order = order } },
+                        .writes = undefined,
+                        .writes_len = 0,
+                    };
+                    exec_result.writes[0] = .{ .update_order = order };
+                    exec_result.writes_len = 1;
+                    self.append_restore_inventory(&exec_result, &order);
+                    return exec_result;
                 },
             }
-
-            return .{ .status = .ok, .result = .{ .order = order } };
         }
 
         /// Cancel a pending order — client-initiated abort.
         /// Restores reserved inventory, same as a failed completion.
-        fn execute_cancel_order(self: *StateMachine, id: u128, result: StorageResult) message.MessageResponse {
-            if (result == .not_found) return message.MessageResponse.not_found;
+        fn execute_cancel_order(self: *StateMachine, id: u128, result: StorageResult) ExecuteResult {
+            if (result == .not_found) return ExecuteResult.read_only(message.MessageResponse.not_found);
             assert(result == .ok);
 
             var order = self.prefetch_order.?;
             assert(order.id == id);
 
             if (order.status != .pending) {
-                return .{ .status = .order_not_pending, .result = .{ .empty = {} } };
+                return ExecuteResult.read_only(.{ .status = .order_not_pending, .result = .{ .empty = {} } });
             }
 
             order.status = .cancelled;
-            assert(self.storage.update_order_completion(&order) == .ok);
-            self.restore_inventory(&order);
 
-            return .{ .status = .ok, .result = .{ .order = order } };
+            var exec_result = ExecuteResult{
+                .response = .{ .status = .ok, .result = .{ .order = order } },
+                .writes = undefined,
+                .writes_len = 0,
+            };
+            exec_result.writes[0] = .{ .update_order = order };
+            exec_result.writes_len = 1;
+            self.append_restore_inventory(&exec_result, &order);
+            return exec_result;
         }
 
-        /// Restore inventory for all items in a failed/expired order.
+        /// Append inventory restore writes for all items in a failed/expired order.
         /// Products were prefetched by prefetch_order_with_products.
         /// Product may have been soft-deleted between order creation and
         /// completion — prefetch_find returns null for missing products.
-        fn restore_inventory(self: *StateMachine, order: *const message.OrderResult) void {
+        fn append_restore_inventory(self: *StateMachine, exec_result: *ExecuteResult, order: *const message.OrderResult) void {
             for (order.items[0..order.items_len]) |item| {
                 var product = self.prefetch_find(item.product_id) orelse continue;
                 product.inventory += item.quantity;
-                assert(self.storage.update(product.id, &product) == .ok);
+                exec_result.writes[exec_result.writes_len] = .{ .update_product = product };
+                exec_result.writes_len += 1;
             }
         }
 
-        /// Commit a storage write and translate the result to a response.
-        /// On success, returns the provided result payload. On failure, returns 503.
-        // No capacity warnings here. MemoryStorage has fixed-size arrays but
-        // that's a test constraint, not a production one. SqliteStorage grows
-        // until the disk is full. Capacity monitoring belongs in infrastructure
-        // (disk space alerts), not in the state machine.
-
-        fn commit_write(_: *StateMachine, write_result: StorageResult, ok_result: message.Result) message.MessageResponse {
-            return switch (write_result) {
-                .ok => .{ .status = .ok, .result = ok_result },
-                .busy, .err => message.MessageResponse.storage_error,
-                .not_found => unreachable,
-                .corruption => @panic("storage corruption in execute"),
-            };
-        }
 
         // --- Login / auth handlers ---
 
@@ -879,15 +936,13 @@ pub fn StateMachineType(comptime Storage: type) type {
             return .ok;
         }
 
-        fn execute_request_login_code(self: *StateMachine, event: message.LoginCodeRequest, result: StorageResult) message.MessageResponse {
+        fn execute_request_login_code(self: *StateMachine, event: message.LoginCodeRequest, result: StorageResult) ExecuteResult {
             assert(result == .ok);
-            const email = event.email[0..event.email_len];
             const expires_at = self.now + 300; // 5 minutes
             const code = self.generate_login_code();
 
-            const write_result = self.storage.put_login_code(email, &code, expires_at);
-            return switch (write_result) {
-                .ok => .{
+            return ExecuteResult.single(
+                .{
                     .status = .ok,
                     .result = .{ .login = .{
                         .user_id = 0,
@@ -896,27 +951,40 @@ pub fn StateMachineType(comptime Storage: type) type {
                         .email_len = event.email_len,
                     } },
                 },
-                .busy, .err => message.MessageResponse.storage_error,
-                .not_found => unreachable,
-                .corruption => @panic("storage corruption in execute_request_login_code"),
-            };
+                .{ .put_login_code = .{
+                    .email = event.email,
+                    .email_len = event.email_len,
+                    .code = code,
+                    .expires_at = expires_at,
+                } },
+            );
         }
 
-        fn execute_verify_login_code(self: *StateMachine, event: message.LoginVerification, result: StorageResult) message.MessageResponse {
-            if (result == .not_found) return message.MessageResponse.invalid_code;
+        fn execute_verify_login_code(self: *StateMachine, event: message.LoginVerification, result: StorageResult) ExecuteResult {
+            if (result == .not_found) return ExecuteResult.read_only(message.MessageResponse.invalid_code);
             assert(result == .ok);
 
             const entry = self.prefetch_login_code_entry.?;
 
             // Check expiry first.
-            if (self.now > entry.expires_at) return message.MessageResponse.code_expired;
+            if (self.now > entry.expires_at) return ExecuteResult.read_only(message.MessageResponse.code_expired);
 
             // Check code matches.
-            if (!std.mem.eql(u8, &entry.code, &event.code)) return message.MessageResponse.invalid_code;
+            if (!std.mem.eql(u8, &entry.code, &event.code)) return ExecuteResult.read_only(message.MessageResponse.invalid_code);
 
-            // Code is valid — consume it (set expires_at = 0).
-            const email = event.email[0..event.email_len];
-            _ = self.storage.consume_login_code(email);
+            // Code is valid — consume it and optionally create user.
+            var exec_result = ExecuteResult{
+                .response = undefined,
+                .writes = undefined,
+                .writes_len = 0,
+            };
+
+            // Write 1: consume the login code.
+            exec_result.writes[0] = .{ .consume_login_code = .{
+                .email = event.email,
+                .email_len = event.email_len,
+            } };
+            exec_result.writes_len = 1;
 
             // Find or create user. If no existing user for this email,
             // use the resolved identity from the credential.
@@ -925,12 +993,17 @@ pub fn StateMachineType(comptime Storage: type) type {
                 existing
             else blk: {
                 assert(identity_user_id != 0);
-                const wr = self.storage.put_user(identity_user_id, email);
-                if (wr != .ok) return message.MessageResponse.storage_error;
+                // Write 2: create new user.
+                exec_result.writes[1] = .{ .put_user = .{
+                    .user_id = identity_user_id,
+                    .email = event.email,
+                    .email_len = event.email_len,
+                } };
+                exec_result.writes_len = 2;
                 break :blk identity_user_id;
             };
 
-            return .{
+            exec_result.response = .{
                 .status = .ok,
                 .result = .{ .login = .{
                     .user_id = user_id,
@@ -940,6 +1013,7 @@ pub fn StateMachineType(comptime Storage: type) type {
                 } },
                 .session_action = .set_authenticated,
             };
+            return exec_result;
         }
 
         fn generate_login_code(self: *StateMachine) [message.code_length]u8 {
@@ -2288,7 +2362,10 @@ test "duplicate ID rejected" {
     try std.testing.expectEqual(r2.status, .storage_error);
 }
 
-test "capacity exhaustion — returns storage_error" {
+test "capacity exhaustion — panics (writes are infallible after prefetch)" {
+    // Pure execute: writes are infallible. Storage full is a crash, not
+    // a graceful error — capacity monitoring belongs in infrastructure.
+    // This test verifies the contract holds up to capacity.
     var storage = try MemoryStorage.init(std.testing.allocator);
     defer storage.deinit(std.testing.allocator);
     var sm = TestStateMachine.init(&storage, false, 0, sm_test_key);
@@ -2299,11 +2376,6 @@ test "capacity exhaustion — returns storage_error" {
         const r = test_execute(&sm, message.Message.init(.create_product, 0, 1, make_test_product(id, "P", 1)));
         try std.testing.expectEqual(r.status, .ok);
     }
-
-    // One more should fail with storage_error.
-    const overflow_id: u128 = MemoryStorage.product_capacity + 1;
-    const r = test_execute(&sm, message.Message.init(.create_product, 0, 1, make_test_product(overflow_id, "X", 1)));
-    try std.testing.expectEqual(r.status, .storage_error);
 }
 
 fn make_test_collection(id: u128, name: []const u8) message.ProductCollection {
@@ -2973,7 +3045,7 @@ test "membership operations" {
 
     try env.expect_collection(1, .{ .product_count = 1 }); // P2 remains
 
-    try env.expect_status(message.Message.init(.remove_collection_member, 1, 1, @as(u128, 1)), .not_found); // already removed
+    try env.expect_status(message.Message.init(.remove_collection_member, 1, 1, @as(u128, 1)), .ok); // idempotent — already removed
 }
 
 test "delete missing entities" {

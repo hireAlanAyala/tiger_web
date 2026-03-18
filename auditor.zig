@@ -623,13 +623,12 @@ pub const Auditor = struct {
             return;
         }
 
-        const m_idx = self.find_active_membership(collection_id, product_id) orelse {
-            assert(resp.status == .not_found);
-            return;
-        };
-
+        // Remove is idempotent — always ok if collection exists.
         assert(resp.status == .ok);
-        self.memberships[m_idx].?.removed = true;
+
+        if (self.find_active_membership(collection_id, product_id)) |m_idx| {
+            self.memberships[m_idx].?.removed = true;
+        }
     }
 
     // =================================================================
