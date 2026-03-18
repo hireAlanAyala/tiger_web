@@ -42,13 +42,13 @@ pub fn StateMachineType(comptime Storage: type) type {
             put_product: message.Product,
             update_product: message.Product,
             put_collection: message.ProductCollection,
-            delete_collection: u128,
+            update_collection: message.ProductCollection,
             put_membership: struct { collection_id: u128, product_id: u128 },
-            remove_membership: struct { collection_id: u128, product_id: u128 },
+            update_membership: struct { collection_id: u128, product_id: u128, removed: bool },
             put_order: message.OrderResult,
             update_order: message.OrderResult,
             put_login_code: LoginCodeWrite,
-            delete_login_code: LoginCodeKey,
+            consume_login_code: LoginCodeKey,
             put_user: struct { user_id: u128, email: [message.email_max]u8, email_len: u8 },
         };
 
@@ -169,6 +169,7 @@ pub fn StateMachineType(comptime Storage: type) type {
                     const col = msg.body_as(message.ProductCollection);
                     if (col.id == 0) return false;
                     if (col.name_len == 0 or col.name_len > message.collection_name_max) return false;
+                    if (col.flags.padding != 0) return false;
                     if (!stdx.zeroed(&col.reserved)) return false;
                     if (!std.unicode.utf8ValidateSlice(col.name[0..col.name_len])) return false;
                 },
@@ -416,9 +417,7 @@ pub fn StateMachineType(comptime Storage: type) type {
                 .create_collection => self.execute_create_collection(msg.body_as(message.ProductCollection).*, result),
 
                 .delete_product => self.execute_soft_delete_product(msg.id, result),
-
-                inline .delete_collection,
-                => |comptime_op| self.execute_delete(comptime_op, msg.id, result),
+                .delete_collection => self.execute_soft_delete_collection(msg.id, result),
 
                 .update_product => self.execute_update_product(
                     msg.id,
@@ -487,9 +486,12 @@ pub fn StateMachineType(comptime Storage: type) type {
             if (result == .not_found) return message.MessageResponse.not_found;
             assert(result == .ok);
 
-            // Soft delete: inactive products are treated as not found.
+            // Soft delete: inactive entities are treated as not found.
             if (op == .get_product or op == .get_product_inventory) {
                 if (!self.prefetch_product.?.flags.active) return message.MessageResponse.not_found;
+            }
+            if (op == .get_collection) {
+                if (!self.prefetch_collection.?.flags.active) return message.MessageResponse.not_found;
             }
 
             return .{
@@ -560,7 +562,8 @@ pub fn StateMachineType(comptime Storage: type) type {
                 .id = event.id,
                 .name = std.mem.zeroes([message.collection_name_max]u8),
                 .name_len = event.name_len,
-                .reserved = std.mem.zeroes([15]u8),
+                .flags = .{ .active = true },
+                .reserved = std.mem.zeroes([14]u8),
             };
             @memcpy(entity.name[0..event.name_len], event.name[0..event.name_len]);
 
@@ -593,18 +596,21 @@ pub fn StateMachineType(comptime Storage: type) type {
             return message.MessageResponse.empty_ok;
         }
 
-        /// Hard delete: remove the entity from storage.
-        /// Used by delete_collection (collections don't have soft delete).
-        fn execute_delete(self: *StateMachine, comptime op: message.Operation, id: u128, result: StorageResult) message.MessageResponse {
+        /// Soft delete collection: set active = false.
+        /// Already-inactive collections return 404 (idempotent).
+        fn execute_soft_delete_collection(self: *StateMachine, id: u128, result: StorageResult) message.MessageResponse {
             if (result == .not_found) return message.MessageResponse.not_found;
             assert(result == .ok);
 
-            assert(switch (op) {
-                .delete_collection => self.storage.delete_collection(id),
-                else => unreachable,
-            } == .ok);
+            var collection = self.prefetch_collection.?;
+            assert(collection.id == id);
 
-            return .{ .status = .ok, .result = .{ .empty = {} } };
+            if (!collection.flags.active) return message.MessageResponse.not_found;
+
+            collection.flags.active = false;
+            assert(self.storage.update_collection(id, &collection) == .ok);
+
+            return message.MessageResponse.empty_ok;
         }
 
         /// Update with optimistic concurrency: client provides expected version,
@@ -908,9 +914,9 @@ pub fn StateMachineType(comptime Storage: type) type {
             // Check code matches.
             if (!std.mem.eql(u8, &entry.code, &event.code)) return message.MessageResponse.invalid_code;
 
-            // Code is valid — consume it.
+            // Code is valid — consume it (set expires_at = 0).
             const email = event.email[0..event.email_len];
-            _ = self.storage.delete_login_code(email);
+            _ = self.storage.consume_login_code(email);
 
             // Find or create user. If no existing user for this email,
             // use the resolved identity from the credential.
@@ -1198,6 +1204,7 @@ pub const MemoryStorage = struct {
         collection_id: u128,
         product_id: u128,
         occupied: bool,
+        removed: bool,
     };
 
     const OrderEntry = struct {
@@ -1222,7 +1229,7 @@ pub const MemoryStorage = struct {
 
     const empty_product = ProductEntry{ .product = undefined, .occupied = false };
     const empty_collection = CollectionEntry{ .collection = undefined, .occupied = false };
-    const empty_membership = MembershipEntry{ .collection_id = 0, .product_id = 0, .occupied = false };
+    const empty_membership = MembershipEntry{ .collection_id = 0, .product_id = 0, .occupied = false, .removed = false };
     const empty_order = OrderEntry{ .order = undefined, .occupied = false };
     const empty_login_code = LoginCodeEntry{ .email = undefined, .email_len = 0, .code = undefined, .expires_at = 0, .occupied = false };
     const empty_user = UserEntry{ .user_id = 0, .email = undefined, .email_len = 0, .occupied = false };
@@ -1410,24 +1417,14 @@ pub const MemoryStorage = struct {
         return .err; // full
     }
 
-    pub fn delete_collection(self: *MemoryStorage, id: u128) StorageResult {
-        var found = false;
+    pub fn update_collection(self: *MemoryStorage, id: u128, col: *const message.ProductCollection) StorageResult {
         for (self.collections_store) |*entry| {
             if (entry.occupied and entry.collection.id == id) {
-                entry.occupied = false;
-                self.collection_count -= 1;
-                found = true;
-                break;
+                entry.collection = col.*;
+                return .ok;
             }
         }
-        if (!found) return .not_found;
-        // Cascade: remove memberships for this collection.
-        for (self.memberships) |*m| {
-            if (m.occupied and m.collection_id == id) {
-                m.occupied = false;
-            }
-        }
-        return .ok;
+        return .not_found;
     }
 
     pub fn list_collections(self: *MemoryStorage, out: *[message.list_max]message.ProductCollection, out_len: *u32, cursor: u128) StorageResult {
@@ -1435,6 +1432,7 @@ pub const MemoryStorage = struct {
         out_len.* = 0;
         for (self.collections_store) |*entry| {
             if (!entry.occupied) continue;
+            if (!entry.collection.flags.active) continue;
             if (entry.collection.id <= cursor) continue;
             insert_sorted(message.ProductCollection, out, out_len, entry.collection);
         }
@@ -1444,13 +1442,16 @@ pub const MemoryStorage = struct {
     // --- Membership operations ---
 
     pub fn add_to_collection(self: *MemoryStorage, collection_id: u128, product_id: u128) StorageResult {
-        // Check for duplicate membership.
+        // Check for existing membership — un-remove if removed.
         for (self.memberships) |*m| {
-            if (m.occupied and m.collection_id == collection_id and m.product_id == product_id) return .ok;
+            if (m.occupied and m.collection_id == collection_id and m.product_id == product_id) {
+                m.removed = false;
+                return .ok;
+            }
         }
         for (self.memberships) |*m| {
             if (!m.occupied) {
-                m.* = .{ .collection_id = collection_id, .product_id = product_id, .occupied = true };
+                m.* = .{ .collection_id = collection_id, .product_id = product_id, .occupied = true, .removed = false };
                 return .ok;
             }
         }
@@ -1459,8 +1460,8 @@ pub const MemoryStorage = struct {
 
     pub fn remove_from_collection(self: *MemoryStorage, collection_id: u128, product_id: u128) StorageResult {
         for (self.memberships) |*m| {
-            if (m.occupied and m.collection_id == collection_id and m.product_id == product_id) {
-                m.occupied = false;
+            if (m.occupied and !m.removed and m.collection_id == collection_id and m.product_id == product_id) {
+                m.removed = true;
                 return .ok;
             }
         }
@@ -1471,7 +1472,7 @@ pub const MemoryStorage = struct {
         if (self.fault()) |f| return f;
         out_len.* = 0;
         for (self.memberships) |*m| {
-            if (!m.occupied or m.collection_id != collection_id) continue;
+            if (!m.occupied or m.removed or m.collection_id != collection_id) continue;
             // Look up the product.
             for (self.products) |*entry| {
                 if (entry.occupied and entry.product.id == m.product_id) {
@@ -1612,12 +1613,12 @@ pub const MemoryStorage = struct {
         return .err; // full
     }
 
-    pub fn delete_login_code(self: *MemoryStorage, email: []const u8) StorageResult {
+    pub fn consume_login_code(self: *MemoryStorage, email: []const u8) StorageResult {
         for (&self.login_codes) |*entry| {
             if (entry.occupied and entry.email_len == email.len and
                 std.mem.eql(u8, entry.email[0..entry.email_len], email))
             {
-                entry.* = empty_login_code;
+                entry.expires_at = 0;
                 return .ok;
             }
         }

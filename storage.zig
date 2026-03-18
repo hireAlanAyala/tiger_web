@@ -29,11 +29,10 @@ pub const SqliteStorage = struct {
     stmt_list: *c.sqlite3_stmt,
     stmt_get_collection: *c.sqlite3_stmt,
     stmt_put_collection: *c.sqlite3_stmt,
-    stmt_delete_collection: *c.sqlite3_stmt,
+    stmt_update_collection: *c.sqlite3_stmt,
     stmt_list_collections: *c.sqlite3_stmt,
     stmt_add_member: *c.sqlite3_stmt,
     stmt_remove_member: *c.sqlite3_stmt,
-    stmt_delete_memberships: *c.sqlite3_stmt,
     stmt_list_members: *c.sqlite3_stmt,
     stmt_put_order: *c.sqlite3_stmt,
     stmt_put_order_item: *c.sqlite3_stmt,
@@ -44,7 +43,7 @@ pub const SqliteStorage = struct {
     stmt_search_products: *c.sqlite3_stmt,
     stmt_get_login_code: *c.sqlite3_stmt,
     stmt_put_login_code: *c.sqlite3_stmt,
-    stmt_delete_login_code: *c.sqlite3_stmt,
+    stmt_consume_login_code: *c.sqlite3_stmt,
     stmt_get_user_by_email: *c.sqlite3_stmt,
     stmt_put_user: *c.sqlite3_stmt,
 
@@ -90,29 +89,27 @@ pub const SqliteStorage = struct {
 
         // Prepare collection statements.
         const stmt_get_collection = prepare(real_db,
-            "SELECT id, name FROM collections WHERE id = ?1;",
+            "SELECT id, name, active FROM collections WHERE id = ?1;",
         );
         const stmt_put_collection = prepare(real_db,
-            "INSERT INTO collections (id, name) VALUES (?1, ?2);",
+            "INSERT INTO collections (id, name, active) VALUES (?1, ?2, ?3);",
         );
-        const stmt_delete_collection = prepare(real_db,
-            "DELETE FROM collections WHERE id = ?1;",
+        const stmt_update_collection = prepare(real_db,
+            "UPDATE collections SET name = ?2, active = ?3 WHERE id = ?1;",
         );
         const stmt_list_collections = prepare(real_db,
-            "SELECT id, name FROM collections WHERE id > ?1 ORDER BY id LIMIT ?2;",
+            "SELECT id, name, active FROM collections WHERE id > ?1 AND active = 1 ORDER BY id LIMIT ?2;",
         );
         const stmt_add_member = prepare(real_db,
-            "INSERT OR IGNORE INTO collection_members (collection_id, product_id) VALUES (?1, ?2);",
+            "INSERT INTO collection_members (collection_id, product_id, removed) VALUES (?1, ?2, 0)" ++
+            " ON CONFLICT(collection_id, product_id) DO UPDATE SET removed = 0;",
         );
         const stmt_remove_member = prepare(real_db,
-            "DELETE FROM collection_members WHERE collection_id = ?1 AND product_id = ?2;",
-        );
-        const stmt_delete_memberships = prepare(real_db,
-            "DELETE FROM collection_members WHERE collection_id = ?1;",
+            "UPDATE collection_members SET removed = 1 WHERE collection_id = ?1 AND product_id = ?2 AND removed = 0;",
         );
         const stmt_list_members = prepare(real_db,
             "SELECT p.id, p.name, p.description, p.price_cents, p.inventory, p.version, p.active " ++
-            "FROM collection_members cm JOIN products p ON cm.product_id = p.id WHERE cm.collection_id = ?1 ORDER BY p.id LIMIT ?2;",
+            "FROM collection_members cm JOIN products p ON cm.product_id = p.id WHERE cm.collection_id = ?1 AND cm.removed = 0 ORDER BY p.id LIMIT ?2;",
         );
 
         // Prepare order statements.
@@ -147,8 +144,8 @@ pub const SqliteStorage = struct {
         const stmt_put_login_code = prepare(real_db,
             "INSERT OR REPLACE INTO login_codes (email, code, expires_at) VALUES (?1, ?2, ?3);",
         );
-        const stmt_delete_login_code = prepare(real_db,
-            "DELETE FROM login_codes WHERE email = ?1;",
+        const stmt_consume_login_code = prepare(real_db,
+            "UPDATE login_codes SET expires_at = 0 WHERE email = ?1;",
         );
         const stmt_get_user_by_email = prepare(real_db,
             "SELECT user_id FROM users WHERE email = ?1;",
@@ -168,11 +165,10 @@ pub const SqliteStorage = struct {
             .stmt_list = stmt_list,
             .stmt_get_collection = stmt_get_collection,
             .stmt_put_collection = stmt_put_collection,
-            .stmt_delete_collection = stmt_delete_collection,
+            .stmt_update_collection = stmt_update_collection,
             .stmt_list_collections = stmt_list_collections,
             .stmt_add_member = stmt_add_member,
             .stmt_remove_member = stmt_remove_member,
-            .stmt_delete_memberships = stmt_delete_memberships,
             .stmt_list_members = stmt_list_members,
             .stmt_put_order = stmt_put_order,
             .stmt_put_order_item = stmt_put_order_item,
@@ -183,7 +179,7 @@ pub const SqliteStorage = struct {
             .stmt_search_products = stmt_search_products,
             .stmt_get_login_code = stmt_get_login_code,
             .stmt_put_login_code = stmt_put_login_code,
-            .stmt_delete_login_code = stmt_delete_login_code,
+            .stmt_consume_login_code = stmt_consume_login_code,
             .stmt_get_user_by_email = stmt_get_user_by_email,
             .stmt_put_user = stmt_put_user,
         };
@@ -205,11 +201,10 @@ pub const SqliteStorage = struct {
         _ = c.sqlite3_finalize(self.stmt_list);
         _ = c.sqlite3_finalize(self.stmt_get_collection);
         _ = c.sqlite3_finalize(self.stmt_put_collection);
-        _ = c.sqlite3_finalize(self.stmt_delete_collection);
+        _ = c.sqlite3_finalize(self.stmt_update_collection);
         _ = c.sqlite3_finalize(self.stmt_list_collections);
         _ = c.sqlite3_finalize(self.stmt_add_member);
         _ = c.sqlite3_finalize(self.stmt_remove_member);
-        _ = c.sqlite3_finalize(self.stmt_delete_memberships);
         _ = c.sqlite3_finalize(self.stmt_list_members);
         _ = c.sqlite3_finalize(self.stmt_put_order);
         _ = c.sqlite3_finalize(self.stmt_put_order_item);
@@ -218,6 +213,11 @@ pub const SqliteStorage = struct {
         _ = c.sqlite3_finalize(self.stmt_list_orders);
         _ = c.sqlite3_finalize(self.stmt_update_order_completion);
         _ = c.sqlite3_finalize(self.stmt_search_products);
+        _ = c.sqlite3_finalize(self.stmt_get_login_code);
+        _ = c.sqlite3_finalize(self.stmt_put_login_code);
+        _ = c.sqlite3_finalize(self.stmt_consume_login_code);
+        _ = c.sqlite3_finalize(self.stmt_get_user_by_email);
+        _ = c.sqlite3_finalize(self.stmt_put_user);
         _ = c.sqlite3_close(self.db);
     }
 
@@ -381,6 +381,7 @@ pub const SqliteStorage = struct {
 
         bind_uuid(stmt, 1, col.id);
         _ = c.sqlite3_bind_text(stmt, 2, col.name[0..col.name_len].ptr, @intCast(col.name_len), c.SQLITE_TRANSIENT);
+        _ = c.sqlite3_bind_int(stmt, 3, if (col.flags.active) @as(c_int, 1) else @as(c_int, 0));
         return switch (step_result(stmt)) {
             .done => .ok,
             .row => unreachable,
@@ -390,18 +391,13 @@ pub const SqliteStorage = struct {
         };
     }
 
-    pub fn delete_collection(self: *SqliteStorage, id: u128) StorageResult {
-        // Delete memberships first.
-        {
-            const stmt = self.stmt_delete_memberships;
-            defer reset_stmt(stmt);
-            bind_uuid(stmt, 1, id);
-            _ = c.sqlite3_step(stmt);
-        }
-
-        const stmt = self.stmt_delete_collection;
+    pub fn update_collection(self: *SqliteStorage, id: u128, col: *const message.ProductCollection) StorageResult {
+        const stmt = self.stmt_update_collection;
         defer reset_stmt(stmt);
+
         bind_uuid(stmt, 1, id);
+        _ = c.sqlite3_bind_text(stmt, 2, col.name[0..col.name_len].ptr, @intCast(col.name_len), c.SQLITE_TRANSIENT);
+        _ = c.sqlite3_bind_int(stmt, 3, if (col.flags.active) @as(c_int, 1) else @as(c_int, 0));
         return switch (step_result(stmt)) {
             .done => {
                 if (c.sqlite3_changes(self.db) == 0) return .not_found;
@@ -699,8 +695,8 @@ pub const SqliteStorage = struct {
         };
     }
 
-    pub fn delete_login_code(self: *SqliteStorage, email: []const u8) StorageResult {
-        const stmt = self.stmt_delete_login_code;
+    pub fn consume_login_code(self: *SqliteStorage, email: []const u8) StorageResult {
+        const stmt = self.stmt_consume_login_code;
         defer reset_stmt(stmt);
         _ = c.sqlite3_bind_text(stmt, 1, email.ptr, @intCast(email.len), c.SQLITE_TRANSIENT);
         return switch (step_result(stmt)) {
@@ -827,6 +823,7 @@ pub const SqliteStorage = struct {
         assert(name_len <= message.collection_name_max);
         @memcpy(out.name[0..name_len], name_ptr[0..name_len]);
         out.name_len = @intCast(name_len);
+        out.flags = .{ .active = c.sqlite3_column_int64(stmt, 2) != 0 };
     }
 
     fn prepare(db: *c.sqlite3, sql: [*:0]const u8) *c.sqlite3_stmt {
@@ -853,16 +850,23 @@ pub const SqliteStorage = struct {
     /// After deploying, clear it back to null and update schema.sql from prod.
     /// Additive only — no drops, no renames, no type changes.
     /// See design/009-documentation_database.md.
-    const next_migration: ?*const fn (*c.sqlite3) void = null;
+    const next_migration: ?*const fn (*c.sqlite3) void = migrate_v3_collection_active;
 
     fn ensure_schema(db: *c.sqlite3) void {
         if (get_schema_version(db) == 0) {
             exec(db, @embedFile("schema.sql"));
-            set_schema_version(db, 2);
+            set_schema_version(db, 3);
         }
         if (next_migration) |migrate| {
             migrate(db);
         }
+    }
+
+    fn migrate_v3_collection_active(db: *c.sqlite3) void {
+        if (get_schema_version(db) >= 3) return;
+        exec(db, "ALTER TABLE collections ADD COLUMN active INTEGER NOT NULL DEFAULT 1;");
+        exec(db, "ALTER TABLE collection_members ADD COLUMN removed INTEGER NOT NULL DEFAULT 0;");
+        set_schema_version(db, 3);
     }
 
     fn get_schema_version(db: *c.sqlite3) u32 {

@@ -233,12 +233,24 @@ pub const Product = extern struct {
     }
 };
 
+/// Collection flags — packed struct matching ProductFlags pattern.
+pub const CollectionFlags = packed struct(u8) {
+    active: bool = false,
+    padding: u7 = 0,
+
+    comptime {
+        assert(@sizeOf(CollectionFlags) == @sizeOf(u8));
+        assert(@bitSizeOf(CollectionFlags) == @sizeOf(CollectionFlags) * 8);
+    }
+};
+
 /// Fixed-size collection record. A named group of products.
 pub const ProductCollection = extern struct {
     id: u128,
     name: [collection_name_max]u8,
     name_len: u8,
-    reserved: [15]u8,
+    flags: CollectionFlags,
+    reserved: [14]u8,
 
     comptime {
         assert(stdx.no_padding(ProductCollection));

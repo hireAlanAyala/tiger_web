@@ -310,10 +310,11 @@ pub fn gen_product_with_id(prng: *PRNG, id: u128) message.Product {
 }
 
 pub fn gen_collection(prng: *PRNG) message.ProductCollection {
-    var c: message.ProductCollection = std.mem.zeroes(message.ProductCollection);
-    c.id = prng.int(u128) | 1;
-    c.name_len = @intCast(gen_utf8_text(prng, &c.name, 1, message.collection_name_max));
-    return c;
+    var col: message.ProductCollection = std.mem.zeroes(message.ProductCollection);
+    col.id = prng.int(u128) | 1;
+    col.name_len = @intCast(gen_utf8_text(prng, &col.name, 1, message.collection_name_max));
+    col.flags = .{ .active = true };
+    return col;
 }
 
 pub fn gen_order(prng: *PRNG, product_ids: []const u128) message.OrderRequest {
@@ -374,11 +375,12 @@ pub fn gen_random_message(prng: *PRNG, operation: message.Operation) message.Mes
             break :blk p;
         }),
         .collection => M.init(operation, id, user_id, blk: {
-            var c = std.mem.zeroes(message.ProductCollection);
-            c.id = prng.int(u128);
-            c.name_len = prng.int(u8);
-            prng.fill(&c.name);
-            break :blk c;
+            var col = std.mem.zeroes(message.ProductCollection);
+            col.id = prng.int(u128);
+            col.name_len = prng.int(u8);
+            col.flags = .{ .active = prng.boolean() };
+            prng.fill(&col.name);
+            break :blk col;
         }),
         .order => M.init(operation, id, user_id, blk: {
             var o = std.mem.zeroes(message.OrderRequest);

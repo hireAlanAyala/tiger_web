@@ -11,12 +11,14 @@ CREATE TABLE products (
 
 CREATE TABLE collections (
     id BLOB(16) PRIMARY KEY,
-    name TEXT NOT NULL
+    name TEXT NOT NULL,
+    active INTEGER NOT NULL DEFAULT 1
 );
 
 CREATE TABLE collection_members (
     collection_id BLOB(16) NOT NULL,
     product_id BLOB(16) NOT NULL,
+    removed INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY (collection_id, product_id)
 );
 

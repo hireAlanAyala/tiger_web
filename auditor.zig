@@ -25,7 +25,7 @@ const login_code_capacity = MemoryStorage.login_code_capacity;
 const user_capacity = MemoryStorage.user_capacity;
 const id_pool_capacity = gen.id_pool_capacity;
 
-const Membership = struct { collection_id: u128, product_id: u128 };
+const Membership = struct { collection_id: u128, product_id: u128, removed: bool };
 
 const AuditorLoginCode = struct {
     email: [message.email_max]u8,
@@ -546,25 +546,30 @@ pub const Auditor = struct {
             return;
         };
 
+        if (!self.collections[idx].?.flags.active) {
+            assert(resp.status == .not_found);
+            return;
+        }
+
         assert(resp.status == .ok);
 
         const returned = resp.result.collection;
         assert(stdx.equal_bytes(message.ProductCollection, &self.collections[idx].?, &returned.collection));
 
-        // Validate member products: all returned products should be members
+        // Validate member products: all returned products should be active members
         // and match the model.
         for (returned.products.items[0..returned.products.len]) |*p| {
             const p_idx = self.find_product(p.id);
             assert(p_idx != null);
-            assert(self.find_membership(id, p.id) != null);
+            assert(self.find_active_membership(id, p.id) != null);
             assert_product_equal(&self.products[p_idx.?].?, p);
         }
 
-        // Count expected members (products that still exist).
+        // Count expected members (active memberships with products that still exist).
         var expected_count: u32 = 0;
         for (self.memberships) |slot| {
             const m = slot orelse continue;
-            if (m.collection_id == id and self.find_product(m.product_id) != null) {
+            if (m.collection_id == id and !m.removed and self.find_product(m.product_id) != null) {
                 expected_count += 1;
             }
         }
@@ -577,18 +582,17 @@ pub const Auditor = struct {
             return;
         };
 
+        if (!self.collections[idx].?.flags.active) {
+            assert(resp.status == .not_found);
+            return;
+        }
+
         assert(resp.status == .ok);
 
-        // Update model: remove collection and cascade memberships.
-        self.collections[idx] = null;
-        self.collection_count -= 1;
-        for (self.memberships) |*slot| {
-            const m = slot.* orelse continue;
-            if (m.collection_id == id) {
-                slot.* = null;
-                self.membership_count -= 1;
-            }
-        }
+        // Update model: soft delete (set flag, keep memberships).
+        var col = self.collections[idx].?;
+        col.flags.active = false;
+        self.collections[idx] = col;
 
         // Remove from ID pool.
         self.remove_collection_id(id);
@@ -603,10 +607,12 @@ pub const Auditor = struct {
 
         assert(resp.status == .ok);
 
-        // Add to model (idempotent — only add if not already present).
-        if (self.find_membership(collection_id, product_id) == null) {
+        // Add to model — un-remove if already exists, else insert.
+        if (self.find_membership_any(collection_id, product_id)) |idx| {
+            self.memberships[idx].?.removed = false;
+        } else {
             const slot = self.find_empty_membership_slot();
-            self.memberships[slot] = .{ .collection_id = collection_id, .product_id = product_id };
+            self.memberships[slot] = .{ .collection_id = collection_id, .product_id = product_id, .removed = false };
             self.membership_count += 1;
         }
     }
@@ -617,14 +623,13 @@ pub const Auditor = struct {
             return;
         }
 
-        const m_idx = self.find_membership(collection_id, product_id) orelse {
+        const m_idx = self.find_active_membership(collection_id, product_id) orelse {
             assert(resp.status == .not_found);
             return;
         };
 
         assert(resp.status == .ok);
-        self.memberships[m_idx] = null;
-        self.membership_count -= 1;
+        self.memberships[m_idx].?.removed = true;
     }
 
     // =================================================================
@@ -675,11 +680,12 @@ pub const Auditor = struct {
     fn on_list_collections(self: *const Auditor, resp: message.MessageResponse) void {
         assert(resp.status == .ok);
         const list = resp.result.collection_list;
-        for (list.items[0..list.len]) |*c| {
-            const idx = self.find_collection(c.id) orelse {
-                std.debug.panic("list returned unknown collection id={}", .{c.id});
+        for (list.items[0..list.len]) |*col| {
+            const idx = self.find_collection(col.id) orelse {
+                std.debug.panic("list returned unknown collection id={}", .{col.id});
             };
-            assert(stdx.equal_bytes(message.ProductCollection, &self.collections[idx].?, c));
+            assert(self.collections[idx].?.flags.active);
+            assert(stdx.equal_bytes(message.ProductCollection, &self.collections[idx].?, col));
         }
     }
 
@@ -711,8 +717,10 @@ pub const Auditor = struct {
             // Dashboard uses active_filter=.active_only — no inactive products.
             assert(p.flags.active);
         }
-        for (dashboard.collections.items[0..dashboard.collections.len]) |c| {
-            assert(self.find_collection(c.id) != null);
+        for (dashboard.collections.items[0..dashboard.collections.len]) |col| {
+            const idx = self.find_collection(col.id);
+            assert(idx != null);
+            assert(self.collections[idx.?].?.flags.active);
         }
         for (dashboard.orders.items[0..dashboard.orders.len]) |o| {
             assert(self.find_order(o.id) != null);
@@ -750,7 +758,18 @@ pub const Auditor = struct {
         return null;
     }
 
-    fn find_membership(self: *const Auditor, collection_id: u128, product_id: u128) ?usize {
+    /// Find an active (non-removed) membership.
+    fn find_active_membership(self: *const Auditor, collection_id: u128, product_id: u128) ?usize {
+        for (self.memberships, 0..) |slot, i| {
+            if (slot) |m| {
+                if (m.collection_id == collection_id and m.product_id == product_id and !m.removed) return i;
+            }
+        }
+        return null;
+    }
+
+    /// Find a membership regardless of removed status.
+    fn find_membership_any(self: *const Auditor, collection_id: u128, product_id: u128) ?usize {
         for (self.memberships, 0..) |slot, i| {
             if (slot) |m| {
                 if (m.collection_id == collection_id and m.product_id == product_id) return i;
