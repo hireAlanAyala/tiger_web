@@ -21,6 +21,19 @@ const WalType = @import("wal.zig").WalType;
 /// This is the equivalent of TigerBeetle's Replica — it owns all connections,
 /// drives the tick loop, and mediates between network IO and the state machine.
 pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type) type {
+    comptime {
+        // Validate App interface — good errors at the boundary, not inside the guts.
+        assert(@hasDecl(App, "Message"));
+        assert(@hasDecl(App, "MessageResponse"));
+        assert(@hasDecl(App, "FollowupState"));
+        assert(@hasDecl(App, "StateMachineType"));
+        assert(@hasDecl(App, "Wal"));
+        assert(@hasDecl(App, "translate"));
+        assert(@hasDecl(App, "encode_response"));
+        assert(@hasDecl(App, "encode_followup"));
+        assert(@hasDecl(App, "refresh_message"));
+    }
+
     const Connection = ConnectionType(IO, App.FollowupState);
     const StateMachine = App.StateMachineType(Storage);
     const Wal = App.Wal;
