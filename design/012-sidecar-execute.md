@@ -198,6 +198,50 @@ operation. The type imports tell the developer — if a function takes
 `OrderRequest`, you know what operation it handles without reading
 the comment. The comment is for the machine, the type is for the human.
 
+## Zig-native is the default: the compiler as tooling
+
+The sidecar is an option, not the default. For most users, writing
+handlers in Zig with a file watcher (`zig build` on save) gives the
+same feedback loop as a TypeScript LSP — under one second from save
+to error with exact line numbers. The Zig compiler IS the linter.
+
+What the compiler catches that a sidecar annotation system cannot:
+
+- **Exhaustive switches.** Add an Operation variant, every switch in
+  codec, state_machine, render fails with the exact missing arm.
+  Annotations can check coverage at build time but can't point to
+  the switch arm you need to add.
+
+- **Type mismatches at every boundary.** Return the wrong result
+  variant for an operation → compile error on the exact line. The
+  sidecar validator catches this at the protocol boundary, one hop
+  removed from the cause.
+
+- **Comptime assertions.** body_max derived from EventType, Message
+  layout validated with no_padding, Status must have .ok, Operation
+  must have is_mutation. These run at compile time, not at the protocol
+  boundary. The error points at the declaration, not at a runtime
+  validation failure.
+
+- **Refactoring safety.** Rename a field → every usage updates or
+  fails. Rename an operation → every switch arm updates or fails.
+  Comment annotations don't participate in rename-symbol.
+
+- **One debugger, one stack trace.** The request flows through Zig
+  from accept to send. No language boundary to cross, no split stack
+  traces, no "the error is in TypeScript but the context is in Zig."
+
+- **Fuzz and replay with zero overhead.** The fuzzer calls prefetch
+  and execute directly — no socket, no serialization. Thousands of
+  iterations per second. The auditor validates in-process. WAL replay
+  is deterministic without qualification.
+
+The sidecar trades these for language familiarity and ecosystem access.
+For pure business logic (if statements and arithmetic on prefetched
+data), there's no library to import and nothing the sidecar language
+adds that Zig doesn't provide. Build the sidecar when someone needs
+it — the architecture supports it. Ship Zig-native by default.
+
 ## What moves to the sidecar
 
 The execute decision: given this operation and this cached data, what's
