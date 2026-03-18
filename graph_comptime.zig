@@ -1,12 +1,12 @@
 const std = @import("std");
-const IO = @import("framework/io.zig").IO;
+const IO = @import("tiger_framework").io.IO;
 const SimIO = @import("sim.zig").SimIO;
 const SqliteStorage = @import("storage.zig").SqliteStorage;
 const state_machine = @import("state_machine.zig");
 const MemoryStorage = state_machine.MemoryStorage;
 const App = @import("app.zig");
-const ServerType = @import("framework/server.zig").ServerType;
-const ConnectionType = @import("framework/connection.zig").ConnectionType;
+const ServerType = @import("tiger_framework").server.ServerType;
+const ConnectionType = @import("tiger_framework").connection.ConnectionType;
 
 // Production instantiations.
 const ProdStateMachine = state_machine.StateMachineType(SqliteStorage);

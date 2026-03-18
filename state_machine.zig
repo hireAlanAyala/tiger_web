@@ -1,13 +1,13 @@
 const std = @import("std");
 const assert = std.debug.assert;
-const stdx = @import("framework/stdx.zig");
+const stdx = @import("tiger_framework").stdx;
 const message = @import("message.zig");
-const auth = @import("framework/auth.zig");
-const TracerType = @import("framework/tracer.zig").TracerType;
+const auth = @import("tiger_framework").auth;
+const TracerType = @import("tiger_framework").tracer.TracerType;
 const Tracer = TracerType(message.Operation, message.Counter);
-const marks = @import("framework/marks.zig");
+const marks = @import("tiger_framework").marks;
 const log = marks.wrap_log(std.log.scoped(.state_machine));
-const PRNG = @import("framework/prng.zig");
+const PRNG = @import("tiger_framework").prng;
 
 /// Storage result type — shared by all storage backends.
 pub const StorageResult = enum { ok, not_found, err, busy, corruption };

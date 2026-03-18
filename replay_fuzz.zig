@@ -14,17 +14,17 @@ const std = @import("std");
 const assert = std.debug.assert;
 const message = @import("message.zig");
 const state_machine = @import("state_machine.zig");
-const auth = @import("framework/auth.zig");
+const auth = @import("tiger_framework").auth;
 const MemoryStorage = state_machine.MemoryStorage;
 const SqliteStorage = @import("storage.zig").SqliteStorage;
-const Wal = @import("framework/wal.zig").WalType(message.Message, message.wal_root);
+const Wal = @import("tiger_framework").wal.WalType(message.Message, message.wal_root);
 const replay_mod = @import("replay.zig");
 const Auditor = @import("auditor.zig").Auditor;
 const fuzz_lib = @import("fuzz_lib.zig");
 const FuzzArgs = fuzz_lib.FuzzArgs;
-const PRNG = @import("framework/prng.zig");
+const PRNG = @import("tiger_framework").prng;
 const gen = @import("fuzz.zig");
-const stdx = @import("framework/stdx.zig");
+const stdx = @import("tiger_framework").stdx;
 
 const replay_fuzz_test_key: *const [auth.key_length]u8 = "tiger-web-test-key-0123456789ab!";
 

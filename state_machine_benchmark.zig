@@ -12,11 +12,11 @@ const assert = std.debug.assert;
 const Bench = @import("framework/bench.zig");
 const message = @import("message.zig");
 const state_machine = @import("state_machine.zig");
-const auth = @import("framework/auth.zig");
+const auth = @import("tiger_framework").auth;
 const MemoryStorage = state_machine.MemoryStorage;
 const StateMachine = state_machine.StateMachineType(MemoryStorage);
 const fuzz = @import("fuzz.zig");
-const PRNG = @import("framework/prng.zig");
+const PRNG = @import("tiger_framework").prng;
 
 const bench_test_key: *const [auth.key_length]u8 = "tiger-web-test-key-0123456789ab!";
 

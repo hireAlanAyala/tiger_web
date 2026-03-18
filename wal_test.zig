@@ -2,7 +2,7 @@ const std = @import("std");
 const testing = std.testing;
 const message = @import("message.zig");
 const Message = message.Message;
-const Wal = @import("framework/wal.zig").WalType(Message, message.wal_root);
+const Wal = @import("tiger_framework").wal.WalType(Message, message.wal_root);
 
 fn test_path() [:0]const u8 {
     return "/tmp/tiger_web_wal_test.wal";

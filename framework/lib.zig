@@ -26,19 +26,17 @@
 //! - `encode_followup(buf, resp, followup, key) -> Response` — render SSE followup
 //! - `refresh_message() -> Message` — construct the SSE refresh message
 
-pub const ServerType = @import("server.zig").ServerType;
-pub const ConnectionType = @import("connection.zig").ConnectionType;
-pub const WalType = @import("wal.zig").WalType;
-pub const TracerType = @import("tracer.zig").TracerType;
-pub const IO = @import("io.zig").IO;
-pub const Time = @import("time.zig").Time;
-pub const TimeReal = @import("time.zig").TimeReal;
-pub const TimeSim = @import("time.zig").TimeSim;
+pub const server = @import("server.zig");
+pub const connection = @import("connection.zig");
+pub const wal = @import("wal.zig");
+pub const tracer = @import("tracer.zig");
+pub const io = @import("io.zig");
+pub const time = @import("time.zig");
 pub const auth = @import("auth.zig");
 pub const http = @import("http.zig");
 pub const stdx = @import("stdx.zig");
 pub const checksum = @import("checksum.zig");
 pub const marks = @import("marks.zig");
-pub const PRNG = @import("prng.zig");
+pub const prng = @import("prng.zig");
 pub const flags = @import("flags.zig");
-pub const bench = @import("bench.zig");
+// bench.zig requires build-time bench_options — import directly, not through the module.

@@ -1,15 +1,15 @@
 const std = @import("std");
-const IO = @import("framework/io.zig").IO;
+const IO = @import("tiger_framework").io.IO;
 const App = @import("app.zig");
 const SqliteStorage = @import("storage.zig").SqliteStorage;
 const StateMachine = App.StateMachineType(SqliteStorage);
-const ServerType = @import("framework/server.zig").ServerType;
-const TimeReal = @import("framework/time.zig").TimeReal;
-const auth = @import("framework/auth.zig");
-const flags = @import("framework/flags.zig");
+const ServerType = @import("tiger_framework").server.ServerType;
+const TimeReal = @import("tiger_framework").time.TimeReal;
+const auth = @import("tiger_framework").auth;
+const flags = @import("tiger_framework").flags;
 
 const Server = ServerType(App, IO, SqliteStorage);
-const marks = @import("framework/marks.zig");
+const marks = @import("tiger_framework").marks;
 const log = marks.wrap_log(std.log.scoped(.main));
 
 /// Tick interval in nanoseconds (10ms).

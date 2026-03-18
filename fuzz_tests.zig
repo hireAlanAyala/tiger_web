@@ -11,7 +11,7 @@
 
 const std = @import("std");
 const assert = std.debug.assert;
-const flags = @import("framework/flags.zig");
+const flags = @import("tiger_framework").flags;
 const fuzz = @import("fuzz_lib.zig");
 
 const log = std.log.scoped(.fuzz);

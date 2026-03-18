@@ -1,9 +1,9 @@
 const std = @import("std");
 const assert = std.debug.assert;
-const stdx = @import("framework/stdx.zig");
+const stdx = @import("tiger_framework").stdx;
 const message = @import("message.zig");
-const auth = @import("framework/auth.zig");
-const http = @import("framework/http.zig");
+const auth = @import("tiger_framework").auth;
+const http = @import("tiger_framework").http;
 
 /// Empty dashboard — used for error responses and comptime buffer sizing.
 /// Every non-SSE error renders the full page so the user has a recovery path.

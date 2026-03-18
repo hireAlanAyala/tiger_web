@@ -1,9 +1,9 @@
 const std = @import("std");
 const assert = std.debug.assert;
-const stdx = @import("framework/stdx.zig");
-const flags = @import("framework/flags.zig");
-const auth = @import("framework/auth.zig");
-const Wal = @import("framework/wal.zig").WalType(message.Message, message.wal_root);
+const stdx = @import("tiger_framework").stdx;
+const flags = @import("tiger_framework").flags;
+const auth = @import("tiger_framework").auth;
+const Wal = @import("tiger_framework").wal.WalType(message.Message, message.wal_root);
 const message = @import("message.zig");
 const Message = message.Message;
 const state_machine = @import("state_machine.zig");

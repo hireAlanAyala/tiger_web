@@ -10,7 +10,7 @@
 
 const std = @import("std");
 const assert = std.debug.assert;
-const stdx = @import("framework/stdx.zig");
+const stdx = @import("tiger_framework").stdx;
 const message = @import("message.zig");
 const state_machine = @import("state_machine.zig");
 const MemoryStorage = state_machine.MemoryStorage;
@@ -18,7 +18,7 @@ const SqliteStorage = @import("storage.zig").SqliteStorage;
 const Auditor = @import("auditor.zig").Auditor;
 const fuzz_lib = @import("fuzz_lib.zig");
 const FuzzArgs = fuzz_lib.FuzzArgs;
-const PRNG = @import("framework/prng.zig");
+const PRNG = @import("tiger_framework").prng;
 const gen = @import("fuzz.zig");
 
 const log = std.log.scoped(.fuzz);

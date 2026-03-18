@@ -1,8 +1,8 @@
 const std = @import("std");
 const assert = std.debug.assert;
-const stdx = @import("framework/stdx.zig");
+const stdx = @import("tiger_framework").stdx;
 const message = @import("message.zig");
-const http = @import("framework/http.zig");
+const http = @import("tiger_framework").http;
 
 const log = std.log.scoped(.codec);
 
@@ -902,7 +902,7 @@ test "GET /orders/:id (get)" {
 // Reproduce: ./zig/zig build unit-test -- --seed=<N>
 // =====================================================================
 
-const PRNG = @import("framework/prng.zig");
+const PRNG = @import("tiger_framework").prng;
 
 test "seeded: UUID parse/write roundtrip" {
     var prng = PRNG.from_seed_testing();

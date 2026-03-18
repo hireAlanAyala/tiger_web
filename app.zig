@@ -7,8 +7,8 @@
 const message = @import("message.zig");
 const codec = @import("codec.zig");
 const render = @import("render.zig");
-const http = @import("framework/http.zig");
-const auth = @import("framework/auth.zig");
+const http = @import("tiger_framework").http;
+const auth = @import("tiger_framework").auth;
 
 pub const Message = message.Message;
 pub const MessageResponse = message.MessageResponse;
@@ -16,7 +16,7 @@ pub const FollowupState = message.FollowupState;
 pub const Operation = message.Operation;
 pub const Status = message.Status;
 pub const StateMachineType = @import("state_machine.zig").StateMachineType;
-pub const Wal = @import("framework/wal.zig").WalType(Message, message.wal_root);
+pub const Wal = @import("tiger_framework").wal.WalType(Message, message.wal_root);
 
 /// Translate an HTTP request into a typed Message. Returns null if the
 /// request doesn't map to a valid operation.

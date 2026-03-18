@@ -3,7 +3,7 @@ const assert = std.debug.assert;
 const message = @import("message.zig");
 const state_machine = @import("state_machine.zig");
 const StorageResult = state_machine.StorageResult;
-const marks = @import("framework/marks.zig");
+const marks = @import("tiger_framework").marks;
 const log = marks.wrap_log(std.log.scoped(.storage));
 
 const c = @cImport({
