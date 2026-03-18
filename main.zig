@@ -1,16 +1,14 @@
 const std = @import("std");
 const IO = @import("framework/io.zig").IO;
-const state_machine = @import("state_machine.zig");
+const App = @import("app.zig");
 const SqliteStorage = @import("storage.zig").SqliteStorage;
-const StateMachine = state_machine.StateMachineType(SqliteStorage);
-const ServerType = @import("server.zig").ServerType;
-const message = @import("message.zig");
+const StateMachine = App.StateMachineType(SqliteStorage);
+const ServerType = @import("framework/server.zig").ServerType;
 const TimeReal = @import("framework/time.zig").TimeReal;
 const auth = @import("framework/auth.zig");
 const flags = @import("framework/flags.zig");
-const Wal = @import("framework/wal.zig").WalType(message.Message, message.wal_root);
 
-const Server = ServerType(IO, SqliteStorage);
+const Server = ServerType(App, IO, SqliteStorage);
 const marks = @import("framework/marks.zig");
 const log = marks.wrap_log(std.log.scoped(.main));
 
@@ -70,7 +68,7 @@ pub fn main() !void {
 
     const listen_fd = try IO.open_listener(address);
 
-    var wal = Wal.init("tiger_web.wal");
+    var wal = App.Wal.init("tiger_web.wal");
     defer wal.deinit();
 
     var time_real = TimeReal{};

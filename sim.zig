@@ -5,7 +5,8 @@ const http = @import("framework/http.zig");
 const state_machine = @import("state_machine.zig");
 const MemoryStorage = state_machine.MemoryStorage;
 const StateMachine = state_machine.StateMachineType(MemoryStorage);
-const ServerType = @import("server.zig").ServerType;
+const App = @import("app.zig");
+const ServerType = @import("framework/server.zig").ServerType;
 const ConnectionType = @import("framework/connection.zig").ConnectionType;
 const marks = @import("framework/marks.zig");
 const PRNG = @import("framework/prng.zig");
@@ -577,7 +578,7 @@ fn format_u32(buf: *[10]u8, val: u32) []const u8 {
     return buf[pos..10];
 }
 
-const Server = ServerType(SimIO, MemoryStorage);
+const Server = ServerType(App, SimIO, MemoryStorage);
 const test_key: *const [auth.key_length]u8 = "tiger-web-test-key-0123456789ab!";
 
 /// Write "Cookie: <name>=<signed_value>\r\n" into buf. Returns bytes written.

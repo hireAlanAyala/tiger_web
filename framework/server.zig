@@ -1,26 +1,29 @@
 const std = @import("std");
 const assert = std.debug.assert;
-const stdx = @import("framework/stdx.zig");
-const message = @import("message.zig");
-const codec = @import("codec.zig");
-const http = @import("framework/http.zig");
-const StateMachineType = @import("state_machine.zig").StateMachineType;
-const ConnectionType = @import("framework/connection.zig").ConnectionType;
-const render = @import("render.zig");
-const Time = @import("framework/time.zig").Time;
-const marks = @import("framework/marks.zig");
+const stdx = @import("stdx.zig");
+const http = @import("http.zig");
+const ConnectionType = @import("connection.zig").ConnectionType;
+const Time = @import("time.zig").Time;
+const marks = @import("marks.zig");
 const log = marks.wrap_log(std.log.scoped(.server));
-const Wal = @import("framework/wal.zig").WalType(message.Message, message.wal_root);
+const WalType = @import("wal.zig").WalType;
 
-/// The server orchestrator, parameterized on the IO and Storage types.
+/// The server orchestrator, parameterized on the App, IO, and Storage types.
 /// In production, IO is the real epoll-based implementation and Storage is SqliteStorage.
 /// In simulation, IO is SimIO and Storage is MemoryStorage.
 ///
+/// App provides the domain types and functions:
+///   Types: Message, MessageResponse, FollowupState, Operation, Status
+///   Functions: translate, encode_response, encode_followup
+///   Constants: refresh_operation
+///   Type constructors: StateMachineType(Storage), Wal
+///
 /// This is the equivalent of TigerBeetle's Replica — it owns all connections,
 /// drives the tick loop, and mediates between network IO and the state machine.
-pub fn ServerType(comptime IO: type, comptime Storage: type) type {
-    const Connection = ConnectionType(IO, message.FollowupState);
-    const StateMachine = StateMachineType(Storage);
+pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type) type {
+    const Connection = ConnectionType(IO, App.FollowupState);
+    const StateMachine = App.StateMachineType(Storage);
+    const Wal = App.Wal;
 
     return struct {
         const Server = @This();
@@ -179,8 +182,8 @@ pub fn ServerType(comptime IO: type, comptime Storage: type) type {
                     .incomplete, .invalid => unreachable,
                 };
 
-                // Route through codec.
-                var msg = codec.translate(parsed.method, parsed.path, parsed.body) orelse {
+                // Route through app codec.
+                var msg = App.translate(parsed.method, parsed.path, parsed.body) orelse {
                     log.mark.warn("unmapped request fd={d}", .{conn.fd});
                     conn.state = .closing;
                     continue;
@@ -222,7 +225,7 @@ pub fn ServerType(comptime IO: type, comptime Storage: type) type {
                     }
                 }
 
-                const r = render.encode_response(&conn.send_buf, msg.operation, resp, conn.is_datastar_request, server.state_machine.secret_key);
+                const r = App.encode_response(&conn.send_buf, msg.operation, resp, conn.is_datastar_request, server.state_machine.secret_key);
                 conn.set_response(r.offset, r.len);
                 conn.keep_alive = r.keep_alive;
             }
@@ -247,9 +250,8 @@ pub fn ServerType(comptime IO: type, comptime Storage: type) type {
                 const followup = conn.followup orelse continue;
                 assert(conn.state == .ready);
                 assert(conn.is_datastar_request);
-                assert(followup.operation.is_mutation());
 
-                const msg = message.Message.init(.page_load_dashboard, 0, 0, {});
+                const msg = App.refresh_message();
 
                 // Prefetch. Storage busy → skip, retry next tick.
                 server.state_machine.tracer.start(.prefetch);
@@ -257,26 +259,24 @@ pub fn ServerType(comptime IO: type, comptime Storage: type) type {
                     server.state_machine.tracer.cancel(.prefetch);
                     continue;
                 }
-                server.state_machine.tracer.stop(.prefetch, .page_load_dashboard);
+                server.state_machine.tracer.stop(.prefetch, msg.operation);
 
                 server.state_machine.tracer.start(.execute);
                 const resp = server.state_machine.commit(msg);
-                server.state_machine.tracer.stop(.execute, .page_load_dashboard);
+                server.state_machine.tracer.stop(.execute, msg.operation);
 
-                // Dashboard load itself failed (storage error). The mutation
-                // already committed — just close the connection. The client
-                // sees a disconnect and can refresh the page.
+                // Refresh failed (storage error). The mutation already committed —
+                // just close the connection. The client sees a disconnect and
+                // can refresh the page.
                 if (resp.status != .ok) {
                     conn.followup = null;
                     conn.state = .closing;
                     continue;
                 }
 
-                const dashboard = resp.result.page_load_dashboard;
-
-                const r = render.encode_followup(
+                const r = App.encode_followup(
                     &conn.send_buf,
-                    &dashboard,
+                    resp,
                     &followup,
                     server.state_machine.secret_key,
                 );
