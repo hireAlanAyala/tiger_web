@@ -346,7 +346,7 @@ test "WAL root deterministic" {
 
     // Stability — if the Message layout or checksum function changes,
     // the root checksum changes and this test catches it.
-    try testing.expectEqual(a.checksum, 0xC12AC0E2DD6948D3353BBB83E282A889);
+    try testing.expectEqual(a.checksum, 0x09AE007A4A26F6D66E3BD522A08C1920);
 }
 
 test "WAL root sentinel detects same-size field swaps" {

@@ -39,9 +39,10 @@ pub fn main(allocator: std.mem.Allocator, args: FuzzArgs) !void {
     var sql_storage = try SqliteStorage.init(":memory:");
     defer sql_storage.deinit();
 
-    var mem_sm = MemSM.init(&mem_storage, false, seed);
+    const fuzz_test_key: *const [32]u8 = "tiger-web-test-key-0123456789ab!";
+    var mem_sm = MemSM.init(&mem_storage, false, seed, fuzz_test_key);
     mem_sm.now = 1_700_000_000;
-    var sql_sm = SqlSM.init(&sql_storage, false, seed);
+    var sql_sm = SqlSM.init(&sql_storage, false, seed, fuzz_test_key);
     sql_sm.now = 1_700_000_000;
 
     // Auditor: third independent reference model — pure-logic state

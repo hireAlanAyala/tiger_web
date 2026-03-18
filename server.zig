@@ -4,14 +4,12 @@ const maybe = @import("message.zig").maybe;
 const message = @import("message.zig");
 const codec = @import("codec.zig");
 const http = @import("http.zig");
-const auth = @import("auth.zig");
 const StateMachineType = @import("state_machine.zig").StateMachineType;
 const ConnectionType = @import("connection.zig").ConnectionType;
 const render = @import("render.zig");
 const Time = @import("time.zig").Time;
 const marks = @import("marks.zig");
 const log = marks.wrap_log(std.log.scoped(.server));
-const PRNG = @import("prng.zig");
 const Wal = @import("wal.zig").Wal;
 
 /// The server orchestrator, parameterized on the IO and Storage types.
@@ -44,8 +42,6 @@ pub fn ServerType(comptime IO: type, comptime Storage: type) type {
         connections: []Connection,
         connections_used: u32,
 
-        secret_key: *const [auth.key_length]u8,
-        prng: PRNG,
         wal: ?*Wal,
 
         tick_count: u32,
@@ -57,7 +53,7 @@ pub fn ServerType(comptime IO: type, comptime Storage: type) type {
         pub const request_timeout_ticks = 3000;
 
         /// Initialize the server. Allocates the connection pool on the heap.
-        pub fn init(allocator: std.mem.Allocator, io: *IO, state_machine: *StateMachine, listen_fd: IO.fd_t, time: Time, secret_key: *const [auth.key_length]u8, prng_seed: u64, wal: ?*Wal) !Server {
+        pub fn init(allocator: std.mem.Allocator, io: *IO, state_machine: *StateMachine, listen_fd: IO.fd_t, time: Time, wal: ?*Wal) !Server {
             const connections = try allocator.alloc(Connection, max_connections);
             errdefer allocator.free(connections);
 
@@ -74,8 +70,6 @@ pub fn ServerType(comptime IO: type, comptime Storage: type) type {
                 .accept_connection = null,
                 .connections = connections,
                 .connections_used = 0,
-                .secret_key = secret_key,
-                .prng = PRNG.from_seed(prng_seed),
                 .wal = wal,
                 .tick_count = 0,
             };
@@ -176,7 +170,7 @@ pub fn ServerType(comptime IO: type, comptime Storage: type) type {
 
             for (server.connections) |*conn| {
                 if (conn.state != .ready) continue;
-                if (conn.pending_followup) continue;
+                if (conn.followup != null) continue;
 
                 // Re-parse HTTP from recv_buf. Deterministic — same bytes, same result.
                 const parsed = switch (http.parse_request(conn.recv_buf[0..conn.recv_pos])) {
@@ -192,20 +186,7 @@ pub fn ServerType(comptime IO: type, comptime Storage: type) type {
                     continue;
                 };
                 conn.is_datastar_request = parsed.is_datastar_request;
-
-                // Cookie identity resolution — every visitor gets an identity.
-                const verified = if (parsed.identity_cookie) |cv| auth.verify_cookie(cv, server.secret_key) else null;
-                const user_id = if (verified) |v| v.user_id else mint_user_id(&server.prng);
-                const cookie_kind: auth.CookieKind = if (verified) |v| v.kind else .anonymous;
-                assert(user_id != 0);
-                msg.user_id = user_id;
-                if (verified == null) {
-                    assert(conn.set_cookie_user_id == 0);
-                    conn.set_cookie_user_id = user_id;
-                    conn.set_cookie_kind = .anonymous;
-                }
-
-                const is_authenticated = cookie_kind == .authenticated;
+                msg.set_credential(parsed.identity_cookie);
 
                 // Prefetch. Storage busy → skip, retry next tick.
                 server.state_machine.tracer.start(.prefetch);
@@ -216,7 +197,6 @@ pub fn ServerType(comptime IO: type, comptime Storage: type) type {
                 server.state_machine.tracer.stop(.prefetch, msg.operation);
 
                 // Execute.
-                assert(msg.user_id != 0);
                 server.state_machine.tracer.start(.execute);
                 const resp = server.state_machine.commit(msg);
                 server.state_machine.tracer.stop(.execute, msg.operation);
@@ -237,34 +217,22 @@ pub fn ServerType(comptime IO: type, comptime Storage: type) type {
                 // their response carries everything needed for rendering.
                 const needs_followup = conn.is_datastar_request and
                     msg.operation.is_mutation() and
-                    resp.cookie_action == .none and
+                    msg.operation != .logout and
                     resp.result != .login;
                 if (needs_followup) {
                     log.mark.debug("SSE mutation: deferring to follow-up fd={d}", .{conn.fd});
-                    conn.pending_followup = true;
-                    conn.followup_status = resp.status;
-                    conn.followup_operation = msg.operation;
+                    conn.followup = .{
+                        .operation = msg.operation,
+                        .status = resp.status,
+                        .user_id = resp.user_id,
+                        .kind = resp.kind,
+                        .session_action = resp.session_action,
+                        .is_new_visitor = resp.is_new_visitor,
+                    };
                     continue;
                 }
 
-                // Cookie actions — the state machine signals what to do
-                // with the session cookie. The server acts generically.
-                switch (resp.cookie_action) {
-                    .set_authenticated => {
-                        const login_result = resp.result.login;
-                        assert(login_result.user_id != 0);
-                        conn.set_cookie_user_id = login_result.user_id;
-                        conn.set_cookie_kind = .authenticated;
-                    },
-                    .clear => {
-                        conn.set_cookie_user_id = user_id;
-                        conn.set_cookie_kind = cookie_kind;
-                    },
-                    .none => {},
-                }
-
-                // Log login codes to console (dev mode — no email sending yet).
-                // Generic check: if the result carries a non-zero code, log it.
+                // Log login codes at the boundary (dev mode — no email sending yet).
                 if (resp.result == .login) {
                     const login_result = resp.result.login;
                     const zero_code: [message.code_length]u8 = .{0} ** message.code_length;
@@ -276,27 +244,7 @@ pub fn ServerType(comptime IO: type, comptime Storage: type) type {
                     }
                 }
 
-                // Encode response. Render handles auth gating — shows login
-                // page for unauthenticated users on protected routes.
-                const cookie_hdr_buf_size = @max(auth.set_cookie_header_max, auth.clear_cookie_header_max);
-                var cookie_hdr_buf: [cookie_hdr_buf_size]u8 = undefined;
-                const cookie_hdr: ?[]const u8 = if (conn.set_cookie_user_id != 0) blk: {
-                    if (resp.cookie_action == .clear) {
-                        break :blk auth.format_clear_cookie_header(
-                            cookie_hdr_buf[0..auth.clear_cookie_header_max],
-                            conn.set_cookie_user_id,
-                            conn.set_cookie_kind,
-                            server.secret_key,
-                        );
-                    }
-                    break :blk auth.format_set_cookie_header(
-                        cookie_hdr_buf[0..auth.set_cookie_header_max],
-                        conn.set_cookie_user_id,
-                        conn.set_cookie_kind,
-                        server.secret_key,
-                    );
-                } else null;
-                const r = render.encode_response(&conn.send_buf, msg.operation, resp, conn.is_datastar_request, cookie_hdr, user_id, is_authenticated);
+                const r = render.encode_response(&conn.send_buf, msg.operation, resp, conn.is_datastar_request, server.state_machine.secret_key);
                 conn.set_response(r.offset, r.len);
                 conn.keep_alive = r.keep_alive;
             }
@@ -307,7 +255,7 @@ pub fn ServerType(comptime IO: type, comptime Storage: type) type {
         fn process_followups(server: *Server) void {
             var any_followup = false;
             for (server.connections) |*conn| {
-                if (conn.pending_followup) {
+                if (conn.followup != null) {
                     any_followup = true;
                     break;
                 }
@@ -318,10 +266,10 @@ pub fn ServerType(comptime IO: type, comptime Storage: type) type {
             defer server.state_machine.commit_batch();
 
             for (server.connections) |*conn| {
-                if (!conn.pending_followup) continue;
+                const followup = conn.followup orelse continue;
                 assert(conn.state == .ready);
                 assert(conn.is_datastar_request);
-                assert(conn.followup_operation.is_mutation());
+                assert(followup.operation.is_mutation());
 
                 const msg = message.Message.init(.page_load_dashboard, 0, 0, {});
 
@@ -341,26 +289,20 @@ pub fn ServerType(comptime IO: type, comptime Storage: type) type {
                 // already committed — just close the connection. The client
                 // sees a disconnect and can refresh the page.
                 if (resp.status != .ok) {
-                    conn.pending_followup = false;
+                    conn.followup = null;
                     conn.state = .closing;
                     continue;
                 }
 
                 const dashboard = resp.result.page_load_dashboard;
 
-                var cookie_hdr_buf: [auth.set_cookie_header_max]u8 = undefined;
-                const cookie_hdr: ?[]const u8 = if (conn.set_cookie_user_id != 0)
-                    auth.format_set_cookie_header(&cookie_hdr_buf, conn.set_cookie_user_id, conn.set_cookie_kind, server.secret_key)
-                else
-                    null;
                 const r = render.encode_followup(
                     &conn.send_buf,
                     &dashboard,
-                    conn.followup_operation,
-                    conn.followup_status,
-                    cookie_hdr,
+                    &followup,
+                    server.state_machine.secret_key,
                 );
-                conn.pending_followup = false;
+                conn.followup = null;
                 conn.set_response(r.offset, r.len);
                 conn.keep_alive = r.keep_alive;
             }
@@ -451,14 +393,6 @@ pub fn ServerType(comptime IO: type, comptime Storage: type) type {
                     log.mark.debug("connection timed out fd={d}", .{conn.fd});
                     conn.state = .closing;
                 }
-            }
-        }
-
-        fn mint_user_id(prng: *PRNG) u128 {
-            while (true) {
-                const id = prng.int(u128);
-                maybe(id == 0);
-                if (id != 0) return id;
             }
         }
 

@@ -3,7 +3,6 @@ const assert = std.debug.assert;
 const message = @import("message.zig");
 const maybe = message.maybe;
 const http = @import("http.zig");
-const auth = @import("auth.zig");
 const marks = @import("marks.zig");
 const log = marks.wrap_log(std.log.scoped(.connection));
 
@@ -63,16 +62,12 @@ pub fn ConnectionType(comptime IO: type) type {
         // The render layer uses this to decide full-page HTML vs SSE fragments.
         is_datastar_request: bool,
 
-        // Cookie identity: when non-zero, render.zig emits a Set-Cookie header.
-        // Reset on keep-alive transition. Assert == 0 in .free state.
-        set_cookie_user_id: u128,
-        set_cookie_kind: auth.CookieKind,
-
-        // SSE follow-up state: after a Datastar mutation commits, the server
-        // stores the result and renders a full dashboard refresh next tick.
-        pending_followup: bool,
-        followup_status: message.Status,
-        followup_operation: message.Operation,
+        // SSE follow-up: when non-null, the server defers rendering to
+        // process_followups next tick for a dashboard refresh. Carries the
+        // original mutation's auth decision as an opaque blob — the connection
+        // never reads or branches on the fields. How auth works is domain
+        // logic (state machine); that auth exists is framework logic (here).
+        followup: ?message.FollowupState,
 
         pub fn init_free() Connection {
             return .{
@@ -92,11 +87,7 @@ pub fn ConnectionType(comptime IO: type) type {
                 .send_activity = false,
                 .keep_alive = true,
                 .is_datastar_request = false,
-                .set_cookie_user_id = 0,
-                .set_cookie_kind = .anonymous,
-                .pending_followup = false,
-                .followup_status = .ok,
-                .followup_operation = .page_load_dashboard,
+                .followup = null,
             };
         }
 
@@ -146,8 +137,7 @@ pub fn ConnectionType(comptime IO: type) type {
                     assert(conn.recv_completion.operation == .none);
                     assert(conn.send_completion.operation == .none);
                     assert(!conn.is_datastar_request);
-                    assert(conn.set_cookie_user_id == 0);
-                    assert(!conn.pending_followup);
+                    assert(conn.followup == null);
                 },
                 .accepting => {
                     assert(conn.fd == 0);
@@ -155,20 +145,20 @@ pub fn ConnectionType(comptime IO: type) type {
                 .receiving => {
                     assert(conn.fd > 0);
                     assert(conn.recv_pos <= conn.recv_buf.len);
-                    assert(!conn.pending_followup);
+                    assert(conn.followup == null);
                 },
                 .ready => {
                     assert(conn.fd > 0);
                     assert(conn.request_consumed > 0);
                     assert(conn.request_consumed <= conn.recv_pos);
-                    if (conn.pending_followup) assert(conn.is_datastar_request);
+                    if (conn.followup != null) assert(conn.is_datastar_request);
                 },
                 .sending => {
                     assert(conn.fd > 0);
                     assert(conn.send_len > 0);
                     assert(conn.send_start + conn.send_len <= conn.send_buf.len);
                     assert(conn.send_pos <= conn.send_len);
-                    assert(!conn.pending_followup);
+                    assert(conn.followup == null);
                 },
                 .closing => {
                     assert(conn.fd > 0);
@@ -302,8 +292,7 @@ pub fn ConnectionType(comptime IO: type) type {
                 assert(conn.recv_pos <= conn.recv_buf.len);
                 conn.request_consumed = 0;
                 conn.is_datastar_request = false;
-                conn.set_cookie_user_id = 0;
-                conn.set_cookie_kind = .anonymous;
+                conn.followup = null;
                 conn.state = .receiving;
 
                 // Try to parse pipelined data immediately. If a complete

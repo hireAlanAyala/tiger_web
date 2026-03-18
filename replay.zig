@@ -2,6 +2,7 @@ const std = @import("std");
 const assert = std.debug.assert;
 const stdx = @import("stdx.zig");
 const flags = @import("flags.zig");
+const auth = @import("auth.zig");
 const Wal = @import("wal.zig").Wal;
 const message = @import("message.zig");
 const Message = message.Message;
@@ -615,7 +616,11 @@ fn replay(args: ReplayArgs) u64 {
     };
     defer storage.deinit();
 
-    var sm = StateMachine.init(&storage, args.trace, 0);
+    // Replay doesn't verify cookies — WAL messages have credential_len=0.
+    // The state machine mints fresh user_ids via resolve_credential. The key
+    // is needed for the init signature but its value is immaterial during replay.
+    const replay_key: *const [auth.key_length]u8 = "tiger-web-replay-key-0123456789!";
+    var sm = StateMachine.init(&storage, args.trace, 0, replay_key);
 
     // Open WAL and validate structure.
     const fd = open_wal(args.path);
@@ -913,6 +918,7 @@ fn fatal_fmt(comptime fmt: []const u8, args: anytype) noreturn {
 // =====================================================================
 
 const testing = std.testing;
+const replay_test_key: *const [auth.key_length]u8 = "tiger-web-test-key-0123456789ab!";
 
 fn test_path() [:0]const u8 {
     return "/tmp/tiger_replay_test.wal";
@@ -1243,7 +1249,7 @@ test "replay: full round-trip" {
         defer mem_storage.deinit(std.heap.page_allocator);
 
         const MemSM = state_machine.StateMachineType(state_machine.MemoryStorage);
-        var sm = MemSM.init(&mem_storage, false, 0);
+        var sm = MemSM.init(&mem_storage, false, 0, replay_test_key);
 
         var timestamp: i64 = 1_700_000_000;
         for (products) |prod| {
@@ -1280,7 +1286,7 @@ test "replay: full round-trip" {
     // Phase 3: Verify the replayed database has the correct state.
     var verify_storage = try SqliteStorage.init(replay_work_path);
     defer verify_storage.deinit();
-    var verify_sm = StateMachine.init(&verify_storage, false, 0);
+    var verify_sm = StateMachine.init(&verify_storage, false, 0, replay_test_key);
 
     // Read back each product.
     for (products) |prod| {
@@ -1313,7 +1319,7 @@ test "replay: stop-at limits entries" {
         defer mem_storage.deinit(std.heap.page_allocator);
 
         const MemSM = state_machine.StateMachineType(state_machine.MemoryStorage);
-        var sm = MemSM.init(&mem_storage, false, 0);
+        var sm = MemSM.init(&mem_storage, false, 0, replay_test_key);
 
         var timestamp: i64 = 1_700_000_000;
         for (1..4) |i| {
@@ -1351,7 +1357,7 @@ test "replay: stop-at limits entries" {
     // Verify: products 1 and 2 exist, product 3 does not.
     var verify_storage = try SqliteStorage.init(replay_work_path);
     defer verify_storage.deinit();
-    var verify_sm = StateMachine.init(&verify_storage, false, 0);
+    var verify_sm = StateMachine.init(&verify_storage, false, 0, replay_test_key);
 
     for ([_]u128{ 1, 2 }) |id| {
         verify_sm.set_time(1_700_000_000);
@@ -1389,7 +1395,7 @@ test "replay: updates and deletes round-trip" {
         defer mem_storage.deinit(std.heap.page_allocator);
 
         const MemSM = state_machine.StateMachineType(state_machine.MemoryStorage);
-        var sm = MemSM.init(&mem_storage, false, 0);
+        var sm = MemSM.init(&mem_storage, false, 0, replay_test_key);
 
         var timestamp: i64 = 1_700_000_000;
 
@@ -1448,7 +1454,7 @@ test "replay: updates and deletes round-trip" {
     // Phase 3: Verify state.
     var verify_storage = try SqliteStorage.init(replay_work_path);
     defer verify_storage.deinit();
-    var verify_sm = StateMachine.init(&verify_storage, false, 0);
+    var verify_sm = StateMachine.init(&verify_storage, false, 0, replay_test_key);
 
     // Product 1: updated price and name.
     {

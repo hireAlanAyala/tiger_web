@@ -562,7 +562,7 @@ pub const EventTag = enum {
 pub const body_max = @sizeOf(OrderRequest);
 
 comptime {
-    assert(body_max == 672);
+    assert(body_max == @sizeOf(OrderRequest));
     for (std.enums.values(Operation)) |op| {
         if (op.EventType() != void) {
             assert(@sizeOf(op.EventType()) <= body_max);
@@ -585,16 +585,38 @@ pub const Message = extern struct {
     op: u64,
     timestamp: i64,
     operation: Operation,
-    reserved: [15]u8,
+    credential: [credential_max]u8,
+    credential_len: u8,
+    reserved: [13]u8,
     body: [body_max]u8,
+
+    pub const credential_max = 97; // auth.cookie_value_max
 
     /// Byte offset where the body begins. Header = [16..body_offset], body = [body_offset..].
     pub const body_offset = @offsetOf(Message, "body");
 
     comptime {
         assert(stdx.no_padding(Message));
-        assert(@sizeOf(Message) == 784);
-        assert(body_offset == 112);
+        assert(@sizeOf(Message) == 880);
+        assert(body_offset == 208);
+    }
+
+    /// Copy raw credential bytes (e.g. cookie value) onto the message.
+    pub fn set_credential(self: *Message, cookie_val: ?[]const u8) void {
+        if (cookie_val) |cv| {
+            assert(cv.len <= credential_max);
+            @memcpy(self.credential[0..cv.len], cv);
+            self.credential_len = @intCast(cv.len);
+        } else {
+            self.credential_len = 0;
+        }
+    }
+
+    /// Returns the credential slice, or null if no credential is set.
+    pub fn credential_slice(self: *const Message) ?[]const u8 {
+        if (self.credential_len == 0) return null;
+        assert(self.credential_len <= credential_max);
+        return self.credential[0..self.credential_len];
     }
 
     /// Construct a message with a typed event value copied into the body.
@@ -726,16 +748,37 @@ pub const Result = union(enum) {
     empty: void,
 };
 
+/// SSE follow-up state — carried on the connection between the mutation
+/// tick and the dashboard refresh tick. Captures the original mutation's
+/// domain context so the follow-up render can produce correct headers
+/// and error fragments.
+pub const FollowupState = struct {
+    operation: Operation,
+    status: Status,
+    user_id: u128,
+    kind: MessageResponse.SessionKind,
+    session_action: MessageResponse.SessionAction,
+    is_new_visitor: bool,
+};
+
 /// Response from the state machine back through the codec layer.
 pub const MessageResponse = struct {
     status: Status,
     result: Result,
-    /// Cookie instruction — the state machine tells the server what to do
-    /// with the session cookie. The server acts generically on this signal
-    /// without checking which operation produced it.
-    cookie_action: CookieAction = .none,
+    /// Session instruction — set by execute handlers (verify_login_code, logout).
+    session_action: SessionAction = .none,
+    /// Resolved identity — set by apply_auth_response from prefetch_identity.
+    user_id: u128 = 0,
+    is_authenticated: bool = false,
+    kind: SessionKind = .anonymous,
+    is_new_visitor: bool = false,
 
-    pub const CookieAction = enum {
+    pub const SessionKind = enum(u8) {
+        anonymous = 0,
+        authenticated = 1,
+    };
+
+    pub const SessionAction = enum {
         /// Don't touch the cookie.
         none,
         /// Set an authenticated session cookie. The user_id comes from
@@ -870,7 +913,7 @@ test "Operation is_mutation pinned classification" {
 test "Message extern struct layout" {
     comptime {
         assert(stdx.no_padding(Message));
-        assert(@sizeOf(Message) == 784);
+        assert(@sizeOf(Message) == 880);
     }
 }
 

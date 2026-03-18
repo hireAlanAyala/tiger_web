@@ -181,7 +181,7 @@ pub const Auditor = struct {
             .page_load_login => assert(resp.status == .ok),
             .logout => {
                 assert(resp.status == .ok);
-                assert(resp.cookie_action == .clear);
+                assert(resp.session_action == .clear);
             },
             .request_login_code => self.on_request_login_code(msg, resp),
             .verify_login_code => self.on_verify_login_code(msg, resp),
@@ -765,7 +765,7 @@ pub const Auditor = struct {
 
     fn on_request_login_code(self: *Auditor, msg: message.Message, resp: message.MessageResponse) void {
         assert(resp.status == .ok);
-        assert(resp.cookie_action == .none);
+        assert(resp.session_action == .none);
 
         const result = resp.result.login;
         const event = msg.body_as(message.LoginCodeRequest);
@@ -837,7 +837,7 @@ pub const Auditor = struct {
 
         // Correct code → must succeed.
         assert(resp.status == .ok);
-        assert(resp.cookie_action == .set_authenticated);
+        assert(resp.session_action == .set_authenticated);
 
         const result = resp.result.login;
         assert(result.user_id != 0);

@@ -14,6 +14,7 @@ const std = @import("std");
 const assert = std.debug.assert;
 const message = @import("message.zig");
 const state_machine = @import("state_machine.zig");
+const auth = @import("auth.zig");
 const MemoryStorage = state_machine.MemoryStorage;
 const SqliteStorage = @import("storage.zig").SqliteStorage;
 const Wal = @import("wal.zig").Wal;
@@ -24,6 +25,8 @@ const FuzzArgs = fuzz_lib.FuzzArgs;
 const PRNG = @import("prng.zig");
 const gen = @import("fuzz.zig");
 const stdx = @import("stdx.zig");
+
+const replay_fuzz_test_key: *const [auth.key_length]u8 = "tiger-web-test-key-0123456789ab!";
 
 const log = std.log.scoped(.fuzz);
 
@@ -39,7 +42,7 @@ pub fn main(allocator: std.mem.Allocator, args: FuzzArgs) !void {
     var mem_storage = try MemoryStorage.init(std.heap.page_allocator);
     defer mem_storage.deinit(std.heap.page_allocator);
 
-    var mem_sm = MemSM.init(&mem_storage, false, seed);
+    var mem_sm = MemSM.init(&mem_storage, false, seed, replay_fuzz_test_key);
     mem_sm.now = 1_700_000_000;
 
     var auditor = try Auditor.init(allocator);
@@ -126,7 +129,7 @@ pub fn main(allocator: std.mem.Allocator, args: FuzzArgs) !void {
     var sql_storage = try SqliteStorage.init(work_path);
     defer sql_storage.deinit();
 
-    var sql_sm = SqlSM.init(&sql_storage, false, seed);
+    var sql_sm = SqlSM.init(&sql_storage, false, seed, replay_fuzz_test_key);
 
     const read_fd = std.posix.open(
         wal_path,

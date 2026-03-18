@@ -12,10 +12,13 @@ const assert = std.debug.assert;
 const Bench = @import("bench.zig");
 const message = @import("message.zig");
 const state_machine = @import("state_machine.zig");
+const auth = @import("auth.zig");
 const MemoryStorage = state_machine.MemoryStorage;
 const StateMachine = state_machine.StateMachineType(MemoryStorage);
 const fuzz = @import("fuzz.zig");
 const PRNG = @import("prng.zig");
+
+const bench_test_key: *const [auth.key_length]u8 = "tiger-web-test-key-0123456789ab!";
 
 const repetitions = 32;
 
@@ -30,7 +33,7 @@ test "benchmark: state machine" {
 
     var storage = try MemoryStorage.init(std.heap.page_allocator);
     defer storage.deinit(std.heap.page_allocator);
-    var sm = StateMachine.init(&storage, false, 0);
+    var sm = StateMachine.init(&storage, false, 0, bench_test_key);
 
     // --- Seed phase (untimed) ---
 

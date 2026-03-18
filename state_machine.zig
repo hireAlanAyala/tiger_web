@@ -2,6 +2,7 @@ const std = @import("std");
 const assert = std.debug.assert;
 const stdx = @import("stdx.zig");
 const message = @import("message.zig");
+const auth = @import("auth.zig");
 const Tracer = @import("tracer.zig");
 const marks = @import("marks.zig");
 const log = marks.wrap_log(std.log.scoped(.state_machine));
@@ -24,6 +25,7 @@ pub fn StateMachineType(comptime Storage: type) type {
         storage: *Storage,
         tracer: Tracer,
         prng: PRNG,
+        secret_key: *const [auth.key_length]u8,
 
         /// Wall-clock time (seconds since epoch). Set by the server before
         /// each process_inbox call. Used for order timeout_at.
@@ -45,12 +47,21 @@ pub fn StateMachineType(comptime Storage: type) type {
         prefetch_login_code_entry: ?Storage.LoginCodeEntry,
         prefetch_user_by_email: ?u128,
         prefetch_result: ?StorageResult,
+        prefetch_identity: ?PrefetchIdentity,
 
-        pub fn init(storage: *Storage, log_trace: bool, prng_seed: u64) StateMachine {
+        const PrefetchIdentity = struct {
+            user_id: u128,
+            kind: auth.CookieKind,
+            is_authenticated: bool,
+            is_new: bool,
+        };
+
+        pub fn init(storage: *Storage, log_trace: bool, prng_seed: u64, secret_key: *const [auth.key_length]u8) StateMachine {
             return .{
                 .storage = storage,
                 .tracer = Tracer.init(log_trace),
                 .prng = PRNG.from_seed(prng_seed),
+                .secret_key = secret_key,
                 .now = 0,
                 .prefetch_product = null,
                 .prefetch_product_list = .{ .items = undefined, .len = 0 },
@@ -62,6 +73,7 @@ pub fn StateMachineType(comptime Storage: type) type {
                 .prefetch_login_code_entry = null,
                 .prefetch_user_by_email = null,
                 .prefetch_result = null,
+                .prefetch_identity = null,
             };
         }
 
@@ -287,11 +299,15 @@ pub fn StateMachineType(comptime Storage: type) type {
             defer self.invariants();
             defer self.reset_prefetch();
 
-            const resp = if (result == .err)
+            self.resolve_credential(msg);
+
+            var resp = if (result == .err)
                 // Storage read error — return 503 regardless of operation.
                 message.MessageResponse.storage_error
             else
                 self.execute(msg, result);
+
+            self.apply_auth_response(&resp);
 
             // Cross-cutting: count every response status. No handler opts
             // in or out — the commit loop guarantees it.
@@ -373,7 +389,7 @@ pub fn StateMachineType(comptime Storage: type) type {
 
                 .page_load_dashboard => self.execute_dashboard(result),
                 .page_load_login => message.MessageResponse.empty_ok,
-                .logout => .{ .status = .ok, .result = .{ .empty = {} }, .cookie_action = .clear },
+                .logout => .{ .status = .ok, .result = .{ .empty = {} }, .session_action = .clear },
 
                 .request_login_code => self.execute_request_login_code(
                     msg.body_as(message.LoginCodeRequest).*,
@@ -382,7 +398,6 @@ pub fn StateMachineType(comptime Storage: type) type {
 
                 .verify_login_code => self.execute_verify_login_code(
                     msg.body_as(message.LoginVerification).*,
-                    msg.user_id,
                     result,
                 ),
             };
@@ -811,7 +826,7 @@ pub fn StateMachineType(comptime Storage: type) type {
             };
         }
 
-        fn execute_verify_login_code(self: *StateMachine, event: message.LoginVerification, msg_user_id: u128, result: StorageResult) message.MessageResponse {
+        fn execute_verify_login_code(self: *StateMachine, event: message.LoginVerification, result: StorageResult) message.MessageResponse {
             if (result == .not_found) return message.MessageResponse.invalid_code;
             assert(result == .ok);
 
@@ -827,14 +842,16 @@ pub fn StateMachineType(comptime Storage: type) type {
             const email = event.email[0..event.email_len];
             _ = self.storage.delete_login_code(email);
 
-            // Find or create user.
+            // Find or create user. If no existing user for this email,
+            // use the resolved identity from the credential.
+            const identity_user_id = self.prefetch_identity.?.user_id;
             const user_id = if (self.prefetch_user_by_email) |existing|
                 existing
             else blk: {
-                assert(msg_user_id != 0);
-                const wr = self.storage.put_user(msg_user_id, email);
+                assert(identity_user_id != 0);
+                const wr = self.storage.put_user(identity_user_id, email);
                 if (wr != .ok) return message.MessageResponse.storage_error;
-                break :blk msg_user_id;
+                break :blk identity_user_id;
             };
 
             return .{
@@ -845,7 +862,7 @@ pub fn StateMachineType(comptime Storage: type) type {
                     .code = .{0} ** message.code_length,
                     .email_len = event.email_len,
                 } },
-                .cookie_action = .set_authenticated,
+                .session_action = .set_authenticated,
             };
         }
 
@@ -867,11 +884,68 @@ pub fn StateMachineType(comptime Storage: type) type {
             self.prefetch_order_list.len = 0;
             self.prefetch_login_code_entry = null;
             self.prefetch_user_by_email = null;
+            self.prefetch_identity = null;
         }
 
         fn reset_prefetch(self: *StateMachine) void {
             self.reset_prefetch_cache();
             self.prefetch_result = null;
+        }
+
+        /// Resolve credential from the message. Called at the top of commit.
+        /// Verifies cookie if present, mints a new identity if absent or invalid.
+        /// Does not mutate the message — the resolved identity lives on self.
+        fn resolve_credential(self: *StateMachine, msg: message.Message) void {
+            if (msg.credential_slice()) |cv| {
+                if (auth.verify_cookie(cv, self.secret_key)) |verified| {
+                    self.prefetch_identity = .{
+                        .user_id = verified.user_id,
+                        .kind = verified.kind,
+                        .is_authenticated = verified.kind == .authenticated,
+                        .is_new = false,
+                    };
+                    return;
+                }
+            }
+            // No credential or invalid — mint a new anonymous identity.
+            const user_id = mint_user_id(&self.prng);
+            self.prefetch_identity = .{
+                .user_id = user_id,
+                .kind = .anonymous,
+                .is_authenticated = false,
+                .is_new = true,
+            };
+        }
+
+        /// Copy resolved identity onto the response. The render layer uses
+        /// these structured fields to format Set-Cookie headers.
+        fn apply_auth_response(self: *StateMachine, resp: *message.MessageResponse) void {
+            const identity = self.prefetch_identity orelse return;
+            resp.user_id = identity.user_id;
+            resp.is_authenticated = identity.is_authenticated;
+            resp.kind = switch (identity.kind) {
+                .anonymous => .anonymous,
+                .authenticated => .authenticated,
+            };
+            resp.is_new_visitor = identity.is_new;
+
+            // Login success overrides: the login result's user_id becomes
+            // the session identity, not the anonymous visitor who submitted the form.
+            if (resp.session_action == .set_authenticated) {
+                const login_result = resp.result.login;
+                assert(login_result.user_id != 0);
+                resp.user_id = login_result.user_id;
+                resp.is_authenticated = true;
+                resp.kind = .authenticated;
+            }
+        }
+
+        fn mint_user_id(prng: *PRNG) u128 {
+            while (true) {
+                const id = prng.int(u128);
+                message.maybe(id == 0);
+                if (id != 0) return id;
+            }
         }
 
         /// Cross-check structural invariants after every commit.
@@ -886,6 +960,7 @@ pub fn StateMachineType(comptime Storage: type) type {
             assert(self.prefetch_order_list.len == 0);
             assert(self.prefetch_login_code_entry == null);
             assert(self.prefetch_user_by_email == null);
+            assert(self.prefetch_identity == null);
             for (self.prefetch_products) |slot| assert(slot == null);
         }
 
@@ -1545,6 +1620,7 @@ fn make_test_product(id: u128, name: []const u8, price: u32) message.Product {
 }
 
 const TestStateMachine = StateMachineType(MemoryStorage);
+const sm_test_key: *const [auth.key_length]u8 = "tiger-web-test-key-0123456789ab!";
 
 fn list_params(active_filter: message.ListParams.ActiveFilter) message.ListParams {
     var params = std.mem.zeroes(message.ListParams);
@@ -1574,7 +1650,7 @@ fn test_execute(sm: *TestStateMachine, msg: message.Message) message.MessageResp
 test "create and get" {
     var storage = try MemoryStorage.init(std.testing.allocator);
     defer storage.deinit(std.testing.allocator);
-    var sm = TestStateMachine.init(&storage, false, 0);
+    var sm = TestStateMachine.init(&storage, false, 0, sm_test_key);
 
     const test_id: u128 = 0xaabbccdd11223344aabbccdd11223344;
     const create_resp = test_execute(&sm, message.Message.init(.create_product, 0, 1, make_test_product(test_id, "Widget", 999)));
@@ -1592,7 +1668,7 @@ test "create and get" {
 test "get missing" {
     var storage = try MemoryStorage.init(std.testing.allocator);
     defer storage.deinit(std.testing.allocator);
-    var sm = TestStateMachine.init(&storage, false, 0);
+    var sm = TestStateMachine.init(&storage, false, 0, sm_test_key);
 
     const resp = test_execute(&sm, message.Message.init(.get_product, 0x00000000000000000000000000000063, 1, {}));
     try std.testing.expectEqual(resp.status, .not_found);
@@ -1601,7 +1677,7 @@ test "get missing" {
 test "update" {
     var storage = try MemoryStorage.init(std.testing.allocator);
     defer storage.deinit(std.testing.allocator);
-    var sm = TestStateMachine.init(&storage, false, 0);
+    var sm = TestStateMachine.init(&storage, false, 0, sm_test_key);
 
     const test_id: u128 = 0x11111111111111111111111111111111;
     const create_resp = test_execute(&sm, message.Message.init(.create_product, 0, 1, make_test_product(test_id, "Old Name", 100)));
@@ -1617,7 +1693,7 @@ test "update" {
 test "delete" {
     var storage = try MemoryStorage.init(std.testing.allocator);
     defer storage.deinit(std.testing.allocator);
-    var sm = TestStateMachine.init(&storage, false, 0);
+    var sm = TestStateMachine.init(&storage, false, 0, sm_test_key);
 
     const test_id: u128 = 0x22222222222222222222222222222222;
     const create_resp = test_execute(&sm, message.Message.init(.create_product, 0, 1, make_test_product(test_id, "Doomed", 100)));
@@ -1633,7 +1709,7 @@ test "delete" {
 test "delete missing" {
     var storage = try MemoryStorage.init(std.testing.allocator);
     defer storage.deinit(std.testing.allocator);
-    var sm = TestStateMachine.init(&storage, false, 0);
+    var sm = TestStateMachine.init(&storage, false, 0, sm_test_key);
 
     const resp = test_execute(&sm, message.Message.init(.delete_product, 0x00000000000000000000000000000063, 1, {}));
     try std.testing.expectEqual(resp.status, .not_found);
@@ -1642,7 +1718,7 @@ test "delete missing" {
 test "soft delete preserves product in storage" {
     var storage = try MemoryStorage.init(std.testing.allocator);
     defer storage.deinit(std.testing.allocator);
-    var sm = TestStateMachine.init(&storage, false, 0);
+    var sm = TestStateMachine.init(&storage, false, 0, sm_test_key);
 
     const test_id: u128 = 0x33333333333333333333333333333333;
     _ = test_execute(&sm, message.Message.init(.create_product, 0, 1, make_test_product(test_id, "SoftDel", 100)));
@@ -1669,7 +1745,7 @@ test "soft delete preserves product in storage" {
 test "list" {
     var storage = try MemoryStorage.init(std.testing.allocator);
     defer storage.deinit(std.testing.allocator);
-    var sm = TestStateMachine.init(&storage, false, 0);
+    var sm = TestStateMachine.init(&storage, false, 0, sm_test_key);
 
     _ = test_execute(&sm, message.Message.init(.create_product, 0, 1, make_test_product(0xaaaa0000000000000000000000000001, "A", 100)));
     _ = test_execute(&sm, message.Message.init(.create_product, 0, 1, make_test_product(0xaaaa0000000000000000000000000002, "B", 200)));
@@ -1684,7 +1760,7 @@ test "list" {
 test "list returns results sorted by ID regardless of insertion order" {
     var storage = try MemoryStorage.init(std.testing.allocator);
     defer storage.deinit(std.testing.allocator);
-    var sm = TestStateMachine.init(&storage, false, 0);
+    var sm = TestStateMachine.init(&storage, false, 0, sm_test_key);
 
     // Insert in descending ID order — the opposite of sorted.
     const id_high: u128 = 0xff;
@@ -1707,7 +1783,7 @@ test "list returns results sorted by ID regardless of insertion order" {
 test "list pagination returns the smallest IDs when more than list_max exist" {
     var storage = try MemoryStorage.init(std.testing.allocator);
     defer storage.deinit(std.testing.allocator);
-    var sm = TestStateMachine.init(&storage, false, 0);
+    var sm = TestStateMachine.init(&storage, false, 0, sm_test_key);
 
     // Create list_max + 10 products with IDs from 1..list_max+10,
     // inserted in reverse order to stress the sort.
@@ -1737,7 +1813,7 @@ test "list pagination returns the smallest IDs when more than list_max exist" {
 test "list with cursor skips earlier items" {
     var storage = try MemoryStorage.init(std.testing.allocator);
     defer storage.deinit(std.testing.allocator);
-    var sm = TestStateMachine.init(&storage, false, 0);
+    var sm = TestStateMachine.init(&storage, false, 0, sm_test_key);
 
     const id1: u128 = 0x00000000000000000000000000000001;
     const id2: u128 = 0x00000000000000000000000000000002;
@@ -1767,7 +1843,7 @@ test "list with cursor skips earlier items" {
 test "list filters by active status" {
     var storage = try MemoryStorage.init(std.testing.allocator);
     defer storage.deinit(std.testing.allocator);
-    var sm = TestStateMachine.init(&storage, false, 0);
+    var sm = TestStateMachine.init(&storage, false, 0, sm_test_key);
 
     var active = make_test_product(0x01, "Active", 100);
     active.flags.active = true;
@@ -1795,7 +1871,7 @@ test "list filters by active status" {
 test "list filters by price range" {
     var storage = try MemoryStorage.init(std.testing.allocator);
     defer storage.deinit(std.testing.allocator);
-    var sm = TestStateMachine.init(&storage, false, 0);
+    var sm = TestStateMachine.init(&storage, false, 0, sm_test_key);
 
     _ = test_execute(&sm, message.Message.init(.create_product, 0, 1, make_test_product(0x01, "Cheap", 500)));
     _ = test_execute(&sm, message.Message.init(.create_product, 0, 1, make_test_product(0x02, "Mid", 1500)));
@@ -1818,7 +1894,7 @@ test "list filters by price range" {
 test "list filters by name prefix" {
     var storage = try MemoryStorage.init(std.testing.allocator);
     defer storage.deinit(std.testing.allocator);
-    var sm = TestStateMachine.init(&storage, false, 0);
+    var sm = TestStateMachine.init(&storage, false, 0, sm_test_key);
 
     _ = test_execute(&sm, message.Message.init(.create_product, 0, 1, make_test_product(0x01, "Widget A", 100)));
     _ = test_execute(&sm, message.Message.init(.create_product, 0, 1, make_test_product(0x02, "Widget B", 200)));
@@ -1836,7 +1912,7 @@ test "list filters by name prefix" {
 test "client-provided IDs" {
     var storage = try MemoryStorage.init(std.testing.allocator);
     defer storage.deinit(std.testing.allocator);
-    var sm = TestStateMachine.init(&storage, false, 0);
+    var sm = TestStateMachine.init(&storage, false, 0, sm_test_key);
 
     const id1: u128 = 0xaabbccddaabbccddaabbccddaabbccd1;
     const id2: u128 = 0xaabbccddaabbccddaabbccddaabbccd2;
@@ -1849,7 +1925,7 @@ test "client-provided IDs" {
 test "transfer inventory — success" {
     var storage = try MemoryStorage.init(std.testing.allocator);
     defer storage.deinit(std.testing.allocator);
-    var sm = TestStateMachine.init(&storage, false, 0);
+    var sm = TestStateMachine.init(&storage, false, 0, sm_test_key);
 
     const id_a: u128 = 0xaaaa0000000000000000000000000001;
     const id_b: u128 = 0xaaaa0000000000000000000000000002;
@@ -1879,7 +1955,7 @@ test "transfer inventory — success" {
 test "transfer inventory — insufficient stock" {
     var storage = try MemoryStorage.init(std.testing.allocator);
     defer storage.deinit(std.testing.allocator);
-    var sm = TestStateMachine.init(&storage, false, 0);
+    var sm = TestStateMachine.init(&storage, false, 0, sm_test_key);
 
     const id_a: u128 = 0xbbbb0000000000000000000000000001;
     const id_b: u128 = 0xbbbb0000000000000000000000000002;
@@ -1900,7 +1976,7 @@ test "transfer inventory — insufficient stock" {
 test "transfer inventory — source not found" {
     var storage = try MemoryStorage.init(std.testing.allocator);
     defer storage.deinit(std.testing.allocator);
-    var sm = TestStateMachine.init(&storage, false, 0);
+    var sm = TestStateMachine.init(&storage, false, 0, sm_test_key);
 
     const id_b: u128 = 0xcccc0000000000000000000000000002;
     _ = test_execute(&sm, message.Message.init(.create_product, 0, 1, make_test_product(id_b, "Target", 0)));
@@ -1912,7 +1988,7 @@ test "transfer inventory — source not found" {
 test "transfer inventory — target not found" {
     var storage = try MemoryStorage.init(std.testing.allocator);
     defer storage.deinit(std.testing.allocator);
-    var sm = TestStateMachine.init(&storage, false, 0);
+    var sm = TestStateMachine.init(&storage, false, 0, sm_test_key);
 
     const id_a: u128 = 0xdddd0000000000000000000000000001;
     var prod_a = make_test_product(id_a, "Source", 0);
@@ -1938,7 +2014,7 @@ fn make_order_request(id: u128, items: []const struct { id: u128, qty: u32 }) me
 test "create order — success" {
     var storage = try MemoryStorage.init(std.testing.allocator);
     defer storage.deinit(std.testing.allocator);
-    var sm = TestStateMachine.init(&storage, false, 0);
+    var sm = TestStateMachine.init(&storage, false, 0, sm_test_key);
 
     const id_a: u128 = 0xaaaa0000000000000000000000000001;
     const id_b: u128 = 0xaaaa0000000000000000000000000002;
@@ -1978,7 +2054,7 @@ test "create order — success" {
 test "create order — insufficient inventory rolls back all" {
     var storage = try MemoryStorage.init(std.testing.allocator);
     defer storage.deinit(std.testing.allocator);
-    var sm = TestStateMachine.init(&storage, false, 0);
+    var sm = TestStateMachine.init(&storage, false, 0, sm_test_key);
 
     const id_a: u128 = 0xbbbb0000000000000000000000000001;
     const id_b: u128 = 0xbbbb0000000000000000000000000002;
@@ -2008,7 +2084,7 @@ test "create order — insufficient inventory rolls back all" {
 test "create order — product not found" {
     var storage = try MemoryStorage.init(std.testing.allocator);
     defer storage.deinit(std.testing.allocator);
-    var sm = TestStateMachine.init(&storage, false, 0);
+    var sm = TestStateMachine.init(&storage, false, 0, sm_test_key);
 
     const id_a: u128 = 0xcccc0000000000000000000000000001;
     var prod_a = make_test_product(id_a, "Exists", 100);
@@ -2026,7 +2102,7 @@ test "create order — product not found" {
 test "create order — persisted and retrievable" {
     var storage = try MemoryStorage.init(std.testing.allocator);
     defer storage.deinit(std.testing.allocator);
-    var sm = TestStateMachine.init(&storage, false, 0);
+    var sm = TestStateMachine.init(&storage, false, 0, sm_test_key);
 
     const id_a: u128 = 0xaaaa0000000000000000000000000001;
     var prod_a = make_test_product(id_a, "Widget", 1000);
@@ -2060,7 +2136,7 @@ test "create order — persisted and retrievable" {
 test "get order — not found" {
     var storage = try MemoryStorage.init(std.testing.allocator);
     defer storage.deinit(std.testing.allocator);
-    var sm = TestStateMachine.init(&storage, false, 0);
+    var sm = TestStateMachine.init(&storage, false, 0, sm_test_key);
 
     const resp = test_execute(&sm, message.Message.init(.get_order, 0x00000000000000000000000000000099, 1, {}));
     try std.testing.expectEqual(resp.status, .not_found);
@@ -2069,7 +2145,7 @@ test "get order — not found" {
 test "create sets version to 1" {
     var storage = try MemoryStorage.init(std.testing.allocator);
     defer storage.deinit(std.testing.allocator);
-    var sm = TestStateMachine.init(&storage, false, 0);
+    var sm = TestStateMachine.init(&storage, false, 0, sm_test_key);
 
     const test_id: u128 = 0xffff0000000000000000000000000001;
     const resp = test_execute(&sm, message.Message.init(.create_product, 0, 1, make_test_product(test_id, "Versioned", 100)));
@@ -2080,7 +2156,7 @@ test "create sets version to 1" {
 test "update increments version" {
     var storage = try MemoryStorage.init(std.testing.allocator);
     defer storage.deinit(std.testing.allocator);
-    var sm = TestStateMachine.init(&storage, false, 0);
+    var sm = TestStateMachine.init(&storage, false, 0, sm_test_key);
 
     const test_id: u128 = 0xffff0000000000000000000000000002;
     _ = test_execute(&sm, message.Message.init(.create_product, 0, 1, make_test_product(test_id, "V1", 100)));
@@ -2096,7 +2172,7 @@ test "update increments version" {
 test "update with wrong version returns conflict" {
     var storage = try MemoryStorage.init(std.testing.allocator);
     defer storage.deinit(std.testing.allocator);
-    var sm = TestStateMachine.init(&storage, false, 0);
+    var sm = TestStateMachine.init(&storage, false, 0, sm_test_key);
 
     const test_id: u128 = 0xffff0000000000000000000000000003;
     _ = test_execute(&sm, message.Message.init(.create_product, 0, 1, make_test_product(test_id, "Original", 100)));
@@ -2116,7 +2192,7 @@ test "update with wrong version returns conflict" {
 test "update with version 0 skips check" {
     var storage = try MemoryStorage.init(std.testing.allocator);
     defer storage.deinit(std.testing.allocator);
-    var sm = TestStateMachine.init(&storage, false, 0);
+    var sm = TestStateMachine.init(&storage, false, 0, sm_test_key);
 
     const test_id: u128 = 0xffff0000000000000000000000000004;
     _ = test_execute(&sm, message.Message.init(.create_product, 0, 1, make_test_product(test_id, "NoCheck", 100)));
@@ -2132,7 +2208,7 @@ test "update with version 0 skips check" {
 test "duplicate ID rejected" {
     var storage = try MemoryStorage.init(std.testing.allocator);
     defer storage.deinit(std.testing.allocator);
-    var sm = TestStateMachine.init(&storage, false, 0);
+    var sm = TestStateMachine.init(&storage, false, 0, sm_test_key);
 
     const test_id: u128 = 0x33333333333333333333333333333333;
     const r1 = test_execute(&sm, message.Message.init(.create_product, 0, 1, make_test_product(test_id, "A", 1)));
@@ -2144,7 +2220,7 @@ test "duplicate ID rejected" {
 test "capacity exhaustion — returns storage_error" {
     var storage = try MemoryStorage.init(std.testing.allocator);
     defer storage.deinit(std.testing.allocator);
-    var sm = TestStateMachine.init(&storage, false, 0);
+    var sm = TestStateMachine.init(&storage, false, 0, sm_test_key);
 
     // Fill storage to capacity.
     for (0..MemoryStorage.product_capacity) |i| {
@@ -2170,7 +2246,7 @@ fn make_test_collection(id: u128, name: []const u8) message.ProductCollection {
 test "delete collection cascades memberships but not products" {
     var storage = try MemoryStorage.init(std.testing.allocator);
     defer storage.deinit(std.testing.allocator);
-    var sm = TestStateMachine.init(&storage, false, 0);
+    var sm = TestStateMachine.init(&storage, false, 0, sm_test_key);
 
     const product_id: u128 = 0xaaaa0000000000000000000000000001;
     const col_id: u128 = 0xcccc0000000000000000000000000001;
@@ -2212,7 +2288,7 @@ test "delete collection cascades memberships but not products" {
 test "seeded: transfer inventory conserves total" {
     var storage = try MemoryStorage.init(std.testing.allocator);
     defer storage.deinit(std.testing.allocator);
-    var sm = TestStateMachine.init(&storage, false, 0);
+    var sm = TestStateMachine.init(&storage, false, 0, sm_test_key);
     var prng = PRNG.from_seed_testing();
 
     const num_products = 8;
@@ -2255,7 +2331,7 @@ test "seeded: transfer inventory conserves total" {
 test "seeded: create order arithmetic" {
     var storage = try MemoryStorage.init(std.testing.allocator);
     defer storage.deinit(std.testing.allocator);
-    var sm = TestStateMachine.init(&storage, false, 0);
+    var sm = TestStateMachine.init(&storage, false, 0, sm_test_key);
     var prng = PRNG.from_seed_testing();
 
     // Create products with random prices and inventories.
@@ -2333,7 +2409,7 @@ test "seeded: create order arithmetic" {
 test "seeded: list filters match predicate" {
     var storage = try MemoryStorage.init(std.testing.allocator);
     defer storage.deinit(std.testing.allocator);
-    var sm = TestStateMachine.init(&storage, false, 0);
+    var sm = TestStateMachine.init(&storage, false, 0, sm_test_key);
     var prng = PRNG.from_seed_testing();
 
     const prefixes = [_][]const u8{ "Alpha", "Beta", "Gamma", "Delta" };
@@ -2422,7 +2498,7 @@ test "seeded: list filters match predicate" {
 test "seeded: update versioning monotonicity" {
     var storage = try MemoryStorage.init(std.testing.allocator);
     defer storage.deinit(std.testing.allocator);
-    var sm = TestStateMachine.init(&storage, false, 0);
+    var sm = TestStateMachine.init(&storage, false, 0, sm_test_key);
     var prng = PRNG.from_seed_testing();
 
     const test_id: u128 = 0xffff0000000000000000000000000099;
@@ -2477,7 +2553,7 @@ const TestEnv = struct {
 
     fn init(self: *TestEnv) !void {
         self.storage = try MemoryStorage.init(std.testing.allocator);
-        self.sm = TestStateMachine.init(&self.storage, false, 0);
+        self.sm = TestStateMachine.init(&self.storage, false, 0, sm_test_key);
     }
 
     fn deinit(self: *TestEnv) void {

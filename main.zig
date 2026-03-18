@@ -65,16 +65,15 @@ pub fn main() !void {
     var storage = try SqliteStorage.init("tiger_web.db");
     defer storage.deinit();
     const sm_seed: u64 = @truncate(std.crypto.random.int(u128));
-    var sm = StateMachine.init(&storage, cli.log_trace, sm_seed);
+    var sm = StateMachine.init(&storage, cli.log_trace, sm_seed, secret_key);
 
     const listen_fd = try IO.open_listener(address);
 
     var wal = Wal.init("tiger_web.wal");
     defer wal.deinit();
 
-    const prng_seed: u64 = @truncate(std.crypto.random.int(u128));
     var time_real = TimeReal{};
-    var server = try Server.init(std.heap.page_allocator, &io, &sm, listen_fd, time_real.time(), secret_key, prng_seed, &wal);
+    var server = try Server.init(std.heap.page_allocator, &io, &sm, listen_fd, time_real.time(), &wal);
 
     log.info("storage=sqlite wal=tiger_web.wal tick_interval={d}ms connections={d}", .{
         tick_ns / std.time.ns_per_ms,

@@ -16,7 +16,7 @@ const PRNG = @import("prng.zig");
 
 const log = std.log.scoped(.fuzz);
 
-const test_key: *const [auth.key_length]u8 = "tiger-web-test-key-0123456789ab!";
+const render_fuzz_test_key: *const [auth.key_length]u8 = "tiger-web-test-key-0123456789ab!";
 
 pub fn main(allocator: std.mem.Allocator, args: FuzzArgs) !void {
     _ = allocator;
@@ -36,14 +36,14 @@ pub fn main(allocator: std.mem.Allocator, args: FuzzArgs) !void {
 
         var send_buf: [http.send_buf_max]u8 = undefined;
 
-        // ~20% of events include a Set-Cookie header.
-        var cookie_hdr_buf: [auth.set_cookie_header_max]u8 = undefined;
-        const set_cookie_header: ?[]const u8 = if (prng.chance(PRNG.ratio(1, 5))) blk: {
-            const uid = prng.int(u128) | 1;
-            break :blk auth.format_set_cookie_header(&cookie_hdr_buf, uid, .anonymous, test_key);
-        } else null;
+        // ~20% of events include a new-visitor cookie.
+        const is_new_visitor = prng.chance(PRNG.ratio(1, 5));
 
-        const gen = gen_response(&prng);
+        var gen = gen_response(&prng);
+
+        gen.resp.user_id = prng.int(u128) | 1;
+        gen.resp.is_authenticated = true;
+        gen.resp.is_new_visitor = is_new_visitor;
 
         // SSE mutations go through encode_followup, not encode_response.
         if (gen.is_datastar_request and gen.operation.is_mutation()) {
@@ -53,7 +53,15 @@ pub fn main(allocator: std.mem.Allocator, args: FuzzArgs) !void {
                 .orders = gen_order_summary_list(&prng, message.dashboard_list_max),
             };
             const followup_status = if (gen.resp.status != .ok) gen.resp.status else .ok;
-            const resp = render.encode_followup(&send_buf, &dashboard, gen.operation, followup_status, set_cookie_header);
+            const followup = message.FollowupState{
+                .operation = gen.operation,
+                .status = followup_status,
+                .user_id = gen.resp.user_id,
+                .kind = gen.resp.kind,
+                .session_action = gen.resp.session_action,
+                .is_new_visitor = gen.resp.is_new_visitor,
+            };
+            const resp = render.encode_followup(&send_buf, &dashboard, &followup, render_fuzz_test_key);
 
             assert(resp.len > 0);
             assert(resp.offset + resp.len <= send_buf.len);
@@ -71,7 +79,7 @@ pub fn main(allocator: std.mem.Allocator, args: FuzzArgs) !void {
                 assert(std.mem.indexOf(u8, output, render.error_selector(gen.operation)) != null);
                 error_count += 1;
             }
-            if (set_cookie_header != null) {
+            if (is_new_visitor) {
                 assert(std.mem.indexOf(u8, output, "Set-Cookie: tiger_id=") != null);
                 cookie_count += 1;
             } else {
@@ -81,8 +89,7 @@ pub fn main(allocator: std.mem.Allocator, args: FuzzArgs) !void {
             continue;
         }
 
-        const user_id = prng.int(u128) | 1;
-        const resp = render.encode_response(&send_buf, gen.operation, gen.resp, gen.is_datastar_request, set_cookie_header, user_id, true);
+        const resp = render.encode_response(&send_buf, gen.operation, gen.resp, gen.is_datastar_request, render_fuzz_test_key);
 
         // Core invariants.
         assert(resp.len > 0);
@@ -97,8 +104,8 @@ pub fn main(allocator: std.mem.Allocator, args: FuzzArgs) !void {
             assert(!resp.keep_alive);
         }
 
-        // Set-Cookie header appears when requested, absent otherwise.
-        if (set_cookie_header != null) {
+        // Set-Cookie header appears for new visitors, absent otherwise.
+        if (is_new_visitor) {
             assert(std.mem.indexOf(u8, output, "Set-Cookie: tiger_id=") != null);
             cookie_count += 1;
         } else {
