@@ -131,6 +131,7 @@ fn verify(path: []const u8) void {
     if (!root_entry.valid_checksum()) {
         fatal("root entry fails full checksum validation at op 0");
     }
+    assert(root_entry.operation == .root); // Pair: Wal.root() sets .root.
 
     var prev_checksum = root_entry.checksum;
     var prev_op: u64 = 0;
@@ -290,6 +291,7 @@ fn inspect(args: InspectArgs) void {
             stdout.print("\n", .{}) catch return;
         }
     }
+    assert(slot == entry_count); // We visited every slot.
 }
 
 // =====================================================================
@@ -382,6 +384,7 @@ fn query(args: QueryArgs) void {
             assert(sqlite.sqlite3_step(insert_stmt) == sqlite.SQLITE_DONE);
         }
     }
+    assert(slot == entry_count); // We visited every slot.
 
     assert(sqlite.sqlite3_exec(db, "COMMIT", null, null, null) == sqlite.SQLITE_OK);
 
@@ -614,12 +617,16 @@ fn replay(args: ReplayArgs) u64 {
 
     var sm = StateMachine.init(&storage, args.trace, 0);
 
-    // Open WAL and verify root.
+    // Open WAL and validate structure.
     const fd = open_wal(args.path);
     defer std.posix.close(fd);
 
     const file_size = get_file_size(fd);
     if (file_size == 0) fatal("empty WAL file");
+
+    if (file_size % @sizeOf(Message) != 0) {
+        fatal("WAL has partial entry — file truncated or corrupted");
+    }
 
     const entry_count = file_size / @sizeOf(Message);
     if (entry_count == 0) fatal("WAL too small for root entry");
@@ -629,24 +636,45 @@ fn replay(args: ReplayArgs) u64 {
     if (root_entry.checksum != expected_root.checksum) {
         fatal("root checksum mismatch — WAL written by incompatible version");
     }
+    assert(root_entry.operation == .root); // Pair: Wal.root() sets .root.
 
     const stop_at = args.@"stop-at" orelse std.math.maxInt(u64);
 
-    // Replay entries forward.
+    return replay_entries(fd, &sm, entry_count, root_entry.checksum, stop_at);
+}
+
+/// Core replay loop — reads WAL entries from fd, validates the hash chain,
+/// and executes each mutation against the state machine. Used by both the
+/// CLI replay command and the replay fuzzer.
+///
+/// Panics on invariant violations (broken chain, storage errors). These
+/// are programming errors or infrastructure failures, not user input errors
+/// — the WAL was either written by our code or is corrupt.
+pub fn replay_entries(
+    fd: std.posix.fd_t,
+    sm: *state_machine.StateMachineType(SqliteStorage),
+    entry_count: u64,
+    root_checksum: u128,
+    stop_at: u64,
+) u64 {
     var replayed: u64 = 0;
+    var prev_checksum = root_checksum;
     var slot: u64 = 1;
     while (slot < entry_count) : (slot += 1) {
-        const entry = read_entry_or_fatal(fd, slot * @sizeOf(Message));
+        const entry = Wal.read_entry(fd, slot * @sizeOf(Message)) orelse {
+            @panic("replay: failed to read entry");
+        };
 
         if (!entry.valid_checksum()) {
-            fatal_fmt("checksum failed at op {d} (slot {d})", .{ entry.op, slot });
+            @panic("replay: checksum failed");
         }
 
         if (!entry.operation.is_mutation()) {
-            fatal_fmt("non-mutation operation '{s}' at op {d}", .{ @tagName(entry.operation), entry.op });
+            @panic("replay: non-mutation in WAL");
         }
 
         assert(entry.op == slot); // Ops sequential — no gaps.
+        assert(entry.parent == prev_checksum); // Hash chain intact.
 
         if (entry.op > stop_at) break;
 
@@ -669,17 +697,17 @@ fn replay(args: ReplayArgs) u64 {
 
         sm.commit_batch();
 
-        // Storage errors during replay indicate infrastructure failure
-        // (disk full, corruption) — not a normal application result.
         if (resp.status == .storage_error) {
-            write_stderr("replay: storage error at op {d}: {s}\n", .{
-                entry.op,
-                @tagName(entry.operation),
-            });
             @panic("replay: storage error — cannot continue");
         }
 
+        prev_checksum = entry.checksum;
         replayed += 1;
+    }
+
+    // Post-loop: if we didn't stop early, we must have replayed every entry.
+    if (stop_at == std.math.maxInt(u64)) {
+        assert(replayed == entry_count - 1); // All entries replayed (minus root).
     }
 
     return replayed;
@@ -1148,9 +1176,37 @@ const replay_snap_path: [:0]const u8 = "/tmp/tiger_replay_snapshot.db";
 const replay_work_path: [:0]const u8 = "/tmp/tiger_replay_replay_test.wal.replay.db";
 
 fn replay_cleanup() void {
-    std.posix.unlink(replay_wal_path) catch {};
-    std.posix.unlink(replay_snap_path) catch {};
-    std.posix.unlink(replay_work_path) catch {};
+    // Delete main files and SQLite auxiliary files (-wal, -shm).
+    // Stale -wal/-shm files from a previous run cause SQLite to replay
+    // a journal against the wrong database, producing constraint errors.
+    for (replay_test_files) |path| {
+        std.posix.unlink(path) catch {};
+    }
+    // Assert cleanup worked — a bug here surfaces as a clear assertion
+    // failure rather than a confusing storage error during replay.
+    for (replay_test_files) |path| {
+        assert(file_not_found(path));
+    }
+}
+
+/// All files a replay test may produce, including SQLite auxiliary files.
+const replay_test_files = expand_sqlite_paths(&.{ replay_wal_path, replay_snap_path, replay_work_path });
+
+fn expand_sqlite_paths(base: []const [:0]const u8) [base.len * 3][:0]const u8 {
+    var out: [base.len * 3][:0]const u8 = undefined;
+    for (base, 0..) |path, i| {
+        out[i * 3 + 0] = path;
+        out[i * 3 + 1] = path ++ "-wal";
+        out[i * 3 + 2] = path ++ "-shm";
+    }
+    return out;
+}
+
+fn file_not_found(path: [:0]const u8) bool {
+    _ = std.posix.fstatat(std.posix.AT.FDCWD, path, 0) catch |err| {
+        return err == error.FileNotFound;
+    };
+    return false;
 }
 
 fn make_product(id: u128, name: []const u8, price: u32) message.Product {
@@ -1315,4 +1371,173 @@ test "replay: stop-at limits entries" {
     const resp3 = verify_sm.commit(msg3);
     verify_sm.commit_batch();
     try testing.expectEqual(resp3.status, .not_found);
+}
+
+test "replay: updates and deletes round-trip" {
+    const StateMachine = state_machine.StateMachineType(SqliteStorage);
+
+    replay_cleanup();
+    defer replay_cleanup();
+
+    // Phase 1: create, update, then delete — exercises all product mutation
+    // paths through the WAL serialization boundary.
+    {
+        var wal = Wal.init(replay_wal_path);
+        defer wal.deinit();
+
+        var mem_storage = try state_machine.MemoryStorage.init(std.heap.page_allocator);
+        defer mem_storage.deinit(std.heap.page_allocator);
+
+        const MemSM = state_machine.StateMachineType(state_machine.MemoryStorage);
+        var sm = MemSM.init(&mem_storage, false, 0);
+
+        var timestamp: i64 = 1_700_000_000;
+
+        // Create two products.
+        for ([_]u128{ 1, 2 }) |id| {
+            const product = make_product(id, "Original", 100);
+            const msg = message.Message.init(.create_product, id, 42, product);
+            sm.set_time(timestamp);
+            try testing.expect(sm.prefetch(msg));
+            try testing.expectEqual(sm.commit(msg).status, .ok);
+            const entry = wal.prepare(msg, timestamp);
+            wal.append(&entry);
+            timestamp += 1;
+        }
+
+        // Update product 1: change price and name.
+        {
+            var updated = make_product(1, "Updated", 999);
+            updated.version = 1; // Must match current version.
+            const msg = message.Message.init(.update_product, 1, 42, updated);
+            sm.set_time(timestamp);
+            try testing.expect(sm.prefetch(msg));
+            try testing.expectEqual(sm.commit(msg).status, .ok);
+            const entry = wal.prepare(msg, timestamp);
+            wal.append(&entry);
+            timestamp += 1;
+        }
+
+        // Soft-delete product 2.
+        {
+            const msg = message.Message.init(.delete_product, 2, 42, {});
+            sm.set_time(timestamp);
+            try testing.expect(sm.prefetch(msg));
+            try testing.expectEqual(sm.commit(msg).status, .ok);
+            const entry = wal.prepare(msg, timestamp);
+            wal.append(&entry);
+            timestamp += 1;
+        }
+    }
+
+    // Phase 2: Replay.
+    {
+        var snap_storage = try SqliteStorage.init(replay_snap_path);
+        snap_storage.deinit();
+    }
+
+    const replayed = replay(ReplayArgs{
+        .@"stop-at" = null,
+        .trace = false,
+        .@"--" = {},
+        .path = replay_wal_path,
+        .snapshot = replay_snap_path,
+    });
+    try testing.expectEqual(replayed, 4); // 2 creates + 1 update + 1 delete
+
+    // Phase 3: Verify state.
+    var verify_storage = try SqliteStorage.init(replay_work_path);
+    defer verify_storage.deinit();
+    var verify_sm = StateMachine.init(&verify_storage, false, 0);
+
+    // Product 1: updated price and name.
+    {
+        verify_sm.set_time(1_700_000_000);
+        const msg = message.Message.init(.get_product, 1, 0, std.mem.zeroes(message.Product));
+        verify_sm.begin_batch();
+        try testing.expect(verify_sm.prefetch(msg));
+        const resp = verify_sm.commit(msg);
+        verify_sm.commit_batch();
+        try testing.expectEqual(resp.status, .ok);
+        const got = resp.result.product;
+        try testing.expectEqual(got.id, 1);
+        try testing.expectEqual(got.price_cents, 999);
+        try testing.expectEqual(got.version, 2); // Bumped by update.
+        try testing.expectEqualSlices(u8, "Updated", got.name[0..got.name_len]);
+    }
+
+    // Product 2: soft-deleted — get_product returns not_found for
+    // inactive products, but the row still exists in storage.
+    {
+        verify_sm.set_time(1_700_000_000);
+        const msg = message.Message.init(.get_product, 2, 0, std.mem.zeroes(message.Product));
+        verify_sm.begin_batch();
+        try testing.expect(verify_sm.prefetch(msg));
+        const resp = verify_sm.commit(msg);
+        verify_sm.commit_batch();
+        try testing.expectEqual(resp.status, .not_found);
+
+        // Verify the row IS still in storage (soft delete, not hard delete).
+        var raw_product: message.Product = undefined;
+        try testing.expectEqual(verify_storage.get(2, &raw_product), .ok);
+        try testing.expectEqual(raw_product.flags.active, false);
+        try testing.expectEqual(raw_product.version, 2); // Bumped by soft delete.
+    }
+}
+
+test "verify: detects broken hash chain" {
+    defer cleanup();
+
+    // Create a valid WAL with 3 entries.
+    _ = create_test_wal(3);
+
+    // Corrupt entry 2's parent field (offset 16 in the Message struct is
+    // the parent field — after checksum). We overwrite the parent but leave
+    // the checksum_body and checksum intact so it passes body/header checks
+    // independently. The chain break is the only error.
+    {
+        const write_fd = std.posix.open(
+            test_path(),
+            .{ .ACCMODE = .RDWR },
+            0,
+        ) catch unreachable;
+        defer std.posix.close(write_fd);
+
+        // Read entry at slot 2, corrupt parent, recompute header checksum
+        // so the entry passes valid_checksum_header independently.
+        const slot: u64 = 2;
+        var entry = Wal.read_entry(write_fd, slot * @sizeOf(Message)).?;
+        try testing.expect(entry.valid_checksum());
+
+        // Corrupt parent — set to a value that breaks the chain.
+        entry.parent = 0xDEADBEEF;
+        // Recompute checksums so checksum validation passes — the chain
+        // break is the only error.
+        entry.set_checksum();
+        try testing.expect(entry.valid_checksum());
+
+        // Write back.
+        const bytes = std.mem.asBytes(&entry);
+        const n = std.posix.pwrite(write_fd, bytes, slot * @sizeOf(Message)) catch unreachable;
+        try testing.expectEqual(n, @sizeOf(Message));
+    }
+
+    // Read back and verify: header/body checksums pass, but chain is broken.
+    const read_fd = std.posix.open(
+        test_path(),
+        .{ .ACCMODE = .RDONLY },
+        0,
+    ) catch unreachable;
+    defer std.posix.close(read_fd);
+
+    const entry1 = Wal.read_entry(read_fd, 1 * @sizeOf(Message)).?;
+    const entry2 = Wal.read_entry(read_fd, 2 * @sizeOf(Message)).?;
+
+    // Both entries pass checksum independently.
+    try testing.expect(entry1.valid_checksum());
+    try testing.expect(entry2.valid_checksum());
+
+    // But the chain is broken: entry2.parent != entry1.checksum.
+    try testing.expect(entry2.parent != entry1.checksum);
+    try testing.expectEqual(entry2.parent, 0xDEADBEEF);
 }
