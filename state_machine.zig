@@ -23,6 +23,70 @@ pub fn StateMachineType(comptime Storage: type) type {
     return struct {
         const StateMachine = @This();
 
+        /// Helper structs for Write variants.
+        pub const LoginCodeWrite = struct {
+            email: [message.email_max]u8,
+            email_len: u8,
+            code: [message.code_length]u8,
+            expires_at: i64,
+        };
+
+        pub const LoginCodeKey = struct {
+            email: [message.email_max]u8,
+            email_len: u8,
+        };
+
+        /// Write command — describes a storage mutation returned by execute handlers.
+        /// Execute is pure: it returns writes, the dispatch loop applies them.
+        pub const Write = union(enum) {
+            put_product: message.Product,
+            update_product: message.Product,
+            put_collection: message.ProductCollection,
+            delete_collection: u128,
+            put_membership: struct { collection_id: u128, product_id: u128 },
+            remove_membership: struct { collection_id: u128, product_id: u128 },
+            put_order: message.OrderResult,
+            update_order: message.OrderResult,
+            put_login_code: LoginCodeWrite,
+            delete_login_code: LoginCodeKey,
+            put_user: struct { user_id: u128, email: [message.email_max]u8, email_len: u8 },
+        };
+
+        /// Maximum writes a single execute can produce.
+        /// put_order (1) + N update_product for inventory (order_items_max = 20).
+        pub const writes_max = 1 + message.order_items_max;
+
+        comptime {
+            assert(writes_max == 21);
+        }
+
+        /// Result of a pure execute handler: response + collected writes.
+        pub const ExecuteResult = struct {
+            response: message.MessageResponse,
+            writes: [writes_max]Write,
+            writes_len: u8,
+
+            /// Read-only operation — no writes.
+            pub fn read_only(response: message.MessageResponse) ExecuteResult {
+                return .{
+                    .response = response,
+                    .writes = undefined,
+                    .writes_len = 0,
+                };
+            }
+
+            /// Single-write operation.
+            pub fn single(response: message.MessageResponse, write: Write) ExecuteResult {
+                var result = ExecuteResult{
+                    .response = response,
+                    .writes = undefined,
+                    .writes_len = 1,
+                };
+                result.writes[0] = write;
+                return result;
+            }
+        };
+
         storage: *Storage,
         tracer: Tracer,
         prng: PRNG,
