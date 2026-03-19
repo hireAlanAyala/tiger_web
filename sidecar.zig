@@ -137,13 +137,22 @@ pub const SidecarClient = struct {
         }
 
         // Validate response fields at the boundary.
+        // These are untrusted sidecar values — validate, don't assert.
         _ = std.meta.intToEnum(message.Status, @intFromEnum(resp_buf.status)) catch {
             log.warn("invalid status in execute_render response: {d}", .{@intFromEnum(resp_buf.status)});
             self.handle_disconnect();
             return false;
         };
-        assert(resp_buf.writes_len <= SM.writes_max);
-        assert(resp_buf.html_len <= protocol.html_max);
+        if (resp_buf.writes_len > SM.writes_max) {
+            log.warn("invalid writes_len in execute_render response: {d}", .{resp_buf.writes_len});
+            self.handle_disconnect();
+            return false;
+        }
+        if (resp_buf.html_len > protocol.html_max) {
+            log.warn("invalid html_len in execute_render response: {d}", .{resp_buf.html_len});
+            self.handle_disconnect();
+            return false;
+        }
 
         return true;
     }
