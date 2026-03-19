@@ -206,8 +206,10 @@ pub const SidecarClient = struct {
     }
 
     fn handle_disconnect(self: *SidecarClient) void {
+        assert(self.fd != -1); // pair: connect() asserts fd == -1 at birth
         log.warn("sidecar disconnected", .{});
-        self.close();
+        std.posix.close(self.fd);
+        self.fd = -1;
     }
 
     /// Attempt to reconnect after a disconnect. Called lazily on the next
