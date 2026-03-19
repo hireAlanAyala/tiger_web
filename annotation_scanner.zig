@@ -249,20 +249,23 @@ pub fn main() !void {
         }
     }
 
-    // Check exhaustiveness — every non-root operation needs an execute handler.
-    for (valid_operations) |op| {
-        if (std.mem.eql(u8, op, "root")) continue; // WAL sentinel, not a real operation.
+    // Check exhaustiveness — every non-root operation needs a handler for each phase.
+    const phases = [_]Phase{ .translate, .execute, .render };
+    for (phases) |phase| {
+        for (valid_operations) |op| {
+            if (std.mem.eql(u8, op, "root")) continue; // WAL sentinel, not a real operation.
 
-        var found = false;
-        for (annotations.items) |ann| {
-            if (ann.phase == .execute and std.mem.eql(u8, ann.operation, op)) {
-                found = true;
-                break;
+            var found = false;
+            for (annotations.items) |ann| {
+                if (ann.phase == phase and std.mem.eql(u8, ann.operation, op)) {
+                    found = true;
+                    break;
+                }
             }
-        }
-        if (!found) {
-            try stderr.print("error: missing handler for [execute] .{s}\n", .{op});
-            errors += 1;
+            if (!found) {
+                try stderr.print("error: missing handler for [{s}] .{s}\n", .{ @tagName(phase), op });
+                errors += 1;
+            }
         }
     }
 
