@@ -99,6 +99,16 @@ fn spot_check_fail(comptime fmt: []const u8, args: anytype) void {
 /// Called after prefetch() succeeds, before execute. Copies all 11 slots
 /// with presence flags for nullable fields.
 pub fn extract_cache(comptime Storage: type, sm: *const state_machine.StateMachineType(Storage)) protocol.PrefetchCache {
+    // Exhaustiveness: if someone adds a prefetch_* field to the SM,
+    // this count changes and the build fails — forcing an update here.
+    comptime {
+        var count: usize = 0;
+        for (@typeInfo(state_machine.StateMachineType(Storage)).@"struct".fields) |f| {
+            if (std.mem.startsWith(u8, f.name, "prefetch_")) count += 1;
+        }
+        assert(count == 11);
+    }
+
     var cache = std.mem.zeroes(protocol.PrefetchCache);
 
     // Nullable single-entity slots.
