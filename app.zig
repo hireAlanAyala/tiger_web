@@ -258,56 +258,62 @@ pub fn apply_sidecar_writes(
             log.mark.err("invalid write tag: {d}", .{slot.tag});
             return false;
         };
-        switch (tag) {
-            .put_product => {
+        // Storage calls are driven by sidecar data — validate results, don't assert.
+        // A sidecar bug (duplicate put, missing entity) should fail the request,
+        // not crash the server.
+        const ok: bool = switch (tag) {
+            .put_product => blk: {
                 const p: *const message.Product = @ptrCast(@alignCast(&slot.data));
-                assert(sm.storage.put(p) == .ok);
+                break :blk sm.storage.put(p) == .ok;
             },
-            .update_product => {
+            .update_product => blk: {
                 const p: *const message.Product = @ptrCast(@alignCast(&slot.data));
-                assert(sm.storage.update(p.id, p) == .ok);
+                break :blk sm.storage.update(p.id, p) == .ok;
             },
-            .put_collection => {
+            .put_collection => blk: {
                 const c: *const message.ProductCollection = @ptrCast(@alignCast(&slot.data));
-                assert(sm.storage.put_collection(c) == .ok);
+                break :blk sm.storage.put_collection(c) == .ok;
             },
-            .update_collection => {
+            .update_collection => blk: {
                 const c: *const message.ProductCollection = @ptrCast(@alignCast(&slot.data));
-                assert(sm.storage.update_collection(c.id, c) == .ok);
+                break :blk sm.storage.update_collection(c.id, c) == .ok;
             },
-            .put_membership => {
+            .put_membership => blk: {
                 const m: *const message.Membership = @ptrCast(@alignCast(&slot.data));
-                assert(sm.storage.add_to_collection(m.collection_id, m.product_id) == .ok);
+                break :blk sm.storage.add_to_collection(m.collection_id, m.product_id) == .ok;
             },
-            .update_membership => {
+            .update_membership => blk: {
                 const m: *const message.MembershipUpdate = @ptrCast(@alignCast(&slot.data));
-                if (m.removed != 0) {
+                break :blk if (m.removed != 0) r: {
                     const r = sm.storage.remove_from_collection(m.collection_id, m.product_id);
-                    assert(r == .ok or r == .not_found);
-                } else {
-                    assert(sm.storage.add_to_collection(m.collection_id, m.product_id) == .ok);
-                }
+                    break :r r == .ok or r == .not_found;
+                } else sm.storage.add_to_collection(m.collection_id, m.product_id) == .ok;
             },
-            .put_order => {
+            .put_order => blk: {
                 const o: *const message.OrderResult = @ptrCast(@alignCast(&slot.data));
-                assert(sm.storage.put_order(o) == .ok);
+                break :blk sm.storage.put_order(o) == .ok;
             },
-            .update_order => {
+            .update_order => blk: {
                 const o: *const message.OrderResult = @ptrCast(@alignCast(&slot.data));
-                assert(sm.storage.update_order_completion(o) == .ok);
+                break :blk sm.storage.update_order_completion(o) == .ok;
             },
-            .put_login_code => {
+            .put_login_code => blk: {
                 const lc: *const message.LoginCodeWrite = @ptrCast(@alignCast(&slot.data));
-                assert(sm.storage.put_login_code(lc.email[0..lc.email_len], &lc.code, lc.expires_at) == .ok);
+                break :blk sm.storage.put_login_code(lc.email[0..lc.email_len], &lc.code, lc.expires_at) == .ok;
             },
-            .consume_login_code => {
+            .consume_login_code => blk: {
                 const lc: *const message.LoginCodeKey = @ptrCast(@alignCast(&slot.data));
                 _ = sm.storage.consume_login_code(lc.email[0..lc.email_len]);
+                break :blk true;
             },
-            .put_user => {
+            .put_user => blk: {
                 const u: *const message.UserWrite = @ptrCast(@alignCast(&slot.data));
-                assert(sm.storage.put_user(u.user_id, u.email[0..u.email_len]) == .ok);
+                break :blk sm.storage.put_user(u.user_id, u.email[0..u.email_len]) == .ok;
             },
+        };
+        if (!ok) {
+            log.mark.err("sidecar write failed: tag={d}", .{slot.tag});
+            return false;
         }
     }
     return true;
