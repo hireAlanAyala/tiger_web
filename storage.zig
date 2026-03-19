@@ -13,13 +13,7 @@ const c = @cImport({
 /// SQLite-backed persistent storage. Uses prepared statements for all
 /// operations. WAL mode for concurrent reads. IDs stored as 16-byte BLOBs.
 pub const SqliteStorage = struct {
-    pub const LoginCodeEntry = struct {
-        email: [message.email_max]u8,
-        email_len: u8,
-        code: [message.code_length]u8,
-        expires_at: i64,
-        occupied: bool,
-    };
+    pub const LoginCodeEntry = message.LoginCodeEntry;
 
     db: *c.sqlite3,
     stmt_get: *c.sqlite3_stmt,
@@ -662,7 +656,7 @@ pub const SqliteStorage = struct {
         _ = c.sqlite3_bind_text(stmt, 1, email.ptr, @intCast(email.len), c.SQLITE_TRANSIENT);
         return switch (step_result(stmt)) {
             .row => {
-                out.occupied = true;
+                out.occupied = 1;
                 out.email_len = @intCast(email.len);
                 @memset(&out.email, 0);
                 @memcpy(out.email[0..email.len], email);

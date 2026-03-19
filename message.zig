@@ -793,6 +793,35 @@ pub const LoginResult = extern struct {
     }
 };
 
+/// Login code storage entry — shared between MemoryStorage and SqliteStorage.
+/// Fields ordered to avoid padding: i64 last for 8-byte alignment.
+pub const LoginCodeEntry = extern struct {
+    email: [email_max]u8,
+    code: [code_length]u8,
+    email_len: u8,
+    occupied: u8,
+    expires_at: i64,
+
+    comptime {
+        assert(stdx.no_padding(LoginCodeEntry));
+        assert(@sizeOf(LoginCodeEntry) == 144);
+    }
+};
+
+/// Prefetch identity — auth context resolved during the prefetch phase.
+pub const PrefetchIdentity = extern struct {
+    user_id: u128,
+    kind: MessageResponse.SessionKind,
+    is_authenticated: u8,
+    is_new: u8,
+    reserved: [13]u8,
+
+    comptime {
+        assert(stdx.no_padding(PrefetchIdentity));
+        assert(@sizeOf(PrefetchIdentity) == 32);
+    }
+};
+
 /// Result payload — self-describing tagged union for response encoding.
 /// The encoder switches on the variant — no external context needed.
 pub const Result = union(enum) {

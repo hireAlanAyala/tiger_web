@@ -112,14 +112,7 @@ pub fn StateMachineType(comptime Storage: type) type {
         prefetch_login_code_entry: ?Storage.LoginCodeEntry,
         prefetch_user_by_email: ?u128,
         prefetch_result: ?StorageResult,
-        prefetch_identity: ?PrefetchIdentity,
-
-        const PrefetchIdentity = struct {
-            user_id: u128,
-            kind: auth.CookieKind,
-            is_authenticated: bool,
-            is_new: bool,
-        };
+        prefetch_identity: ?message.PrefetchIdentity,
 
         pub fn init(storage: *Storage, log_trace: bool, prng_seed: u64, secret_key: *const [auth.key_length]u8) StateMachine {
             return .{
@@ -1052,9 +1045,10 @@ pub fn StateMachineType(comptime Storage: type) type {
                 if (auth.verify_cookie(cv, self.secret_key)) |verified| {
                     self.prefetch_identity = .{
                         .user_id = verified.user_id,
-                        .kind = verified.kind,
-                        .is_authenticated = verified.kind == .authenticated,
-                        .is_new = false,
+                        .kind = @enumFromInt(@intFromEnum(verified.kind)),
+                        .is_authenticated = @intFromBool(verified.kind == .authenticated),
+                        .is_new = 0,
+                        .reserved = .{0} ** 13,
                     };
                     return;
                 }
@@ -1064,8 +1058,9 @@ pub fn StateMachineType(comptime Storage: type) type {
             self.prefetch_identity = .{
                 .user_id = user_id,
                 .kind = .anonymous,
-                .is_authenticated = false,
-                .is_new = true,
+                .is_authenticated = 0,
+                .is_new = 1,
+                .reserved = .{0} ** 13,
             };
         }
 
@@ -1074,12 +1069,12 @@ pub fn StateMachineType(comptime Storage: type) type {
         fn apply_auth_response(self: *StateMachine, resp: *message.MessageResponse) void {
             const identity = self.prefetch_identity orelse return;
             resp.user_id = identity.user_id;
-            resp.is_authenticated = identity.is_authenticated;
+            resp.is_authenticated = identity.is_authenticated != 0;
             resp.kind = switch (identity.kind) {
                 .anonymous => .anonymous,
                 .authenticated => .authenticated,
             };
-            resp.is_new_visitor = identity.is_new;
+            resp.is_new_visitor = identity.is_new != 0;
 
             // Login success overrides: the login result's user_id becomes
             // the session identity, not the anonymous visitor who submitted the form.
@@ -1288,13 +1283,7 @@ pub const MemoryStorage = struct {
         occupied: bool,
     };
 
-    pub const LoginCodeEntry = struct {
-        email: [message.email_max]u8,
-        email_len: u8,
-        code: [message.code_length]u8,
-        expires_at: i64,
-        occupied: bool,
-    };
+    pub const LoginCodeEntry = message.LoginCodeEntry;
 
     const UserEntry = struct {
         user_id: u128,
@@ -1307,7 +1296,7 @@ pub const MemoryStorage = struct {
     const empty_collection = CollectionEntry{ .collection = undefined, .occupied = false };
     const empty_membership = MembershipEntry{ .collection_id = 0, .product_id = 0, .occupied = false, .removed = false };
     const empty_order = OrderEntry{ .order = undefined, .occupied = false };
-    const empty_login_code = LoginCodeEntry{ .email = undefined, .email_len = 0, .code = undefined, .expires_at = 0, .occupied = false };
+    const empty_login_code = LoginCodeEntry{ .email = undefined, .code = undefined, .email_len = 0, .occupied = 0, .expires_at = 0 };
     const empty_user = UserEntry{ .user_id = 0, .email = undefined, .email_len = 0, .occupied = false };
 
     products: *[product_capacity]ProductEntry,
@@ -1653,7 +1642,7 @@ pub const MemoryStorage = struct {
     pub fn get_login_code(self: *MemoryStorage, email: []const u8, out: *LoginCodeEntry) StorageResult {
         if (self.fault()) |f| return f;
         for (&self.login_codes) |*entry| {
-            if (entry.occupied and entry.email_len == email.len and
+            if (entry.occupied != 0 and entry.email_len == email.len and
                 std.mem.eql(u8, entry.email[0..entry.email_len], email))
             {
                 out.* = entry.*;
@@ -1666,7 +1655,7 @@ pub const MemoryStorage = struct {
     pub fn put_login_code(self: *MemoryStorage, email: []const u8, code: *const [message.code_length]u8, expires_at: i64) StorageResult {
         // Overwrite existing code for this email.
         for (&self.login_codes) |*entry| {
-            if (entry.occupied and entry.email_len == email.len and
+            if (entry.occupied != 0 and entry.email_len == email.len and
                 std.mem.eql(u8, entry.email[0..entry.email_len], email))
             {
                 entry.code = code.*;
@@ -1676,8 +1665,8 @@ pub const MemoryStorage = struct {
         }
         // Insert into first free slot.
         for (&self.login_codes) |*entry| {
-            if (!entry.occupied) {
-                entry.occupied = true;
+            if (entry.occupied == 0) {
+                entry.occupied = 1;
                 entry.email_len = @intCast(email.len);
                 @memset(&entry.email, 0);
                 @memcpy(entry.email[0..email.len], email);
@@ -1691,7 +1680,7 @@ pub const MemoryStorage = struct {
 
     pub fn consume_login_code(self: *MemoryStorage, email: []const u8) StorageResult {
         for (&self.login_codes) |*entry| {
-            if (entry.occupied and entry.email_len == email.len and
+            if (entry.occupied != 0 and entry.email_len == email.len and
                 std.mem.eql(u8, entry.email[0..entry.email_len], email))
             {
                 entry.expires_at = 0;

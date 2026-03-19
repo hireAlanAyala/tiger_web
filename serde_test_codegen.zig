@@ -30,6 +30,8 @@ const output = blk: {
         \\  readLoginCodeRequest, writeLoginCodeRequest,
         \\  readLoginVerification, writeLoginVerification,
         \\  readMessage, writeMessage,
+        \\  readLoginCodeEntry, writeLoginCodeEntry,
+        \\  readPrefetchIdentity, writePrefetchIdentity,
         \\  readTranslateRequest, writeTranslateRequest,
         \\  readTranslateResponse, writeTranslateResponse,
         \\  type Product, type ProductCollection, type InventoryTransfer,
@@ -37,6 +39,7 @@ const output = blk: {
         \\  type OrderResultItem, type OrderResult, type OrderSummary,
         \\  type SearchQuery, type ListParams, type LoginCodeRequest,
         \\  type LoginVerification, type Message,
+        \\  type LoginCodeEntry, type PrefetchIdentity,
         \\  type TranslateRequest, type TranslateResponse,
         \\  type ProductFlags, type CollectionFlags,
         \\} from './types.generated.ts';
@@ -120,6 +123,8 @@ const output = blk: {
     w.emit_test_vector("LoginCodeRequest", message.LoginCodeRequest, test_login_request());
     w.emit_test_vector("LoginVerification", message.LoginVerification, test_login_verify());
     w.emit_test_vector("Message", message.Message, test_message());
+    w.emit_test_vector("LoginCodeEntry", message.LoginCodeEntry, test_login_code_entry());
+    w.emit_test_vector("PrefetchIdentity", message.PrefetchIdentity, test_prefetch_identity());
     w.emit_test_vector("TranslateRequest", protocol.TranslateRequest, test_translate_request());
     w.emit_test_vector("TranslateResponse", protocol.TranslateResponse, test_translate_response());
 
@@ -142,6 +147,8 @@ const output = blk: {
     w.emit_random_roundtrip("LoginCodeRequest", message.LoginCodeRequest);
     w.emit_random_roundtrip("LoginVerification", message.LoginVerification);
     w.emit_random_roundtrip("Message", message.Message);
+    w.emit_random_roundtrip("LoginCodeEntry", message.LoginCodeEntry);
+    w.emit_random_roundtrip("PrefetchIdentity", message.PrefetchIdentity);
     w.emit_random_roundtrip("TranslateRequest", protocol.TranslateRequest);
     w.emit_random_roundtrip("TranslateResponse", protocol.TranslateResponse);
 
@@ -687,6 +694,27 @@ fn test_message() message.Message {
     @memcpy(m.body[0..@sizeOf(message.Product)], std.mem.asBytes(&p));
     assert_str_len(&m.credential, m.credential_len);
     return m;
+}
+
+fn test_login_code_entry() message.LoginCodeEntry {
+    var e = std.mem.zeroes(message.LoginCodeEntry);
+    set_str(&e.email, "test@example.com");
+    e.email_len = 16;
+    @memcpy(&e.code, "987654");
+    e.occupied = 1;
+    e.expires_at = 1700001000;
+    assert_str_len(&e.email, e.email_len);
+    return e;
+}
+
+fn test_prefetch_identity() message.PrefetchIdentity {
+    return .{
+        .user_id = 0xaabbccdd11223344aabbccdd11223344,
+        .kind = .authenticated,
+        .is_authenticated = 1,
+        .is_new = 0,
+        .reserved = .{0} ** 13,
+    };
 }
 
 fn test_translate_request() protocol.TranslateRequest {
