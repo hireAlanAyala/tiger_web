@@ -463,7 +463,10 @@ const Writer = struct {
 
     fn emit_packed_serde(w: *Writer, comptime T: type) void {
         const name = type_leaf_name(T);
-        const fields = @typeInfo(T).@"struct".fields;
+        const info = @typeInfo(T).@"struct";
+        assert(info.layout == .@"packed");
+        assert(@sizeOf(T) == 1); // Packed flags must fit in a single byte.
+        const fields = info.fields;
 
         // Read function
         w.raw("function read");
@@ -505,7 +508,10 @@ const Writer = struct {
 
     fn emit_extern_serde(w: *Writer, comptime T: type) void {
         const name = type_leaf_name(T);
-        const fields = @typeInfo(T).@"struct".fields;
+        const info = @typeInfo(T).@"struct";
+        assert(info.layout == .@"extern");
+        assert(stdx.no_padding(T));
+        const fields = info.fields;
 
         // --- Read function ---
         w.raw("export function read");
@@ -632,7 +638,7 @@ const Writer = struct {
                 w.raw("Values)");
             },
             .@"struct" => {
-                // Packed flags
+                assert(@typeInfo(field.type).@"struct".layout == .@"packed");
                 w.raw("read");
                 w.raw(type_leaf_name(field.type));
                 w.raw("(dv, offset + ");
@@ -780,7 +786,7 @@ const Writer = struct {
                 w.raw(");\n");
             },
             .@"struct" => {
-                // Packed flags
+                assert(@typeInfo(field.type).@"struct".layout == .@"packed");
                 w.raw("  write");
                 w.raw(type_leaf_name(field.type));
                 w.raw("(dv, offset + ");
@@ -937,12 +943,15 @@ const LenInfo = struct {
 
 /// Returns the offset and type of the _len companion for a given field.
 /// Caller must have verified has_len_companion() returns true.
+/// Asserts the companion field is an unsigned integer (u8, u16, or u32).
 fn get_len_info(comptime StructT: type, comptime field_name: []const u8) LenInfo {
     for (@typeInfo(StructT).@"struct".fields) |f| {
         if (f.name.len == field_name.len + 4 and
             std.mem.eql(u8, f.name[0..field_name.len], field_name) and
             std.mem.eql(u8, f.name[field_name.len..], "_len"))
         {
+            assert(@typeInfo(f.type) == .int);
+            assert(@typeInfo(f.type).int.signedness == .unsigned);
             return .{ .offset = @offsetOf(StructT, f.name), .bits = @typeInfo(f.type).int.bits };
         }
     }
@@ -950,6 +959,8 @@ fn get_len_info(comptime StructT: type, comptime field_name: []const u8) LenInfo
     if (std.mem.eql(u8, field_name, "items")) {
         for (@typeInfo(StructT).@"struct".fields) |f| {
             if (std.mem.eql(u8, f.name, "len")) {
+                assert(@typeInfo(f.type) == .int);
+                assert(@typeInfo(f.type).int.signedness == .unsigned);
                 return .{ .offset = @offsetOf(StructT, f.name), .bits = @typeInfo(f.type).int.bits };
             }
         }

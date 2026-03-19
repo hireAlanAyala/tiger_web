@@ -255,11 +255,13 @@ const Writer = struct {
                 }
                 w.raw("]");
             } else if (has_len_companion(StructT, field.name)) {
-                // [N]u8 with _len → string literal
+                // [N]u8 with _len → string literal (assert safe for TS single-quoted string)
                 const buf = @field(val, field.name);
                 const len = get_len_value(StructT, val, field.name);
+                const str = buf[0..len];
+                for (str) |ch| assert(ch != '\'' and ch != '\\' and ch >= 0x20 and ch < 0x7f);
                 w.raw("'");
-                w.raw(buf[0..len]);
+                w.raw(str);
                 w.raw("'");
             } else {
                 // [N]u8 without _len → Uint8Array literal
@@ -400,8 +402,9 @@ const Writer = struct {
                 if (i.bits == 128) {
                     w.raw("randHex(rng, 16)");
                 } else if (i.bits == 64) {
-                    // Keep within safe integer range
-                    w.raw("randInt(rng, 0, 2**32 - 1)");
+                    // Test up to 2^48 — within JS safe integer range (2^53),
+                    // large enough to exercise the BigInt serde path.
+                    w.raw("randInt(rng, 0, 2**48 - 1)");
                 } else if (i.bits == 32) {
                     w.raw("randInt(rng, 0, 2**32 - 1)");
                 } else if (i.bits == 16) {
@@ -512,7 +515,16 @@ fn should_skip(comptime StructT: type, comptime field_name: []const u8) bool {
 // ---------------------------------------------------------------------------
 
 fn set_str(comptime buf: []u8, comptime s: []const u8) void {
+    assert(s.len <= buf.len);
     @memcpy(buf[0..s.len], s);
+}
+
+/// Assert the string content matches the declared _len for a test vector.
+/// Catches hand-authored test structs where the string and _len diverge.
+fn assert_str_len(comptime buf: []const u8, comptime len: usize) void {
+    assert(len <= buf.len);
+    // Bytes beyond len must be zero (from zeroes init).
+    for (buf[len..]) |b| assert(b == 0);
 }
 
 fn test_product() message.Product {
@@ -526,6 +538,8 @@ fn test_product() message.Product {
     p.inventory = 100;
     p.version = 3;
     p.flags = .{ .active = true };
+    assert_str_len(&p.name, p.name_len);
+    assert_str_len(&p.description, p.description_len);
     return p;
 }
 
