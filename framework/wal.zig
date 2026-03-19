@@ -99,7 +99,14 @@ pub fn WalType(comptime Message: type, comptime root_fn: fn () Message) type {
 
         if (file_size > 0) {
             const entry_count = file_size / @sizeOf(Message);
-            if (entry_count > 0) {
+            if (entry_count == 0) {
+                // File exists but is too small for even one entry — corrupt.
+                log.warn("stale WAL — deleting and starting fresh", .{});
+                std.posix.close(fd);
+                std.fs.cwd().deleteFile(path) catch {};
+                return init(path);
+            }
+            {
                 const read_fd = std.posix.open(
                     path,
                     .{ .ACCMODE = .RDONLY },
@@ -108,20 +115,23 @@ pub fn WalType(comptime Message: type, comptime root_fn: fn () Message) type {
                     log.err("open for recovery failed: {}", .{err});
                     @panic("wal: failed to open file for recovery");
                 };
-                defer std.posix.close(read_fd);
-
                 // Verify root entry matches this code's version.
                 const root_entry = read_entry(read_fd, 0);
-                if (root_entry) |re| {
+                const stale = if (root_entry) |re| blk: {
                     const expected_root = Wal.root();
-                    if (re.checksum != expected_root.checksum) {
-                        log.err("root checksum mismatch — WAL written by incompatible version", .{});
-                        @panic("wal: version mismatch");
-                    }
-                } else {
-                    log.err("failed to read root entry", .{});
-                    @panic("wal: failed to read root entry");
+                    break :blk re.checksum != expected_root.checksum;
+                } else true;
+
+                if (stale) {
+                    // Incompatible or corrupt WAL — delete and start fresh.
+                    // Expected during development when types change between builds.
+                    log.warn("stale WAL — deleting and starting fresh", .{});
+                    std.posix.close(read_fd);
+                    std.posix.close(fd);
+                    std.fs.cwd().deleteFile(path) catch {};
+                    return init(path);
                 }
+                defer std.posix.close(read_fd);
 
                 // Scan backwards from the last entry to find the last valid one.
                 // A crash mid-write may corrupt the tail — skip corrupt entries

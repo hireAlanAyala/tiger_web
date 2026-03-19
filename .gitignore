@@ -18,3 +18,5 @@ graph.json
 types.json
 callgraph.svg
 generated/
+node_modules/
+package-lock.json

@@ -46,9 +46,10 @@ pub fn main() !void {
 
     log_level_runtime = if (cli.log_debug) .debug else .info;
 
-    const secret_env = std.posix.getenv("SECRET_KEY") orelse {
-        log.err("SECRET_KEY not set", .{});
-        std.process.exit(1);
+    const dev_default_key = "tiger-web-dev-default-key-0!!!!!";
+    const secret_env = std.posix.getenv("SECRET_KEY") orelse blk: {
+        log.warn("SECRET_KEY not set — using development default (not safe for production)", .{});
+        break :blk dev_default_key;
     };
     if (secret_env.len != auth.key_length) {
         log.err("SECRET_KEY must be exactly {d} bytes, got {d}", .{ auth.key_length, secret_env.len });
