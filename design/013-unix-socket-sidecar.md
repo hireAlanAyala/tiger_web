@@ -351,34 +351,56 @@ operations, run both paths, compare byte-for-byte. Test by
 introducing a deliberate non-determinism in a TypeScript handler
 and verifying the spot-check catches it.
 
-### Step 8: Handler map (replaces annotation scanner)
+### Step 8: Annotation scanner + HandlerMap
 
-The codegen emits a `HandlerMap` type — a record with one key per
-operation, each typed with the correct cache/body/result signatures.
-The developer exports an object that `satisfies HandlerMap`:
+Two layers of exhaustiveness checking, each serving a different
+purpose.
+
+**Layer 1: Annotation scanner (language-agnostic, codegen)**
+
+Scan source files for `// [execute] .operation_name` comments.
+Check against the Operation enum. Missing operation → build error.
+Duplicate → build error. Works for any language with comments —
+TypeScript, Python, Ruby, Go. One scanner implementation in the
+codegen, every sidecar language gets exhaustiveness.
+
+```typescript
+// [execute] .create_product
+export function createProduct(cache: PrefetchCache, body: Product): ExecuteResult { ... }
+
+// [execute] .get_product
+export function getProduct(cache: PrefetchCache): ExecuteResult { ... }
+```
+
+This is the infrastructure investment. The scanner runs during
+`zig build codegen`, which already walks types and emits code.
+Scanning source files for annotations is a small addition to
+the same build step. The annotation pattern is reusable across
+every language the sidecar supports — community contributors
+get exhaustiveness checking for free.
+
+**Layer 2: HandlerMap type (TypeScript-specific, optional)**
+
+For TypeScript, the codegen also emits a `HandlerMap` type.
+The developer can use `satisfies HandlerMap` for live IDE errors:
 
 ```typescript
 export default {
-  create_product: (cache, body) => { ... },
-  get_product: (cache) => { ... },
-  // miss one → TS compiler error, live in IDE
+  create_product: createProduct,
+  get_product: getProduct,
+  // miss one → red squiggly, live in IDE
 } satisfies HandlerMap;
 ```
 
-Missing operation → compiler error. Misspelled key → compiler error.
-Wrong handler signature → compiler error. All enforced by `tsc`,
-no annotation scanner needed, no build step beyond the compiler.
+This is a TypeScript optimization on top of the scanner, not a
+replacement. The scanner works at build time for every language.
+The HandlerMap adds live IDE feedback for TypeScript specifically.
 
-Domain files export partial maps, wiring file spreads them:
-
-```typescript
-import { products } from './products.ts';
-import { orders } from './orders.ts';
-export default { ...products, ...orders } satisfies HandlerMap;
-```
-
-This replaces the annotation scanner from the original design.
-The compiler is the exhaustiveness checker.
+**Why both:** The annotation scanner is the foundation — it
+compounds across languages. The HandlerMap is polish for the
+primary target language. Build the foundation first (scanner),
+add the polish later (HandlerMap). This follows the project
+philosophy: infrastructure that compounds is the product.
 
 ## Zig validation vs TypeScript validation
 
