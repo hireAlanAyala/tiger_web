@@ -42,6 +42,26 @@ A missing handler is caught before any code reaches production.
 Live IDE feedback is nice but not necessary — the guarantee is
 the same.
 
+**Clickable error locations.** The scanner knows exactly where
+each annotation lives. Errors print `file:line` paths that are
+clickable in every modern terminal and IDE:
+
+```
+error: missing handler for operation 'delete_product'
+  hint: add to ts/products.ts:
+    // [execute] .delete_product
+
+error: duplicate handler for operation 'create_product'
+  --> ts/products.ts:14  // [execute] .create_product
+  --> ts/orders.ts:8     // [execute] .create_product
+```
+
+This is a universal convention — VS Code, JetBrains, vim, emacs
+all make `file:line` clickable. The scanner runs in Zig, but
+the output works for any language: `ts/products.ts:14`,
+`py/products.py:27`. Every sidecar language gets actionable
+errors with zero IDE-specific integration.
+
 For TypeScript specifically, the codegen also emits a `HandlerMap`
 type as optional polish. Developers who want live IDE errors can
 use it. But the annotation scanner is the foundation.

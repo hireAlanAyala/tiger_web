@@ -372,6 +372,25 @@ export function createProduct(cache: PrefetchCache, body: Product): ExecuteResul
 export function getProduct(cache: PrefetchCache): ExecuteResult { ... }
 ```
 
+Errors include clickable file:line locations:
+
+```
+error: missing handler for operation 'delete_product'
+  hint: add to ts/products.ts:
+    // [execute] .delete_product
+
+error: duplicate handler for operation 'create_product'
+  --> ts/products.ts:14  // [execute] .create_product
+  --> ts/orders.ts:8     // [execute] .create_product
+```
+
+The `file:line` format is a universal terminal/IDE convention —
+clickable in VS Code, JetBrains, vim quickfix, emacs compilation
+mode, and every modern terminal. The scanner runs in Zig, prints
+to stderr. The user's IDE doesn't need to understand Zig — it
+just sees the path and makes it clickable. Works for every
+sidecar language: `ts/products.ts:14`, `py/products.py:27`.
+
 This is the infrastructure investment. The scanner runs during
 `zig build codegen`, which already walks types and emits code.
 Scanning source files for annotations is a small addition to
