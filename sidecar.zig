@@ -61,6 +61,7 @@ pub const SidecarClient = struct {
         path: []const u8,
         body: []const u8,
     ) ?message.Message {
+        if (self.fd == -1) self.try_reconnect();
         if (self.fd == -1) return null;
 
         assert(path.len <= protocol.path_max);
@@ -115,6 +116,7 @@ pub const SidecarClient = struct {
         is_sse: bool,
         resp_buf: *protocol.ExecuteRenderResponse,
     ) bool {
+        if (self.fd == -1) self.try_reconnect();
         if (self.fd == -1) return false;
 
         var req = std.mem.zeroes(protocol.ExecuteRenderRequest);
@@ -185,6 +187,17 @@ pub const SidecarClient = struct {
     fn handle_disconnect(self: *SidecarClient) void {
         log.warn("sidecar disconnected", .{});
         self.close();
+    }
+
+    /// Attempt to reconnect after a disconnect. Called lazily on the next
+    /// request — no background polling, no retry loops. If the sidecar
+    /// restarted, this picks it up. If not, the request falls through to
+    /// native rendering (execute_render) or unmapped (translate).
+    fn try_reconnect(self: *SidecarClient) void {
+        assert(self.fd == -1);
+        if (self.connect()) {
+            log.info("sidecar reconnected", .{});
+        }
     }
 };
 
