@@ -1,54 +1,54 @@
 // Page and auth handlers — translate, execute, render.
 
-import type { TranslateRequest, TranslateResult, HandlerResult, PrefetchCache } from "../../generated/types.generated.ts";
+import type { Request, Route, Response, Context } from "../../generated/types.generated.ts";
 
-// [translate] .page_load_dashboard
-export function translatePageLoadDashboard(req: TranslateRequest): TranslateResult | null {
+// [route] .page_load_dashboard
+export function translatePageLoadDashboard(req: Request): Route | null {
   if (req.method !== "get" || req.path !== "/") return null;
   return { operation: "page_load_dashboard", id: "0".repeat(32) };
 }
 
-// [translate] .page_load_login
-export function translatePageLoadLogin(req: TranslateRequest): TranslateResult | null {
+// [route] .page_load_login
+export function translatePageLoadLogin(req: Request): Route | null {
   if (req.method !== "get" || req.path !== "/login") return null;
   return { operation: "page_load_login", id: "0".repeat(32) };
 }
 
-// [translate] .request_login_code
-export function translateRequestLoginCode(req: TranslateRequest): TranslateResult | null {
+// [route] .request_login_code
+export function translateRequestLoginCode(req: Request): Route | null {
   if (req.method !== "post" || req.path !== "/login/request") return null;
   return { operation: "request_login_code", id: "0".repeat(32) };
 }
 
-// [translate] .verify_login_code
-export function translateVerifyLoginCode(req: TranslateRequest): TranslateResult | null {
+// [route] .verify_login_code
+export function translateVerifyLoginCode(req: Request): Route | null {
   if (req.method !== "post" || req.path !== "/login/verify") return null;
   return { operation: "verify_login_code", id: "0".repeat(32) };
 }
 
-// [translate] .logout
-export function translateLogout(req: TranslateRequest): TranslateResult | null {
+// [route] .logout
+export function translateLogout(req: Request): Route | null {
   if (req.method !== "post" || req.path !== "/logout") return null;
   return { operation: "logout", id: "0".repeat(32) };
 }
 
-// [execute] .page_load_dashboard
-export function executePageLoadDashboard(cache: PrefetchCache): HandlerResult { return { status: "ok", writes: [] }; }
+// [handle] .page_load_dashboard
+export function executePageLoadDashboard(cache: Context): Response { return { status: "ok", writes: [] }; }
 
-// [execute] .page_load_login
-export function executePageLoadLogin(): HandlerResult { return { status: "ok", writes: [] }; }
+// [handle] .page_load_login
+export function executePageLoadLogin(): Response { return { status: "ok", writes: [] }; }
 
-// [execute] .request_login_code
-export function executeRequestLoginCode(cache: PrefetchCache): HandlerResult { return { status: "ok", writes: [] }; }
+// [handle] .request_login_code
+export function executeRequestLoginCode(cache: Context): Response { return { status: "ok", writes: [] }; }
 
-// [execute] .verify_login_code
-export function executeVerifyLoginCode(cache: PrefetchCache): HandlerResult { return { status: "ok", writes: [] }; }
+// [handle] .verify_login_code
+export function executeVerifyLoginCode(cache: Context): Response { return { status: "ok", writes: [] }; }
 
-// [execute] .logout
-export function executeLogout(): HandlerResult { return { status: "ok", writes: [] }; }
+// [handle] .logout
+export function executeLogout(): Response { return { status: "ok", writes: [] }; }
 
 // [render] .page_load_dashboard
-export function renderPageLoadDashboard(status: string, cache: PrefetchCache): string { return "<div>Dashboard</div>"; }
+export function renderPageLoadDashboard(status: string, cache: Context): string { return "<div>Dashboard</div>"; }
 
 // [render] .page_load_login
 export function renderPageLoadLogin(status: string): string { return "<div>Login</div>"; }

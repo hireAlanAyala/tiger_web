@@ -83,9 +83,11 @@ fn parse_annotation(line: []const u8, prefix: []const u8) ?struct { phase: Phase
     const phase_str = rest[0..close];
     rest = rest[close + 1 ..];
 
-    const phase: Phase = if (std.mem.eql(u8, phase_str, "translate"))
+    // Accept both internal names (translate/execute/render) and
+    // user-facing names (route/handle/render).
+    const phase: Phase = if (std.mem.eql(u8, phase_str, "translate") or std.mem.eql(u8, phase_str, "route"))
         .translate
-    else if (std.mem.eql(u8, phase_str, "execute"))
+    else if (std.mem.eql(u8, phase_str, "execute") or std.mem.eql(u8, phase_str, "handle"))
         .execute
     else if (std.mem.eql(u8, phase_str, "render"))
         .render
@@ -320,6 +322,20 @@ test "parse_annotation python style" {
     try std.testing.expect(result != null);
     try std.testing.expectEqual(result.?.phase, .translate);
     try std.testing.expect(std.mem.eql(u8, result.?.operation, "list_products"));
+}
+
+test "parse_annotation user-facing phase names" {
+    const route = parse_annotation("// [route] .create_product", "//");
+    try std.testing.expect(route != null);
+    try std.testing.expectEqual(route.?.phase, .translate);
+
+    const handle = parse_annotation("// [handle] .get_product", "//");
+    try std.testing.expect(handle != null);
+    try std.testing.expectEqual(handle.?.phase, .execute);
+
+    const render = parse_annotation("// [render] .list_products", "//");
+    try std.testing.expect(render != null);
+    try std.testing.expectEqual(render.?.phase, .render);
 }
 
 test "parse_annotation invalid phase" {

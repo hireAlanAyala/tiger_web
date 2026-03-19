@@ -188,6 +188,16 @@ const output = blk: {
     w.raw("  writes: Write[];\n");
     w.raw("}\n\n");
 
+    // --- User-facing aliases ---
+    // Friendly names for handler developers. Internal names stay for
+    // protocol/serde code. Handlers import these — no framework jargon.
+    w.raw("// User-facing type aliases.\n");
+    w.raw("export type Request = TranslateRequest;\n");
+    w.raw("export type Route = TranslateResult;\n");
+    w.raw("export type Response = HandlerResult;\n");
+    w.raw("export type Context = PrefetchCache;\n");
+    w.raw("export type Change = Write;\n\n");
+
     // --- Serde: binary ↔ TypeScript serialization ---
     w.emit_serde_helpers();
 
@@ -1610,7 +1620,7 @@ test "output is valid structure" {
             if (i + 12 <= output.len and std.mem.eql(u8, output[i..][0..12], "export const")) consts += 1;
         }
         assert(interfaces == 40);
-        assert(types == 14);
+        assert(types == 19);
         assert(consts == 34);
         // 33 extern structs × 2 (read + write) = 66 serde functions
         assert(functions == 66);
