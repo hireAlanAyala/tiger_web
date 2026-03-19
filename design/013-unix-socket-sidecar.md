@@ -351,12 +351,34 @@ operations, run both paths, compare byte-for-byte. Test by
 introducing a deliberate non-determinism in a TypeScript handler
 and verifying the spot-check catches it.
 
-### Step 8: Annotation scanner
+### Step 8: Handler map (replaces annotation scanner)
 
-Build the `zig build codegen` step that scans TypeScript files
-for `// [execute]`, `// [translate]`, `// [render]` annotations.
-Verify exhaustiveness against the Operation enum. Missing operation
-→ build error. Duplicate → build error.
+The codegen emits a `HandlerMap` type — a record with one key per
+operation, each typed with the correct cache/body/result signatures.
+The developer exports an object that `satisfies HandlerMap`:
+
+```typescript
+export default {
+  create_product: (cache, body) => { ... },
+  get_product: (cache) => { ... },
+  // miss one → TS compiler error, live in IDE
+} satisfies HandlerMap;
+```
+
+Missing operation → compiler error. Misspelled key → compiler error.
+Wrong handler signature → compiler error. All enforced by `tsc`,
+no annotation scanner needed, no build step beyond the compiler.
+
+Domain files export partial maps, wiring file spreads them:
+
+```typescript
+import { products } from './products.ts';
+import { orders } from './orders.ts';
+export default { ...products, ...orders } satisfies HandlerMap;
+```
+
+This replaces the annotation scanner from the original design.
+The compiler is the exhaustiveness checker.
 
 ## Zig validation vs TypeScript validation
 
