@@ -7,7 +7,6 @@ import type {
   Context,
   Product,
 } from "tiger-web";
-import { product_name_max, product_description_max } from "tiger-web";
 
 // ========================== create_product ==========================
 
@@ -178,9 +177,8 @@ function parseProduct(parsed: Record<string, unknown>, id: string): Product | nu
   const inventory = Number(parsed.inventory ?? 0);
   const version = Number(parsed.version ?? 1);
 
-  // Reject at the boundary — inner code never sees invalid data.
-  if (name.length === 0 || name.length > product_name_max) return null;
-  if (description.length > product_description_max) return null;
+  // Domain rules — serde handles max length, these are business logic.
+  if (name.length === 0) return null;
   if (!Number.isInteger(price_cents) || price_cents < 0) return null;
   if (!Number.isInteger(inventory) || inventory < 0) return null;
   if (!Number.isInteger(version) || version < 1) return null;

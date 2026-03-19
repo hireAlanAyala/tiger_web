@@ -1,7 +1,6 @@
 // Collection handlers — each operation groups route → handle → render.
 
 import type { Request, Route, Response, Context, ProductCollection } from "tiger-web";
-import { collection_name_max } from "tiger-web";
 
 // ========================== create_collection ==========================
 
@@ -10,7 +9,7 @@ export function routeCreateCollection(req: Request): Route | null {
   if (req.method !== "post" || req.path !== "/collections") return null;
   const parsed = JSON.parse(req.body || "{}");
   const name = String(parsed.name || "");
-  if (name.length === 0 || name.length > collection_name_max) return null;
+  if (name.length === 0) return null;
   return { operation: "create_collection", id: "0".repeat(32) };
 }
 
