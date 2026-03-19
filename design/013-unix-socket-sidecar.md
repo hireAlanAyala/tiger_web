@@ -403,6 +403,115 @@ name, wrong argument type). These are caught before the bytes reach
 the socket. The two systems are complementary — TypeScript catches
 errors at write time, Zig catches errors at the protocol boundary.
 
+## Cache serialization design (Step 3b)
+
+The prefetch cache has 11 slots. Not every operation uses every
+slot — `get_product` needs one Product, `page_load_dashboard`
+needs three lists. The question is how to serialize this for the
+execute_render protocol message.
+
+### Cache slots
+
+| Slot | Type | Max size | Used by |
+|------|------|----------|---------|
+| `product` | `?Product` | 672 | get/create/update/delete product, add_collection_member |
+| `product_list` | `ProductList` | 33,604 | list_products, get_collection, search, dashboard |
+| `products` | `[20]?Product` | 13,460 | transfer_inventory, create/complete/cancel order |
+| `collection` | `?ProductCollection` | 160 | get/create/delete collection, add/remove member |
+| `collection_list` | `CollectionList` | 8,004 | list_collections, dashboard |
+| `order` | `?OrderResult` | 3,632 | get/complete/cancel order |
+| `order_list` | `OrderSummaryList` | 5,604 | list_orders, dashboard |
+| `login_code` | `?LoginCodeEntry` | ~144 | request_login_code, verify_login_code |
+| `user_by_email` | `?u128` | 16 | verify_login_code |
+| `result` | `?StorageResult` | 1 | all mutating operations |
+| `identity` | `?PrefetchIdentity` | ~34 | all operations (auth context) |
+
+Total if all populated: ~65KB.
+
+### Options considered
+
+**A. Flat — serialize all slots every time.**
+Fixed-size ~65KB buffer. Presence flags for nullable slots. Every
+message is the same size regardless of operation.
+
+Pro: no per-operation logic, protocol is operation-agnostic, one
+struct in codegen. Con: 65KB per message even for get_product
+which needs 673 bytes.
+
+**B. Per-operation cache structs.**
+Define a separate extern struct for each operation's cache needs.
+`GetProductCache`, `DashboardCache`, etc.
+
+Pro: minimal wire size. Con: ~20 structs, operation-specific
+protocol, more codegen surface, protocol changes when operation
+cache needs change.
+
+**C. Tagged slot sequence.**
+Variable-length: `[slot_tag][slot_data][slot_tag][slot_data]...`
+Only populated slots are sent.
+
+Pro: minimal wire size. Con: variable-length framing (violates
+"no framing" design principle), parsing complexity.
+
+### Decision: Option A (flat)
+
+For a unix socket on the same machine, 65KB is noise:
+- `memcpy` of 65KB: ~5μs
+- SQLite write: ~50-100μs
+- Kernel unix socket buffer: configurable, defaults to 128KB+
+- No network, no serialization overhead, no GC pressure
+
+The alternative designs save bandwidth at the cost of protocol
+complexity. Every byte saved is a byte that never leaves the
+machine anyway. The flat approach is:
+- One PrefetchCache extern struct, known at comptime
+- One read function, one write function (from codegen)
+- Zero per-operation protocol logic
+- Operation-agnostic — adding a new cache slot is one field
+
+Presence encoding for nullable slots:
+- `?Product` → `[1]u8` (0/1) + `[672]u8` (data, zeroed if absent)
+- `[20]?Product` → `[20]u8` (per-item presence) + `[20]Product`
+- Lists → always present, `len` field indicates populated count
+
+### Write union serialization
+
+The execute_render response carries up to 21 Write commands.
+Each Write is a tagged union — the largest variant is OrderResult
+(3,632 bytes).
+
+Fixed-size approach: each write slot is `[tag: u8][pad: 15 bytes][data: 3,632 bytes]` = 3,648 bytes.
+21 slots × 3,648 = 76,608 bytes.
+
+This is large but the max case (21 × OrderResult) never occurs.
+The real max is 1 × OrderResult + 20 × Product (1 × 3,632 + 20
+× 672 = 17,072). But fixed-size means we allocate for the worst
+case.
+
+Alternative: variable-length writes with `[tag: u8][len: u16][data]`.
+This breaks the fixed-size principle but saves 50KB+ in the
+common case. Since the response also carries variable-length HTML
+(`html_len` + `html[0..html_len]`), the message is already
+effectively variable-length.
+
+**Decision: tagged fixed-size write slots.** Each slot is padded
+to the max variant size. Consistent with the flat principle.
+The 76KB is the same order as the HTML buffer (98KB). Both are
+allocated once at startup, not per-request.
+
+### Execute+render message sizes
+
+Request: tag(1) + operation(1) + id(16) + body(672) + identity(~50)
++ result(2) + cache(~65,000) + is_sse(1) + reserved ≈ **66KB**
+
+Response: status(1) + writes_len(1) + writes(76,608) + result(~47,248)
++ html_len(4) + html(98,304) + reserved ≈ **222KB**
+
+Both allocated as fixed-size buffers at startup. The unix socket
+sends/receives the full buffer each time. For synchronous
+request/response at 100 ops/sec, this is ~30MB/sec total
+throughput — well within unix socket capacity.
+
 ## Not in scope
 
 - WASM transport (future, for Rust sidecars)
