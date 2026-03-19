@@ -114,9 +114,9 @@ pub const PrefetchCache = extern struct {
     has_user_by_email: u8,
     has_result: u8,
     has_identity: u8,
-    flags_reserved: u8,
+    reserved_flags: u8,
     products_presence: [message.order_items_max]u8,
-    presence_reserved: [4]u8,
+    reserved_presence: [4]u8,
 
     // --- Data (largest alignment first) ---
     identity: message.PrefetchIdentity,
@@ -130,7 +130,7 @@ pub const PrefetchCache = extern struct {
     products: [message.order_items_max]message.Product,
     login_code: message.LoginCodeEntry,
     result: u8,
-    data_reserved: [15]u8,
+    reserved_data: [15]u8,
 
     comptime {
         assert(stdx.no_padding(PrefetchCache));
@@ -143,13 +143,12 @@ pub const PrefetchCache = extern struct {
 /// data is padded to the largest variant size (OrderResult).
 pub const WriteSlot = extern struct {
     tag: u8,
-    tag_reserved: [15]u8,
+    reserved_tag: [15]u8,
     data: [@sizeOf(message.OrderResult)]u8,
 
     comptime {
         assert(stdx.no_padding(WriteSlot));
         assert(@sizeOf(WriteSlot) == 16 + @sizeOf(message.OrderResult));
-        // Tag + padding aligns data to 16 bytes.
         assert(@offsetOf(WriteSlot, "data") == 16);
     }
 };
@@ -183,11 +182,9 @@ pub const ExecuteRenderResponse = extern struct {
     // Tail padding: struct alignment is 4 (from html_len u32).
     tail_reserved: [tail_pad]u8,
 
-    const tail_pad = blk: {
-        const raw: usize = 1 + 1 + 1 + 13 + @sizeOf(message.PageLoadDashboardResult) +
-            SM.writes_max * @sizeOf(WriteSlot) + 4 + @as(usize, html_max);
-        break :blk (4 - (raw % 4)) % 4;
-    };
+    // Pre-html fields are all 4-aligned (16-byte header + result + writes + html_len).
+    // Tail padding depends only on html_max.
+    const tail_pad = (4 - (@as(usize, html_max) % 4)) % 4;
 
     comptime {
         assert(stdx.no_padding(ExecuteRenderResponse));

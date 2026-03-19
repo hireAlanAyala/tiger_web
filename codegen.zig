@@ -45,14 +45,13 @@ const known_structs = .{
     // Sidecar types
     message.LoginCodeEntry,
     message.PrefetchIdentity,
-    // Protocol (translate round trip — generic serde works)
+    // Protocol
     protocol.TranslateRequest,
     protocol.TranslateResponse,
-    // Protocol (execute_render) — WriteSlot uses raw byte data, not typed fields.
-    // PrefetchCache uses presence flags, not _len pattern.
-    // ExecuteRenderRequest/Response contain these non-standard types.
-    // Serde for these is hand-written in the sidecar, not generated.
+    protocol.PrefetchCache,
     protocol.WriteSlot,
+    protocol.ExecuteRenderRequest,
+    protocol.ExecuteRenderResponse,
 };
 
 /// All enum types emitted as TS string literal unions.
@@ -347,22 +346,33 @@ const Writer = struct {
     }
 
     fn write_field_type(w: *Writer, comptime StructT: type, comptime field: std.builtin.Type.StructField) void {
+        const nullable = has_presence_companion(StructT, field.name);
+        const array_nullable = is_array_type(field.type) and
+            @typeInfo(field.type).array.child != u8 and
+            has_array_presence_companion(StructT, field.name);
+
         if (is_array_type(field.type)) {
             const arr = @typeInfo(field.type).array;
             if (arr.child != u8) {
-                // [N]T where T != u8 → T[] regardless of _len companion.
-                w.write_ts_type(arr.child);
-                w.raw("[]");
+                if (array_nullable) {
+                    // [N]T with _presence → (T | null)[]
+                    w.raw("(");
+                    w.write_ts_type(arr.child);
+                    w.raw(" | null)[]");
+                } else {
+                    // [N]T → T[]
+                    w.write_ts_type(arr.child);
+                    w.raw("[]");
+                }
             } else if (has_len_companion(StructT, field.name)) {
-                // [N]u8 with _len → string.
                 w.raw("string");
             } else {
-                // [N]u8 without _len → Uint8Array.
                 w.raw("Uint8Array");
             }
-            return;
+        } else {
+            w.write_ts_type(field.type);
         }
-        w.write_ts_type(field.type);
+        if (nullable) w.raw(" | null");
     }
 
     fn write_ts_type(w: *Writer, comptime T: type) void {
@@ -584,10 +594,33 @@ const Writer = struct {
         w.raw(field.name);
         w.raw(": ");
 
+        const nullable = has_presence_companion(T, field.name);
+
+        // Presence-gated nullable: "dv.getUint8(offset + X) !== 0 ? <read> : null"
+        if (nullable) {
+            w.raw("dv.getUint8(offset + ");
+            w.int(get_presence_offset(T, field.name));
+            w.raw(") !== 0 ? ");
+        }
+
         if (is_array_type(field.type)) {
             const arr = @typeInfo(field.type).array;
-            if (arr.child != u8) {
-                // [N]T array → Array.from(...)
+            if (arr.child != u8 and has_array_presence_companion(T, field.name)) {
+                // [N]T with _presence → per-item nullable array
+                const poff = get_array_presence_offset(T, field.name);
+                w.raw("Array.from({ length: ");
+                w.int(arr.len);
+                w.raw(" }, (_, i) =>\n      dv.getUint8(offset + ");
+                w.int(poff);
+                w.raw(" + i) !== 0\n        ? read");
+                w.raw(type_leaf_name(arr.child));
+                w.raw("(data, offset + ");
+                w.int(@offsetOf(T, field.name));
+                w.raw(" + i * ");
+                w.int(@sizeOf(arr.child));
+                w.raw(")\n        : null)");
+            } else if (arr.child != u8) {
+                // [N]T array with _len → Array.from(...)
                 const li = get_len_info(T, field.name);
                 w.raw("Array.from({ length: ");
                 w.emit_dv_read(li);
@@ -620,6 +653,7 @@ const Writer = struct {
             w.emit_scalar_read(T, field);
         }
 
+        if (nullable) w.raw(" : null");
         w.raw(",\n");
     }
 
@@ -687,9 +721,52 @@ const Writer = struct {
     // --- Serde field write (statements) ---
 
     fn emit_serde_write_field(w: *Writer, comptime T: type, comptime field: std.builtin.Type.StructField) void {
+        const nullable = has_presence_companion(T, field.name);
+        const data_size = @sizeOf(field.type);
+
+        if (nullable) {
+            // Set presence flag and conditionally write data.
+            w.raw("  dv.setUint8(offset + ");
+            w.int(get_presence_offset(T, field.name));
+            w.raw(", val.");
+            w.raw(field.name);
+            w.raw(" !== null ? 1 : 0);\n");
+            w.raw("  if (val.");
+            w.raw(field.name);
+            w.raw(" !== null) {\n");
+        }
+
         if (is_array_type(field.type)) {
             const arr = @typeInfo(field.type).array;
-            if (arr.child != u8) {
+            if (arr.child != u8 and has_array_presence_companion(T, field.name)) {
+                // [N]T with per-item presence
+                const poff = get_array_presence_offset(T, field.name);
+                w.raw("  data.fill(0, offset + ");
+                w.int(@offsetOf(T, field.name));
+                w.raw(", offset + ");
+                w.int(@offsetOf(T, field.name) + arr.len * @sizeOf(arr.child));
+                w.raw(");\n");
+                w.raw("  for (let i = 0; i < ");
+                w.int(arr.len);
+                w.raw("; i++) {\n");
+                w.raw("    dv.setUint8(offset + ");
+                w.int(poff);
+                w.raw(" + i, val.");
+                w.raw(field.name);
+                w.raw("[i] !== null ? 1 : 0);\n");
+                w.raw("    if (val.");
+                w.raw(field.name);
+                w.raw("[i] !== null) write");
+                w.raw(type_leaf_name(arr.child));
+                w.raw("(data, offset + ");
+                w.int(@offsetOf(T, field.name));
+                w.raw(" + i * ");
+                w.int(@sizeOf(arr.child));
+                w.raw(", val.");
+                w.raw(field.name);
+                w.raw("[i]!);\n");
+                w.raw("  }\n");
+            } else if (arr.child != u8) {
                 // [N]T array — validate, loop, write length
                 const li = get_len_info(T, field.name);
                 const len_max = (@as(u64, 1) << li.bits) - 1;
@@ -766,6 +843,15 @@ const Writer = struct {
             }
         } else {
             w.emit_scalar_write(T, field);
+        }
+
+        if (nullable) {
+            w.raw("  } else {\n");
+            w.raw("    data.fill(0, offset + ");
+            w.int(@offsetOf(T, field.name));
+            w.raw(", offset + ");
+            w.int(@offsetOf(T, field.name) + data_size);
+            w.raw(");\n  }\n");
         }
     }
 
@@ -1021,6 +1107,60 @@ fn is_reserved_or_padding(comptime field_name: []const u8) bool {
     return std.mem.startsWith(u8, field_name, "reserved") or std.mem.eql(u8, field_name, "padding");
 }
 
+/// Returns true if field_name has a "has_{name}" presence companion in StructT.
+/// The companion is a u8 flag (0=absent, 1=present) that gates the data field.
+fn has_presence_companion(comptime StructT: type, comptime field_name: []const u8) bool {
+    for (@typeInfo(StructT).@"struct".fields) |f| {
+        if (f.name.len == field_name.len + 4 and
+            std.mem.eql(u8, f.name[0..4], "has_") and
+            std.mem.eql(u8, f.name[4..], field_name))
+        {
+            assert(f.type == u8);
+            return true;
+        }
+    }
+    return false;
+}
+
+/// Returns the offset of the "has_{name}" presence companion field.
+fn get_presence_offset(comptime StructT: type, comptime field_name: []const u8) usize {
+    for (@typeInfo(StructT).@"struct".fields) |f| {
+        if (f.name.len == field_name.len + 4 and
+            std.mem.eql(u8, f.name[0..4], "has_") and
+            std.mem.eql(u8, f.name[4..], field_name))
+        {
+            return @offsetOf(StructT, f.name);
+        }
+    }
+    unreachable;
+}
+
+/// Returns true if field_name has a "{name}_presence" per-item presence array in StructT.
+fn has_array_presence_companion(comptime StructT: type, comptime field_name: []const u8) bool {
+    for (@typeInfo(StructT).@"struct".fields) |f| {
+        if (f.name.len == field_name.len + 9 and
+            std.mem.eql(u8, f.name[0..field_name.len], field_name) and
+            std.mem.eql(u8, f.name[field_name.len..], "_presence"))
+        {
+            return true;
+        }
+    }
+    return false;
+}
+
+/// Returns the offset of the "{name}_presence" per-item presence array.
+fn get_array_presence_offset(comptime StructT: type, comptime field_name: []const u8) usize {
+    for (@typeInfo(StructT).@"struct".fields) |f| {
+        if (f.name.len == field_name.len + 9 and
+            std.mem.eql(u8, f.name[0..field_name.len], field_name) and
+            std.mem.eql(u8, f.name[field_name.len..], "_presence"))
+        {
+            return @offsetOf(StructT, f.name);
+        }
+    }
+    unreachable;
+}
+
 /// Returns true if a field should be omitted from the TS output.
 fn should_skip(comptime StructT: type, comptime field_name: []const u8) bool {
     if (std.mem.startsWith(u8, field_name, "reserved")) return true;
@@ -1034,6 +1174,17 @@ fn should_skip(comptime StructT: type, comptime field_name: []const u8) bool {
 
     // Skip bare "len" when there's an "items" field (list structs)
     if (std.mem.eql(u8, field_name, "len") and has_field(StructT, "items")) return true;
+
+    // Skip "has_X" presence companions (e.g., "has_product" when "product" exists)
+    if (field_name.len > 4 and std.mem.eql(u8, field_name[0..4], "has_")) {
+        if (has_field(StructT, field_name[4..])) return true;
+    }
+
+    // Skip "X_presence" array presence companions
+    if (field_name.len > 9 and std.mem.eql(u8, field_name[field_name.len - 9 ..], "_presence")) {
+        const base = field_name[0 .. field_name.len - 9];
+        if (has_field(StructT, base)) return true;
+    }
 
     return false;
 }
@@ -1051,7 +1202,7 @@ fn count_anon_structs(comptime U: type) usize {
 
 /// Returns true if T is a struct in the known_structs list.
 fn is_known_struct(comptime T: type) bool {
-    comptime assert(known_structs.len == 32);
+    comptime assert(known_structs.len == 35);
     comptime {
         for (known_structs) |K| assert(@typeInfo(K) == .@"struct");
     }
@@ -1088,7 +1239,7 @@ fn is_known_union(comptime T: type) bool {
 /// Asserts no two emitted types produce the same TS name.
 /// Checks across all categories: enums, structs, unions, anonymous interfaces.
 fn assert_no_name_collisions() void {
-    @setEvalBranchQuota(200000);
+    @setEvalBranchQuota(500000);
     // Struct leaf names are unique among themselves.
     inline for (known_structs) |K1| {
         var count: usize = 0;
@@ -1319,7 +1470,7 @@ test "output is valid structure" {
     comptime assert(std.mem.startsWith(u8, &output, "// Auto-generated"));
 
     comptime {
-        @setEvalBranchQuota(200000);
+        @setEvalBranchQuota(500000);
         var interfaces: usize = 0;
         var types: usize = 0;
         var consts: usize = 0;
@@ -1331,10 +1482,10 @@ test "output is valid structure" {
             if (i + 11 <= output.len and std.mem.eql(u8, output[i..][0..11], "export type")) types += 1;
             if (i + 12 <= output.len and std.mem.eql(u8, output[i..][0..12], "export const")) consts += 1;
         }
-        assert(interfaces == 35);
+        assert(interfaces == 38);
         assert(types == 13);
         assert(consts == 27);
-        // 25 extern structs × 2 (read + write) = 50 serde functions
-        assert(functions == 50);
+        // 28 extern structs × 2 (read + write) = 56 serde functions
+        assert(functions == 56);
     }
 }
