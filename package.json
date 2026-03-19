@@ -1,16 +1,10 @@
 {
   "private": true,
   "scripts": {
-    "codegen": "./zig/zig build codegen",
-    "scan": "./zig/zig build scan -- ts/handlers/ --manifest=generated/manifest.json",
-    "adapter": "tsx adapters/typescript.ts generated/manifest.json generated/dispatch.generated.ts",
-    "build": "npm run codegen && npm run scan && npm run adapter",
+    "build": "./zig/zig build codegen && ./zig/zig build scan -- ts/handlers/ --manifest=generated/manifest.json && tsx adapters/typescript.ts generated/manifest.json generated/dispatch.generated.ts",
     "sidecar": "tsx generated/dispatch.generated.ts /tmp/tiger-web.sock",
     "server": "./zig/zig build run -- --sidecar=/tmp/tiger-web.sock",
-    "dev": "npm run build && concurrently 'npm run sidecar' 'sleep 1 && npm run server'",
-    "test:serde": "tsx generated/serde_test.generated.ts",
-    "test:adapter": "./zig/zig build test-adapter",
-    "test:zig": "./zig/zig build unit-test"
+    "dev": "npm run build && concurrently 'npm run sidecar' 'sleep 1 && npm run server'"
   },
   "devDependencies": {
     "tsx": "^4",
