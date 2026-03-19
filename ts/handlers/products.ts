@@ -42,14 +42,22 @@ export function routeGetProduct(req: Request): Route | null {
 // [handle] .get_product
 export function handleGetProduct(ctx: Context): Response {
   if (ctx.product === null) return { status: "not_found", writes: [] };
+  // Soft delete: inactive products are treated as not found.
+  if (!ctx.product.flags.active) return { status: "not_found", writes: [] };
   return { status: "ok", writes: [] };
 }
 
 // [render] .get_product
 export function renderGetProduct(status: string, ctx: Context): string {
   if (status !== "ok") return `<div class="error">${esc(status)}</div>`;
-  if (ctx.product) return `<div class="product"><h1>${esc(ctx.product.name)}</h1></div>`;
-  return `<div class="error">not_found</div>`;
+  const p = ctx.product!;
+  return `<div class="card">` +
+    `<h3>${esc(p.name)}</h3>` +
+    `<p>$${(p.price_cents / 100).toFixed(2)}</p>` +
+    `<p>Inventory: ${p.inventory}</p>` +
+    `<p>Version: ${p.version}</p>` +
+    (!p.flags.active ? `<span>[inactive]</span>` : ``) +
+    `</div>`;
 }
 
 // ========================== list_products ==========================
