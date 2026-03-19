@@ -512,6 +512,27 @@ sends/receives the full buffer each time. For synchronous
 request/response at 100 ops/sec, this is ~30MB/sec total
 throughput — well within unix socket capacity.
 
+### Open: Result union serialization
+
+The Result tagged union (10 variants, largest ~47KB
+PageLoadDashboardResult) contains non-extern structs (ProductList,
+CollectionWithProducts) that can't be @bitCast-ed. Needs the same
+treatment as the Write union: tag byte + fixed-size data region
+padded to the max variant. Define the wire layout before
+implementing Step 3b.
+
+### Memory budget assertion
+
+The sidecar uses one pair of fixed-size buffers (single connection,
+single-threaded server). Assert the total at comptime:
+```
+comptime {
+    assert(@sizeOf(ExecuteRenderRequest) + @sizeOf(ExecuteRenderResponse) < 300 * 1024);
+}
+```
+If someone adds a cache slot or grows a list, the budget check
+catches it before it ships. Explicit, not discovered at runtime.
+
 ## Not in scope
 
 - WASM transport (future, for Rust sidecars)
