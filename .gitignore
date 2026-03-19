@@ -17,3 +17,4 @@ graph_comptime.o
 graph.json
 types.json
 callgraph.svg
+generated/

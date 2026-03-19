@@ -105,6 +105,7 @@ pub fn build(b: *std.Build) void {
         "codec.zig",
         "render.zig",
         "wal_test.zig",
+        "codegen.zig",
     };
     const unit_test_step = b.step("unit-test", "Run unit tests");
     for (modules) |mod| {
@@ -150,6 +151,22 @@ pub fn build(b: *std.Build) void {
         });
         unit_test_step.dependOn(&b.addRunArtifact(unit_test).step);
     }
+
+    // --- Codegen ---
+    const codegen_exe = b.addExecutable(.{
+        .name = "tiger-codegen",
+        .root_source_file = b.path("codegen.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    addFramework(codegen_exe.root_module, framework);
+
+    const codegen_cmd = b.addRunArtifact(codegen_exe);
+    const codegen_output = codegen_cmd.captureStdOut();
+    const wf = b.addUpdateSourceFiles();
+    wf.addCopyFileToSource(codegen_output, "generated/types.generated.ts");
+    const codegen_step = b.step("codegen", "Generate TypeScript type definitions");
+    codegen_step.dependOn(&wf.step);
 
     // --- Benchmark (smoke mode as part of unit-test, real via bench step) ---
     const bench_smoke_options = b.addOptions();
