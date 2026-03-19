@@ -196,6 +196,7 @@ const SM = state_machine.StateMachineType(MemoryStorage);
 
 test "extract_cache empty state machine" {
     var storage = try MemoryStorage.init(std.testing.allocator);
+    defer storage.deinit(std.testing.allocator);
     const secret = "tiger-web-test-key-0123456789ab!".*;
     var sm = SM.init(&storage, false, 42, &secret);
 
@@ -223,6 +224,7 @@ test "extract_cache empty state machine" {
 
 test "extract_cache with populated product" {
     var storage = try MemoryStorage.init(std.testing.allocator);
+    defer storage.deinit(std.testing.allocator);
     const secret = "tiger-web-test-key-0123456789ab!".*;
     var sm = SM.init(&storage, false, 42, &secret);
 
@@ -258,6 +260,7 @@ test "extract_cache with populated product" {
 
 test "apply_write returns false for duplicate put" {
     var storage = try MemoryStorage.init(std.testing.allocator);
+    defer storage.deinit(std.testing.allocator);
     const secret = "tiger-web-test-key-0123456789ab!".*;
     var sm = SM.init(&storage, false, 42, &secret);
 
