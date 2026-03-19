@@ -408,3 +408,65 @@ test "extract_cache with populated product" {
 
     _ = sm.commit(get_msg);
 }
+
+test "apply_sidecar_writes put_product" {
+    var storage = try MemoryStorage.init(std.testing.allocator);
+    const secret = "tiger-web-test-key-0123456789ab!".*;
+    var sm = SM.init(&storage, false, 42, &secret);
+
+    // Build a WriteSlot with a Product.
+    var slot = std.mem.zeroes(protocol.WriteSlot);
+    slot.tag = @intFromEnum(protocol.WriteTag.put_product);
+    var p = std.mem.zeroes(message.Product);
+    p.id = 0xaabbccdd11223344aabbccdd11223344;
+    @memcpy(p.name[0..4], "Test");
+    p.name_len = 4;
+    p.price_cents = 999;
+    p.inventory = 10;
+    p.version = 1;
+    p.flags = .{ .active = true };
+    @memcpy(slot.data[0..@sizeOf(message.Product)], std.mem.asBytes(&p));
+
+    // Apply the write.
+    const ok = apply_sidecar_writes(MemoryStorage, &sm, &[_]protocol.WriteSlot{slot});
+    try std.testing.expect(ok);
+
+    // Verify the product is in storage.
+    const msg = message.Message.init(.get_product, p.id, 0, {});
+    assert(sm.prefetch(msg));
+    const cache = extract_cache(MemoryStorage, &sm);
+    try std.testing.expectEqual(cache.has_product, 1);
+    try std.testing.expectEqual(cache.product.price_cents, 999);
+    _ = sm.commit(msg);
+}
+
+test "apply_sidecar_writes duplicate put returns false" {
+    var storage = try MemoryStorage.init(std.testing.allocator);
+    const secret = "tiger-web-test-key-0123456789ab!".*;
+    var sm = SM.init(&storage, false, 42, &secret);
+
+    var slot = std.mem.zeroes(protocol.WriteSlot);
+    slot.tag = @intFromEnum(protocol.WriteTag.put_product);
+    var p = std.mem.zeroes(message.Product);
+    p.id = 0x1234;
+    p.version = 1;
+    p.flags = .{ .active = true };
+    @memcpy(slot.data[0..@sizeOf(message.Product)], std.mem.asBytes(&p));
+
+    // First put succeeds.
+    try std.testing.expect(apply_sidecar_writes(MemoryStorage, &sm, &[_]protocol.WriteSlot{slot}));
+
+    // Duplicate put fails — returns false, doesn't crash.
+    try std.testing.expect(!apply_sidecar_writes(MemoryStorage, &sm, &[_]protocol.WriteSlot{slot}));
+}
+
+test "apply_sidecar_writes invalid tag returns false" {
+    var storage = try MemoryStorage.init(std.testing.allocator);
+    const secret = "tiger-web-test-key-0123456789ab!".*;
+    var sm = SM.init(&storage, false, 42, &secret);
+
+    var slot = std.mem.zeroes(protocol.WriteSlot);
+    slot.tag = 255; // Invalid tag.
+
+    try std.testing.expect(!apply_sidecar_writes(MemoryStorage, &sm, &[_]protocol.WriteSlot{slot}));
+}
