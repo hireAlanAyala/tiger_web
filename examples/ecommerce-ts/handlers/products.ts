@@ -6,7 +6,7 @@ import type {
   Response,
   Context,
   Product,
-} from "../../../generated/types.generated.ts";
+} from "tiger-web";
 
 // ========================== create_product ==========================
 

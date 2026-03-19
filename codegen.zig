@@ -180,7 +180,7 @@ const output = blk: {
     w.raw("export interface TranslateResult {\n");
     w.raw("  operation: Operation;\n");
     w.raw("  id: string;\n");
-    w.raw("  body?: Record<string, unknown> | null;\n");
+    w.raw("  body?: unknown;\n");
     w.raw("}\n\n");
 
     w.raw("export interface HandlerResult {\n");

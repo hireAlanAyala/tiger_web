@@ -1,6 +1,6 @@
 // Collection handlers — each operation groups route → handle → render.
 
-import type { Request, Route, Response, Context } from "../../../generated/types.generated.ts";
+import type { Request, Route, Response, Context } from "tiger-web";
 
 function esc(s: string): string { return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;"); }
 

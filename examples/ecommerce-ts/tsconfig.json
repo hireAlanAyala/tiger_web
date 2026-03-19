@@ -1,0 +1,14 @@
+{
+  "compilerOptions": {
+    "strict": true,
+    "noUnusedParameters": false,
+    "target": "es2020",
+    "module": "nodenext",
+    "moduleResolution": "nodenext",
+    "paths": {
+      "tiger-web": ["../../generated/types.generated.ts"]
+    },
+    "baseUrl": "."
+  },
+  "include": ["handlers/**/*.ts"]
+}

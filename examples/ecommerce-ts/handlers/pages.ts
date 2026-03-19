@@ -1,6 +1,6 @@
 // Page and auth handlers — each operation groups route → handle → render.
 
-import type { Request, Route, Response, Context } from "../../../generated/types.generated.ts";
+import type { Request, Route, Response, Context } from "tiger-web";
 
 // ========================== page_load_dashboard ==========================
 
