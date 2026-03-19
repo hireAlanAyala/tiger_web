@@ -178,7 +178,10 @@ pub const SidecarClient = struct {
     fn send_all(self: *SidecarClient, bytes: []const u8) bool {
         var sent: usize = 0;
         while (sent < bytes.len) {
-            const n = std.posix.send(self.fd, bytes[sent..], std.posix.MSG.NOSIGNAL) catch {
+            const n = std.posix.send(self.fd, bytes[sent..], std.posix.MSG.NOSIGNAL) catch |err| {
+                if (err == error.WouldBlock) {
+                    log.err("sidecar send timed out — handler is not pure or sidecar is frozen", .{});
+                }
                 return false;
             };
             if (n == 0) return false;
@@ -190,7 +193,10 @@ pub const SidecarClient = struct {
     fn recv_all(self: *SidecarClient, buf: []u8) bool {
         var recvd: usize = 0;
         while (recvd < buf.len) {
-            const n = std.posix.recv(self.fd, buf[recvd..], 0) catch {
+            const n = std.posix.recv(self.fd, buf[recvd..], 0) catch |err| {
+                if (err == error.WouldBlock) {
+                    log.err("sidecar recv timed out — handler is not pure or sidecar is frozen", .{});
+                }
                 return false;
             };
             if (n == 0) return false; // peer closed
