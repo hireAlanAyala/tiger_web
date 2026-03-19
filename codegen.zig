@@ -102,6 +102,8 @@ const output = blk: {
     w.emit_const("json_body_max", protocol.json_body_max);
     w.emit_const("translate_request_size", @sizeOf(protocol.TranslateRequest));
     w.emit_const("translate_response_size", @sizeOf(protocol.TranslateResponse));
+    w.emit_const("execute_render_request_size", @sizeOf(protocol.ExecuteRenderRequest));
+    w.emit_const("execute_render_response_size", @sizeOf(protocol.ExecuteRenderResponse));
     w.raw("\n");
 
     // --- Enums ---
@@ -1548,7 +1550,7 @@ test "output is valid structure" {
         }
         assert(interfaces == 38);
         assert(types == 13);
-        assert(consts == 29);
+        assert(consts == 31);
         // 28 extern structs × 2 (read + write) = 56 serde functions
         assert(functions == 56);
     }

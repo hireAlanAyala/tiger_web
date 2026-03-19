@@ -157,6 +157,74 @@ pub fn extract_cache(comptime Storage: type, sm: *const state_machine.StateMachi
     return cache;
 }
 
+/// Execute and encode: unified commit + render that chooses between
+/// Zig-native and sidecar paths. Returns everything the server needs
+/// to complete the response.
+/// Sidecar response buffer — allocated once (module-level), reused per request.
+/// ~200KB, too large for the stack. Single-threaded server, no concurrency.
+var sidecar_resp_buf: protocol.ExecuteRenderResponse = undefined;
+
+pub fn commit_and_encode(
+    comptime Storage: type,
+    sm: *state_machine.StateMachineType(Storage),
+    msg: Message,
+    send_buf: []u8,
+    is_datastar_request: bool,
+    secret_key: *const [auth.key_length]u8,
+) CommitResult {
+    if (sidecar) |*client| {
+        // Extract cache before commit (commit resets it).
+        const cache = extract_cache(Storage, sm);
+
+        // Still run native commit — needed for WAL, followup, and spot-check.
+        const native_resp = sm.commit(msg);
+
+        // Call sidecar for execute + render.
+        if (client.execute_render(msg.operation, msg.id, &msg.body, &cache, is_datastar_request, &sidecar_resp_buf)) {
+            // Spot-check: compare status.
+            if (sidecar_resp_buf.status != native_resp.status) {
+                spot_check_fail("spot-check divergence: execute status sidecar={s} native={s}", .{
+                    @tagName(sidecar_resp_buf.status), @tagName(native_resp.status),
+                });
+            }
+
+            // Use sidecar HTML — copy into send_buf.
+            const html_len = sidecar_resp_buf.html_len;
+            assert(html_len <= send_buf.len);
+            @memcpy(send_buf[0..html_len], sidecar_resp_buf.html[0..html_len]);
+
+            return .{
+                .status = native_resp.status,
+                .followup = native_resp.followup,
+                .response = .{ .offset = 0, .len = html_len, .keep_alive = !is_datastar_request },
+            };
+        }
+        // Sidecar failed — fall back to native render.
+        log.warn("sidecar execute_render failed, falling back to native", .{});
+        const r = render.encode_response(send_buf, msg.operation, native_resp, is_datastar_request, secret_key);
+        return .{
+            .status = native_resp.status,
+            .followup = native_resp.followup,
+            .response = r,
+        };
+    }
+
+    // Native path — no sidecar.
+    const resp = sm.commit(msg);
+    const r = render.encode_response(send_buf, msg.operation, resp, is_datastar_request, secret_key);
+    return .{
+        .status = resp.status,
+        .followup = resp.followup,
+        .response = r,
+    };
+}
+
+pub const CommitResult = struct {
+    status: Status,
+    followup: ?FollowupState,
+    response: render.Response,
+};
+
 /// Encode a response into the send buffer.
 pub fn encode_response(send_buf: []u8, operation: Operation, resp: MessageResponse, is_datastar_request: bool, secret_key: *const [auth.key_length]u8) render.Response {
     return render.encode_response(send_buf, operation, resp, is_datastar_request, secret_key);

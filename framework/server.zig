@@ -233,14 +233,20 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
                 }
                 server.state_machine.tracer.stop(.prefetch, msg.operation);
 
-                // Execute.
+                // Execute + render (native or sidecar — App decides).
                 server.state_machine.tracer.start(.execute);
-                const resp = server.state_machine.commit(msg);
+                const commit_result = App.commit_and_encode(
+                    Storage,
+                    server.state_machine,
+                    msg,
+                    &conn.send_buf,
+                    conn.is_datastar_request,
+                    server.state_machine.secret_key,
+                );
                 server.state_machine.tracer.stop(.execute, msg.operation);
-                server.state_machine.tracer.trace_log(msg.operation, resp.status, conn.fd);
+                server.state_machine.tracer.trace_log(msg.operation, commit_result.status, conn.fd);
 
                 // WAL: log mutations after execute. No fsync — SQLite is the authority.
-                // If the WAL is disabled (write failure), skip silently.
                 if (server.wal) |wal| {
                     if (!wal.disabled and msg.operation.is_mutation()) {
                         const timestamp = server.state_machine.now;
@@ -249,19 +255,17 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
                     }
                 }
 
-                // SSE mutations that need a dashboard refresh carry a followup
-                // on the response. The state machine decides — server just reads it.
+                // SSE mutations that need a dashboard refresh carry a followup.
                 if (conn.is_datastar_request) {
-                    if (resp.followup) |_| {
+                    if (commit_result.followup) |_| {
                         log.mark.debug("SSE mutation: deferring to follow-up fd={d}", .{conn.fd});
-                        conn.followup = resp.followup;
+                        conn.followup = commit_result.followup;
                         continue;
                     }
                 }
 
-                const r = App.encode_response(&conn.send_buf, msg.operation, resp, conn.is_datastar_request, server.state_machine.secret_key);
-                conn.set_response(r.offset, r.len);
-                conn.keep_alive = r.keep_alive;
+                conn.set_response(commit_result.response.offset, commit_result.response.len);
+                conn.keep_alive = commit_result.response.keep_alive;
             }
         }
 
