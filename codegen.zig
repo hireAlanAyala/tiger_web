@@ -881,27 +881,33 @@ const Writer = struct {
                 w.emit_dv_write_end(li);
                 w.raw(";\n");
             } else if (has_len_companion(T, field.name)) {
-                // [N]u8 with _len → string, with length validation
+                // [N]u8 with _len → string, with length validation.
+                // Check input length BEFORE encoding — encodeInto silently
+                // truncates to the buffer size, hiding data corruption.
                 const li = get_len_info(T, field.name);
-                const len_max = (@as(u64, 1) << li.bits) - 1;
+                const buf_max = arr.len;
                 // Zero the full buffer, encode string, validate + write length.
+                w.raw("  { const _s = val.");
+                w.raw(field.name);
+                w.raw("; if (_s.length > ");
+                w.int(buf_max);
+                w.raw(") throw new Error('");
+                w.raw(field.name);
+                w.raw(" exceeds max length ");
+                w.int(buf_max);
+                w.raw(": ' + _s.length); }\n");
                 w.raw("  data.fill(0, offset + ");
                 w.int(@offsetOf(T, field.name));
                 w.raw(", offset + ");
-                w.int(@offsetOf(T, field.name) + arr.len);
+                w.int(@offsetOf(T, field.name) + buf_max);
                 w.raw(");\n");
                 w.raw("  { const _n = _encoder.encodeInto(val.");
                 w.raw(field.name);
                 w.raw(", data.subarray(offset + ");
                 w.int(@offsetOf(T, field.name));
                 w.raw(", offset + ");
-                w.int(@offsetOf(T, field.name) + arr.len);
+                w.int(@offsetOf(T, field.name) + buf_max);
                 w.raw(")).written; ");
-                w.raw("if (_n > ");
-                w.int(len_max);
-                w.raw(") throw new Error('");
-                w.raw(field.name);
-                w.raw(" too long: ' + _n); ");
                 w.emit_dv_write_start(li);
                 w.raw("_n");
                 w.emit_dv_write_end(li);
