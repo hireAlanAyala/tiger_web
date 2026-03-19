@@ -98,7 +98,7 @@ fn spot_check_fail(comptime fmt: []const u8, args: anytype) void {
 /// Extract the prefetch cache from the state machine into the protocol struct.
 /// Called after prefetch() succeeds, before execute. Copies all 11 slots
 /// with presence flags for nullable fields.
-pub fn extract_cache(sm: anytype) protocol.PrefetchCache {
+pub fn extract_cache(comptime Storage: type, sm: *const state_machine.StateMachineType(Storage)) protocol.PrefetchCache {
     var cache = std.mem.zeroes(protocol.PrefetchCache);
 
     // Nullable single-entity slots.
@@ -178,7 +178,7 @@ test "extract_cache empty state machine" {
     const msg = message.Message.init(.get_product, 0x1234, 0, {});
     assert(sm.prefetch(msg));
 
-    const cache = extract_cache(&sm);
+    const cache = extract_cache(MemoryStorage, &sm);
 
     // Product not found — has_product is 0, result is not_found.
     try std.testing.expectEqual(cache.has_product, 0);
@@ -219,7 +219,7 @@ test "extract_cache with populated product" {
     const get_msg = message.Message.init(.get_product, p.id, 0, {});
     assert(sm.prefetch(get_msg));
 
-    const cache = extract_cache(&sm);
+    const cache = extract_cache(MemoryStorage, &sm);
 
     // Product found.
     try std.testing.expectEqual(cache.has_product, 1);
