@@ -110,6 +110,29 @@ const output = blk: {
     w.emit_const("execute_render_response_size", @sizeOf(protocol.ExecuteRenderResponse));
     w.raw("\n");
 
+    // --- Operation → body serializer mapping ---
+    // Used by the dispatch to serialize translate results automatically.
+    // The developer returns a typed object; the dispatch calls the right writeX.
+    w.raw("export const operationBodyWriter: Record<string, ((data: Uint8Array, offset: number, val: any) => void) | null> = {\n");
+    for (@typeInfo(message.Operation).@"enum".fields) |op_field| {
+        const op: message.Operation = @enumFromInt(op_field.value);
+        w.raw("  ");
+        w.raw(op_field.name);
+        w.raw(": ");
+        const ET = op.EventType();
+        if (ET == void) {
+            w.raw("null");
+        } else if (@typeInfo(ET) == .int) {
+            // u128 — no struct writer, handled inline
+            w.raw("null");
+        } else {
+            w.raw("write");
+            w.raw(type_leaf_name(ET));
+        }
+        w.raw(",\n");
+    }
+    w.raw("};\n\n");
+
     // --- Enums ---
     for (known_enums) |T| w.emit_enum(T);
 
@@ -1554,7 +1577,7 @@ test "output is valid structure" {
         }
         assert(interfaces == 38);
         assert(types == 14);
-        assert(consts == 32);
+        assert(consts == 33);
         // 33 extern structs × 2 (read + write) = 66 serde functions
         assert(functions == 66);
     }

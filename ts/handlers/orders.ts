@@ -1,49 +1,49 @@
 // Order handlers — translate, execute, render.
 
-import type { TranslateRequest, TranslateResponse, PrefetchCache } from "../../generated/types.generated.ts";
+import type { TranslateRequest, PrefetchCache } from "../../generated/types.generated.ts";
 
+interface TranslateResult { operation: string; id: string; body?: Record<string, unknown> | null; }
 interface ExecuteResult { status: string; writes: unknown[]; }
-function notFound(): TranslateResponse { return { id: "0".repeat(32), body: new Uint8Array(672), found: 0, operation: "root" }; }
 function escapeHtml(s: string): string { return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;"); }
 
 // [translate] .create_order
-export function translateCreateOrder(req: TranslateRequest): TranslateResponse {
-  if (req.method !== "post" || req.path !== "/orders") return notFound();
-  return { id: "0".repeat(32), body: new Uint8Array(672), found: 1, operation: "create_order" };
+export function translateCreateOrder(req: TranslateRequest): TranslateResult | null {
+  if (req.method !== "post" || req.path !== "/orders") return null;
+  return { operation: "create_order", id: "0".repeat(32) };
 }
 
 // [translate] .get_order
-export function translateGetOrder(req: TranslateRequest): TranslateResponse {
+export function translateGetOrder(req: TranslateRequest): TranslateResult | null {
   const m = req.path.match(/^\/orders\/([a-f0-9]{32})$/);
-  if (!m || req.method !== "get") return notFound();
-  return { id: m[1], body: new Uint8Array(672), found: 1, operation: "get_order" };
+  if (!m || req.method !== "get") return null;
+  return { operation: "get_order", id: m[1] };
 }
 
 // [translate] .list_orders
-export function translateListOrders(req: TranslateRequest): TranslateResponse {
-  if (req.method !== "get" || req.path !== "/orders") return notFound();
-  return { id: "0".repeat(32), body: new Uint8Array(672), found: 1, operation: "list_orders" };
+export function translateListOrders(req: TranslateRequest): TranslateResult | null {
+  if (req.method !== "get" || req.path !== "/orders") return null;
+  return { operation: "list_orders", id: "0".repeat(32) };
 }
 
 // [translate] .complete_order
-export function translateCompleteOrder(req: TranslateRequest): TranslateResponse {
+export function translateCompleteOrder(req: TranslateRequest): TranslateResult | null {
   const m = req.path.match(/^\/orders\/([a-f0-9]{32})\/complete$/);
-  if (!m || req.method !== "post") return notFound();
-  return { id: m[1], body: new Uint8Array(672), found: 1, operation: "complete_order" };
+  if (!m || req.method !== "post") return null;
+  return { operation: "complete_order", id: m[1] };
 }
 
 // [translate] .cancel_order
-export function translateCancelOrder(req: TranslateRequest): TranslateResponse {
+export function translateCancelOrder(req: TranslateRequest): TranslateResult | null {
   const m = req.path.match(/^\/orders\/([a-f0-9]{32})\/cancel$/);
-  if (!m || req.method !== "post") return notFound();
-  return { id: m[1], body: new Uint8Array(672), found: 1, operation: "cancel_order" };
+  if (!m || req.method !== "post") return null;
+  return { operation: "cancel_order", id: m[1] };
 }
 
 // [translate] .transfer_inventory
-export function translateTransferInventory(req: TranslateRequest): TranslateResponse {
+export function translateTransferInventory(req: TranslateRequest): TranslateResult | null {
   const m = req.path.match(/^\/products\/([a-f0-9]{32})\/transfer-inventory\/([a-f0-9]{32})$/);
-  if (!m || req.method !== "post") return notFound();
-  return { id: m[1], body: new Uint8Array(672), found: 1, operation: "transfer_inventory" };
+  if (!m || req.method !== "post") return null;
+  return { operation: "transfer_inventory", id: m[1] };
 }
 
 // [execute] .create_order

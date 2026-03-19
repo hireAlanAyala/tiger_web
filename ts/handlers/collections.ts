@@ -1,49 +1,49 @@
 // Collection handlers — translate, execute, render.
 
-import type { TranslateRequest, TranslateResponse, PrefetchCache } from "../../generated/types.generated.ts";
+import type { TranslateRequest, PrefetchCache } from "../../generated/types.generated.ts";
 
+interface TranslateResult { operation: string; id: string; body?: Record<string, unknown> | null; }
 interface ExecuteResult { status: string; writes: unknown[]; }
-function notFound(): TranslateResponse { return { id: "0".repeat(32), body: new Uint8Array(672), found: 0, operation: "root" }; }
 function escapeHtml(s: string): string { return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;"); }
 
 // [translate] .create_collection
-export function translateCreateCollection(req: TranslateRequest): TranslateResponse {
-  if (req.method !== "post" || req.path !== "/collections") return notFound();
-  return { id: "0".repeat(32), body: new Uint8Array(672), found: 1, operation: "create_collection" };
+export function translateCreateCollection(req: TranslateRequest): TranslateResult | null {
+  if (req.method !== "post" || req.path !== "/collections") return null;
+  return { operation: "create_collection", id: "0".repeat(32) };
 }
 
 // [translate] .get_collection
-export function translateGetCollection(req: TranslateRequest): TranslateResponse {
+export function translateGetCollection(req: TranslateRequest): TranslateResult | null {
   const m = req.path.match(/^\/collections\/([a-f0-9]{32})$/);
-  if (!m || req.method !== "get") return notFound();
-  return { id: m[1], body: new Uint8Array(672), found: 1, operation: "get_collection" };
+  if (!m || req.method !== "get") return null;
+  return { operation: "get_collection", id: m[1] };
 }
 
 // [translate] .list_collections
-export function translateListCollections(req: TranslateRequest): TranslateResponse {
-  if (req.method !== "get" || req.path !== "/collections") return notFound();
-  return { id: "0".repeat(32), body: new Uint8Array(672), found: 1, operation: "list_collections" };
+export function translateListCollections(req: TranslateRequest): TranslateResult | null {
+  if (req.method !== "get" || req.path !== "/collections") return null;
+  return { operation: "list_collections", id: "0".repeat(32) };
 }
 
 // [translate] .delete_collection
-export function translateDeleteCollection(req: TranslateRequest): TranslateResponse {
+export function translateDeleteCollection(req: TranslateRequest): TranslateResult | null {
   const m = req.path.match(/^\/collections\/([a-f0-9]{32})$/);
-  if (!m || req.method !== "delete") return notFound();
-  return { id: m[1], body: new Uint8Array(672), found: 1, operation: "delete_collection" };
+  if (!m || req.method !== "delete") return null;
+  return { operation: "delete_collection", id: m[1] };
 }
 
 // [translate] .add_collection_member
-export function translateAddCollectionMember(req: TranslateRequest): TranslateResponse {
+export function translateAddCollectionMember(req: TranslateRequest): TranslateResult | null {
   const m = req.path.match(/^\/collections\/([a-f0-9]{32})\/members$/);
-  if (!m || req.method !== "post") return notFound();
-  return { id: m[1], body: new Uint8Array(672), found: 1, operation: "add_collection_member" };
+  if (!m || req.method !== "post") return null;
+  return { operation: "add_collection_member", id: m[1] };
 }
 
 // [translate] .remove_collection_member
-export function translateRemoveCollectionMember(req: TranslateRequest): TranslateResponse {
+export function translateRemoveCollectionMember(req: TranslateRequest): TranslateResult | null {
   const m = req.path.match(/^\/collections\/([a-f0-9]{32})\/members\/([a-f0-9]{32})$/);
-  if (!m || req.method !== "delete") return notFound();
-  return { id: m[1], body: new Uint8Array(672), found: 1, operation: "remove_collection_member" };
+  if (!m || req.method !== "delete") return null;
+  return { operation: "remove_collection_member", id: m[1] };
 }
 
 // [execute] .create_collection

@@ -2,71 +2,69 @@
 
 import type {
   TranslateRequest,
-  TranslateResponse,
   PrefetchCache,
   Product,
 } from "../../generated/types.generated.ts";
-import { writeProduct } from "../../generated/types.generated.ts";
+
+// TranslateResult — returned by translate handlers.
+// The dispatch serializes the body automatically.
+interface TranslateResult {
+  operation: string;
+  id: string;
+  body?: Record<string, unknown> | null;
+}
 
 // ---------------------------------------------------------------------------
 // Translate
 // ---------------------------------------------------------------------------
 
 // [translate] .create_product
-export function translateCreateProduct(req: TranslateRequest): TranslateResponse {
-  if (req.method !== "post" || req.path !== "/products") {
-    return notFound();
-  }
+export function translateCreateProduct(req: TranslateRequest): TranslateResult | null {
+  if (req.method !== "post" || req.path !== "/products") return null;
   const parsed = JSON.parse(req.body || "{}");
   const id = parsed.id || "0".repeat(32);
-  const product = makeProduct(parsed, id);
-  const body = new Uint8Array(672);
-  writeProduct(body, 0, product);
-  return { id, body, found: 1, operation: "create_product" };
+  return { operation: "create_product", id, body: makeProduct(parsed, id) };
 }
 
 // [translate] .get_product
-export function translateGetProduct(req: TranslateRequest): TranslateResponse {
+export function translateGetProduct(req: TranslateRequest): TranslateResult | null {
   const match = req.path.match(/^\/products\/([a-f0-9]{32})$/);
-  if (!match || req.method !== "get") return notFound();
-  return { id: match[1], body: new Uint8Array(672), found: 1, operation: "get_product" };
+  if (!match || req.method !== "get") return null;
+  return { operation: "get_product", id: match[1] };
 }
 
 // [translate] .list_products
-export function translateListProducts(req: TranslateRequest): TranslateResponse {
-  if (req.method !== "get" || req.path !== "/products") return notFound();
-  return { id: "0".repeat(32), body: new Uint8Array(672), found: 1, operation: "list_products" };
+export function translateListProducts(req: TranslateRequest): TranslateResult | null {
+  if (req.method !== "get" || req.path !== "/products") return null;
+  return { operation: "list_products", id: "0".repeat(32) };
 }
 
 // [translate] .update_product
-export function translateUpdateProduct(req: TranslateRequest): TranslateResponse {
+export function translateUpdateProduct(req: TranslateRequest): TranslateResult | null {
   const match = req.path.match(/^\/products\/([a-f0-9]{32})$/);
-  if (!match || req.method !== "put") return notFound();
+  if (!match || req.method !== "put") return null;
   const parsed = JSON.parse(req.body || "{}");
-  const product = makeProduct(parsed, match[1]);
-  const body = new Uint8Array(672);
-  writeProduct(body, 0, product);
-  return { id: match[1], body, found: 1, operation: "update_product" };
+  return { operation: "update_product", id: match[1], body: makeProduct(parsed, match[1]) };
 }
 
 // [translate] .delete_product
-export function translateDeleteProduct(req: TranslateRequest): TranslateResponse {
+export function translateDeleteProduct(req: TranslateRequest): TranslateResult | null {
   const match = req.path.match(/^\/products\/([a-f0-9]{32})$/);
-  if (!match || req.method !== "delete") return notFound();
-  return { id: match[1], body: new Uint8Array(672), found: 1, operation: "delete_product" };
+  if (!match || req.method !== "delete") return null;
+  return { operation: "delete_product", id: match[1] };
 }
 
 // [translate] .get_product_inventory
-export function translateGetProductInventory(req: TranslateRequest): TranslateResponse {
+export function translateGetProductInventory(req: TranslateRequest): TranslateResult | null {
   const match = req.path.match(/^\/products\/([a-f0-9]{32})\/inventory$/);
-  if (!match || req.method !== "get") return notFound();
-  return { id: match[1], body: new Uint8Array(672), found: 1, operation: "get_product_inventory" };
+  if (!match || req.method !== "get") return null;
+  return { operation: "get_product_inventory", id: match[1] };
 }
 
 // [translate] .search_products
-export function translateSearchProducts(req: TranslateRequest): TranslateResponse {
-  if (req.method !== "get" || !req.path.startsWith("/products/search")) return notFound();
-  return { id: "0".repeat(32), body: new Uint8Array(672), found: 1, operation: "search_products" };
+export function translateSearchProducts(req: TranslateRequest): TranslateResult | null {
+  if (req.method !== "get" || !req.path.startsWith("/products/search")) return null;
+  return { operation: "search_products", id: "0".repeat(32) };
 }
 
 // ---------------------------------------------------------------------------
@@ -165,10 +163,6 @@ export function renderSearchProducts(op: string, status: string, result: Execute
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
-
-function notFound(): TranslateResponse {
-  return { id: "0".repeat(32), body: new Uint8Array(672), found: 0, operation: "root" };
-}
 
 function makeProduct(parsed: Record<string, unknown>, id: string): Product {
   return {

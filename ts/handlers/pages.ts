@@ -1,38 +1,38 @@
 // Page and auth handlers — translate, execute, render.
 
-import type { TranslateRequest, TranslateResponse, PrefetchCache } from "../../generated/types.generated.ts";
+import type { TranslateRequest, PrefetchCache } from "../../generated/types.generated.ts";
 
+interface TranslateResult { operation: string; id: string; body?: Record<string, unknown> | null; }
 interface ExecuteResult { status: string; writes: unknown[]; }
-function notFound(): TranslateResponse { return { id: "0".repeat(32), body: new Uint8Array(672), found: 0, operation: "root" }; }
 
 // [translate] .page_load_dashboard
-export function translatePageLoadDashboard(req: TranslateRequest): TranslateResponse {
-  if (req.method !== "get" || req.path !== "/") return notFound();
-  return { id: "0".repeat(32), body: new Uint8Array(672), found: 1, operation: "page_load_dashboard" };
+export function translatePageLoadDashboard(req: TranslateRequest): TranslateResult | null {
+  if (req.method !== "get" || req.path !== "/") return null;
+  return { operation: "page_load_dashboard", id: "0".repeat(32) };
 }
 
 // [translate] .page_load_login
-export function translatePageLoadLogin(req: TranslateRequest): TranslateResponse {
-  if (req.method !== "get" || req.path !== "/login") return notFound();
-  return { id: "0".repeat(32), body: new Uint8Array(672), found: 1, operation: "page_load_login" };
+export function translatePageLoadLogin(req: TranslateRequest): TranslateResult | null {
+  if (req.method !== "get" || req.path !== "/login") return null;
+  return { operation: "page_load_login", id: "0".repeat(32) };
 }
 
 // [translate] .request_login_code
-export function translateRequestLoginCode(req: TranslateRequest): TranslateResponse {
-  if (req.method !== "post" || req.path !== "/login/request") return notFound();
-  return { id: "0".repeat(32), body: new Uint8Array(672), found: 1, operation: "request_login_code" };
+export function translateRequestLoginCode(req: TranslateRequest): TranslateResult | null {
+  if (req.method !== "post" || req.path !== "/login/request") return null;
+  return { operation: "request_login_code", id: "0".repeat(32) };
 }
 
 // [translate] .verify_login_code
-export function translateVerifyLoginCode(req: TranslateRequest): TranslateResponse {
-  if (req.method !== "post" || req.path !== "/login/verify") return notFound();
-  return { id: "0".repeat(32), body: new Uint8Array(672), found: 1, operation: "verify_login_code" };
+export function translateVerifyLoginCode(req: TranslateRequest): TranslateResult | null {
+  if (req.method !== "post" || req.path !== "/login/verify") return null;
+  return { operation: "verify_login_code", id: "0".repeat(32) };
 }
 
 // [translate] .logout
-export function translateLogout(req: TranslateRequest): TranslateResponse {
-  if (req.method !== "post" || req.path !== "/logout") return notFound();
-  return { id: "0".repeat(32), body: new Uint8Array(672), found: 1, operation: "logout" };
+export function translateLogout(req: TranslateRequest): TranslateResult | null {
+  if (req.method !== "post" || req.path !== "/logout") return null;
+  return { operation: "logout", id: "0".repeat(32) };
 }
 
 // [execute] .page_load_dashboard
