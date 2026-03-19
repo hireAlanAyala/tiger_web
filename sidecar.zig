@@ -20,6 +20,7 @@ pub const SidecarClient = struct {
     /// Connect to the sidecar unix socket. Returns false on failure.
     pub fn connect(self: *SidecarClient) bool {
         assert(self.fd == -1);
+        assert(self.path.len > 0);
 
         const fd = std.posix.socket(std.posix.AF.UNIX, std.posix.SOCK.STREAM, 0) catch |err| {
             log.warn("socket: {}", .{err});
@@ -84,6 +85,14 @@ pub const SidecarClient = struct {
 
         if (resp.found == 0) return null;
         assert(resp.found == 1);
+
+        // Validate the operation is a known enum value — catches
+        // corrupted responses before the value propagates.
+        _ = std.meta.intToEnum(message.Operation, @intFromEnum(resp.operation)) catch {
+            log.warn("invalid operation in translate response: {d}", .{@intFromEnum(resp.operation)});
+            self.handle_disconnect();
+            return null;
+        };
 
         var msg = std.mem.zeroes(message.Message);
         msg.operation = resp.operation;
