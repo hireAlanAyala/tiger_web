@@ -123,6 +123,10 @@ for (const phase of ["translate", "execute", "render"] as const) {
 }
 
 // Socket server.
+// No default handlers — the scanner validated exhaustiveness.
+// If a handler is missing, the property access throws. This is
+// a configuration error (adapter bug or scanner bypass), not a
+// runtime condition to handle gracefully.
 out += `const socketPath = process.argv[2];
 if (!socketPath) { console.error('Usage: node dispatch.generated.ts <socket-path>'); process.exit(1); }
 
@@ -137,10 +141,7 @@ const server = net.createServer((conn) => {
         if (pending.length < translate_request_size) break;
         const req = readTranslateRequest(new Uint8Array(pending.buffer, pending.byteOffset, translate_request_size), 0);
         pending = pending.subarray(translate_request_size);
-        const handler = translateHandlers[req.operation];
-        const resp: TranslateResponse = handler
-          ? handler(req)
-          : { id: '0'.repeat(32), body: new Uint8Array(672), found: 0, operation: 'root' };
+        const resp: TranslateResponse = translateHandlers[req.operation](req);
         const out = new Uint8Array(translate_response_size);
         writeTranslateResponse(out, 0, resp);
         conn.write(out);
@@ -148,12 +149,10 @@ const server = net.createServer((conn) => {
         if (pending.length < execute_render_request_size) break;
         const req = readExecuteRenderRequest(new Uint8Array(pending.buffer, pending.byteOffset, execute_render_request_size), 0);
         pending = pending.subarray(execute_render_request_size);
-        const execHandler = executeHandlers[req.operation];
-        const renderHandler = renderHandlers[req.operation];
-        const execResult = execHandler ? execHandler(req.cache, req.body) : { status: 'ok', writes: [] };
-        const html = renderHandler ? renderHandler(req.operation, execResult.status, execResult) : '<div>OK</div>';
+        const execResult = executeHandlers[req.operation](req.cache, req.body);
+        const html = renderHandlers[req.operation](req.operation, execResult.status, execResult);
         const resp: ExecuteRenderResponse = {
-          status: execResult.status || 'ok',
+          status: execResult.status,
           writes_len: 0, result_tag: 0,
           result: new Uint8Array(47248),
           writes: Array.from({ length: 21 }, () => ({ tag: 0, reserved_tag: new Uint8Array(15), data: new Uint8Array(3632) })),
