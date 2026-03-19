@@ -289,6 +289,111 @@ test "execute_render round trip via socketpair" {
     try std.testing.expect(std.mem.startsWith(u8, html, "<div"));
 }
 
+test "reconnect after disconnect — succeeds when sidecar restarts" {
+    // Start a mock listener on a temp unix socket.
+    const sock_path = "/tmp/tiger-sidecar-test.sock";
+    std.fs.cwd().deleteFile(sock_path) catch {};
+
+    const listener = try listen_unix(sock_path);
+    defer std.posix.close(listener);
+    defer std.fs.cwd().deleteFile(sock_path) catch {};
+
+    var client = SidecarClient{ .path = sock_path };
+
+    // First connection.
+    try std.testing.expect(client.connect());
+    const accepted1 = try std.posix.accept(listener, null, null, 0);
+
+    // Simulate sidecar crash — close the accepted connection.
+    std.posix.close(accepted1);
+
+    // Client's next translate fails (peer closed), triggers disconnect.
+    const result1 = client.translate(.get, "/products", "");
+    try std.testing.expect(result1 == null);
+    try std.testing.expectEqual(client.fd, -1);
+
+    // Next translate triggers reconnect — listener is still up, so connect succeeds.
+    // Spawn a mock thread to accept and respond.
+    const thread = try std.Thread.spawn(.{}, mock_accept_and_respond, .{listener});
+    const result2 = client.translate(.get, "/products/abc123", "");
+    thread.join();
+
+    try std.testing.expect(result2 != null);
+    try std.testing.expectEqual(result2.?.operation, .get_product);
+    try std.testing.expect(client.fd != -1);
+    client.close();
+}
+
+test "reconnect after disconnect — fails when sidecar is down" {
+    var client = SidecarClient{ .path = "/tmp/tiger-sidecar-nonexistent.sock" };
+    // Simulate a previous connection that disconnected.
+    // fd is -1 (no previous fd to leak), path points to nonexistent socket.
+    try std.testing.expectEqual(client.fd, -1);
+
+    // translate should try reconnect, fail, return null.
+    const result = client.translate(.get, "/products", "");
+    try std.testing.expect(result == null);
+    try std.testing.expectEqual(client.fd, -1);
+}
+
+test "multiple disconnect-reconnect cycles" {
+    const sock_path = "/tmp/tiger-sidecar-cycle.sock";
+    std.fs.cwd().deleteFile(sock_path) catch {};
+
+    const listener = try listen_unix(sock_path);
+    defer std.posix.close(listener);
+    defer std.fs.cwd().deleteFile(sock_path) catch {};
+
+    var client = SidecarClient{ .path = sock_path };
+
+    for (0..3) |_| {
+        // Connect.
+        try std.testing.expect(client.connect());
+        const accepted = try std.posix.accept(listener, null, null, 0);
+
+        // Crash — close server side.
+        std.posix.close(accepted);
+
+        // Client detects disconnect.
+        const result = client.translate(.get, "/products", "");
+        try std.testing.expect(result == null);
+        try std.testing.expectEqual(client.fd, -1);
+    }
+
+    // Final reconnect with a real response.
+    const thread = try std.Thread.spawn(.{}, mock_accept_and_respond, .{listener});
+    const result = client.translate(.get, "/products/abc123", "");
+    thread.join();
+
+    try std.testing.expect(result != null);
+    try std.testing.expectEqual(result.?.operation, .get_product);
+    client.close();
+}
+
+fn mock_accept_and_respond(listener: std.posix.fd_t) void {
+    const fd = std.posix.accept(listener, null, null, 0) catch return;
+    defer std.posix.close(fd);
+
+    var req_bytes: [@sizeOf(protocol.TranslateRequest)]u8 = undefined;
+    recv_test(fd, &req_bytes);
+
+    var resp = std.mem.zeroes(protocol.TranslateResponse);
+    resp.found = 1;
+    resp.operation = .get_product;
+    resp.id = 0x11223344;
+    send_test(fd, std.mem.asBytes(&resp));
+}
+
+fn listen_unix(path: []const u8) !std.posix.fd_t {
+    const fd = try std.posix.socket(std.posix.AF.UNIX, std.posix.SOCK.STREAM, 0);
+    var addr: std.posix.sockaddr.un = .{ .path = undefined };
+    @memcpy(addr.path[0..path.len], path);
+    addr.path[path.len] = 0;
+    try std.posix.bind(fd, @ptrCast(&addr), @sizeOf(std.posix.sockaddr.un));
+    try std.posix.listen(fd, 5);
+    return fd;
+}
+
 // --- Mock sidecar threads ---
 
 fn mock_translate_echo(fd: std.posix.fd_t) void {
