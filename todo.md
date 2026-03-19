@@ -132,3 +132,44 @@ Ticket 8: Defer writes to end of tick (pure execute) — DONE
   (after each execute), not batched at end of tick. Operations later in the tick
   still see earlier operations' writes. Fix this when it matters — the architecture
   supports it, just move the apply loop outside the connection for-loop.
+
+- not a feature, but learn more about the zig comptime runtime features that make the comptime allocations and typegen possible
+
+- what error handling trade offs does the seam produce? example do we return an error when an api call fails?
+
+- The sidecar can fail, make sure that we have through error handling + logging of it failing
+and make sure the side car can restart after a crash
+is the sidecar blocking to the single thread? and is that ok since it should be pure
+
+We should find a way to couple the sqlschema parts with the rest of the code
+
+- Move ts/handlers/ and package.json into examples/ecommerce-ts/ — DONE
+  Framework root stays clean (Zig + codegen). Examples are self-contained projects
+  that import from the framework. The examples/ directory enables CI integration
+  testing per-example.
+
+Ensure the framework works in all operating systems. right now it only works on linux
+
+ci should run test adapter
+
+are all the user space compile logs pretty clear and actionable?
+
+does the sidecar restart on crash?
+
+user space spec:
+- test worker
+- test returning sse
+- test db calls
+
+can we couple the db with the feature more?
+
+clean up the ts example package.json should be written form the perspective of the user, it has some framework code
+also maybe pull it out into example/
+
+add ci/cd with integration tests against the /examples repo
+
+thought: if we swapped out the db with a cache would the system still be deterministic?
+is there a way to measure determinism? example if 1 service writes to my db from an outside perspective how much determinism have I lost?
+
+what is the goal of squashing and how often do you swquash? what do you gain what do you lose?
+

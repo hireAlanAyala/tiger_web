@@ -1,0 +1,12 @@
+{
+  "private": true,
+  "scripts": {
+    "build": "cd ../.. && ./zig/zig build codegen && ./zig/zig build scan -- examples/ecommerce-ts/handlers/ --manifest=generated/manifest.json && PATH=examples/ecommerce-ts/node_modules/.bin:$PATH tsx adapters/typescript.ts generated/manifest.json generated/dispatch.generated.ts",
+    "dev": "npm run build && concurrently 'tsx ../../generated/dispatch.generated.ts /tmp/tiger-web.sock' 'sleep 1 && cd ../.. && ./zig/zig build run -- --sidecar=/tmp/tiger-web.sock'"
+  },
+  "devDependencies": {
+    "tsx": "^4",
+    "concurrently": "^9",
+    "typescript": "^5"
+  }
+}

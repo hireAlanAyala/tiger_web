@@ -24,7 +24,7 @@ npm run dev                 # start sidecar + server on port 3000
 ./zig/zig build test         # simulation tests (PRNG-driven, full stack)
 ./zig/zig build fuzz -- state_machine              # random seed
 ./zig/zig build fuzz -- state_machine 12345        # specific seed
-./zig/zig build scan -- ts/handlers/               # validate annotations
+./zig/zig build scan -- examples/ecommerce-ts/handlers/  # validate annotations
 ./zig/zig build fuzz -- --events-max=1000 state_machine  # with options
 ./zig/zig build fuzz -- smoke                      # all fuzzers, small event counts
 ./zig/zig build bench           # state machine benchmark (real measurements)
@@ -61,7 +61,7 @@ Native commit handles storage, auth, WAL. Sidecar provides HTML.
 | `sidecar.zig` | Unix socket client (`SidecarClient`) — translate + execute_render |
 | `protocol.zig` | Wire format types (TranslateRequest/Response, PrefetchCache, WriteSlot) |
 | `adapters/typescript.ts` | Reads manifest, generates `dispatch.generated.ts` |
-| `ts/handlers/*.ts` | Developer's annotated handler functions |
+| `examples/ecommerce-ts/handlers/*.ts` | Developer's annotated handler functions |
 
 ### Framework (`framework/`) — domain-free, parameterized on App
 

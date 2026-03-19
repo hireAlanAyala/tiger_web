@@ -113,9 +113,9 @@ assert(dispatch.includes("TagValues.translate"), "dispatches on translate tag");
 assert(dispatch.includes("TagValues.execute_render"), "dispatches on execute_render tag");
 
 // Test: direct handler calls (no optional chaining).
-assert(dispatch.includes("translateHandlers[req.operation](req)"), "direct translate call");
-assert(dispatch.includes("executeHandlers[req.operation](req.cache, req.body)"), "direct execute call");
-assert(dispatch.includes("renderHandlers[req.operation](req.operation, execResult.status, execResult)"), "direct render call");
+assert(dispatch.includes("handler(req)"), "direct translate call");
+assert(dispatch.includes("executeHandlers[req.operation](req.cache, typedBody)"), "direct execute call");
+assert(dispatch.includes("renderHandlers[req.operation](execResult.status, req.cache)"), "direct render call");
 
 // Cleanup.
 rmSync(testDir, { recursive: true, force: true });
