@@ -45,46 +45,51 @@ pub fn translate(method: http.Method, path: []const u8, body: []const u8) ?Messa
     return codec.translate(method, path, body);
 }
 
-/// Compare sidecar and Zig-native translate results. Log divergence.
-/// Does NOT panic — the sidecar result is used regardless. Divergence
-/// means the developer's handler has a bug, not that the system is corrupt.
+/// Compare sidecar and Zig-native translate results.
+/// Debug: panics on divergence — catches bugs during development.
+/// Release: logs and continues — divergence is a handler bug, not corruption.
 fn spot_check_translate(path: []const u8, sidecar_result: ?Message, native_result: ?Message) void {
     const sidecar_msg = sidecar_result orelse {
         if (native_result != null) {
-            log.mark.err("spot-check divergence: sidecar=null native={s} path={s}", .{
+            spot_check_fail("spot-check divergence: sidecar=null native={s} path={s}", .{
                 @tagName(native_result.?.operation), path,
             });
         }
         return;
     };
     const native_msg = native_result orelse {
-        log.mark.err("spot-check divergence: sidecar={s} native=null path={s}", .{
+        spot_check_fail("spot-check divergence: sidecar={s} native=null path={s}", .{
             @tagName(sidecar_msg.operation), path,
         });
         return;
     };
 
-    // Compare operation.
     if (sidecar_msg.operation != native_msg.operation) {
-        log.mark.err("spot-check divergence: operation sidecar={s} native={s} path={s}", .{
+        spot_check_fail("spot-check divergence: operation sidecar={s} native={s} path={s}", .{
             @tagName(sidecar_msg.operation), @tagName(native_msg.operation), path,
         });
         return;
     }
 
-    // Compare entity ID.
     if (sidecar_msg.id != native_msg.id) {
-        log.mark.err("spot-check divergence: id mismatch for {s} path={s}", .{
+        spot_check_fail("spot-check divergence: id mismatch for {s} path={s}", .{
             @tagName(sidecar_msg.operation), path,
         });
         return;
     }
 
-    // Compare body bytes.
     if (!std.mem.eql(u8, &sidecar_msg.body, &native_msg.body)) {
-        log.mark.err("spot-check divergence: body mismatch for {s} path={s}", .{
+        spot_check_fail("spot-check divergence: body mismatch for {s} path={s}", .{
             @tagName(sidecar_msg.operation), path,
         });
+    }
+}
+
+/// Debug: panic. Release: log and continue.
+fn spot_check_fail(comptime fmt: []const u8, args: anytype) void {
+    log.mark.err(fmt, args);
+    if (@import("builtin").mode == .Debug) {
+        @panic("spot-check divergence");
     }
 }
 
