@@ -140,15 +140,19 @@ pub fn commit_and_encode(
             };
         }
 
-        // Use sidecar HTML — copy into send_buf.
+        // Copy sidecar HTML into send_buf at header_reserve offset,
+        // then backfill HTTP headers (Content-Type, Content-Length, etc).
         const html_len = sidecar_resp_buf.html_len;
-        assert(html_len <= send_buf.len);
-        @memcpy(send_buf[0..html_len], sidecar_resp_buf.html[0..html_len]);
+        assert(render.header_reserve + html_len <= send_buf.len);
+        @memcpy(send_buf[render.header_reserve..][0..html_len], sidecar_resp_buf.html[0..html_len]);
+        const cookie_hdr = render.format_cookie_header(native_resp, secret_key);
+        const set_cookie: ?[]const u8 = if (cookie_hdr.len > 0) cookie_hdr.slice() else null;
+        const r = render.backfill_headers(send_buf, html_len, set_cookie);
 
         return .{
             .status = native_resp.status,
             .followup = native_resp.followup,
-            .response = .{ .offset = 0, .len = html_len, .keep_alive = !is_datastar_request },
+            .response = r,
         };
     }
 

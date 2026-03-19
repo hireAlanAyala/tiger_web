@@ -201,7 +201,7 @@ pub const ExecuteRenderResponse = extern struct {
     html_len: u32,
     html: [html_max]u8,
     // Tail padding: struct alignment is 4 (from html_len u32).
-    tail_reserved: [tail_pad]u8,
+    reserved_tail: [tail_pad]u8,
 
     // Pre-html fields are all 4-aligned (16-byte header + result + writes + html_len).
     // Tail padding depends only on html_max.

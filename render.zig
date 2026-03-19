@@ -187,7 +187,7 @@ pub const Response = struct {
 /// "Connection: keep-alive\r\n" (24) +
 /// "Set-Cookie: tiger_id=...;...\r\n" (152 max) +
 /// "\r\n" (2) = 284.  Round up for safety.
-const header_reserve: u32 = 384;
+pub const header_reserve: u32 = 384;
 
 /// The result variant drives success encoding. For errors, `operation`
 /// selects which UI panel to show the error in.
@@ -206,18 +206,18 @@ pub fn encode_response(send_buf: []u8, operation: message.Operation, resp: messa
     }
 }
 
-const CookieHeader = struct {
+pub const CookieHeader = struct {
     buf: [auth.set_cookie_header_max]u8,
     len: u8,
 
-    fn slice(self: *const CookieHeader) []const u8 {
+    pub fn slice(self: *const CookieHeader) []const u8 {
         return self.buf[0..self.len];
     }
 };
 
 /// Format Set-Cookie header from structured auth fields on the response.
 /// Returns zero-length if no cookie action is needed.
-fn format_cookie_header(resp: message.MessageResponse, secret_key: *const [auth.key_length]u8) CookieHeader {
+pub fn format_cookie_header(resp: message.MessageResponse, secret_key: *const [auth.key_length]u8) CookieHeader {
     var result = CookieHeader{ .buf = undefined, .len = 0 };
 
     switch (resp.session_action) {
@@ -435,7 +435,7 @@ fn encode_html_response(send_buf: []u8, operation: message.Operation, resp: mess
 
 /// Write HTTP headers right-aligned into the reserved space before the body.
 /// Always 200 OK — see design/002-always-200.md.
-fn backfill_headers(send_buf: []u8, body_len: usize, set_cookie_header: ?[]const u8) Response {
+pub fn backfill_headers(send_buf: []u8, body_len: usize, set_cookie_header: ?[]const u8) Response {
     // Build headers into a stack buffer.
     var hdr_buf: [header_reserve]u8 = undefined;
     var h = HtmlWriter{ .buf = &hdr_buf, .pos = 0 };
