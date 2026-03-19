@@ -32,94 +32,9 @@ pub var sidecar: ?SidecarClient = null;
 
 /// Translate an HTTP request into a typed Message. Returns null if the
 /// request doesn't map to a valid operation.
-///
-/// When the sidecar is active, runs BOTH paths and compares results
-/// (spot-check). The sidecar result is used; divergence is logged as
-/// an error. The Zig-native translate is pure (~1μs) so the overhead
-/// of running both is negligible compared to the socket round trip.
 pub fn translate(method: http.Method, path: []const u8, body: []const u8) ?Message {
-    if (sidecar) |*client| {
-        const sidecar_result = client.translate(method, path, body);
-        const native_result = codec.translate(method, path, body);
-        spot_check_translate(path, sidecar_result, native_result);
-        return sidecar_result;
-    }
+    if (sidecar) |*client| return client.translate(method, path, body);
     return codec.translate(method, path, body);
-}
-
-/// Compare sidecar and Zig-native translate results.
-/// Messages use the developer's vocabulary — no "native", no "sidecar",
-/// no protocol jargon. The developer sees what their handler returned
-/// vs what was expected, and where to fix it.
-fn spot_check_translate(path: []const u8, sidecar_result: ?Message, native_result: ?Message) void {
-    const sidecar_msg = sidecar_result orelse {
-        if (native_result) |expected| {
-            spot_check_fail(
-                \\[spot-check] {s}
-                \\  your [route] handler returned: null (no match)
-                \\  expected:                      {s}
-                \\  hint: add a [route] .{s} handler that matches this path
-            , .{ path, @tagName(expected.operation), @tagName(expected.operation) });
-        }
-        return;
-    };
-    const native_msg = native_result orelse {
-        spot_check_fail(
-            \\[spot-check] {s}
-            \\  your [route] handler returned: {s}
-            \\  expected:                      null (no match)
-            \\  hint: your [route] .{s} handler should return null for this path
-        , .{ path, @tagName(sidecar_msg.operation), @tagName(sidecar_msg.operation) });
-        return;
-    };
-
-    if (sidecar_msg.operation != native_msg.operation) {
-        spot_check_fail(
-            \\[spot-check] {s}
-            \\  your [route] handler returned: {s}
-            \\  expected:                      {s}
-            \\  hint: check which [route] handler matches this path
-        , .{ path, @tagName(sidecar_msg.operation), @tagName(native_msg.operation) });
-        return;
-    }
-
-    if (sidecar_msg.id != native_msg.id) {
-        spot_check_fail(
-            \\[spot-check] {s}
-            \\  operation: {s}
-            \\  your handler returned a different id than expected
-            \\  hint: check the id extraction in your [route] .{s} handler
-        , .{ path, @tagName(sidecar_msg.operation), @tagName(sidecar_msg.operation) });
-        return;
-    }
-
-    if (!std.mem.eql(u8, &sidecar_msg.body, &native_msg.body)) {
-        spot_check_fail(
-            \\[spot-check] {s}
-            \\  operation: {s}
-            \\  your handler returned different body data than expected
-            \\  hint: check the body construction in your [route] .{s} handler
-        , .{ path, @tagName(sidecar_msg.operation), @tagName(sidecar_msg.operation) });
-    }
-}
-
-/// Compare execute status. Called from commit_and_encode when the sidecar is active.
-fn spot_check_execute(operation: message.Operation, sidecar_status: message.Status, native_status: message.Status) void {
-    if (sidecar_status == native_status) return;
-    spot_check_fail(
-        \\[spot-check] {s}
-        \\  your [handle] handler returned: {s}
-        \\  expected:                       {s}
-        \\  hint: check your [handle] .{s} function
-    , .{ @tagName(operation), @tagName(sidecar_status), @tagName(native_status), @tagName(operation) });
-}
-
-/// Debug: panic. Release: log and continue.
-fn spot_check_fail(comptime fmt: []const u8, args: anytype) void {
-    log.mark.err(fmt, args);
-    if (@import("builtin").mode == .Debug) {
-        @panic("spot-check divergence");
-    }
 }
 
 /// Extract the prefetch cache from the state machine into the protocol struct.
@@ -188,12 +103,9 @@ pub fn extract_cache(comptime Storage: type, sm: *const state_machine.StateMachi
 /// Zig-native and sidecar paths. Returns everything the server needs
 /// to complete the response.
 ///
-/// When the sidecar is active, it is the ONLY execution path. The native
-/// commit does not run. No fallback — if the sidecar fails, the request
-/// fails. Mixing paths would break determinism (design/013: "no fallback").
-///
-/// Spot-check on execute status is done by the simulator in the test
-/// environment, not on every production request.
+/// When the sidecar is active, native commit handles storage (writes, auth,
+/// WAL, followup). The sidecar provides HTML. If the sidecar fails, the
+/// framework renders natively since the native commit already ran.
 
 // Response buffer — module-level because ~200KB is too large for the stack
 // and App is a namespace (no instance). Single-threaded, no concurrency.
@@ -228,19 +140,6 @@ pub fn commit_and_encode(
             };
         }
 
-        // Spot-check: compare status and writes.
-        spot_check_execute(msg.operation, sidecar_resp_buf.status, native_resp.status);
-
-        for (sidecar_resp_buf.writes[0..sidecar_resp_buf.writes_len]) |slot| {
-            if (deserialize_write(state_machine.StateMachineType(Storage), slot) == null) {
-                spot_check_fail(
-                    \\[spot-check] {s}
-                    \\  your [handle] handler returned an invalid write (tag={d})
-                    \\  hint: check the writes array in your [handle] .{s} function
-                , .{ @tagName(msg.operation), slot.tag, @tagName(msg.operation) });
-            }
-        }
-
         // Use sidecar HTML — copy into send_buf.
         const html_len = sidecar_resp_buf.html_len;
         assert(html_len <= send_buf.len);
@@ -268,37 +167,6 @@ pub const CommitResult = struct {
     followup: ?FollowupState,
     response: render.Response,
 };
-
-/// Deserialize a WriteSlot into a Write tagged union.
-/// Returns null if the tag is invalid. Used by the spot-check to
-/// validate sidecar writes and by the future write-authority path
-/// to feed writes into SM.apply_write.
-///
-/// The @ptrCast reinterprets raw bytes as extern struct types — safe
-/// because all payloads are extern with no_padding, WriteSlot.data
-/// starts at offset 16 (aligned by tag + reserved_tag padding), and
-/// @alignCast is checked at runtime in Debug and ReleaseSafe.
-fn deserialize_write(comptime StateMachineT: type, slot: protocol.WriteSlot) ?StateMachineT.Write {
-    const tag = std.meta.intToEnum(protocol.WriteTag, slot.tag) catch return null;
-    return switch (tag) {
-        .put_product => .{ .put_product = byteCast(message.Product, &slot.data) },
-        .update_product => .{ .update_product = byteCast(message.Product, &slot.data) },
-        .put_collection => .{ .put_collection = byteCast(message.ProductCollection, &slot.data) },
-        .update_collection => .{ .update_collection = byteCast(message.ProductCollection, &slot.data) },
-        .put_membership => .{ .put_membership = byteCast(message.Membership, &slot.data) },
-        .update_membership => .{ .update_membership = byteCast(message.MembershipUpdate, &slot.data) },
-        .put_order => .{ .put_order = byteCast(message.OrderResult, &slot.data) },
-        .update_order => .{ .update_order = byteCast(message.OrderResult, &slot.data) },
-        .put_login_code => .{ .put_login_code = byteCast(message.LoginCodeWrite, &slot.data) },
-        .consume_login_code => .{ .consume_login_code = byteCast(message.LoginCodeKey, &slot.data) },
-        .put_user => .{ .put_user = byteCast(message.UserWrite, &slot.data) },
-    };
-}
-
-/// Reinterpret raw bytes as a typed extern struct value.
-fn byteCast(comptime T: type, data: *const [@sizeOf(message.OrderResult)]u8) T {
-    return @as(*const T, @ptrCast(@alignCast(data))).*;
-}
 
 /// Encode a response into the send buffer.
 pub fn encode_response(send_buf: []u8, operation: Operation, resp: MessageResponse, is_datastar_request: bool, secret_key: *const [auth.key_length]u8) render.Response {
@@ -382,44 +250,6 @@ test "extract_cache with populated product" {
     try std.testing.expectEqual(cache.result, @intFromEnum(state_machine.StorageResult.ok));
 
     _ = sm.commit(get_msg);
-}
-
-test "deserialize_write and apply_write round trip" {
-    var storage = try MemoryStorage.init(std.testing.allocator);
-    const secret = "tiger-web-test-key-0123456789ab!".*;
-    var sm = SM.init(&storage, false, 42, &secret);
-
-    // Build a WriteSlot with a Product.
-    var slot = std.mem.zeroes(protocol.WriteSlot);
-    slot.tag = @intFromEnum(protocol.WriteTag.put_product);
-    var p = std.mem.zeroes(message.Product);
-    p.id = 0xaabbccdd11223344aabbccdd11223344;
-    @memcpy(p.name[0..4], "Test");
-    p.name_len = 4;
-    p.price_cents = 999;
-    p.inventory = 10;
-    p.version = 1;
-    p.flags = .{ .active = true };
-    @memcpy(slot.data[0..@sizeOf(message.Product)], std.mem.asBytes(&p));
-
-    // Deserialize and apply through the shared apply_write.
-    const write = deserialize_write(SM, slot);
-    try std.testing.expect(write != null);
-    try std.testing.expect(sm.apply_write(write.?));
-
-    // Verify the product is in storage.
-    const msg = message.Message.init(.get_product, p.id, 0, {});
-    assert(sm.prefetch(msg));
-    const cache = extract_cache(MemoryStorage, &sm);
-    try std.testing.expectEqual(cache.has_product, 1);
-    try std.testing.expectEqual(cache.product.price_cents, 999);
-    _ = sm.commit(msg);
-}
-
-test "deserialize_write invalid tag returns null" {
-    var slot = std.mem.zeroes(protocol.WriteSlot);
-    slot.tag = 255;
-    try std.testing.expect(deserialize_write(SM, slot) == null);
 }
 
 test "apply_write returns false for duplicate put" {

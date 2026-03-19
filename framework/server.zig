@@ -218,7 +218,7 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
 
                 // Route through app codec.
                 var msg = App.translate(parsed.method, parsed.path, parsed.body) orelse {
-                    log.mark.warn("unmapped request fd={d}", .{conn.fd});
+                    log.mark.warn("unmapped request: {s} {s} fd={d}", .{ @tagName(parsed.method), parsed.path, conn.fd });
                     conn.state = .closing;
                     continue;
                 };
