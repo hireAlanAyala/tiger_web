@@ -609,14 +609,13 @@ writes the handlers.
 
 **Sidecar handles:** translate (routing), execute (for rendering
 decisions), render (HTML). The developer writes all three phases in
-TypeScript. The execute result (status, writes) is spot-checked
-against the native commit. The HTML is served to the user.
+TypeScript. The HTML is served to the user.
 
-**Spot-check enforces agreement:** every request runs both native
-execute and sidecar execute. Status is compared. Sidecar writes are
-deserialized and validated. Divergence panics in debug (developer
-fixes immediately) and logs in release. The developer must keep
-the Zig handlers and TypeScript handlers in agreement.
+**Correctness enforcement:**
+- Type system: Status as a typed union catches wrong values at compile time
+- Annotation scanner: missing handler → build error with clickable file:line
+- Simulator: PRNG-driven operations exercise every handler path (test time)
+- Unmapped request log: includes HTTP method + path for runtime diagnosis
 
 **Why not sidecar write authority:** we implemented and reverted it.
 Moving storage writes to the sidecar introduced three problems:

@@ -32,8 +32,9 @@ zig build codegen
 ## 3. Full sidecar simulator test
 
 Run the existing PRNG-driven simulator through the sidecar path.
-The simulator generates random operations, runs them through both
-native and sidecar, and the spot-check catches any divergence.
+The simulator generates random operations, runs them through the
+sidecar, and validates responses structurally (correct status
+codes, valid HTML, no crashes).
 
 This exercises every operation, every cache slot, every write
 variant, and every render path through the real socket protocol.
@@ -41,7 +42,7 @@ Deterministic seeds for reproducibility.
 
 Structure: the sim test starts the TS sidecar as a child process,
 starts the Zig server with `--sidecar`, runs the full operation
-sequence, and verifies no spot-check failures.
+sequence, and verifies no failures.
 
 ```bash
 ./zig/zig build test -- --sidecar    # sim tests through sidecar
