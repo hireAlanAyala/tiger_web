@@ -110,6 +110,42 @@ TigerBeetle's prefetch is async with callback chains — it enqueues reads, subm
 
 Our prefetch is synchronous — both `MemoryStorage` and `SqliteStorage` return immediately. `prefetch_collection_with_products()` does two sequential reads in one call. If either returns `.busy`, the whole prefetch returns false and retries next tick. This is a valid simplification for a single-node HTTP server where storage access doesn't require async IO.
 
+## Error Response on Unmapped Requests
+
+TigerBeetle silently drops malformed messages. This makes sense for a binary protocol where clients are generated SDKs — a malformed message means a bug in the SDK, not a user mistake. There's no human to inform.
+
+Our clients are browsers and developers with curl. When `translate()` fails (unknown route, bad JSON, invalid UUID), the request parsed as valid HTTP — we just can't route it. Closing the connection silently gives the developer `curl: (52) Empty reply from server` with no indication of what went wrong.
+
+We send a short `200 OK` with `"invalid request"` body before closing. Same always-200 convention as every other response — errors go in the body. The departure from TB's silent-drop is justified by the client type: humans deserve feedback, generated SDKs don't need it.
+
+Invalid HTTP (can't parse the frame at all) still closes silently — if we can't parse the request, we can't reliably frame a response.
+
+## Single Writer — Consequences of External DB Writes
+
+The framework assumes it is the sole writer to the database. External writes are unsupported — the framework is designed around single-writer semantics and we don't provide tooling or guarantees for multi-writer scenarios. That said, if a user bypasses the framework and writes directly to SQLite:
+
+- **Server** — keeps running, serves correct responses for whatever data is in the DB
+- **WAL** — incomplete, replay can't reproduce current state (debugging degraded, not broken)
+- **Auditor** — unaffected, only runs in fuzz tests against its own model
+- **Fuzz suite** — unaffected, drives operations through the framework API
+- **Race conditions** — yes, same as any concurrent writer, not framework-specific
+- **Assertions** — won't fire, they validate the state machine's own writes, not external ones
+
+The single-writer principle protects your debugging tools (replay), not the running server. If external writes are needed, route them through the framework's HTTP API — the worker pattern does this — so the WAL logs them and the state machine sees them.
+
+### Third-party databases
+
+Also not recommended, but the framework could run against a remote database (Postgres, Turso, etc.) instead of local SQLite. The `Storage` interface is comptime duck-typed — any backend that implements `get`, `put`, `update`, `delete`, `list`, `begin`, `commit` works. `begin`/`commit` are already optional by convention (`MemoryStorage` no-ops them).
+
+What degrades:
+- **Replay** — WAL still logs locally, but `tiger-replay diff` would compare against a remote DB instead of a local file
+- **Prefetch latency** — synchronous prefetch over the network blocks the tick loop. At 5ms per round-trip, throughput drops from ~20,000 ops/sec to ~200. For a remote DB, prefetch would need to become async (the TigerBeetle pattern we intentionally skipped — see `plans/patterns-to-revisit.md`)
+- **Transactions** — depends on what the remote DB supports. No multi-statement transactions means no per-tick atomicity
+
+What works fine: single-writer semantics, the auditor, fuzz testing, the sidecar, all framework guarantees. The storage backend is behind a comptime interface — the framework doesn't know or care what's on the other side.
+
+With multiple writers against a shared remote DB, the stale-read risk is the same as any other application — Rails, Django, Express all need optimistic locking or transactions for the same reason. The framework isn't worse here, it's just not special. The determinism guarantee weakens from "provable" to "best effort within our boundary," but the architecture still does more work for you than anything else in the space.
+
 ## Single-Threaded, No IO Batching
 
 TigerBeetle batches IO submissions and completions through io_uring, processing multiple operations per syscall. The IO layer is designed for high-throughput concurrent replication traffic.
