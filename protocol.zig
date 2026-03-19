@@ -5,13 +5,15 @@
 //!   1. Translate: method + path + body → operation + id + typed event
 //!   2. Execute + Render: operation + cache → status + writes + HTML
 //!
-//! This file defines round trip 1 (translate). Round trip 2 is pending
-//! cache serialization design (see design/013, Step 3b).
+//! Both round trips defined here as extern structs with no padding.
 
 const std = @import("std");
 const assert = std.debug.assert;
 const stdx = @import("tiger_framework").stdx;
 const message = @import("message.zig");
+const state_machine = @import("state_machine.zig");
+const SM = state_machine.StateMachineType(state_machine.MemoryStorage);
+const render = @import("render.zig");
 
 /// Maximum URL path length in the translate request.
 pub const path_max = 256;
@@ -91,3 +93,112 @@ pub const TranslateResponse = extern struct {
         return self.found == 1;
     }
 };
+
+// -----------------------------------------------------------------------
+// Round trip 2: Execute + Render
+// -----------------------------------------------------------------------
+
+/// Maximum HTML render output size (from render.zig).
+pub const html_max = render.send_buf_max;
+
+/// Prefetch cache — flat serialization of all 11 cache slots.
+/// Presence flags grouped first (u8 per nullable slot), then data.
+/// Nullable slots: 0 = absent, 1 = present. Lists are always present
+/// (len field indicates how many items are populated).
+pub const PrefetchCache = extern struct {
+    // --- Presence flags (28 bytes + 4 reserved = 32) ---
+    has_product: u8,
+    has_collection: u8,
+    has_order: u8,
+    has_login_code: u8,
+    has_user_by_email: u8,
+    has_result: u8,
+    has_identity: u8,
+    flags_reserved: u8,
+    products_presence: [message.order_items_max]u8,
+    presence_reserved: [4]u8,
+
+    // --- Data (largest alignment first) ---
+    identity: message.PrefetchIdentity,
+    product: message.Product,
+    collection: message.ProductCollection,
+    order: message.OrderResult,
+    user_by_email: u128,
+    product_list: message.ProductList,
+    collection_list: message.CollectionList,
+    order_list: message.OrderSummaryList,
+    products: [message.order_items_max]message.Product,
+    login_code: message.LoginCodeEntry,
+    result: u8,
+    data_reserved: [15]u8,
+
+    comptime {
+        assert(stdx.no_padding(PrefetchCache));
+        // Struct alignment is 16 (from u128 fields in Product, etc.)
+        assert(@sizeOf(PrefetchCache) % 16 == 0);
+    }
+};
+
+/// Single write slot — tag identifies the Write union variant,
+/// data is padded to the largest variant size (OrderResult).
+pub const WriteSlot = extern struct {
+    tag: u8,
+    tag_reserved: [15]u8,
+    data: [@sizeOf(message.OrderResult)]u8,
+
+    comptime {
+        assert(stdx.no_padding(WriteSlot));
+        assert(@sizeOf(WriteSlot) == 16 + @sizeOf(message.OrderResult));
+        // Tag + padding aligns data to 16 bytes.
+        assert(@offsetOf(WriteSlot, "data") == 16);
+    }
+};
+
+/// Execute+render request: Zig → sidecar.
+pub const ExecuteRenderRequest = extern struct {
+    tag: Tag,
+    operation: message.Operation,
+    is_sse: u8,
+    reserved: [13]u8,
+    id: u128,
+    body: [message.body_max]u8,
+    cache: PrefetchCache,
+
+    comptime {
+        assert(stdx.no_padding(ExecuteRenderRequest));
+        assert(@sizeOf(ExecuteRenderRequest) % 16 == 0);
+    }
+};
+
+/// Execute+render response: sidecar → Zig.
+pub const ExecuteRenderResponse = extern struct {
+    status: message.Status,
+    writes_len: u8,
+    result_tag: u8,
+    reserved: [13]u8,
+    result: [@sizeOf(message.PageLoadDashboardResult)]u8,
+    writes: [SM.writes_max]WriteSlot,
+    html_len: u32,
+    html: [html_max]u8,
+    // Tail padding: struct alignment is 4 (from html_len u32).
+    tail_reserved: [tail_pad]u8,
+
+    const tail_pad = blk: {
+        const raw: usize = 1 + 1 + 1 + 13 + @sizeOf(message.PageLoadDashboardResult) +
+            SM.writes_max * @sizeOf(WriteSlot) + 4 + @as(usize, html_max);
+        break :blk (4 - (raw % 4)) % 4;
+    };
+
+    comptime {
+        assert(stdx.no_padding(ExecuteRenderResponse));
+        assert(@sizeOf(ExecuteRenderResponse) % 4 == 0);
+        assert(SM.writes_max == 21);
+    }
+};
+
+// Memory budget assertion — both buffers allocated once at startup.
+// Single connection, single-threaded server.
+comptime {
+    const total = @sizeOf(ExecuteRenderRequest) + @sizeOf(ExecuteRenderResponse);
+    assert(total < 300 * 1024);
+}

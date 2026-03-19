@@ -45,9 +45,14 @@ const known_structs = .{
     // Sidecar types
     message.LoginCodeEntry,
     message.PrefetchIdentity,
-    // Protocol
+    // Protocol (translate round trip — generic serde works)
     protocol.TranslateRequest,
     protocol.TranslateResponse,
+    // Protocol (execute_render) — WriteSlot uses raw byte data, not typed fields.
+    // PrefetchCache uses presence flags, not _len pattern.
+    // ExecuteRenderRequest/Response contain these non-standard types.
+    // Serde for these is hand-written in the sidecar, not generated.
+    protocol.WriteSlot,
 };
 
 /// All enum types emitted as TS string literal unions.
@@ -1046,9 +1051,7 @@ fn count_anon_structs(comptime U: type) usize {
 
 /// Returns true if T is a struct in the known_structs list.
 fn is_known_struct(comptime T: type) bool {
-    // 14 extern + 2 flags + 2 regular + 3 SM-internal + 2 sidecar + 2 protocol = 25
-    // + 6 newly-extern (lists, composites, LoginResult) = 31
-    comptime assert(known_structs.len == 31);
+    comptime assert(known_structs.len == 32);
     comptime {
         for (known_structs) |K| assert(@typeInfo(K) == .@"struct");
     }
@@ -1328,13 +1331,10 @@ test "output is valid structure" {
             if (i + 11 <= output.len and std.mem.eql(u8, output[i..][0..11], "export type")) types += 1;
             if (i + 12 <= output.len and std.mem.eql(u8, output[i..][0..12], "export const")) consts += 1;
         }
-        // 24 extern + 2 flags + 2 regular + 3 SM-internal + 3 anon = 34 interfaces
-        assert(interfaces == 34);
-        // 11 enum type aliases + 2 union type aliases = 13 types
+        assert(interfaces == 35);
         assert(types == 13);
-        // 16 constants + 11 Values consts = 27 consts
         assert(consts == 27);
-        // 24 extern structs × 2 (read + write) = 48 serde functions
-        assert(functions == 48);
+        // 25 extern structs × 2 (read + write) = 50 serde functions
+        assert(functions == 50);
     }
 }
