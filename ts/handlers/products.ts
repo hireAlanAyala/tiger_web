@@ -1,4 +1,4 @@
-// Product handlers — translate, execute, render.
+// Product handlers — each operation groups route → handle → render.
 
 import type {
   Request,
@@ -8,153 +8,153 @@ import type {
   Product,
 } from "../../generated/types.generated.ts";
 
-// ---------------------------------------------------------------------------
-// Translate
-// ---------------------------------------------------------------------------
+// ========================== create_product ==========================
 
 // [route] .create_product
-export function translateCreateProduct(req: Request): Route | null {
+export function routeCreateProduct(req: Request): Route | null {
   if (req.method !== "post" || req.path !== "/products") return null;
   const parsed = JSON.parse(req.body || "{}");
   const id = parsed.id || "0".repeat(32);
   return { operation: "create_product", id, body: makeProduct(parsed, id) };
 }
 
+// [handle] .create_product
+export function handleCreateProduct(ctx: Context, body: Product): Response {
+  if (ctx.product !== null) return { status: "version_conflict", writes: [] };
+  return { status: "ok", writes: [] };
+}
+
+// [render] .create_product
+export function renderCreateProduct(status: string, ctx: Context): string {
+  if (status !== "ok") return `<div class="error">${esc(status)}</div>`;
+  return `<div class="product">Created</div>`;
+}
+
+// ========================== get_product ==========================
+
 // [route] .get_product
-export function translateGetProduct(req: Request): Route | null {
+export function routeGetProduct(req: Request): Route | null {
   const match = req.path.match(/^\/products\/([a-f0-9]{32})$/);
   if (!match || req.method !== "get") return null;
   return { operation: "get_product", id: match[1] };
 }
 
+// [handle] .get_product
+export function handleGetProduct(ctx: Context): Response {
+  if (ctx.product === null) return { status: "not_found", writes: [] };
+  return { status: "ok", writes: [] };
+}
+
+// [render] .get_product
+export function renderGetProduct(status: string, ctx: Context): string {
+  if (status !== "ok") return `<div class="error">${esc(status)}</div>`;
+  if (ctx.product) return `<div class="product"><h1>${esc(ctx.product.name)}</h1></div>`;
+  return `<div class="error">not_found</div>`;
+}
+
+// ========================== list_products ==========================
+
 // [route] .list_products
-export function translateListProducts(req: Request): Route | null {
+export function routeListProducts(req: Request): Route | null {
   if (req.method !== "get" || req.path !== "/products") return null;
   return { operation: "list_products", id: "0".repeat(32) };
 }
 
+// [handle] .list_products
+export function handleListProducts(ctx: Context): Response {
+  return { status: "ok", writes: [] };
+}
+
+// [render] .list_products
+export function renderListProducts(status: string, ctx: Context): string {
+  const items = ctx.product_list.items;
+  return `<div class="products">${items.map(p => `<div>${esc(p.name)}</div>`).join("")}</div>`;
+}
+
+// ========================== update_product ==========================
+
 // [route] .update_product
-export function translateUpdateProduct(req: Request): Route | null {
+export function routeUpdateProduct(req: Request): Route | null {
   const match = req.path.match(/^\/products\/([a-f0-9]{32})$/);
   if (!match || req.method !== "put") return null;
   const parsed = JSON.parse(req.body || "{}");
   return { operation: "update_product", id: match[1], body: makeProduct(parsed, match[1]) };
 }
 
+// [handle] .update_product
+export function handleUpdateProduct(ctx: Context, body: Product): Response {
+  if (ctx.product === null) return { status: "not_found", writes: [] };
+  return { status: "ok", writes: [] };
+}
+
+// [render] .update_product
+export function renderUpdateProduct(status: string, ctx: Context): string {
+  if (status !== "ok") return `<div class="error">${esc(status)}</div>`;
+  return `<div class="product">Updated</div>`;
+}
+
+// ========================== delete_product ==========================
+
 // [route] .delete_product
-export function translateDeleteProduct(req: Request): Route | null {
+export function routeDeleteProduct(req: Request): Route | null {
   const match = req.path.match(/^\/products\/([a-f0-9]{32})$/);
   if (!match || req.method !== "delete") return null;
   return { operation: "delete_product", id: match[1] };
 }
 
+// [handle] .delete_product
+export function handleDeleteProduct(ctx: Context): Response {
+  if (ctx.product === null) return { status: "not_found", writes: [] };
+  return { status: "ok", writes: [] };
+}
+
+// [render] .delete_product
+export function renderDeleteProduct(status: string, ctx: Context): string {
+  if (status !== "ok") return `<div class="error">${esc(status)}</div>`;
+  return `<div class="product">Deleted</div>`;
+}
+
+// ========================== get_product_inventory ==========================
+
 // [route] .get_product_inventory
-export function translateGetProductInventory(req: Request): Route | null {
+export function routeGetProductInventory(req: Request): Route | null {
   const match = req.path.match(/^\/products\/([a-f0-9]{32})\/inventory$/);
   if (!match || req.method !== "get") return null;
   return { operation: "get_product_inventory", id: match[1] };
 }
 
+// [handle] .get_product_inventory
+export function handleGetProductInventory(ctx: Context): Response {
+  if (ctx.product === null) return { status: "not_found", writes: [] };
+  return { status: "ok", writes: [] };
+}
+
+// [render] .get_product_inventory
+export function renderGetProductInventory(status: string, ctx: Context): string {
+  if (status !== "ok") return `<div class="error">${esc(status)}</div>`;
+  if (ctx.product) return `<div class="inventory">${ctx.product.inventory}</div>`;
+  return `<div class="error">not_found</div>`;
+}
+
+// ========================== search_products ==========================
+
 // [route] .search_products
-export function translateSearchProducts(req: Request): Route | null {
+export function routeSearchProducts(req: Request): Route | null {
   if (req.method !== "get" || !req.path.startsWith("/products/search")) return null;
   return { operation: "search_products", id: "0".repeat(32) };
 }
 
-// ---------------------------------------------------------------------------
-// Execute
-// ---------------------------------------------------------------------------
-
-// [handle] .create_product
-export function executeCreateProduct(cache: Context, body: Product): Response {
-  if (cache.product !== null) return { status: "version_conflict", writes: [] };
-  return { status: "ok", writes: [] };
-}
-
-// [handle] .get_product
-export function executeGetProduct(cache: Context): Response {
-  if (cache.product === null) return { status: "not_found", writes: [] };
-  return { status: "ok", writes: [] };
-}
-
-// [handle] .list_products
-export function executeListProducts(cache: Context): Response {
-  return { status: "ok", writes: [] };
-}
-
-// [handle] .update_product
-export function executeUpdateProduct(cache: Context, body: Product): Response {
-  if (cache.product === null) return { status: "not_found", writes: [] };
-  return { status: "ok", writes: [] };
-}
-
-// [handle] .delete_product
-export function executeDeleteProduct(cache: Context): Response {
-  if (cache.product === null) return { status: "not_found", writes: [] };
-  return { status: "ok", writes: [] };
-}
-
-// [handle] .get_product_inventory
-export function executeGetProductInventory(cache: Context): Response {
-  if (cache.product === null) return { status: "not_found", writes: [] };
-  return { status: "ok", writes: [] };
-}
-
 // [handle] .search_products
-export function executeSearchProducts(cache: Context): Response {
+export function handleSearchProducts(ctx: Context): Response {
   return { status: "ok", writes: [] };
-}
-
-// ---------------------------------------------------------------------------
-// Render
-// ---------------------------------------------------------------------------
-
-// [render] .create_product
-export function renderCreateProduct(status: string, cache: Context): string {
-  if (status !== "ok") return `<div class="error">${escapeHtml(status)}</div>`;
-  return `<div class="product">Created</div>`;
-}
-
-// [render] .get_product
-export function renderGetProduct(status: string, cache: Context): string {
-  if (status !== "ok") return `<div class="error">${escapeHtml(status)}</div>`;
-  if (cache.product) return `<div class="product"><h1>${escapeHtml(cache.product.name)}</h1></div>`;
-  return `<div class="error">not_found</div>`;
-}
-
-// [render] .list_products
-export function renderListProducts(status: string, cache: Context): string {
-  const items = cache.product_list.items;
-  return `<div class="products">${items.map(p => `<div>${escapeHtml(p.name)}</div>`).join("")}</div>`;
-}
-
-// [render] .update_product
-export function renderUpdateProduct(status: string, cache: Context): string {
-  if (status !== "ok") return `<div class="error">${escapeHtml(status)}</div>`;
-  return `<div class="product">Updated</div>`;
-}
-
-// [render] .delete_product
-export function renderDeleteProduct(status: string, cache: Context): string {
-  if (status !== "ok") return `<div class="error">${escapeHtml(status)}</div>`;
-  return `<div class="product">Deleted</div>`;
-}
-
-// [render] .get_product_inventory
-export function renderGetProductInventory(status: string, cache: Context): string {
-  if (status !== "ok") return `<div class="error">${escapeHtml(status)}</div>`;
-  if (cache.product) return `<div class="inventory">${cache.product.inventory}</div>`;
-  return `<div class="error">not_found</div>`;
 }
 
 // [render] .search_products
-export function renderSearchProducts(status: string, cache: Context): string {
+export function renderSearchProducts(status: string, ctx: Context): string {
   return `<div class="search-results">Search results</div>`;
 }
 
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
+// ========================== helpers ==========================
 
 function makeProduct(parsed: Record<string, unknown>, id: string): Product {
   return {
@@ -168,6 +168,6 @@ function makeProduct(parsed: Record<string, unknown>, id: string): Product {
   };
 }
 
-function escapeHtml(s: string): string {
+function esc(s: string): string {
   return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 }
