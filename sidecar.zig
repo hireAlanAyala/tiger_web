@@ -106,7 +106,7 @@ pub const SidecarClient = struct {
         // Validate the operation is a known enum value — catches
         // corrupted responses before the value propagates.
         _ = std.meta.intToEnum(message.Operation, @intFromEnum(resp.operation)) catch {
-            log.warn("invalid operation in translate response: {d}", .{@intFromEnum(resp.operation)});
+            log.err("route handler returned unknown operation {d} — check your route function's return value", .{@intFromEnum(resp.operation)});
             self.handle_disconnect();
             return null;
         };
@@ -154,18 +154,19 @@ pub const SidecarClient = struct {
 
         // Validate response fields at the boundary.
         // These are untrusted sidecar values — validate, don't assert.
+        // Log at err with the operation name so the developer knows which handler is wrong.
         _ = std.meta.intToEnum(message.Status, @intFromEnum(resp_buf.status)) catch {
-            log.warn("invalid status in execute_render response: {d}", .{@intFromEnum(resp_buf.status)});
+            log.err("{s}: handler returned unknown status {d} — check your handle function's return value", .{ @tagName(operation), @intFromEnum(resp_buf.status) });
             self.handle_disconnect();
             return false;
         };
         if (resp_buf.writes_len > SM.writes_max) {
-            log.warn("invalid writes_len in execute_render response: {d}", .{resp_buf.writes_len});
+            log.err("{s}: handler returned {d} writes (max {d}) — check your handle function's writes array", .{ @tagName(operation), resp_buf.writes_len, SM.writes_max });
             self.handle_disconnect();
             return false;
         }
         if (resp_buf.html_len > protocol.html_max) {
-            log.warn("invalid html_len in execute_render response: {d}", .{resp_buf.html_len});
+            log.err("{s}: render returned {d} bytes of HTML (max {d}) — check your render function's output", .{ @tagName(operation), resp_buf.html_len, protocol.html_max });
             self.handle_disconnect();
             return false;
         }

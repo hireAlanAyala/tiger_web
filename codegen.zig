@@ -1631,7 +1631,7 @@ test "output is valid structure" {
         assert(interfaces == 40);
         assert(types == 19);
         assert(consts == 34);
-        // 33 extern structs × 2 (read + write) = 66 serde functions
-        assert(functions == 66);
+        // 33 extern structs × 2 (read + write) = 66 serde functions + 1 assert
+        assert(functions == 67);
     }
 }
