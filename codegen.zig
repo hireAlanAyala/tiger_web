@@ -3,6 +3,7 @@ const assert = std.debug.assert;
 const stdx = @import("tiger_framework").stdx;
 const message = @import("message.zig");
 const state_machine = @import("state_machine.zig");
+const protocol = @import("protocol.zig");
 
 const SM = state_machine.StateMachineType(state_machine.MemoryStorage);
 
@@ -41,6 +42,9 @@ const known_structs = .{
     SM.LoginCodeWrite,
     SM.LoginCodeKey,
     SM.ExecuteResult,
+    // Protocol
+    protocol.TranslateRequest,
+    protocol.TranslateResponse,
 };
 
 /// All enum types emitted as TS string literal unions.
@@ -54,6 +58,9 @@ const known_enums = .{
     state_machine.StorageResult,
     message.MessageResponse.SessionKind,
     message.MessageResponse.SessionAction,
+    // Protocol
+    protocol.Tag,
+    protocol.Method,
 };
 
 /// All union types emitted as TS discriminated unions.
@@ -84,6 +91,8 @@ const output = blk: {
     w.emit_const("order_timeout_seconds", message.order_timeout_seconds);
     w.emit_const("credential_max", message.Message.credential_max);
     w.emit_const("writes_max", SM.writes_max);
+    w.emit_const("path_max", protocol.path_max);
+    w.emit_const("json_body_max", protocol.json_body_max);
     w.raw("\n");
 
     // --- Enums ---
@@ -1011,8 +1020,8 @@ fn count_anon_structs(comptime U: type) usize {
 
 /// Returns true if T is a struct in the known_structs list.
 fn is_known_struct(comptime T: type) bool {
-    // 14 extern + 2 flags + 8 regular + 3 SM-internal = 27
-    comptime assert(known_structs.len == 27);
+    // 14 extern + 2 flags + 8 regular + 3 SM-internal + 2 protocol = 29
+    comptime assert(known_structs.len == 29);
     inline for (known_structs) |K| {
         if (T == K) return true;
     }
@@ -1021,7 +1030,7 @@ fn is_known_struct(comptime T: type) bool {
 
 /// Returns true if T is an enum in the known_enums list.
 fn is_known_enum(comptime T: type) bool {
-    comptime assert(known_enums.len == 9);
+    comptime assert(known_enums.len == 11);
     inline for (known_enums) |E| {
         if (T == E) return true;
     }
@@ -1277,13 +1286,13 @@ test "output is valid structure" {
             if (i + 11 <= output.len and std.mem.eql(u8, output[i..][0..11], "export type")) types += 1;
             if (i + 12 <= output.len and std.mem.eql(u8, output[i..][0..12], "export const")) consts += 1;
         }
-        // 14 extern + 2 flags + 8 regular + 3 SM-internal + 3 anon = 30 interfaces
-        assert(interfaces == 30);
-        // 9 enum type aliases + 2 union type aliases = 11 types
-        assert(types == 11);
-        // 14 constants + 9 Values consts = 23 consts
-        assert(consts == 23);
-        // 14 extern structs × 2 (read + write) = 28 serde functions
-        assert(functions == 28);
+        // 14 extern + 2 flags + 8 regular + 3 SM-internal + 3 anon + 2 protocol = 32 interfaces
+        assert(interfaces == 32);
+        // 11 enum type aliases + 2 union type aliases = 13 types
+        assert(types == 13);
+        // 16 constants + 11 Values consts = 27 consts
+        assert(consts == 27);
+        // 16 extern structs × 2 (read + write) = 32 serde functions
+        assert(functions == 32);
     }
 }

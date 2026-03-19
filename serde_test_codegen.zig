@@ -2,6 +2,7 @@ const std = @import("std");
 const assert = std.debug.assert;
 const message = @import("message.zig");
 const state_machine = @import("state_machine.zig");
+const protocol = @import("protocol.zig");
 
 const SM = state_machine.StateMachineType(state_machine.MemoryStorage);
 
@@ -29,11 +30,14 @@ const output = blk: {
         \\  readLoginCodeRequest, writeLoginCodeRequest,
         \\  readLoginVerification, writeLoginVerification,
         \\  readMessage, writeMessage,
+        \\  readTranslateRequest, writeTranslateRequest,
+        \\  readTranslateResponse, writeTranslateResponse,
         \\  type Product, type ProductCollection, type InventoryTransfer,
         \\  type OrderItem, type OrderRequest, type OrderCompletion,
         \\  type OrderResultItem, type OrderResult, type OrderSummary,
         \\  type SearchQuery, type ListParams, type LoginCodeRequest,
         \\  type LoginVerification, type Message,
+        \\  type TranslateRequest, type TranslateResponse,
         \\  type ProductFlags, type CollectionFlags,
         \\} from './types.generated.ts';
         \\
@@ -116,6 +120,8 @@ const output = blk: {
     w.emit_test_vector("LoginCodeRequest", message.LoginCodeRequest, test_login_request());
     w.emit_test_vector("LoginVerification", message.LoginVerification, test_login_verify());
     w.emit_test_vector("Message", message.Message, test_message());
+    w.emit_test_vector("TranslateRequest", protocol.TranslateRequest, test_translate_request());
+    w.emit_test_vector("TranslateResponse", protocol.TranslateResponse, test_translate_response());
 
     // --- Random round-trip tests ---
     w.raw("// --- Random round-trip tests ---\n\n");
@@ -136,6 +142,8 @@ const output = blk: {
     w.emit_random_roundtrip("LoginCodeRequest", message.LoginCodeRequest);
     w.emit_random_roundtrip("LoginVerification", message.LoginVerification);
     w.emit_random_roundtrip("Message", message.Message);
+    w.emit_random_roundtrip("TranslateRequest", protocol.TranslateRequest);
+    w.emit_random_roundtrip("TranslateResponse", protocol.TranslateResponse);
 
     w.raw("console.log(`${passed} serde round-trip tests passed (seed: ${seed})`);\n");
 
@@ -678,6 +686,31 @@ fn test_message() message.Message {
     @memcpy(m.body[0..@sizeOf(message.Product)], std.mem.asBytes(&p));
     assert_str_len(&m.credential, m.credential_len);
     return m;
+}
+
+fn test_translate_request() protocol.TranslateRequest {
+    var r = std.mem.zeroes(protocol.TranslateRequest);
+    r.tag = .translate;
+    r.method = .post;
+    set_str(&r.path, "/products");
+    r.path_len = 9;
+    const json = "{\"name\":\"Tiger Shirt\"}";
+    set_str(&r.body, json);
+    r.body_len = json.len;
+    assert_str_len(&r.path, r.path_len);
+    assert_str_len(&r.body, r.body_len);
+    return r;
+}
+
+fn test_translate_response() protocol.TranslateResponse {
+    var r = std.mem.zeroes(protocol.TranslateResponse);
+    r.found = 1;
+    r.operation = .create_product;
+    r.id = 0x0102030405060708090a0b0c0d0e0f10;
+    // Body: embed a test product
+    const p = test_product();
+    @memcpy(r.body[0..@sizeOf(message.Product)], std.mem.asBytes(&p));
+    return r;
 }
 
 // =====================================================================
