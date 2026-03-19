@@ -182,11 +182,10 @@ const server = net.createServer((conn) => {
         const html = renderHandlers[req.operation](execResult.status, req.cache);
         const resp: ExecuteRenderResponse = {
           status: execResult.status,
-          writes_len: 0, result_tag: 0,
+          result_tag: 0,
           result: new Uint8Array(47248),
-          writes: Array.from({ length: 21 }, () => ({ tag: 0, reserved_tag: new Uint8Array(15), data: new Uint8Array(3632) })),
+          writes: execResult.writes.map((w: any) => ({ tag: w.tag || 0, data: new Uint8Array(3632) })),
           html,
-          tail_reserved: new Uint8Array(3),
         };
         const respBytes = new Uint8Array(execute_render_response_size);
         writeExecuteRenderResponse(respBytes, 0, resp);
