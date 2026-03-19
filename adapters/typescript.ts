@@ -141,7 +141,14 @@ const server = net.createServer((conn) => {
         if (pending.length < translate_request_size) break;
         const req = readTranslateRequest(new Uint8Array(pending.buffer, pending.byteOffset, translate_request_size), 0);
         pending = pending.subarray(translate_request_size);
-        const resp: TranslateResponse = translateHandlers[req.operation](req);
+        // Translate: try each handler until one returns found=1.
+        // Unlike execute/render, translate determines the operation — we
+        // can't dispatch by operation name because we don't know it yet.
+        let resp: TranslateResponse = { id: '0'.repeat(32), body: new Uint8Array(672), found: 0, operation: 'root' };
+        for (const handler of Object.values(translateHandlers)) {
+          const result = handler(req);
+          if (result.found === 1) { resp = result; break; }
+        }
         const out = new Uint8Array(translate_response_size);
         writeTranslateResponse(out, 0, resp);
         conn.write(out);
@@ -157,6 +164,7 @@ const server = net.createServer((conn) => {
           result: new Uint8Array(47248),
           writes: Array.from({ length: 21 }, () => ({ tag: 0, reserved_tag: new Uint8Array(15), data: new Uint8Array(3632) })),
           html,
+          tail_reserved: new Uint8Array(3),
         };
         const respBytes = new Uint8Array(execute_render_response_size);
         writeExecuteRenderResponse(respBytes, 0, resp);
