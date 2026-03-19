@@ -79,6 +79,16 @@ pub fn main() !void {
         Server.max_connections,
     });
     if (cli.log_debug) log.info("log_level=debug log_trace={}", .{cli.log_trace});
+    // Sidecar: connect to external unix socket process.
+    if (cli.sidecar) |path| {
+        App.sidecar = .{ .path = path };
+        if (!App.sidecar.?.connect()) {
+            log.err("failed to connect to sidecar at {s}", .{path});
+            std.process.exit(1);
+        }
+        log.info("sidecar={s}", .{path});
+    }
+
     log.info("listening on port {d}", .{cli.port});
 
     // Main event loop. No signal handling — let the OS kill the process.
@@ -92,4 +102,5 @@ const CliArgs = struct {
     port: u16 = 3000,
     log_debug: bool = false,
     log_trace: bool = false,
+    sidecar: ?[]const u8 = null,
 };

@@ -325,7 +325,7 @@ fn verify_login_state(mem: *MemoryStorage, sql: *SqliteStorage) void {
 
     // Iterate MemoryStorage's login_codes array — no list API exists.
     for (&mem.login_codes) |*entry| {
-        if (!entry.occupied) continue;
+        if (entry.occupied == 0) continue;
         const email = entry.email[0..entry.email_len];
 
         var sql_entry: SqliteStorage.LoginCodeEntry = undefined;
@@ -333,7 +333,7 @@ fn verify_login_state(mem: *MemoryStorage, sql: *SqliteStorage) void {
         if (result != .ok) {
             std.debug.panic("login code missing in sql for email len={d}", .{entry.email_len});
         }
-        assert(sql_entry.occupied);
+        assert(sql_entry.occupied != 0);
         assert(sql_entry.email_len == entry.email_len);
         assert(std.mem.eql(u8, &sql_entry.code, &entry.code));
         assert(sql_entry.expires_at == entry.expires_at);

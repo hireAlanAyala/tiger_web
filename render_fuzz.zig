@@ -279,6 +279,7 @@ fn gen_response(prng: *PRNG) GenResult {
                 },
                 .code = "123456".*,
                 .email_len = 9,
+                .reserved = .{0} ** 9,
             } },
         },
     };
@@ -294,6 +295,7 @@ fn gen_product_list(prng: *PRNG, max_len: u32) message.ProductList {
     var list: message.ProductList = .{
         .items = undefined,
         .len = prng.range_inclusive(u32, 0, max_len),
+        .reserved = .{0} ** 12,
     };
     for (list.items[0..list.len]) |*p| {
         p.* = gen_product(prng);
@@ -333,6 +335,7 @@ fn gen_collection_list(prng: *PRNG, max_len: u32) message.CollectionList {
     var list: message.CollectionList = .{
         .items = undefined,
         .len = prng.range_inclusive(u32, 0, max_len),
+        .reserved = .{0} ** 12,
     };
     for (list.items[0..list.len]) |*col| {
         col.* = gen_collection(prng);
@@ -344,6 +347,7 @@ fn gen_order_summary_list(prng: *PRNG, max_len: u32) message.OrderSummaryList {
     var list: message.OrderSummaryList = .{
         .items = undefined,
         .len = prng.range_inclusive(u32, 0, max_len),
+        .reserved = .{0} ** 12,
     };
     for (list.items[0..list.len]) |*o| {
         o.* = std.mem.zeroes(message.OrderSummary);
