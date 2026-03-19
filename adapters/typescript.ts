@@ -145,11 +145,14 @@ const server = net.createServer((conn) => {
         // Unlike execute/render, translate determines the operation — we
         // can't dispatch by operation name because we don't know it yet.
         //
-        // This is O(n) per request — 24 function calls, 23 fail. The
-        // alternative is a generated URL router, which makes the adapter
-        // language-specific (pattern matching varies by language). The
-        // iteration costs ~0.1μs vs ~50μs for the socket round trip.
-        // Correct trade-off for a same-machine unix socket.
+        // O(n) per request: 24 handlers × ~40ns each ≈ 1μs. The socket
+        // round trip is ~50μs — iteration is 2% overhead. At 20,000
+        // ops/sec (socket limit), adds 20ms/sec total CPU. The socket
+        // becomes the bottleneck long before the iteration does.
+        //
+        // A generated URL router would be faster but language-specific
+        // (pattern matching varies by language). The iteration keeps the
+        // adapter simple and language-agnostic in structure.
         let resp: TranslateResponse = { id: '0'.repeat(32), body: new Uint8Array(672), found: 0, operation: 'root' };
         for (const handler of Object.values(translateHandlers)) {
           const result = handler(req);
