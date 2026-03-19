@@ -1,8 +1,13 @@
 // Test for the TypeScript adapter.
 // Run: npx tsx adapters/typescript_test.ts
 
-import { readFileSync, writeFileSync, mkdirSync, rmSync } from "fs";
+import { readFileSync, writeFileSync, mkdirSync, rmSync, existsSync } from "fs";
 import { execSync } from "child_process";
+
+if (!existsSync("generated/types.generated.ts")) {
+  console.error("error: generated/types.generated.ts not found. Run `zig build codegen` first.");
+  process.exit(1);
+}
 
 const testDir = "/tmp/tiger-adapter-test";
 let passed = 0;
