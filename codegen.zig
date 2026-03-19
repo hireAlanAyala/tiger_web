@@ -107,6 +107,18 @@ const output = blk: {
     // --- Tagged unions ---
     for (known_unions) |U| w.emit_union(U);
 
+    // --- Serde: binary ↔ TypeScript serialization ---
+    w.emit_serde_helpers();
+
+    for (known_structs) |T| {
+        const layout = @typeInfo(T).@"struct".layout;
+        if (layout == .@"packed") {
+            w.emit_packed_serde(T);
+        } else if (layout == .@"extern") {
+            w.emit_extern_serde(T);
+        }
+    }
+
     // --- Exhaustiveness assertions ---
 
     // Union variant counts — if a variant is added, codegen must be updated.
@@ -412,6 +424,433 @@ const Writer = struct {
             w.write_ts_type(T);
         }
     }
+
+    // =======================================================================
+    // Serde — binary ↔ TypeScript serialization
+    // =======================================================================
+
+    fn emit_serde_helpers(w: *Writer) void {
+        w.raw("// --- Serde ---\n\n");
+        w.raw("const _decoder = new TextDecoder();\n");
+        w.raw("const _encoder = new TextEncoder();\n\n");
+
+        // readU128 / writeU128
+        w.raw("function readU128(dv: DataView, offset: number): string {\n");
+        w.raw("  const lo = dv.getBigUint64(offset, true);\n");
+        w.raw("  const hi = dv.getBigUint64(offset + 8, true);\n");
+        w.raw("  return ((hi << 64n) | lo).toString(16).padStart(32, '0');\n");
+        w.raw("}\n\n");
+
+        w.raw("function writeU128(dv: DataView, offset: number, hex: string): void {\n");
+        w.raw("  const val = BigInt('0x' + (hex || '0'));\n");
+        w.raw("  dv.setBigUint64(offset, val & 0xFFFFFFFFFFFFFFFFn, true);\n");
+        w.raw("  dv.setBigUint64(offset + 8, val >> 64n, true);\n");
+        w.raw("}\n\n");
+
+        // readEnum / writeEnum
+        w.raw("function readEnum<T extends string>(dv: DataView, offset: number, values: Record<string, number>): T {\n");
+        w.raw("  const byte = dv.getUint8(offset);\n");
+        w.raw("  for (const [name, val] of Object.entries(values)) {\n");
+        w.raw("    if (val === byte) return name as T;\n");
+        w.raw("  }\n");
+        w.raw("  throw new Error('invalid enum value: ' + byte);\n");
+        w.raw("}\n\n");
+
+        w.raw("function writeEnum(dv: DataView, offset: number, values: Record<string, number>, name: string): void {\n");
+        w.raw("  dv.setUint8(offset, values[name]);\n");
+        w.raw("}\n\n");
+    }
+
+    fn emit_packed_serde(w: *Writer, comptime T: type) void {
+        const name = type_leaf_name(T);
+        const fields = @typeInfo(T).@"struct".fields;
+
+        // Read function
+        w.raw("function read");
+        w.raw(name);
+        w.raw("(dv: DataView, offset: number): ");
+        w.raw(name);
+        w.raw(" {\n  const byte = dv.getUint8(offset);\n  return {\n");
+        for (fields) |field| {
+            if (std.mem.eql(u8, field.name, "padding")) continue;
+            if (field.type != bool) continue;
+            w.raw("    ");
+            w.raw(field.name);
+            w.raw(": (byte & ");
+            w.int(@as(u8, 1) << @bitOffsetOf(T, field.name));
+            w.raw(") !== 0,\n");
+        }
+        w.raw("  };\n}\n\n");
+
+        // Write function
+        w.raw("function write");
+        w.raw(name);
+        w.raw("(dv: DataView, offset: number, val: ");
+        w.raw(name);
+        w.raw("): void {\n  dv.setUint8(offset, ");
+        var first = true;
+        for (fields) |field| {
+            if (std.mem.eql(u8, field.name, "padding")) continue;
+            if (field.type != bool) continue;
+            if (!first) w.raw(" | ");
+            first = false;
+            w.raw("(val.");
+            w.raw(field.name);
+            w.raw(" ? ");
+            w.int(@as(u8, 1) << @bitOffsetOf(T, field.name));
+            w.raw(" : 0)");
+        }
+        w.raw(");\n}\n\n");
+    }
+
+    fn emit_extern_serde(w: *Writer, comptime T: type) void {
+        const name = type_leaf_name(T);
+        const fields = @typeInfo(T).@"struct".fields;
+
+        // --- Read function ---
+        w.raw("export function read");
+        w.raw(name);
+        w.raw("(data: Uint8Array, offset: number): ");
+        w.raw(name);
+        w.raw(" {\n");
+        w.raw("  const dv = new DataView(data.buffer, data.byteOffset, data.byteLength);\n");
+        w.raw("  return {\n");
+        for (fields) |field| {
+            if (should_skip(T, field.name)) continue;
+            w.emit_serde_read_field(T, field);
+        }
+        w.raw("  };\n}\n\n");
+
+        // --- Write function ---
+        // No bulk zero-fill — each byte is written exactly once.
+        // Reserved/padding regions are zeroed explicitly. _len companions
+        // are set by their parent field's write. Visible fields are written
+        // by emit_serde_write_field.
+        w.raw("export function write");
+        w.raw(name);
+        w.raw("(data: Uint8Array, offset: number, val: ");
+        w.raw(name);
+        w.raw("): void {\n");
+        w.raw("  const dv = new DataView(data.buffer, data.byteOffset, data.byteLength);\n");
+        for (fields) |field| {
+            if (should_skip(T, field.name)) {
+                // Zero the skipped region (reserved, _len, padding).
+                // _len fields are overwritten by their parent's write below,
+                // but zeroing first is harmless and handles the default case.
+                w.raw("  data.fill(0, offset + ");
+                w.int(@offsetOf(T, field.name));
+                w.raw(", offset + ");
+                w.int(@offsetOf(T, field.name) + @sizeOf(field.type));
+                w.raw(");\n");
+                continue;
+            }
+            w.emit_serde_write_field(T, field);
+        }
+        w.raw("}\n\n");
+    }
+
+    // --- Serde field read (expression inside object literal) ---
+
+    fn emit_serde_read_field(w: *Writer, comptime T: type, comptime field: std.builtin.Type.StructField) void {
+        w.raw("    ");
+        w.raw(field.name);
+        w.raw(": ");
+
+        if (is_array_type(field.type)) {
+            const arr = @typeInfo(field.type).array;
+            if (arr.child != u8) {
+                // [N]T array → Array.from(...)
+                const li = get_len_info(T, field.name);
+                w.raw("Array.from({ length: ");
+                w.emit_dv_read(li);
+                w.raw(" }, (_, i) =>\n      read");
+                w.raw(type_leaf_name(arr.child));
+                w.raw("(data, offset + ");
+                w.int(@offsetOf(T, field.name));
+                w.raw(" + i * ");
+                w.int(@sizeOf(arr.child));
+                w.raw("))");
+            } else if (has_len_companion(T, field.name)) {
+                // [N]u8 with _len → string
+                const li = get_len_info(T, field.name);
+                w.raw("_decoder.decode(data.subarray(offset + ");
+                w.int(@offsetOf(T, field.name));
+                w.raw(", offset + ");
+                w.int(@offsetOf(T, field.name));
+                w.raw(" + ");
+                w.emit_dv_read(li);
+                w.raw("))");
+            } else {
+                // [N]u8 without _len → Uint8Array copy
+                w.raw("data.slice(offset + ");
+                w.int(@offsetOf(T, field.name));
+                w.raw(", offset + ");
+                w.int(@offsetOf(T, field.name) + arr.len);
+                w.raw(")");
+            }
+        } else {
+            w.emit_scalar_read(T, field);
+        }
+
+        w.raw(",\n");
+    }
+
+    fn emit_scalar_read(w: *Writer, comptime T: type, comptime field: std.builtin.Type.StructField) void {
+        const ft = @typeInfo(field.type);
+        switch (ft) {
+            .int => |i| {
+                if (i.bits == 128) {
+                    w.raw("readU128(dv, offset + ");
+                    w.int(@offsetOf(T, field.name));
+                    w.raw(")");
+                } else if (i.bits == 64) {
+                    w.raw("Number(dv.getBig");
+                    if (i.signedness == .signed) w.raw("Int64(offset + ") else w.raw("Uint64(offset + ");
+                    w.int(@offsetOf(T, field.name));
+                    w.raw(", true))");
+                } else if (i.bits == 32) {
+                    w.raw("dv.getUint32(offset + ");
+                    w.int(@offsetOf(T, field.name));
+                    w.raw(", true)");
+                } else if (i.bits == 16) {
+                    w.raw("dv.getUint16(offset + ");
+                    w.int(@offsetOf(T, field.name));
+                    w.raw(", true)");
+                } else {
+                    w.raw("dv.getUint8(offset + ");
+                    w.int(@offsetOf(T, field.name));
+                    w.raw(")");
+                }
+            },
+            .@"enum" => {
+                w.raw("readEnum<");
+                w.raw(type_leaf_name(field.type));
+                w.raw(">(dv, offset + ");
+                w.int(@offsetOf(T, field.name));
+                w.raw(", ");
+                w.raw(type_leaf_name(field.type));
+                w.raw("Values)");
+            },
+            .@"struct" => {
+                // Packed flags
+                w.raw("read");
+                w.raw(type_leaf_name(field.type));
+                w.raw("(dv, offset + ");
+                w.int(@offsetOf(T, field.name));
+                w.raw(")");
+            },
+            .bool => {
+                w.raw("dv.getUint8(offset + ");
+                w.int(@offsetOf(T, field.name));
+                w.raw(") !== 0");
+            },
+            else => @compileError("unhandled serde read type: " ++ @typeName(field.type)),
+        }
+    }
+
+    // --- Serde field write (statements) ---
+
+    fn emit_serde_write_field(w: *Writer, comptime T: type, comptime field: std.builtin.Type.StructField) void {
+        if (is_array_type(field.type)) {
+            const arr = @typeInfo(field.type).array;
+            if (arr.child != u8) {
+                // [N]T array — validate, loop, write length
+                const li = get_len_info(T, field.name);
+                const len_max = (@as(u64, 1) << li.bits) - 1;
+                const arr_max = @min(arr.len, len_max);
+                // Zero the full array region, then write populated items.
+                w.raw("  data.fill(0, offset + ");
+                w.int(@offsetOf(T, field.name));
+                w.raw(", offset + ");
+                w.int(@offsetOf(T, field.name) + arr.len * @sizeOf(arr.child));
+                w.raw(");\n");
+                w.raw("  if (val.");
+                w.raw(field.name);
+                w.raw(".length > ");
+                w.int(arr_max);
+                w.raw(") throw new Error('");
+                w.raw(field.name);
+                w.raw(" too long: ' + val.");
+                w.raw(field.name);
+                w.raw(".length);\n");
+                w.raw("  for (let i = 0; i < val.");
+                w.raw(field.name);
+                w.raw(".length; i++) write");
+                w.raw(type_leaf_name(arr.child));
+                w.raw("(data, offset + ");
+                w.int(@offsetOf(T, field.name));
+                w.raw(" + i * ");
+                w.int(@sizeOf(arr.child));
+                w.raw(", val.");
+                w.raw(field.name);
+                w.raw("[i]);\n");
+                // Write length
+                w.raw("  ");
+                w.emit_dv_write_start(li);
+                w.raw("val.");
+                w.raw(field.name);
+                w.raw(".length");
+                w.emit_dv_write_end(li);
+                w.raw(";\n");
+            } else if (has_len_companion(T, field.name)) {
+                // [N]u8 with _len → string, with length validation
+                const li = get_len_info(T, field.name);
+                const len_max = (@as(u64, 1) << li.bits) - 1;
+                // Zero the full buffer, encode string, validate + write length.
+                w.raw("  data.fill(0, offset + ");
+                w.int(@offsetOf(T, field.name));
+                w.raw(", offset + ");
+                w.int(@offsetOf(T, field.name) + arr.len);
+                w.raw(");\n");
+                w.raw("  { const _n = _encoder.encodeInto(val.");
+                w.raw(field.name);
+                w.raw(", data.subarray(offset + ");
+                w.int(@offsetOf(T, field.name));
+                w.raw(", offset + ");
+                w.int(@offsetOf(T, field.name) + arr.len);
+                w.raw(")).written; ");
+                w.raw("if (_n > ");
+                w.int(len_max);
+                w.raw(") throw new Error('");
+                w.raw(field.name);
+                w.raw(" too long: ' + _n); ");
+                w.emit_dv_write_start(li);
+                w.raw("_n");
+                w.emit_dv_write_end(li);
+                w.raw("; }\n");
+            } else {
+                // [N]u8 without _len → Uint8Array
+                w.raw("  data.set(val.");
+                w.raw(field.name);
+                w.raw(".subarray(0, ");
+                w.int(arr.len);
+                w.raw("), offset + ");
+                w.int(@offsetOf(T, field.name));
+                w.raw(");\n");
+            }
+        } else {
+            w.emit_scalar_write(T, field);
+        }
+    }
+
+    fn emit_scalar_write(w: *Writer, comptime T: type, comptime field: std.builtin.Type.StructField) void {
+        const ft = @typeInfo(field.type);
+        switch (ft) {
+            .int => |i| {
+                if (i.bits == 128) {
+                    w.raw("  writeU128(dv, offset + ");
+                    w.int(@offsetOf(T, field.name));
+                    w.raw(", val.");
+                    w.raw(field.name);
+                    w.raw(");\n");
+                } else if (i.bits == 64) {
+                    w.raw("  dv.setBig");
+                    if (i.signedness == .signed) w.raw("Int64(offset + ") else w.raw("Uint64(offset + ");
+                    w.int(@offsetOf(T, field.name));
+                    w.raw(", BigInt(val.");
+                    w.raw(field.name);
+                    w.raw("), true);\n");
+                } else if (i.bits == 32) {
+                    w.raw("  dv.setUint32(offset + ");
+                    w.int(@offsetOf(T, field.name));
+                    w.raw(", val.");
+                    w.raw(field.name);
+                    w.raw(", true);\n");
+                } else if (i.bits == 16) {
+                    w.raw("  dv.setUint16(offset + ");
+                    w.int(@offsetOf(T, field.name));
+                    w.raw(", val.");
+                    w.raw(field.name);
+                    w.raw(", true);\n");
+                } else {
+                    w.raw("  dv.setUint8(offset + ");
+                    w.int(@offsetOf(T, field.name));
+                    w.raw(", val.");
+                    w.raw(field.name);
+                    w.raw(");\n");
+                }
+            },
+            .@"enum" => {
+                w.raw("  writeEnum(dv, offset + ");
+                w.int(@offsetOf(T, field.name));
+                w.raw(", ");
+                w.raw(type_leaf_name(field.type));
+                w.raw("Values, val.");
+                w.raw(field.name);
+                w.raw(");\n");
+            },
+            .@"struct" => {
+                // Packed flags
+                w.raw("  write");
+                w.raw(type_leaf_name(field.type));
+                w.raw("(dv, offset + ");
+                w.int(@offsetOf(T, field.name));
+                w.raw(", val.");
+                w.raw(field.name);
+                w.raw(");\n");
+            },
+            .bool => {
+                w.raw("  dv.setUint8(offset + ");
+                w.int(@offsetOf(T, field.name));
+                w.raw(", val.");
+                w.raw(field.name);
+                w.raw(" ? 1 : 0);\n");
+            },
+            else => @compileError("unhandled serde write type: " ++ @typeName(field.type)),
+        }
+    }
+
+    // --- DataView read/write for _len companion fields ---
+
+    fn emit_dv_read(w: *Writer, comptime li: LenInfo) void {
+        switch (li.bits) {
+            8 => {
+                w.raw("dv.getUint8(offset + ");
+                w.int(li.offset);
+                w.raw(")");
+            },
+            16 => {
+                w.raw("dv.getUint16(offset + ");
+                w.int(li.offset);
+                w.raw(", true)");
+            },
+            32 => {
+                w.raw("dv.getUint32(offset + ");
+                w.int(li.offset);
+                w.raw(", true)");
+            },
+            else => unreachable,
+        }
+    }
+
+    fn emit_dv_write_start(w: *Writer, comptime li: LenInfo) void {
+        switch (li.bits) {
+            8 => {
+                w.raw("dv.setUint8(offset + ");
+                w.int(li.offset);
+                w.raw(", ");
+            },
+            16 => {
+                w.raw("dv.setUint16(offset + ");
+                w.int(li.offset);
+                w.raw(", ");
+            },
+            32 => {
+                w.raw("dv.setUint32(offset + ");
+                w.int(li.offset);
+                w.raw(", ");
+            },
+            else => unreachable,
+        }
+    }
+
+    fn emit_dv_write_end(w: *Writer, comptime li: LenInfo) void {
+        switch (li.bits) {
+            8 => w.raw(")"),
+            16, 32 => w.raw(", true)"),
+            else => unreachable,
+        }
+    }
 };
 
 // ---------------------------------------------------------------------------
@@ -487,6 +926,35 @@ fn has_len_companion(comptime StructT: type, comptime field_name: []const u8) bo
         return true;
     }
     return false;
+}
+
+/// Offset and bit-width of a _len companion field, used by serde emitters
+/// to generate the correct DataView read/write call.
+const LenInfo = struct {
+    offset: usize,
+    bits: u16,
+};
+
+/// Returns the offset and type of the _len companion for a given field.
+/// Caller must have verified has_len_companion() returns true.
+fn get_len_info(comptime StructT: type, comptime field_name: []const u8) LenInfo {
+    for (@typeInfo(StructT).@"struct".fields) |f| {
+        if (f.name.len == field_name.len + 4 and
+            std.mem.eql(u8, f.name[0..field_name.len], field_name) and
+            std.mem.eql(u8, f.name[field_name.len..], "_len"))
+        {
+            return .{ .offset = @offsetOf(StructT, f.name), .bits = @typeInfo(f.type).int.bits };
+        }
+    }
+    // items + len pattern
+    if (std.mem.eql(u8, field_name, "items")) {
+        for (@typeInfo(StructT).@"struct".fields) |f| {
+            if (std.mem.eql(u8, f.name, "len")) {
+                return .{ .offset = @offsetOf(StructT, f.name), .bits = @typeInfo(f.type).int.bits };
+            }
+        }
+    }
+    unreachable;
 }
 
 /// Returns true if the named field in StructT is an array type.
@@ -749,9 +1217,11 @@ test "output is valid structure" {
         var interfaces: usize = 0;
         var types: usize = 0;
         var consts: usize = 0;
+        var functions: usize = 0;
         var i: usize = 0;
         while (i + 16 < output.len) : (i += 1) {
             if (std.mem.eql(u8, output[i..][0..16], "export interface")) interfaces += 1;
+            if (std.mem.eql(u8, output[i..][0..16], "export function ")) functions += 1;
             if (i + 11 <= output.len and std.mem.eql(u8, output[i..][0..11], "export type")) types += 1;
             if (i + 12 <= output.len and std.mem.eql(u8, output[i..][0..12], "export const")) consts += 1;
         }
@@ -761,5 +1231,7 @@ test "output is valid structure" {
         assert(types == 11);
         // 14 constants + 9 Values consts = 23 consts
         assert(consts == 23);
+        // 14 extern structs × 2 (read + write) = 28 serde functions
+        assert(functions == 28);
     }
 }
