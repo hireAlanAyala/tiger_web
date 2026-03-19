@@ -139,18 +139,16 @@ fn map_method(method: http.Method) protocol.Method {
 
 test "translate round trip via socketpair" {
     const pair = test_socketpair();
-    defer std.posix.close(pair[0]);
+    // Client owns pair[0] — close via client.close(), not defer.
 
-    // Spawn mock sidecar on pair[1].
     const thread = try std.Thread.spawn(.{}, mock_translate_echo, .{pair[1]});
 
-    // Client on pair[0].
     var client = SidecarClient{ .path = "/unused", .fd = pair[0] };
     const result = client.translate(.get, "/products/abc123", "");
 
     thread.join();
+    client.close();
 
-    // Verify the sidecar returned a mapped route.
     try std.testing.expect(result != null);
     try std.testing.expectEqual(result.?.operation, .get_product);
     try std.testing.expectEqual(result.?.id, 0xaabbccdd11223344aabbccdd11223344);
@@ -158,7 +156,6 @@ test "translate round trip via socketpair" {
 
 test "translate returns null for unmapped" {
     const pair = test_socketpair();
-    defer std.posix.close(pair[0]);
 
     const thread = try std.Thread.spawn(.{}, mock_translate_not_found, .{pair[1]});
 
@@ -166,23 +163,22 @@ test "translate returns null for unmapped" {
     const result = client.translate(.get, "/nonexistent", "");
 
     thread.join();
+    client.close();
 
     try std.testing.expect(result == null);
 }
 
 test "translate returns null on disconnect" {
     const pair = test_socketpair();
-    // Don't defer-close pair[0] — the client takes ownership and
-    // closes it on disconnect. Double-close would panic (EBADF).
+    // Client owns pair[0] — handle_disconnect closes it on failure.
 
-    // Close the sidecar end immediately — simulates crash.
     std.posix.close(pair[1]);
 
     var client = SidecarClient{ .path = "/unused", .fd = pair[0] };
     const result = client.translate(.get, "/products", "");
 
     try std.testing.expect(result == null);
-    try std.testing.expectEqual(client.fd, -1); // auto-disconnected
+    try std.testing.expectEqual(client.fd, -1);
 }
 
 // --- Mock sidecar threads ---
@@ -190,15 +186,17 @@ test "translate returns null on disconnect" {
 fn mock_translate_echo(fd: std.posix.fd_t) void {
     defer std.posix.close(fd);
 
-    // Read the translate request.
     var req_bytes: [@sizeOf(protocol.TranslateRequest)]u8 = undefined;
     recv_test(fd, &req_bytes);
 
     const req: *const protocol.TranslateRequest = @ptrCast(@alignCast(&req_bytes));
+    // Assert the full request — tag, method, path, body.
     assert(req.tag == .translate);
     assert(req.method == .get);
+    assert(req.path_len == 16);
+    assert(std.mem.eql(u8, req.path[0..req.path_len], "/products/abc123"));
+    assert(req.body_len == 0);
 
-    // Send a "found" response.
     var resp = std.mem.zeroes(protocol.TranslateResponse);
     resp.found = 1;
     resp.operation = .get_product;
@@ -211,6 +209,13 @@ fn mock_translate_not_found(fd: std.posix.fd_t) void {
 
     var req_bytes: [@sizeOf(protocol.TranslateRequest)]u8 = undefined;
     recv_test(fd, &req_bytes);
+
+    const req: *const protocol.TranslateRequest = @ptrCast(@alignCast(&req_bytes));
+    assert(req.tag == .translate);
+    assert(req.method == .get);
+    assert(req.path_len == 12);
+    assert(std.mem.eql(u8, req.path[0..req.path_len], "/nonexistent"));
+    assert(req.body_len == 0);
 
     var resp = std.mem.zeroes(protocol.TranslateResponse);
     resp.found = 0;
