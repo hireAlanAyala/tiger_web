@@ -9,6 +9,8 @@ const std = @import("std");
 const assert = std.debug.assert;
 const message = @import("message.zig");
 const protocol = @import("protocol.zig");
+const state_machine = @import("state_machine.zig");
+const SM = state_machine.StateMachineType(state_machine.MemoryStorage);
 const http = @import("tiger_framework").http;
 
 const log = std.log.scoped(.sidecar);
@@ -101,6 +103,51 @@ pub const SidecarClient = struct {
         return msg;
     }
 
+    /// Execute + render via the sidecar. Sends the prefetch cache and
+    /// receives status, writes, and HTML into `resp_buf`. Returns false
+    /// on socket error. The caller provides the response buffer because
+    /// ExecuteRenderResponse is ~200KB — too large for the stack.
+    pub fn execute_render(
+        self: *SidecarClient,
+        operation: message.Operation,
+        id: u128,
+        body: *const [message.body_max]u8,
+        cache: *const protocol.PrefetchCache,
+        is_sse: bool,
+        resp_buf: *protocol.ExecuteRenderResponse,
+    ) bool {
+        if (self.fd == -1) return false;
+
+        var req = std.mem.zeroes(protocol.ExecuteRenderRequest);
+        req.tag = .execute_render;
+        req.operation = operation;
+        req.id = id;
+        req.is_sse = @intFromBool(is_sse);
+        @memcpy(&req.body, body);
+        req.cache = cache.*;
+
+        if (!self.send_all(std.mem.asBytes(&req))) {
+            self.handle_disconnect();
+            return false;
+        }
+
+        if (!self.recv_all(std.mem.asBytes(resp_buf))) {
+            self.handle_disconnect();
+            return false;
+        }
+
+        // Validate response fields at the boundary.
+        _ = std.meta.intToEnum(message.Status, @intFromEnum(resp_buf.status)) catch {
+            log.warn("invalid status in execute_render response: {d}", .{@intFromEnum(resp_buf.status)});
+            self.handle_disconnect();
+            return false;
+        };
+        assert(resp_buf.writes_len <= SM.writes_max);
+        assert(resp_buf.html_len <= protocol.html_max);
+
+        return true;
+    }
+
     // --- IO helpers ---
 
     fn send_all(self: *SidecarClient, bytes: []const u8) bool {
@@ -190,6 +237,37 @@ test "translate returns null on disconnect" {
     try std.testing.expectEqual(client.fd, -1);
 }
 
+test "execute_render round trip via socketpair" {
+    const pair = test_socketpair();
+
+    const thread = try std.Thread.spawn(.{}, mock_execute_render, .{pair[1]});
+
+    var client = SidecarClient{ .path = "/unused", .fd = pair[0] };
+    var cache = std.mem.zeroes(protocol.PrefetchCache);
+    cache.has_product = 1;
+    cache.product = std.mem.zeroes(message.Product);
+    cache.product.id = 0xaabbccdd11223344aabbccdd11223344;
+
+    var body = std.mem.zeroes([message.body_max]u8);
+
+    // Heap-allocate — ExecuteRenderResponse is ~200KB, too large for the stack.
+    const resp_buf = try std.testing.allocator.create(protocol.ExecuteRenderResponse);
+    defer std.testing.allocator.destroy(resp_buf);
+
+    const ok = client.execute_render(.get_product, cache.product.id, &body, &cache, false, resp_buf);
+
+    thread.join();
+    client.close();
+
+    try std.testing.expect(ok);
+    try std.testing.expectEqual(resp_buf.status, .ok);
+    try std.testing.expectEqual(resp_buf.writes_len, 0);
+    try std.testing.expect(resp_buf.html_len > 0);
+    try std.testing.expect(resp_buf.html_len <= protocol.html_max);
+    const html = resp_buf.html[0..resp_buf.html_len];
+    try std.testing.expect(std.mem.startsWith(u8, html, "<div"));
+}
+
 // --- Mock sidecar threads ---
 
 fn mock_translate_echo(fd: std.posix.fd_t) void {
@@ -229,6 +307,37 @@ fn mock_translate_not_found(fd: std.posix.fd_t) void {
     var resp = std.mem.zeroes(protocol.TranslateResponse);
     resp.found = 0;
     send_test(fd, std.mem.asBytes(&resp));
+}
+
+fn mock_execute_render(fd: std.posix.fd_t) void {
+    defer std.posix.close(fd);
+
+    // Heap-allocate — request (~66KB) and response (~200KB) are too large for thread stack.
+    const req_bytes = std.testing.allocator.alignedAlloc(
+        u8,
+        @alignOf(protocol.ExecuteRenderRequest),
+        @sizeOf(protocol.ExecuteRenderRequest),
+    ) catch unreachable;
+    defer std.testing.allocator.free(req_bytes);
+    recv_test(fd, req_bytes);
+
+    const req: *const protocol.ExecuteRenderRequest = @ptrCast(@alignCast(req_bytes.ptr));
+    assert(req.tag == .execute_render);
+    assert(req.operation == .get_product);
+    assert(req.is_sse == 0);
+    assert(req.cache.has_product == 1);
+    assert(req.cache.product.id == 0xaabbccdd11223344aabbccdd11223344);
+
+    const resp = std.testing.allocator.create(protocol.ExecuteRenderResponse) catch unreachable;
+    defer std.testing.allocator.destroy(resp);
+    resp.* = std.mem.zeroes(protocol.ExecuteRenderResponse);
+    resp.status = .ok;
+    resp.writes_len = 0;
+    const html = "<div>Product Detail</div>";
+    @memcpy(resp.html[0..html.len], html);
+    resp.html_len = html.len;
+
+    send_test(fd, std.mem.asBytes(resp));
 }
 
 fn test_socketpair() [2]std.posix.fd_t {
