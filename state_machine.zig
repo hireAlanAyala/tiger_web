@@ -1026,7 +1026,14 @@ pub fn StateMachineType(comptime Storage: type) type {
             self.prefetch_identity = null;
         }
 
-        pub fn reset_prefetch(self: *StateMachine) void {
+        /// Reset prefetch state without executing. Called by the sidecar
+        /// path when execute happens externally — the SM's cache must still
+        /// be cleaned up for the next request.
+        pub fn skip_commit(self: *StateMachine) void {
+            self.reset_prefetch();
+        }
+
+        fn reset_prefetch(self: *StateMachine) void {
             self.reset_prefetch_cache();
             self.prefetch_result = null;
         }

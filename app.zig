@@ -165,13 +165,8 @@ pub fn extract_cache(comptime Storage: type, sm: *const state_machine.StateMachi
 /// commit does not run. No fallback — if the sidecar fails, the request
 /// fails. Mixing paths would break determinism (design/013: "no fallback").
 ///
-/// Spot-check runs the native commit for comparison, but uses the sidecar
-/// result for the response. The native writes go to storage (the authority),
-/// but eventually the sidecar's writes will be applied instead.
-///
-/// TODO: apply sidecar writes to storage instead of running native commit.
-/// Current state: native commit runs for correctness, sidecar provides HTML.
-/// Target state: sidecar provides writes + HTML, framework applies writes.
+/// Spot-check on execute status is done by the simulator in the test
+/// environment, not on every production request.
 
 // Response buffer — module-level because ~200KB is too large for the stack
 // and App is a namespace (no instance). Single-threaded, no concurrency.
@@ -212,8 +207,8 @@ pub fn commit_and_encode(
             };
         }
 
-        // Reset prefetch cache (normally done by commit, which we skipped).
-        sm.reset_prefetch();
+        // Clean up prefetch state (normally done by commit, which we skipped).
+        sm.skip_commit();
 
         // Use sidecar HTML — copy into send_buf.
         const html_len = sidecar_resp_buf.html_len;
@@ -246,6 +241,13 @@ pub const CommitResult = struct {
 /// Apply writes from the sidecar response to storage.
 /// Each WriteSlot is deserialized by tag and applied via the storage interface.
 /// Returns false if any write has an invalid tag (sidecar bug).
+///
+/// The @ptrCast(@alignCast(&slot.data)) reinterprets raw bytes as typed structs.
+/// This is safe because: all payload types are extern with no_padding, the sidecar
+/// serialized them via the generated serde (same @offsetOf), and WriteSlot.data
+/// starts at offset 16 (aligned to 16 bytes by the tag + reserved_tag padding).
+/// The @alignCast is a runtime check in Debug and ReleaseSafe — catches misaligned
+/// data from a buggy sidecar.
 pub fn apply_sidecar_writes(
     comptime Storage: type,
     sm: *state_machine.StateMachineType(Storage),
