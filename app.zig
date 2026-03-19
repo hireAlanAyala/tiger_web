@@ -160,8 +160,22 @@ pub fn extract_cache(comptime Storage: type, sm: *const state_machine.StateMachi
 /// Execute and encode: unified commit + render that chooses between
 /// Zig-native and sidecar paths. Returns everything the server needs
 /// to complete the response.
-/// Sidecar response buffer — allocated once (module-level), reused per request.
-/// ~200KB, too large for the stack. Single-threaded server, no concurrency.
+///
+/// When the sidecar is active, it is the ONLY execution path. The native
+/// commit does not run. No fallback — if the sidecar fails, the request
+/// fails. Mixing paths would break determinism (design/013: "no fallback").
+///
+/// Spot-check runs the native commit for comparison, but uses the sidecar
+/// result for the response. The native writes go to storage (the authority),
+/// but eventually the sidecar's writes will be applied instead.
+///
+/// TODO: apply sidecar writes to storage instead of running native commit.
+/// Current state: native commit runs for correctness, sidecar provides HTML.
+/// Target state: sidecar provides writes + HTML, framework applies writes.
+
+// Response buffer — module-level because ~200KB is too large for the stack
+// and App is a namespace (no instance). Single-threaded, no concurrency.
+// TODO: move to an App instance when App becomes a struct.
 var sidecar_resp_buf: protocol.ExecuteRenderResponse = undefined;
 
 pub fn commit_and_encode(
@@ -176,36 +190,37 @@ pub fn commit_and_encode(
         // Extract cache before commit (commit resets it).
         const cache = extract_cache(Storage, sm);
 
-        // Still run native commit — needed for WAL, followup, and spot-check.
+        // Native commit runs for storage correctness and spot-check.
+        // TODO: replace with sidecar write application when wired up.
         const native_resp = sm.commit(msg);
 
         // Call sidecar for execute + render.
-        if (client.execute_render(msg.operation, msg.id, &msg.body, &cache, is_datastar_request, &sidecar_resp_buf)) {
-            // Spot-check: compare status.
-            if (sidecar_resp_buf.status != native_resp.status) {
-                spot_check_fail("spot-check divergence: execute status sidecar={s} native={s}", .{
-                    @tagName(sidecar_resp_buf.status), @tagName(native_resp.status),
-                });
-            }
-
-            // Use sidecar HTML — copy into send_buf.
-            const html_len = sidecar_resp_buf.html_len;
-            assert(html_len <= send_buf.len);
-            @memcpy(send_buf[0..html_len], sidecar_resp_buf.html[0..html_len]);
-
+        if (!client.execute_render(msg.operation, msg.id, &msg.body, &cache, is_datastar_request, &sidecar_resp_buf)) {
+            // No fallback. Sidecar failure → request fails.
+            log.mark.err("sidecar execute_render failed fd=-1", .{});
             return .{
-                .status = native_resp.status,
-                .followup = native_resp.followup,
-                .response = .{ .offset = 0, .len = html_len, .keep_alive = !is_datastar_request },
+                .status = .storage_error,
+                .followup = null,
+                .response = .{ .offset = 0, .len = 0, .keep_alive = false },
             };
         }
-        // Sidecar failed — fall back to native render.
-        log.warn("sidecar execute_render failed, falling back to native", .{});
-        const r = render.encode_response(send_buf, msg.operation, native_resp, is_datastar_request, secret_key);
+
+        // Spot-check: compare status.
+        if (sidecar_resp_buf.status != native_resp.status) {
+            spot_check_fail("spot-check divergence: execute status sidecar={s} native={s}", .{
+                @tagName(sidecar_resp_buf.status), @tagName(native_resp.status),
+            });
+        }
+
+        // Use sidecar HTML — copy into send_buf.
+        const html_len = sidecar_resp_buf.html_len;
+        assert(html_len <= send_buf.len);
+        @memcpy(send_buf[0..html_len], sidecar_resp_buf.html[0..html_len]);
+
         return .{
-            .status = native_resp.status,
+            .status = sidecar_resp_buf.status,
             .followup = native_resp.followup,
-            .response = r,
+            .response = .{ .offset = 0, .len = html_len, .keep_alive = !is_datastar_request },
         };
     }
 
