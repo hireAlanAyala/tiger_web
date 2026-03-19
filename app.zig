@@ -48,43 +48,70 @@ pub fn translate(method: http.Method, path: []const u8, body: []const u8) ?Messa
 }
 
 /// Compare sidecar and Zig-native translate results.
-/// Debug: panics on divergence — catches bugs during development.
-/// Release: logs and continues — divergence is a handler bug, not corruption.
+/// Messages use the developer's vocabulary — no "native", no "sidecar",
+/// no protocol jargon. The developer sees what their handler returned
+/// vs what was expected, and where to fix it.
 fn spot_check_translate(path: []const u8, sidecar_result: ?Message, native_result: ?Message) void {
     const sidecar_msg = sidecar_result orelse {
-        if (native_result != null) {
-            spot_check_fail("spot-check divergence: sidecar=null native={s} path={s}", .{
-                @tagName(native_result.?.operation), path,
-            });
+        if (native_result) |expected| {
+            spot_check_fail(
+                \\[spot-check] {s}
+                \\  your [route] handler returned: null (no match)
+                \\  expected:                      {s}
+                \\  hint: add a [route] .{s} handler that matches this path
+            , .{ path, @tagName(expected.operation), @tagName(expected.operation) });
         }
         return;
     };
     const native_msg = native_result orelse {
-        spot_check_fail("spot-check divergence: sidecar={s} native=null path={s}", .{
-            @tagName(sidecar_msg.operation), path,
-        });
+        spot_check_fail(
+            \\[spot-check] {s}
+            \\  your [route] handler returned: {s}
+            \\  expected:                      null (no match)
+            \\  hint: your [route] .{s} handler should return null for this path
+        , .{ path, @tagName(sidecar_msg.operation), @tagName(sidecar_msg.operation) });
         return;
     };
 
     if (sidecar_msg.operation != native_msg.operation) {
-        spot_check_fail("spot-check divergence: operation sidecar={s} native={s} path={s}", .{
-            @tagName(sidecar_msg.operation), @tagName(native_msg.operation), path,
-        });
+        spot_check_fail(
+            \\[spot-check] {s}
+            \\  your [route] handler returned: {s}
+            \\  expected:                      {s}
+            \\  hint: check which [route] handler matches this path
+        , .{ path, @tagName(sidecar_msg.operation), @tagName(native_msg.operation) });
         return;
     }
 
     if (sidecar_msg.id != native_msg.id) {
-        spot_check_fail("spot-check divergence: id mismatch for {s} path={s}", .{
-            @tagName(sidecar_msg.operation), path,
-        });
+        spot_check_fail(
+            \\[spot-check] {s}
+            \\  operation: {s}
+            \\  your handler returned a different id than expected
+            \\  hint: check the id extraction in your [route] .{s} handler
+        , .{ path, @tagName(sidecar_msg.operation), @tagName(sidecar_msg.operation) });
         return;
     }
 
     if (!std.mem.eql(u8, &sidecar_msg.body, &native_msg.body)) {
-        spot_check_fail("spot-check divergence: body mismatch for {s} path={s}", .{
-            @tagName(sidecar_msg.operation), path,
-        });
+        spot_check_fail(
+            \\[spot-check] {s}
+            \\  operation: {s}
+            \\  your handler returned different body data than expected
+            \\  hint: check the body construction in your [route] .{s} handler
+        , .{ path, @tagName(sidecar_msg.operation), @tagName(sidecar_msg.operation) });
     }
+}
+
+/// Compare execute status. Called from commit_and_encode when the sidecar is active.
+fn spot_check_execute(operation: message.Operation, sidecar_status: message.Status, native_status: message.Status) void {
+    if (sidecar_status == native_status) return;
+    spot_check_fail(
+        \\[spot-check] {s}
+        \\  your [handle] handler returned: {s}
+        \\  expected:                       {s}
+        \\  hint: check your [handle] .{s} function
+    , .{ @tagName(operation), @tagName(sidecar_status), @tagName(native_status), @tagName(operation) });
 }
 
 /// Debug: panic. Release: log and continue.
@@ -201,22 +228,16 @@ pub fn commit_and_encode(
             };
         }
 
-        // Spot-check: compare sidecar status against native.
-        if (sidecar_resp_buf.status != native_resp.status) {
-            spot_check_fail("spot-check divergence: execute status sidecar={s} native={s}", .{
-                @tagName(sidecar_resp_buf.status), @tagName(native_resp.status),
-            });
-        }
+        // Spot-check: compare status and writes.
+        spot_check_execute(msg.operation, sidecar_resp_buf.status, native_resp.status);
 
-        // Spot-check: compare sidecar writes against native.
-        // Deserialize sidecar writes and compare with apply_write.
         for (sidecar_resp_buf.writes[0..sidecar_resp_buf.writes_len]) |slot| {
-            if (deserialize_write(state_machine.StateMachineType(Storage), slot)) |_| {
-                // Write deserialized successfully — it would be applied
-                // if we were in write-authority mode. For now, native
-                // commit already applied the writes.
-            } else {
-                spot_check_fail("spot-check divergence: invalid sidecar write tag={d}", .{slot.tag});
+            if (deserialize_write(state_machine.StateMachineType(Storage), slot) == null) {
+                spot_check_fail(
+                    \\[spot-check] {s}
+                    \\  your [handle] handler returned an invalid write (tag={d})
+                    \\  hint: check the writes array in your [handle] .{s} function
+                , .{ @tagName(msg.operation), slot.tag, @tagName(msg.operation) });
             }
         }
 
