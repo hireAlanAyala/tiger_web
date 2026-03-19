@@ -177,26 +177,151 @@ const Writer = struct {
         }
     }
 
-    /// Emit a test vector: Zig struct → hex bytes → TS decode → re-encode → byte compare.
+    /// Emit a test vector pair:
+    /// 1. Zig→TS: Zig bytes → readX → writeX → byte compare (tests readX + writeX)
+    /// 2. TS→Zig: TS constructs object → writeX → byte compare against Zig bytes
+    ///    (tests writeX independently of readX)
     fn emit_test_vector(w: *Writer, comptime name: []const u8, comptime T: type, comptime val: T) void {
         const bytes: [@sizeOf(T)]u8 = @bitCast(val);
-        w.raw("{\n  const orig = hexToBytes('");
+
+        // Direction 1: Zig→TS→Zig (bytes → read → write → compare)
+        w.raw("{\n  const zigBytes = hexToBytes('");
         w.hex(&bytes);
         w.raw("');\n");
         w.raw("  const decoded = read");
         w.raw(name);
-        w.raw("(orig, 0);\n");
+        w.raw("(zigBytes, 0);\n");
         w.raw("  const reEncoded = new Uint8Array(");
         w.int(@sizeOf(T));
         w.raw(");\n");
         w.raw("  write");
         w.raw(name);
         w.raw("(reEncoded, 0, decoded);\n");
-        w.raw("  assertBytesEqual(orig, reEncoded, '");
+        w.raw("  assertBytesEqual(zigBytes, reEncoded, '");
         w.raw(name);
-        w.raw(" test vector');\n");
+        w.raw(" Zig→TS→Zig');\n");
         w.raw("  passed++;\n");
         w.raw("}\n\n");
+
+        // Direction 2: TS→Zig (construct object in TS → write → compare with Zig bytes)
+        w.raw("{\n  const zigBytes = hexToBytes('");
+        w.hex(&bytes);
+        w.raw("');\n");
+        w.raw("  const obj: ");
+        w.raw(name);
+        w.raw(" = ");
+        w.emit_literal(T, val);
+        w.raw(";\n");
+        w.raw("  const written = new Uint8Array(");
+        w.int(@sizeOf(T));
+        w.raw(");\n");
+        w.raw("  write");
+        w.raw(name);
+        w.raw("(written, 0, obj);\n");
+        w.raw("  assertBytesEqual(zigBytes, written, '");
+        w.raw(name);
+        w.raw(" TS→Zig');\n");
+        w.raw("  passed++;\n");
+        w.raw("}\n\n");
+    }
+
+    /// Emit a TS literal from a comptime Zig struct value.
+    fn emit_literal(w: *Writer, comptime T: type, comptime val: anytype) void {
+        const info = @typeInfo(T).@"struct";
+        w.raw("{\n");
+        for (info.fields) |field| {
+            if (should_skip(T, field.name)) continue;
+            w.raw("    ");
+            w.raw(field.name);
+            w.raw(": ");
+            w.emit_field_literal(T, field, val);
+            w.raw(",\n");
+        }
+        w.raw("  }");
+    }
+
+    /// Emit a TS literal for one field value.
+    fn emit_field_literal(w: *Writer, comptime StructT: type, comptime field: std.builtin.Type.StructField, comptime val: anytype) void {
+        if (is_array_type(field.type)) {
+            const arr = @typeInfo(field.type).array;
+            if (arr.child != u8) {
+                // [N]T array with _len — emit populated items
+                const items = @field(val, field.name);
+                const len = get_len_value(StructT, val, field.name);
+                w.raw("[");
+                for (0..len) |i| {
+                    if (i > 0) w.raw(", ");
+                    w.emit_literal(arr.child, items[i]);
+                }
+                w.raw("]");
+            } else if (has_len_companion(StructT, field.name)) {
+                // [N]u8 with _len → string literal
+                const buf = @field(val, field.name);
+                const len = get_len_value(StructT, val, field.name);
+                w.raw("'");
+                w.raw(buf[0..len]);
+                w.raw("'");
+            } else {
+                // [N]u8 without _len → Uint8Array literal
+                const buf = @field(val, field.name);
+                w.raw("new Uint8Array([");
+                for (buf, 0..) |b, i| {
+                    if (i > 0) w.raw(",");
+                    w.int(b);
+                }
+                w.raw("])");
+            }
+            return;
+        }
+        const ft = @typeInfo(field.type);
+        switch (ft) {
+            .int => |i| {
+                if (i.bits == 128) {
+                    w.raw("'");
+                    w.emit_u128_hex(@field(val, field.name));
+                    w.raw("'");
+                } else {
+                    w.int(@field(val, field.name));
+                }
+            },
+            .@"enum" => {
+                w.raw("'");
+                w.raw(@tagName(@field(val, field.name)));
+                w.raw("'");
+            },
+            .@"struct" => {
+                // Packed flags — emit boolean fields
+                const fv = @field(val, field.name);
+                w.raw("{ ");
+                var first = true;
+                for (@typeInfo(field.type).@"struct".fields) |ff| {
+                    if (std.mem.eql(u8, ff.name, "padding")) continue;
+                    if (ff.type != bool) continue;
+                    if (!first) w.raw(", ");
+                    first = false;
+                    w.raw(ff.name);
+                    w.raw(": ");
+                    w.raw(if (@field(fv, ff.name)) "true" else "false");
+                }
+                w.raw(" }");
+            },
+            .bool => w.raw(if (@field(val, field.name)) "true" else "false"),
+            else => @compileError("unhandled literal type: " ++ @typeName(field.type)),
+        }
+    }
+
+    /// Emit a u128 as a 32-char hex string.
+    fn emit_u128_hex(w: *Writer, comptime val: u128) void {
+        const hex_chars = "0123456789abcdef";
+        var v = val;
+        var digits: [32]u8 = undefined;
+        var i: usize = 32;
+        while (i > 0) {
+            i -= 1;
+            digits[i] = hex_chars[@intCast(v & 0xf)];
+            v >>= 4;
+        }
+        w.raw(&digits);
     }
 
     /// Emit a random round-trip test block for one struct type.
@@ -353,6 +478,22 @@ fn has_len_companion(comptime StructT: type, comptime field_name: []const u8) bo
         return true;
     }
     return false;
+}
+
+/// Returns the runtime value of the _len companion field for a given field.
+fn get_len_value(comptime StructT: type, comptime val: anytype, comptime field_name: []const u8) usize {
+    for (@typeInfo(StructT).@"struct".fields) |f| {
+        if (f.name.len == field_name.len + 4 and
+            std.mem.eql(u8, f.name[0..field_name.len], field_name) and
+            std.mem.eql(u8, f.name[field_name.len..], "_len"))
+        {
+            return @intCast(@field(val, f.name));
+        }
+    }
+    if (std.mem.eql(u8, field_name, "items")) {
+        return @intCast(@field(val, "len"));
+    }
+    unreachable;
 }
 
 fn should_skip(comptime StructT: type, comptime field_name: []const u8) bool {
