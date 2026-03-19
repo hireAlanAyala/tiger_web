@@ -1,0 +1,149 @@
+# Design 002: Always 200
+
+## Problem
+
+Tiger_web returned HTTP 4xx/5xx status codes for application errors:
+401 for auth failure, 404 for not found, 409 for conflicts, 410 for expired
+orders, 503 for storage errors. These status codes serve no one:
+
+- **Humans don't see them.** The browser renders the HTML body regardless of
+  status code. The user sees "Order Expired" because the HTML says so, not
+  because the status line says 410.
+
+- **Datastar throws on them.** Any non-2xx/3xx response triggers Datastar's
+  error handler, which prevents the HTML from being painted. A well-rendered
+  error page inside a 409 response is invisible to the user — Datastar
+  discards it and throws.
+
+- **No machine consumers exist.** There is no JSON API client parsing status
+  codes. The only consumers are browsers and Datastar, both of which need the
+  HTML body, not the status code.
+
+- **Two signals for one fact.** The status code and the HTML body both encode
+  the result. When they disagree (nice error page + 500 status), Datastar
+  follows the status code and the user sees nothing. Two signals for one fact
+  is a bug waiting to happen.
+
+The SSE path already proved this: follow-up responses are always HTTP 200, with
+errors delivered as `<div class="error">` fragments. The non-SSE path was the
+inconsistency.
+
+## Decision
+
+Every response is HTTP 200 OK. Always. The HTML body is the only error channel.
+
+`http.status_line()` returns `"HTTP/1.1 200 OK\r\n"` for all `message.Status`
+values. A comptime assertion in `http.zig` checks every `Status` variant
+produces 200, so adding a new variant cannot silently introduce a non-200 code.
+
+Auth failures render the dashboard page (which includes the token input) for
+non-SSE requests, or an SSE error fragment for Datastar. No 401, no
+`WWW-Authenticate` header.
+
+### What 200 means
+
+HTTP 200 means "I successfully produced a response for you." The response
+itself tells the human what happened — "Order Expired", "Not Found",
+"Unauthorized". This is the same semantics as a search engine returning
+"No results found" with a 200: the request was processed, here is the answer.
+
+### HOWL
+
+This follows the HOWL (Hypermedia On Whatever you Like) principle: when HTTP
+is your UI transport and humans are your consumers, status codes are
+transport-level metadata (did the server process the request?), not
+application-level metadata (was the business operation successful?). The
+application result lives in the HTML.
+
+Datastar's author articulates this as: "If you get a client error or server
+error when you control both sides then it's a bug." The 4xx/5xx codes exist
+for machines that need to discriminate error types programmatically. Humans
+read HTML.
+
+## Options considered
+
+**Keep 4xx/5xx for non-SSE, 200 for SSE.** Rejected — two error models for
+the same application. The SSE path already proved that 200 + HTML error
+fragments works. Extending the same model to all responses eliminates a
+category of bugs (Datastar discarding error pages).
+
+**Return 4xx/5xx and teach Datastar to handle them.** Rejected — fighting the
+framework. Datastar treats non-2xx as errors by design. Even if we forked it,
+the next version would break us.
+
+**200 for auth, keep 4xx for business errors.** Rejected — arbitrary boundary.
+If "Order Expired" is fine as 200 + HTML, so is "Not Found". Partial adoption
+creates a rule that's harder to remember than "always 200".
+
+## Simplifications
+
+Always-200 eliminated several concepts:
+
+- **`http.status_line()`** — deleted. The function accepted a `message.Status`
+  and returned the same string for every variant. The status line is now a
+  string literal at the two sites that produce HTTP headers (`backfill_headers`
+  and `encode_sse_headers` in `render.zig`). No function, no parameter, no
+  comptime assertion needed — the invariant is structural.
+
+- **`http.encode_401_response()`** — deleted. Auth failures now go through
+  `render.encode_response()` with `status: .unauthorized`, which renders the
+  full dashboard page (token input visible) for non-SSE, or an SSE error
+  fragment for Datastar. No separate `encode_unauthorized` function —
+  unauthorized is just another error status.
+
+- **`encode_error_body()` / `encode_error_body_end()`** — deleted. Non-SSE
+  errors used to render a bare `<h1>Service Unavailable</h1>` page — no
+  Datastar, no token input, no navigation, dead end. Now they render the full
+  dashboard page via `encode_dashboard_page()`, giving the user a recovery
+  path. This is the same response as auth failure and page_load_dashboard with
+  empty data.
+
+- **`backfill_headers` status parameter** — removed. The function wrote
+  `http.status_line(status)` which always returned `"HTTP/1.1 200 OK\r\n"`.
+  Now it writes the literal string directly.
+
+- **`message` import in `http.zig`** — removed. `http.zig` no longer
+  references `message.Status`. It's a pure parser again.
+
+## Invariant enforcement
+
+The always-200 invariant is structural — there is no function that maps
+application status to HTTP status code. The string `"HTTP/1.1 200 OK\r\n"`
+appears as a literal in exactly two places: `backfill_headers` (non-SSE) and
+`encode_sse_headers` (SSE). There is no mechanism to produce a non-200 response.
+
+Additionally enforced by tests:
+
+1. **Render fuzzer (`render_fuzz.zig`)**: every generated response — full page,
+   SSE fragment, follow-up, auth failure, error — asserts the output starts
+   with `"HTTP/1.1 200 OK\r\n"`. Non-SSE errors assert `<!DOCTYPE html>` and
+   `Content-Length`. SSE errors assert `<div class="error">` and valid framing.
+
+2. **Render unit tests**: `encode_response` (including `status: .unauthorized`)
+   and `encode_followup` tests all assert `"HTTP/1.1 200 OK\r\n"`.
+
+3. **Sim integration test**: `"auth failure -- 200 with login page, not 401"`
+   sends a request without a token and asserts the response is 200 with the
+   full dashboard page (token input visible).
+
+4. **Sim integration test**: `"storage err fault -- renders dashboard page"`
+   injects a storage error and asserts the response is 200 with the full
+   dashboard page.
+
+## What changed
+
+| File | Change |
+|---|---|
+| `http.zig` | Deleted `status_line()`, `encode_401_response()`, `message` import. Pure parser. |
+| `message.zig` | Added `Status.unauthorized`. Auth is just another error status. |
+| `render.zig` | Added `encode_dashboard_page()`, `empty_dashboard` constant. Deleted `encode_error_body()`, `encode_error_body_end()`, `encode_unauthorized()`. Non-SSE errors render dashboard. `backfill_headers` hardcodes 200. |
+| `server.zig` | Auth failure calls `render.encode_response()` with `.unauthorized` status. |
+| `render_fuzz.zig` | Auth failures go through `encode_response`. Asserts non-SSE errors render dashboard. |
+| `sim.zig` | Auth failure test. Error tests use Datastar for error-text assertions. |
+
+## Caching
+
+Status codes matter to caches, proxies, and CDNs — a cached 200 "not found"
+page is a cached error. Tiger_web has no caching layer, no CDN, no reverse
+proxy. Same-origin, single-process, `Cache-Control: no-cache` on every
+response. If a caching layer is added, this decision should be revisited.

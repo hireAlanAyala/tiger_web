@@ -7,16 +7,7 @@ zig/
 *.db-wal
 *.db-shm
 *.wal
-
-# Visualization build artifacts (regenerate with ./graph --json, ./graph_comptime, dot)
-graph
-graph.o
-worker.o
-graph_comptime
-graph_comptime.o
-graph.json
-types.json
-callgraph.svg
+*.o
 generated/
 node_modules/
 **/node_modules/
