@@ -808,6 +808,69 @@ pub const LoginCodeEntry = extern struct {
     }
 };
 
+/// Login code write payload — same layout as LoginCodeEntry without the
+/// occupied flag. Used by the Write union for put_login_code.
+pub const LoginCodeWrite = extern struct {
+    email: [email_max]u8,
+    code: [code_length]u8,
+    email_len: u8,
+    reserved: u8,
+    expires_at: i64,
+
+    comptime {
+        assert(stdx.no_padding(LoginCodeWrite));
+        assert(@sizeOf(LoginCodeWrite) == 144);
+    }
+};
+
+/// Login code key — identifies a login code by email for consumption.
+pub const LoginCodeKey = extern struct {
+    email: [email_max]u8,
+    email_len: u8,
+
+    comptime {
+        assert(stdx.no_padding(LoginCodeKey));
+        assert(@sizeOf(LoginCodeKey) == 129);
+    }
+};
+
+/// Membership write — add or check a product in a collection.
+pub const Membership = extern struct {
+    collection_id: u128,
+    product_id: u128,
+
+    comptime {
+        assert(stdx.no_padding(Membership));
+        assert(@sizeOf(Membership) == 32);
+    }
+};
+
+/// Membership update — add or remove a product from a collection.
+pub const MembershipUpdate = extern struct {
+    collection_id: u128,
+    product_id: u128,
+    removed: u8,
+    reserved: [15]u8,
+
+    comptime {
+        assert(stdx.no_padding(MembershipUpdate));
+        assert(@sizeOf(MembershipUpdate) == 48);
+    }
+};
+
+/// User write — create a user from login verification.
+pub const UserWrite = extern struct {
+    user_id: u128,
+    email: [email_max]u8,
+    email_len: u8,
+    reserved: [15]u8,
+
+    comptime {
+        assert(stdx.no_padding(UserWrite));
+        assert(@sizeOf(UserWrite) == 160);
+    }
+};
+
 /// Prefetch identity — auth context resolved during the prefetch phase.
 pub const PrefetchIdentity = extern struct {
     user_id: u128,

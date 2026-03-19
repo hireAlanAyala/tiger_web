@@ -24,32 +24,24 @@ pub fn StateMachineType(comptime Storage: type) type {
         const StateMachine = @This();
 
         /// Helper structs for Write variants.
-        pub const LoginCodeWrite = struct {
-            email: [message.email_max]u8,
-            email_len: u8,
-            code: [message.code_length]u8,
-            expires_at: i64,
-        };
-
-        pub const LoginCodeKey = struct {
-            email: [message.email_max]u8,
-            email_len: u8,
-        };
+        pub const LoginCodeWrite = message.LoginCodeWrite;
+        pub const LoginCodeKey = message.LoginCodeKey;
 
         /// Write command — describes a storage mutation returned by execute handlers.
         /// Execute is pure: it returns writes, the dispatch loop applies them.
+        /// All payload types are extern structs for sidecar wire serialization.
         pub const Write = union(enum) {
             put_product: message.Product,
             update_product: message.Product,
             put_collection: message.ProductCollection,
             update_collection: message.ProductCollection,
-            put_membership: struct { collection_id: u128, product_id: u128 },
-            update_membership: struct { collection_id: u128, product_id: u128, removed: bool },
+            put_membership: message.Membership,
+            update_membership: message.MembershipUpdate,
             put_order: message.OrderResult,
             update_order: message.OrderResult,
-            put_login_code: LoginCodeWrite,
-            consume_login_code: LoginCodeKey,
-            put_user: struct { user_id: u128, email: [message.email_max]u8, email_len: u8 },
+            put_login_code: message.LoginCodeWrite,
+            consume_login_code: message.LoginCodeKey,
+            put_user: message.UserWrite,
         };
 
         /// Maximum writes a single execute can produce.
@@ -482,7 +474,7 @@ pub fn StateMachineType(comptime Storage: type) type {
                 .update_collection => |col| assert(self.storage.update_collection(col.id, &col) == .ok),
                 .put_membership => |m| assert(self.storage.add_to_collection(m.collection_id, m.product_id) == .ok),
                 .update_membership => |m| {
-                    if (m.removed) {
+                    if (m.removed != 0) {
                         const r = self.storage.remove_from_collection(m.collection_id, m.product_id);
                         assert(r == .ok or r == .not_found);
                     } else {
@@ -695,7 +687,7 @@ pub fn StateMachineType(comptime Storage: type) type {
         fn execute_remove_member(_: *StateMachine, id: u128, product_id: u128, result: StorageResult) ExecuteResult {
             if (result == .not_found) return ExecuteResult.read_only(message.MessageResponse.not_found);
             assert(result == .ok);
-            return ExecuteResult.single(message.MessageResponse.empty_ok, .{ .update_membership = .{ .collection_id = id, .product_id = product_id, .removed = true } });
+            return ExecuteResult.single(message.MessageResponse.empty_ok, .{ .update_membership = .{ .collection_id = id, .product_id = product_id, .removed = 1, .reserved = .{0} ** 15 } });
         }
 
         /// Transfer inventory: two products in cache, cross-entity validation, two writes.
@@ -947,8 +939,9 @@ pub fn StateMachineType(comptime Storage: type) type {
                 },
                 .{ .put_login_code = .{
                     .email = event.email,
-                    .email_len = event.email_len,
                     .code = code,
+                    .email_len = event.email_len,
+                    .reserved = 0,
                     .expires_at = expires_at,
                 } },
             );
@@ -992,6 +985,7 @@ pub fn StateMachineType(comptime Storage: type) type {
                     .user_id = identity_user_id,
                     .email = event.email,
                     .email_len = event.email_len,
+                    .reserved = .{0} ** 15,
                 } };
                 exec_result.writes_len = 2;
                 break :blk identity_user_id;
