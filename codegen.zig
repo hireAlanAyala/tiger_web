@@ -1136,13 +1136,25 @@ fn get_presence_offset(comptime StructT: type, comptime field_name: []const u8) 
 }
 
 /// Returns true if field_name has a "{name}_presence" per-item presence array in StructT.
+/// Asserts the presence array length matches the data array length.
 fn has_array_presence_companion(comptime StructT: type, comptime field_name: []const u8) bool {
     for (@typeInfo(StructT).@"struct".fields) |f| {
         if (f.name.len == field_name.len + 9 and
             std.mem.eql(u8, f.name[0..field_name.len], field_name) and
             std.mem.eql(u8, f.name[field_name.len..], "_presence"))
         {
-            return true;
+            // Presence array must be [N]u8 where N matches the data array length.
+            assert(@typeInfo(f.type) == .array);
+            assert(@typeInfo(f.type).array.child == u8);
+            // Find the data field and verify array lengths match.
+            for (@typeInfo(StructT).@"struct".fields) |df| {
+                if (std.mem.eql(u8, df.name, field_name)) {
+                    assert(@typeInfo(df.type) == .array);
+                    assert(@typeInfo(f.type).array.len == @typeInfo(df.type).array.len);
+                    return true;
+                }
+            }
+            unreachable; // presence companion without data field
         }
     }
     return false;
@@ -1375,6 +1387,56 @@ test "has_len_companion detection" {
     comptime assert(!has_len_companion(message.Product, "flags"));
     comptime assert(!has_len_companion(message.Message, "body"));
     comptime assert(!has_len_companion(message.LoginVerification, "code"));
+}
+
+test "has_presence_companion detection" {
+    // Nullable fields with has_X companion.
+    comptime assert(has_presence_companion(protocol.PrefetchCache, "product"));
+    comptime assert(has_presence_companion(protocol.PrefetchCache, "collection"));
+    comptime assert(has_presence_companion(protocol.PrefetchCache, "order"));
+    comptime assert(has_presence_companion(protocol.PrefetchCache, "login_code"));
+    comptime assert(has_presence_companion(protocol.PrefetchCache, "user_by_email"));
+    comptime assert(has_presence_companion(protocol.PrefetchCache, "result"));
+    comptime assert(has_presence_companion(protocol.PrefetchCache, "identity"));
+
+    // Non-nullable fields — no has_X companion.
+    comptime assert(!has_presence_companion(protocol.PrefetchCache, "product_list"));
+    comptime assert(!has_presence_companion(protocol.PrefetchCache, "collection_list"));
+    comptime assert(!has_presence_companion(protocol.PrefetchCache, "order_list"));
+    comptime assert(!has_presence_companion(protocol.PrefetchCache, "products"));
+
+    // Non-cache types have no presence companions.
+    comptime assert(!has_presence_companion(message.Product, "id"));
+    comptime assert(!has_presence_companion(message.Product, "name"));
+}
+
+test "has_array_presence_companion detection" {
+    // products has products_presence companion.
+    comptime assert(has_array_presence_companion(protocol.PrefetchCache, "products"));
+
+    // Other arrays don't have presence companions.
+    comptime assert(!has_array_presence_companion(message.OrderRequest, "items"));
+    comptime assert(!has_array_presence_companion(message.Product, "name"));
+}
+
+test "should_skip presence companions" {
+    // has_X companions are skipped.
+    comptime assert(should_skip(protocol.PrefetchCache, "has_product"));
+    comptime assert(should_skip(protocol.PrefetchCache, "has_identity"));
+
+    // X_presence companions are skipped.
+    comptime assert(should_skip(protocol.PrefetchCache, "products_presence"));
+
+    // Reserved fields in protocol types are skipped.
+    comptime assert(should_skip(protocol.PrefetchCache, "reserved_flags"));
+    comptime assert(should_skip(protocol.PrefetchCache, "reserved_presence"));
+    comptime assert(should_skip(protocol.PrefetchCache, "reserved_data"));
+
+    // Data fields are not skipped.
+    comptime assert(!should_skip(protocol.PrefetchCache, "product"));
+    comptime assert(!should_skip(protocol.PrefetchCache, "product_list"));
+    comptime assert(!should_skip(protocol.PrefetchCache, "products"));
+    comptime assert(!should_skip(protocol.PrefetchCache, "identity"));
 }
 
 test "type_leaf_name extracts last segment" {

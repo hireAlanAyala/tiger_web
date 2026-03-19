@@ -32,6 +32,7 @@ const output = blk: {
         \\  readMessage, writeMessage,
         \\  readLoginCodeEntry, writeLoginCodeEntry,
         \\  readPrefetchIdentity, writePrefetchIdentity,
+        \\  readPrefetchCache, writePrefetchCache,
         \\  readTranslateRequest, writeTranslateRequest,
         \\  readTranslateResponse, writeTranslateResponse,
         \\  type Product, type ProductCollection, type InventoryTransfer,
@@ -40,6 +41,7 @@ const output = blk: {
         \\  type SearchQuery, type ListParams, type LoginCodeRequest,
         \\  type LoginVerification, type Message,
         \\  type LoginCodeEntry, type PrefetchIdentity,
+        \\  type PrefetchCache,
         \\  type TranslateRequest, type TranslateResponse,
         \\  type ProductFlags, type CollectionFlags,
         \\} from './types.generated.ts';
@@ -151,6 +153,50 @@ const output = blk: {
     w.emit_random_roundtrip("PrefetchIdentity", message.PrefetchIdentity);
     w.emit_random_roundtrip("TranslateRequest", protocol.TranslateRequest);
     w.emit_random_roundtrip("TranslateResponse", protocol.TranslateResponse);
+
+    // --- Null path tests ---
+    // Verify nullable fields round-trip through null correctly.
+    w.raw("// --- Null path tests ---\n\n");
+    w.raw(
+        \\{
+        \\  const cache: PrefetchCache = {
+        \\    product: null, collection: null, order: null,
+        \\    login_code: null, user_by_email: null, result: null, identity: null,
+        \\    product_list: { items: [], len: 0, reserved: new Uint8Array(12) },
+        \\    collection_list: { items: [], len: 0, reserved: new Uint8Array(12) },
+        \\    order_list: { items: [], len: 0, reserved: new Uint8Array(12) },
+        \\    products: Array.from({ length: 20 }, () => null),
+        \\  };
+        \\  const buf = new Uint8Array(
+    );
+    w.int(@sizeOf(protocol.PrefetchCache));
+    w.raw(
+        \\);
+        \\  writePrefetchCache(buf, 0, cache);
+        \\  const decoded = readPrefetchCache(buf, 0);
+        \\  if (decoded.product !== null) throw new Error('product should be null');
+        \\  if (decoded.collection !== null) throw new Error('collection should be null');
+        \\  if (decoded.order !== null) throw new Error('order should be null');
+        \\  if (decoded.login_code !== null) throw new Error('login_code should be null');
+        \\  if (decoded.user_by_email !== null) throw new Error('user_by_email should be null');
+        \\  if (decoded.result !== null) throw new Error('result should be null');
+        \\  if (decoded.identity !== null) throw new Error('identity should be null');
+        \\  for (let i = 0; i < 20; i++) {
+        \\    if (decoded.products[i] !== null) throw new Error('products[' + i + '] should be null');
+        \\  }
+        \\  // Round-trip: all-null → write → read → write → compare bytes
+        \\  const buf2 = new Uint8Array(
+    );
+    w.int(@sizeOf(protocol.PrefetchCache));
+    w.raw(
+        \\);
+        \\  writePrefetchCache(buf2, 0, decoded);
+        \\  assertBytesEqual(buf, buf2, 'PrefetchCache all-null round-trip');
+        \\  passed++;
+        \\}
+        \\
+        \\
+    );
 
     w.raw("console.log(`${passed} serde round-trip tests passed (seed: ${seed})`);\n");
 
