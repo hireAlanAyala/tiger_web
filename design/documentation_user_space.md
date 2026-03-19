@@ -47,13 +47,29 @@ each annotation lives. Errors print `file:line` paths that are
 clickable in every modern terminal and IDE:
 
 ```
-error: missing handler for operation 'delete_product'
-  hint: add to ts/products.ts:
-    // [execute] .delete_product
+error: missing handler for [execute] .delete_product
 
-error: duplicate handler for operation 'create_product'
-  --> ts/products.ts:14  // [execute] .create_product
-  --> ts/orders.ts:8     // [execute] .create_product
+error: duplicate handler for [execute] .create_product
+  --> ts/products.ts:14
+  --> ts/orders.ts:8
+
+error: ts/products.ts:42: unknown operation '.nonexistent'
+
+warning: ts/docs.ts:10: annotation followed by comment, skipping
+```
+
+The scanner also skips annotations where the next non-empty line
+is a comment — preventing false positives from documentation
+blocks and commented-out examples:
+
+```typescript
+// This annotation is in a doc block — scanner skips it:
+// [execute] .create_product
+// This explains how create_product works
+
+// This annotation is real — next line is code:
+// [execute] .create_product
+export function createProduct(cache, body) { ... }
 ```
 
 This is a universal convention — VS Code, JetBrains, vim, emacs
