@@ -596,6 +596,35 @@ comptime {
 If someone adds a cache slot or grows a list, the budget check
 catches it before it ships. Explicit, not discovered at runtime.
 
+## Future: sidecar write authority
+
+Currently the native Zig commit runs on every request alongside the
+sidecar. The native path applies writes to storage (the authority).
+The sidecar provides HTML. The spot-check compares status.
+
+This works because the sidecar mirrors the Zig handlers — both
+produce the same writes. The native commit keeps storage correct.
+
+When a developer writes a TypeScript handler that produces DIFFERENT
+writes (custom business logic, different validation rules, new
+calculations), the sidecar's writes need to become the authority:
+
+1. Make all Write payload types extern (LoginCodeWrite, LoginCodeKey,
+   put_membership, update_membership, put_user — currently regular
+   structs inside the SM generic)
+2. Define a Write tag enum mapping for the protocol
+3. Implement write deserialization: WriteSlot tag + bytes → storage call
+4. Framework validates each write (valid tag, correct size, non-zero
+   keys, bounds checks)
+5. Framework applies sidecar writes to storage directly
+6. Remove native commit from the sidecar path
+7. Spot-check moves to test environment (simulator), not production
+
+Build this when a user's TypeScript handler needs writes that differ
+from the native Zig path. Not before. The native commit running in
+parallel is correct for the current state — no user has custom
+business logic yet.
+
 ## Not in scope
 
 - WASM transport (future, for Rust sidecars)
