@@ -177,11 +177,13 @@ const Writer = struct {
     }
 
     fn write_pascal(w: *Writer, comptime name: []const u8) void {
+        assert(name.len > 0);
         var cap = true;
         for (name) |ch| {
             if (ch == '_') {
                 cap = true;
             } else {
+                assert(w.pos < w.buf.len);
                 w.buf[w.pos] = if (cap and ch >= 'a' and ch <= 'z') ch - 32 else ch;
                 w.pos += 1;
                 cap = false;
@@ -208,8 +210,11 @@ const Writer = struct {
 
     fn emit_enum(w: *Writer, comptime T: type) void {
         const name = type_leaf_name(T);
-        const fields = @typeInfo(T).@"enum".fields;
+        const info = @typeInfo(T).@"enum";
+        const fields = info.fields;
         assert(fields.len > 0);
+        // Serde uses dv.getUint8/setUint8 — enum must fit in one byte.
+        assert(@sizeOf(T) == 1);
 
         w.raw("export type ");
         w.raw(name);
@@ -1022,6 +1027,9 @@ fn count_anon_structs(comptime U: type) usize {
 fn is_known_struct(comptime T: type) bool {
     // 14 extern + 2 flags + 8 regular + 3 SM-internal + 2 protocol = 29
     comptime assert(known_structs.len == 29);
+    comptime {
+        for (known_structs) |K| assert(@typeInfo(K) == .@"struct");
+    }
     inline for (known_structs) |K| {
         if (T == K) return true;
     }
@@ -1031,6 +1039,9 @@ fn is_known_struct(comptime T: type) bool {
 /// Returns true if T is an enum in the known_enums list.
 fn is_known_enum(comptime T: type) bool {
     comptime assert(known_enums.len == 11);
+    comptime {
+        for (known_enums) |E| assert(@typeInfo(E) == .@"enum");
+    }
     inline for (known_enums) |E| {
         if (T == E) return true;
     }
@@ -1040,6 +1051,9 @@ fn is_known_enum(comptime T: type) bool {
 /// Returns true if T is a union in the known_unions list.
 fn is_known_union(comptime T: type) bool {
     comptime assert(known_unions.len == 2);
+    comptime {
+        for (known_unions) |U| assert(@typeInfo(U) == .@"union");
+    }
     inline for (known_unions) |U| {
         if (T == U) return true;
     }

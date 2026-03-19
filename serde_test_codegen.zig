@@ -177,6 +177,7 @@ const Writer = struct {
     }
 
     fn hex(w: *Writer, comptime bytes: []const u8) void {
+        assert(w.pos + bytes.len * 2 <= w.buf.len);
         const hex_chars = "0123456789abcdef";
         for (bytes) |b| {
             w.buf[w.pos] = hex_chars[b >> 4];

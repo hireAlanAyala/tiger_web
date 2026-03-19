@@ -57,10 +57,12 @@ pub const TranslateRequest = extern struct {
     }
 
     pub fn path_slice(self: *const TranslateRequest) []const u8 {
+        assert(self.path_len <= path_max);
         return self.path[0..self.path_len];
     }
 
     pub fn body_slice(self: *const TranslateRequest) []const u8 {
+        assert(self.body_len <= json_body_max);
         return self.body[0..self.body_len];
     }
 };
@@ -81,5 +83,11 @@ pub const TranslateResponse = extern struct {
         assert(@sizeOf(TranslateResponse) == 704);
         // Size must be aligned to u128 alignment (16 bytes).
         assert(@sizeOf(TranslateResponse) % @alignOf(u128) == 0);
+    }
+
+    /// Returns true if the sidecar found a matching route.
+    pub fn is_found(self: *const TranslateResponse) bool {
+        assert(self.found == 0 or self.found == 1);
+        return self.found == 1;
     }
 };
