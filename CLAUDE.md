@@ -11,6 +11,7 @@ sh zig/download.sh          # one-time: download Zig 0.14.1
 npm install                 # one-time: install TS dependencies
 
 # --- Sidecar development (TypeScript handlers) ---
+cd examples/ecommerce-ts && npm install  # one-time: install example dependencies
 npm run build               # codegen + scan annotations + generate dispatch
 npm run dev                 # start sidecar + server on port 3000
 

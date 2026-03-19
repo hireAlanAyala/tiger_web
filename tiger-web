@@ -1,0 +1,27 @@
+#!/bin/sh
+set -e
+
+FRAMEWORK_ROOT="$(cd "$(dirname "$0")" && pwd)"
+EXAMPLE_DIR="$(pwd)"
+EXAMPLE_REL="${EXAMPLE_DIR#"$FRAMEWORK_ROOT"/}"
+SOCK="/tmp/tiger-web.sock"
+
+case "$1" in
+  build)
+    cd "$FRAMEWORK_ROOT"
+    ./zig/zig build codegen
+    ./zig/zig build scan -- "$EXAMPLE_REL/handlers/" --manifest=generated/manifest.json
+    PATH="$EXAMPLE_DIR/node_modules/.bin:$PATH" tsx adapters/typescript.ts generated/manifest.json generated/dispatch.generated.ts
+    ;;
+  dev)
+    "$0" build
+    cd "$EXAMPLE_DIR"
+    npx concurrently \
+      "tsx $FRAMEWORK_ROOT/generated/dispatch.generated.ts $SOCK" \
+      "sleep 1 && cd $FRAMEWORK_ROOT && ./zig/zig build run -- --sidecar=$SOCK"
+    ;;
+  *)
+    echo "Usage: tiger-web <build|dev>"
+    exit 1
+    ;;
+esac
