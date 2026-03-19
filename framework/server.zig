@@ -219,7 +219,18 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
                 // Route through app codec.
                 var msg = App.translate(parsed.method, parsed.path, parsed.body) orelse {
                     log.mark.warn("unmapped request: {s} {s} fd={d}", .{ @tagName(parsed.method), parsed.path, conn.fd });
-                    conn.state = .closing;
+                    // Valid HTTP frame but can't route it (unknown path, bad JSON,
+                    // invalid UUID). Send a generic error — not a structured error
+                    // enum. translate() is ?Message, not a error union, deliberately:
+                    // TB doesn't explain why a message is invalid because the SDK
+                    // can't produce one. We don't control the client, but the fix
+                    // for bad requests is a client library, not better server errors.
+                    // A structured TranslateError would grow with every codec change
+                    // and leak application concerns into the framework.
+                    // See decisions/divergences.md "Error Response on Unmapped Requests".
+                    const resp = unmapped_response(conn);
+                    conn.set_response(resp.offset, resp.len);
+                    conn.keep_alive = false;
                     continue;
                 };
                 conn.is_datastar_request = parsed.is_datastar_request;
@@ -410,6 +421,20 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
                     conn.state = .closing;
                 }
             }
+        }
+
+        /// Write a short error response for requests that parsed as valid HTTP
+        /// but couldn't be routed (unknown path, malformed JSON, bad UUID, etc.).
+        fn unmapped_response(conn: *Connection) struct { offset: u32, len: u32 } {
+            const response =
+                "HTTP/1.1 200 OK\r\n" ++
+                "Content-Type: text/plain\r\n" ++
+                "Content-Length: 16\r\n" ++
+                "Connection: close\r\n" ++
+                "\r\n" ++
+                "invalid request\n";
+            @memcpy(conn.send_buf[0..response.len], response);
+            return .{ .offset = 0, .len = response.len };
         }
 
         /// Cross-check structural invariants after every tick.
