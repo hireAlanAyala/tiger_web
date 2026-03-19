@@ -596,34 +596,49 @@ comptime {
 If someone adds a cache slot or grows a list, the budget check
 catches it before it ships. Explicit, not discovered at runtime.
 
-## Future: sidecar write authority
+## Two-path architecture (considered and settled)
 
-Currently the native Zig commit runs on every request alongside the
-sidecar. The native path applies writes to storage (the authority).
-The sidecar provides HTML. The spot-check compares status.
+The native Zig commit is the permanent storage authority. The sidecar
+is the permanent rendering authority. This is not scaffolding — it's
+the design.
 
-This works because the sidecar mirrors the Zig handlers — both
-produce the same writes. The native commit keeps storage correct.
+**Native commit handles:** storage writes, auth (session cookies),
+WAL (crash recovery), followup (SSE), prefetch reset. These are
+framework lifecycle concerns that don't change regardless of who
+writes the handlers.
 
-When a developer writes a TypeScript handler that produces DIFFERENT
-writes (custom business logic, different validation rules, new
-calculations), the sidecar's writes need to become the authority:
+**Sidecar handles:** translate (routing), execute (for rendering
+decisions), render (HTML). The developer writes all three phases in
+TypeScript. The execute result (status, writes) is spot-checked
+against the native commit. The HTML is served to the user.
 
-1. Make all Write payload types extern (LoginCodeWrite, LoginCodeKey,
-   put_membership, update_membership, put_user — currently regular
-   structs inside the SM generic)
-2. Define a Write tag enum mapping for the protocol
-3. Implement write deserialization: WriteSlot tag + bytes → storage call
-4. Framework validates each write (valid tag, correct size, non-zero
-   keys, bounds checks)
-5. Framework applies sidecar writes to storage directly
-6. Remove native commit from the sidecar path
-7. Spot-check moves to test environment (simulator), not production
+**Spot-check enforces agreement:** every request runs both native
+execute and sidecar execute. Status is compared. Sidecar writes are
+deserialized and validated. Divergence panics in debug (developer
+fixes immediately) and logs in release. The developer must keep
+the Zig handlers and TypeScript handlers in agreement.
 
-Build this when a user's TypeScript handler needs writes that differ
-from the native Zig path. Not before. The native commit running in
-parallel is correct for the current state — no user has custom
-business logic yet.
+**Why not sidecar write authority:** we implemented and reverted it.
+Moving storage writes to the sidecar introduced three problems:
+1. Partial write atomicity — sidecar writes applied one by one,
+   partial commits on validation failure
+2. Session management — native commit resolves auth from prefetch
+   identity, skipping it broke login/logout
+3. WAL inconsistency — WAL replays through native commit, sidecar
+   writes diverge from replay
+
+These are solvable but the solutions add complexity for a benefit
+no user needs yet. The two-path architecture gives developers full
+rendering control in TypeScript while the Zig handlers remain the
+storage authority. Custom business logic that changes writes
+requires updating the Zig handler — same as any backend change
+in any framework.
+
+**Sidecar failure renders natively.** If the sidecar socket call
+fails, the native commit already ran. The framework renders from
+the native result — consistent with the database state. This is
+not a "fallback" (mixing execution paths) — it's rendering from
+the authoritative commit that already happened.
 
 ## Not in scope
 
