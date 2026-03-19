@@ -273,6 +273,40 @@ For each extern struct: read/write functions that map field offsets
 to object properties. Test with round-trip: TS object → binary →
 TS object, assert equality.
 
+### Step 2b: Serde round-trip fuzzer
+
+PRNG-driven fuzzer that validates the serde boundary. For each
+extern struct: generate a random Zig value → serialize to wire
+bytes → deserialize in TypeScript → re-serialize → compare bytes.
+Agreement proves the TS serde matches the Zig layout.
+
+Runs both directions:
+- **Zig → TS:** random struct → Zig serializes → TS deserializes
+  → TS re-serializes → byte-compare against original
+- **TS → Zig:** random TS object → TS serializes → Zig deserializes
+  → Zig re-serializes → byte-compare against original
+
+Covers:
+- Field offset mismatches (wrong `@offsetOf` in codegen)
+- `_len` companion semantics (string truncation, array length)
+- Enum value round-trip (numeric → string literal → numeric)
+- Packed flags (boolean → bit → boolean)
+- `u128` hex encoding (string ↔ 16-byte little-endian)
+- Reserved/padding bytes (must be zero-filled)
+- Edge cases: empty strings, max-length strings, zero values,
+  max integer values, all flags set, all flags clear
+
+Structure: single Zig binary that spawns a Node child process.
+Zig generates random structs via PRNG, pipes them to Node over
+stdin, Node deserializes + re-serializes, pipes back over stdout,
+Zig compares. Deterministic seed for reproducibility. Follows the
+existing `fuzz_tests.zig` dispatcher pattern.
+
+```bash
+./zig/zig build fuzz -- serde              # random seed
+./zig/zig build fuzz -- serde 12345        # specific seed
+```
+
 ### Step 3: Protocol wire format
 
 Define exact byte layouts for the two round trips. Implement in
