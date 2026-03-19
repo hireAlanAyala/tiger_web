@@ -139,6 +139,27 @@ pub const PrefetchCache = extern struct {
     }
 };
 
+/// Write variant tag — matches the Write union field order.
+/// Used in WriteSlot to identify the payload type.
+pub const WriteTag = enum(u8) {
+    put_product = 0,
+    update_product = 1,
+    put_collection = 2,
+    update_collection = 3,
+    put_membership = 4,
+    update_membership = 5,
+    put_order = 6,
+    update_order = 7,
+    put_login_code = 8,
+    consume_login_code = 9,
+    put_user = 10,
+
+    comptime {
+        // Must match the number of Write union variants.
+        assert(std.meta.fields(WriteTag).len == 11);
+    }
+};
+
 /// Single write slot — tag identifies the Write union variant,
 /// data is padded to the largest variant size (OrderResult).
 pub const WriteSlot = extern struct {

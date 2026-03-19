@@ -1026,7 +1026,7 @@ pub fn StateMachineType(comptime Storage: type) type {
             self.prefetch_identity = null;
         }
 
-        fn reset_prefetch(self: *StateMachine) void {
+        pub fn reset_prefetch(self: *StateMachine) void {
             self.reset_prefetch_cache();
             self.prefetch_result = null;
         }

@@ -71,6 +71,7 @@ const known_enums = .{
     // Protocol
     protocol.Tag,
     protocol.Method,
+    protocol.WriteTag,
 };
 
 /// All union types emitted as TS discriminated unions.
@@ -1233,7 +1234,7 @@ fn is_known_struct(comptime T: type) bool {
 
 /// Returns true if T is an enum in the known_enums list.
 fn is_known_enum(comptime T: type) bool {
-    comptime assert(known_enums.len == 11);
+    comptime assert(known_enums.len == 12);
     comptime {
         for (known_enums) |E| assert(@typeInfo(E) == .@"enum");
     }
@@ -1552,8 +1553,8 @@ test "output is valid structure" {
             if (i + 12 <= output.len and std.mem.eql(u8, output[i..][0..12], "export const")) consts += 1;
         }
         assert(interfaces == 38);
-        assert(types == 13);
-        assert(consts == 31);
+        assert(types == 14);
+        assert(consts == 32);
         // 33 extern structs × 2 (read + write) = 66 serde functions
         assert(functions == 66);
     }

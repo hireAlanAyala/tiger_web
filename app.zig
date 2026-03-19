@@ -190,10 +190,6 @@ pub fn commit_and_encode(
         // Extract cache before commit (commit resets it).
         const cache = extract_cache(Storage, sm);
 
-        // Native commit runs for storage correctness and spot-check.
-        // TODO: replace with sidecar write application when wired up.
-        const native_resp = sm.commit(msg);
-
         // Call sidecar for execute + render.
         if (!client.execute_render(msg.operation, msg.id, &msg.body, &cache, is_datastar_request, &sidecar_resp_buf)) {
             // No fallback. Sidecar failure → request fails.
@@ -205,12 +201,19 @@ pub fn commit_and_encode(
             };
         }
 
-        // Spot-check: compare status.
-        if (sidecar_resp_buf.status != native_resp.status) {
-            spot_check_fail("spot-check divergence: execute status sidecar={s} native={s}", .{
-                @tagName(sidecar_resp_buf.status), @tagName(native_resp.status),
-            });
+        // Apply sidecar writes to storage.
+        const writes = sidecar_resp_buf.writes[0..sidecar_resp_buf.writes_len];
+        if (!apply_sidecar_writes(Storage, sm, writes)) {
+            log.mark.err("sidecar writes invalid", .{});
+            return .{
+                .status = .storage_error,
+                .followup = null,
+                .response = .{ .offset = 0, .len = 0, .keep_alive = false },
+            };
         }
+
+        // Reset prefetch cache (normally done by commit, which we skipped).
+        sm.reset_prefetch();
 
         // Use sidecar HTML — copy into send_buf.
         const html_len = sidecar_resp_buf.html_len;
@@ -219,7 +222,7 @@ pub fn commit_and_encode(
 
         return .{
             .status = sidecar_resp_buf.status,
-            .followup = native_resp.followup,
+            .followup = null, // TODO: sidecar followup support
             .response = .{ .offset = 0, .len = html_len, .keep_alive = !is_datastar_request },
         };
     }
@@ -239,6 +242,74 @@ pub const CommitResult = struct {
     followup: ?FollowupState,
     response: render.Response,
 };
+
+/// Apply writes from the sidecar response to storage.
+/// Each WriteSlot is deserialized by tag and applied via the storage interface.
+/// Returns false if any write has an invalid tag (sidecar bug).
+pub fn apply_sidecar_writes(
+    comptime Storage: type,
+    sm: *state_machine.StateMachineType(Storage),
+    writes: []const protocol.WriteSlot,
+) bool {
+    for (writes) |slot| {
+        const tag = std.meta.intToEnum(protocol.WriteTag, slot.tag) catch {
+            log.mark.err("invalid write tag: {d}", .{slot.tag});
+            return false;
+        };
+        switch (tag) {
+            .put_product => {
+                const p: *const message.Product = @ptrCast(@alignCast(&slot.data));
+                assert(sm.storage.put(p) == .ok);
+            },
+            .update_product => {
+                const p: *const message.Product = @ptrCast(@alignCast(&slot.data));
+                assert(sm.storage.update(p.id, p) == .ok);
+            },
+            .put_collection => {
+                const c: *const message.ProductCollection = @ptrCast(@alignCast(&slot.data));
+                assert(sm.storage.put_collection(c) == .ok);
+            },
+            .update_collection => {
+                const c: *const message.ProductCollection = @ptrCast(@alignCast(&slot.data));
+                assert(sm.storage.update_collection(c.id, c) == .ok);
+            },
+            .put_membership => {
+                const m: *const message.Membership = @ptrCast(@alignCast(&slot.data));
+                assert(sm.storage.add_to_collection(m.collection_id, m.product_id) == .ok);
+            },
+            .update_membership => {
+                const m: *const message.MembershipUpdate = @ptrCast(@alignCast(&slot.data));
+                if (m.removed != 0) {
+                    const r = sm.storage.remove_from_collection(m.collection_id, m.product_id);
+                    assert(r == .ok or r == .not_found);
+                } else {
+                    assert(sm.storage.add_to_collection(m.collection_id, m.product_id) == .ok);
+                }
+            },
+            .put_order => {
+                const o: *const message.OrderResult = @ptrCast(@alignCast(&slot.data));
+                assert(sm.storage.put_order(o) == .ok);
+            },
+            .update_order => {
+                const o: *const message.OrderResult = @ptrCast(@alignCast(&slot.data));
+                assert(sm.storage.update_order_completion(o) == .ok);
+            },
+            .put_login_code => {
+                const lc: *const message.LoginCodeWrite = @ptrCast(@alignCast(&slot.data));
+                assert(sm.storage.put_login_code(lc.email[0..lc.email_len], &lc.code, lc.expires_at) == .ok);
+            },
+            .consume_login_code => {
+                const lc: *const message.LoginCodeKey = @ptrCast(@alignCast(&slot.data));
+                _ = sm.storage.consume_login_code(lc.email[0..lc.email_len]);
+            },
+            .put_user => {
+                const u: *const message.UserWrite = @ptrCast(@alignCast(&slot.data));
+                assert(sm.storage.put_user(u.user_id, u.email[0..u.email_len]) == .ok);
+            },
+        }
+    }
+    return true;
+}
 
 /// Encode a response into the send buffer.
 pub fn encode_response(send_buf: []u8, operation: Operation, resp: MessageResponse, is_datastar_request: bool, secret_key: *const [auth.key_length]u8) render.Response {
