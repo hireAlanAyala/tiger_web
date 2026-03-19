@@ -165,6 +165,20 @@ pub fn build(b: *std.Build) void {
     const codegen_output = codegen_cmd.captureStdOut();
     const wf = b.addUpdateSourceFiles();
     wf.addCopyFileToSource(codegen_output, "generated/types.generated.ts");
+
+    // Serde test codegen — generates round-trip test file.
+    const serde_test_exe = b.addExecutable(.{
+        .name = "tiger-serde-test-codegen",
+        .root_source_file = b.path("serde_test_codegen.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    addFramework(serde_test_exe.root_module, framework);
+
+    const serde_test_cmd = b.addRunArtifact(serde_test_exe);
+    const serde_test_output = serde_test_cmd.captureStdOut();
+    wf.addCopyFileToSource(serde_test_output, "generated/serde_test.generated.ts");
+
     const codegen_step = b.step("codegen", "Generate TypeScript type definitions");
     codegen_step.dependOn(&wf.step);
 
