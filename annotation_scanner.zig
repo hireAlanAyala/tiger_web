@@ -12,8 +12,8 @@
 //! The adapter reads the manifest, extracts function names from the
 //! source files, and generates the dispatch file in the target language.
 //!
-//! Usage: zig build scan -- ts/
-//!        zig build scan -- ts/ --manifest=generated/manifest.json
+//! Usage: zig build scan -- examples/ecommerce-ts/handlers/
+//!        zig build scan -- examples/ecommerce-ts/handlers/ --manifest=generated/manifest.json
 
 const std = @import("std");
 const assert = std.debug.assert;
