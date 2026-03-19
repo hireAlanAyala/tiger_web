@@ -120,6 +120,18 @@ pub fn build(b: *std.Build) void {
         unit_test_step.dependOn(&run_unit_test.step);
     }
 
+    // Modules that need libc only.
+    for ([_][]const u8{"sidecar.zig"}) |mod| {
+        const unit_test = b.addTest(.{
+            .root_source_file = b.path(mod),
+            .target = target,
+            .optimize = optimize,
+        });
+        addFramework(unit_test.root_module, framework);
+        unit_test.linkLibC();
+        unit_test_step.dependOn(&b.addRunArtifact(unit_test).step);
+    }
+
     // Modules that need sqlite3 + libc.
     for ([_][]const u8{ "storage.zig", "replay.zig" }) |mod| {
         const unit_test = b.addTest(.{
