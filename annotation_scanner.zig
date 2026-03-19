@@ -83,11 +83,11 @@ fn parse_annotation(line: []const u8, prefix: []const u8) ?struct { phase: Phase
     const phase_str = rest[0..close];
     rest = rest[close + 1 ..];
 
-    // Accept both internal names (translate/execute/render) and
-    // user-facing names (route/handle/render).
-    const phase: Phase = if (std.mem.eql(u8, phase_str, "translate") or std.mem.eql(u8, phase_str, "route"))
+    // User-facing phase names only. Internal names (translate/execute)
+    // belong to the Zig framework, not handler annotations.
+    const phase: Phase = if (std.mem.eql(u8, phase_str, "route"))
         .translate
-    else if (std.mem.eql(u8, phase_str, "execute") or std.mem.eql(u8, phase_str, "handle"))
+    else if (std.mem.eql(u8, phase_str, "handle"))
         .execute
     else if (std.mem.eql(u8, phase_str, "render"))
         .render
@@ -305,7 +305,7 @@ fn emit_manifest(allocator: std.mem.Allocator, out_path: []const u8, annotations
 // =====================================================================
 
 test "parse_annotation valid" {
-    const result = parse_annotation("// [execute] .create_product", "//");
+    const result = parse_annotation("// [handle] .create_product", "//");
     try std.testing.expect(result != null);
     try std.testing.expectEqual(result.?.phase, .execute);
     try std.testing.expect(std.mem.eql(u8, result.?.operation, "create_product"));
@@ -318,13 +318,13 @@ test "parse_annotation with leading whitespace" {
 }
 
 test "parse_annotation python style" {
-    const result = parse_annotation("# [translate] .list_products", "#");
+    const result = parse_annotation("# [route] .list_products", "#");
     try std.testing.expect(result != null);
     try std.testing.expectEqual(result.?.phase, .translate);
     try std.testing.expect(std.mem.eql(u8, result.?.operation, "list_products"));
 }
 
-test "parse_annotation user-facing phase names" {
+test "parse_annotation all user-facing phases" {
     const route = parse_annotation("// [route] .create_product", "//");
     try std.testing.expect(route != null);
     try std.testing.expectEqual(route.?.phase, .translate);
@@ -336,6 +336,12 @@ test "parse_annotation user-facing phase names" {
     const render = parse_annotation("// [render] .list_products", "//");
     try std.testing.expect(render != null);
     try std.testing.expectEqual(render.?.phase, .render);
+}
+
+test "parse_annotation rejects internal phase names" {
+    // Internal names belong to Zig framework, not handler annotations.
+    try std.testing.expect(parse_annotation("// [translate] .foo", "//") == null);
+    try std.testing.expect(parse_annotation("// [execute] .foo", "//") == null);
 }
 
 test "parse_annotation invalid phase" {
