@@ -106,6 +106,7 @@ pub fn build(b: *std.Build) void {
         "render.zig",
         "wal_test.zig",
         "codegen.zig",
+        "serde_test_codegen.zig",
     };
     const unit_test_step = b.step("unit-test", "Run unit tests");
     for (modules) |mod| {

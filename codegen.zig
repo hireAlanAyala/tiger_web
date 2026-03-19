@@ -1190,6 +1190,42 @@ test "type_leaf_name extracts last segment" {
     comptime assert(std.mem.eql(u8, type_leaf_name(SM.ExecuteResult), "ExecuteResult"));
 }
 
+test "get_len_info offset and bit width" {
+    // u8 _len companions.
+    comptime {
+        const name_li = get_len_info(message.Product, "name");
+        assert(name_li.offset == @offsetOf(message.Product, "name_len"));
+        assert(name_li.bits == 8);
+    }
+
+    // u16 _len companions.
+    comptime {
+        const desc_li = get_len_info(message.Product, "description");
+        assert(desc_li.offset == @offsetOf(message.Product, "description_len"));
+        assert(desc_li.bits == 16);
+    }
+
+    // u32 _len via items + len pattern.
+    comptime {
+        const items_li = get_len_info(message.ProductList, "items");
+        assert(items_li.bits == 32);
+    }
+
+    // Typed array _len (OrderRequest.items + items_len).
+    comptime {
+        const items_li = get_len_info(message.OrderRequest, "items");
+        assert(items_li.offset == @offsetOf(message.OrderRequest, "items_len"));
+        assert(items_li.bits == 8);
+    }
+
+    // Credential _len on Message.
+    comptime {
+        const cred_li = get_len_info(message.Message, "credential");
+        assert(cred_li.offset == @offsetOf(message.Message, "credential_len"));
+        assert(cred_li.bits == 8);
+    }
+}
+
 test "is_ts_identifier validation" {
     comptime assert(is_ts_identifier("Product"));
     comptime assert(is_ts_identifier("foo_bar"));

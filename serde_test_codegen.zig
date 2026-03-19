@@ -522,6 +522,7 @@ fn set_str(comptime buf: []u8, comptime s: []const u8) void {
 /// Assert the string content matches the declared _len for a test vector.
 /// Catches hand-authored test structs where the string and _len diverge.
 fn assert_str_len(comptime buf: []const u8, comptime len: usize) void {
+    @setEvalBranchQuota(10000);
     assert(len <= buf.len);
     // Bytes beyond len must be zero (from zeroes init).
     for (buf[len..]) |b| assert(b == 0);
@@ -549,6 +550,7 @@ fn test_collection() message.ProductCollection {
     set_str(&c.name, "Summer Sale");
     c.name_len = 11;
     c.flags = .{ .active = true };
+    assert_str_len(&c.name, c.name_len);
     return c;
 }
 
@@ -582,6 +584,7 @@ fn test_completion() message.OrderCompletion {
     set_str(&c.payment_ref, "ch_1234567890");
     c.payment_ref_len = 13;
     c.result = .confirmed;
+    assert_str_len(&c.payment_ref, c.payment_ref_len);
     return c;
 }
 
@@ -593,6 +596,7 @@ fn test_result_item() message.OrderResultItem {
     i.line_total_cents = 8997;
     i.price_cents = 2999;
     i.quantity = 3;
+    assert_str_len(&i.name, i.name_len);
     return i;
 }
 
@@ -606,6 +610,7 @@ fn test_order_result() message.OrderResult {
     r.total_cents = 8997;
     r.timeout_at = 1700000000;
     r.status = .confirmed;
+    assert_str_len(&r.payment_ref, r.payment_ref_len);
     return r;
 }
 
@@ -618,6 +623,7 @@ fn test_order_summary() message.OrderSummary {
     s.timeout_at = 1700000060;
     s.items_len = 2;
     s.status = .pending;
+    assert_str_len(&s.payment_ref, s.payment_ref_len);
     return s;
 }
 
@@ -625,6 +631,7 @@ fn test_search_query() message.SearchQuery {
     var q = std.mem.zeroes(message.SearchQuery);
     set_str(&q.query, "tiger");
     q.query_len = 5;
+    assert_str_len(&q.query, q.query_len);
     return q;
 }
 
@@ -636,6 +643,7 @@ fn test_list_params() message.ListParams {
     l.price_min = 1000;
     l.price_max = 5000;
     l.active_filter = .active_only;
+    assert_str_len(&l.name_prefix, l.name_prefix_len);
     return l;
 }
 
@@ -643,6 +651,7 @@ fn test_login_request() message.LoginCodeRequest {
     var r = std.mem.zeroes(message.LoginCodeRequest);
     set_str(&r.email, "test@example.com");
     r.email_len = 16;
+    assert_str_len(&r.email, r.email_len);
     return r;
 }
 
@@ -651,6 +660,7 @@ fn test_login_verify() message.LoginVerification {
     set_str(&v.email, "test@example.com");
     v.email_len = 16;
     @memcpy(&v.code, "123456");
+    assert_str_len(&v.email, v.email_len);
     return v;
 }
 
@@ -666,5 +676,60 @@ fn test_message() message.Message {
     // Body: embed a test product
     const p = test_product();
     @memcpy(m.body[0..@sizeOf(message.Product)], std.mem.asBytes(&p));
+    assert_str_len(&m.credential, m.credential_len);
     return m;
+}
+
+// =====================================================================
+// Tests
+// =====================================================================
+
+test "emit_u128_hex known values" {
+    // Zero.
+    comptime {
+        var buf: [131072]u8 = undefined;
+        var w = Writer{ .buf = &buf, .pos = 0 };
+        w.emit_u128_hex(0);
+        assert(std.mem.eql(u8, buf[0..32], "00000000000000000000000000000000"));
+    }
+
+    // Small value — only low bytes populated.
+    comptime {
+        var buf: [131072]u8 = undefined;
+        var w = Writer{ .buf = &buf, .pos = 0 };
+        w.emit_u128_hex(0x42);
+        assert(std.mem.eql(u8, buf[0..32], "00000000000000000000000000000042"));
+    }
+
+    // Full 128-bit value — matches the test product ID.
+    comptime {
+        var buf: [131072]u8 = undefined;
+        var w = Writer{ .buf = &buf, .pos = 0 };
+        w.emit_u128_hex(0x0102030405060708090a0b0c0d0e0f10);
+        assert(std.mem.eql(u8, buf[0..32], "0102030405060708090a0b0c0d0e0f10"));
+    }
+
+    // Max value.
+    comptime {
+        var buf: [131072]u8 = undefined;
+        var w = Writer{ .buf = &buf, .pos = 0 };
+        w.emit_u128_hex(std.math.maxInt(u128));
+        assert(std.mem.eql(u8, buf[0..32], "ffffffffffffffffffffffffffffffff"));
+    }
+}
+
+test "get_len_value extracts correct comptime values" {
+    comptime {
+        const p = test_product();
+        assert(get_len_value(message.Product, p, "name") == 11);
+        assert(get_len_value(message.Product, p, "description") == 12);
+    }
+    comptime {
+        const r = test_order_request();
+        assert(get_len_value(message.OrderRequest, r, "items") == 2);
+    }
+    comptime {
+        const m = test_message();
+        assert(get_len_value(message.Message, m, "credential") == 16);
+    }
 }
