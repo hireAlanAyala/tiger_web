@@ -307,6 +307,17 @@ existing `fuzz_tests.zig` dispatcher pattern.
 ./zig/zig build fuzz -- serde 12345        # specific seed
 ```
 
+**Current status:** Implemented as codegen-generated TS test with
+Zig-constructed test vectors (both directions) + PRNG random
+round-trips. Run: `npx tsx generated/serde_test.generated.ts [seed]`
+
+The cross-process pipe fuzzer (Zig spawns Node, reads TS-written
+bytes) is deferred to Step 5. When the sidecar is wired up, the
+Zig framework's response validator becomes the test oracle — it
+validates every byte the sidecar produces at runtime, making the
+cross-process fuzzer redundant for correctness. The pipe fuzzer
+remains valuable for regression detection with deterministic seeds.
+
 ### Step 3: Protocol wire format
 
 Define exact byte layouts for the two round trips. Implement in
