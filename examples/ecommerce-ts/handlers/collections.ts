@@ -1,6 +1,7 @@
 // Collection handlers — each operation groups route → handle → render.
 
 import type { Request, Route, Response, Context, ProductCollection } from "tiger-web";
+import { assert } from "tiger-web";
 
 // ========================== create_collection ==========================
 
@@ -126,7 +127,7 @@ export function renderRemoveCollectionMember(status: string): string {
 // ========================== assertions ==========================
 
 function assertCollection(ctx: Context): ProductCollection {
-  if (ctx.collection === null) throw new Error("render: collection is null after ok status");
+  assert(ctx.collection !== null, "render: collection is null after ok status");
   return ctx.collection;
 }
 

@@ -1,6 +1,7 @@
 // Order and inventory handlers — each operation groups route → handle → render.
 
 import type { Request, Route, Response, Context, OrderResult } from "tiger-web";
+import { assert } from "tiger-web";
 
 // ========================== create_order ==========================
 
@@ -126,7 +127,7 @@ export function renderTransferInventory(status: string): string {
 // ========================== assertions ==========================
 
 function assertOrder(ctx: Context): OrderResult {
-  if (ctx.order === null) throw new Error("render: order is null after ok status");
+  assert(ctx.order !== null, "render: order is null after ok status");
   return ctx.order;
 }
 

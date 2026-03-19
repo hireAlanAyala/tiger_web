@@ -197,6 +197,9 @@ const output = blk: {
     w.raw("export type Response = HandlerResult;\n");
     w.raw("export type Context = PrefetchCache;\n");
     w.raw("export type Change = Write;\n\n");
+    w.raw("export function assert(condition: boolean, msg: string): asserts condition {\n");
+    w.raw("  if (!condition) throw new Error('assertion failed: ' + msg);\n");
+    w.raw("}\n\n");
 
     // --- Serde: binary ↔ TypeScript serialization ---
     w.emit_serde_helpers();

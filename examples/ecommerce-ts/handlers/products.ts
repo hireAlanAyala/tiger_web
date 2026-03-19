@@ -7,6 +7,7 @@ import type {
   Context,
   Product,
 } from "tiger-web";
+import { assert } from "tiger-web";
 
 // ========================== create_product ==========================
 
@@ -189,7 +190,7 @@ function parseProduct(parsed: Record<string, unknown>, id: string): Product | nu
 // ========================== render assertions ==========================
 
 function assertProduct(ctx: Context): Product {
-  if (ctx.product === null) throw new Error("render: product is null after ok status");
+  assert(ctx.product !== null, "render: product is null after ok status");
   return ctx.product;
 }
 
