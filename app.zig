@@ -240,7 +240,13 @@ pub const CommitResult = struct {
 
 /// Apply writes from the sidecar response to storage.
 /// Each WriteSlot is deserialized by tag and applied via the storage interface.
-/// Returns false if any write has an invalid tag (sidecar bug).
+/// Returns false if any write has an invalid tag or storage rejects it.
+///
+/// Unlike StateMachine.apply_write (which asserts storage results), this function
+/// VALIDATES them. The SM's asserts are correct — its execute handlers guarantee
+/// writes are valid (prefetch verified entities exist, execute computed correct
+/// values). Here, the writes come from the sidecar — untrusted. A sidecar bug
+/// (duplicate put, update of missing entity) should fail the request, not crash.
 ///
 /// The @ptrCast(@alignCast(&slot.data)) reinterprets raw bytes as typed structs.
 /// This is safe because: all payload types are extern with no_padding, the sidecar
