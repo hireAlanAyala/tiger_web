@@ -170,17 +170,19 @@ pub fn main() !void {
     };
     defer dir.close();
 
-    var iter = dir.iterate();
-    while (try iter.next()) |entry| {
+    // Walk recursively — handles ts/products/create.ts etc.
+    var walker = try dir.walk(allocator);
+    defer walker.deinit();
+
+    while (try walker.next()) |entry| {
         if (entry.kind != .file) continue;
 
-        const prefix = comment_prefix(entry.name) orelse continue;
+        const prefix = comment_prefix(entry.basename) orelse continue;
 
         // Build full path for error messages.
-        const path = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ scan_dir, entry.name });
-        defer allocator.free(path);
+        const path = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ scan_dir, entry.path });
 
-        const content = dir.readFileAlloc(allocator, entry.name, 1024 * 1024) catch |err| {
+        const content = dir.readFileAlloc(allocator, entry.path, 1024 * 1024) catch |err| {
             try stderr.print("error: cannot read '{s}': {}\n", .{ path, err });
             errors += 1;
             continue;
