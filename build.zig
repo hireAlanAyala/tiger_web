@@ -212,6 +212,12 @@ pub fn build(b: *std.Build) void {
     const codegen_step = b.step("codegen", "Generate TypeScript type definitions");
     codegen_step.dependOn(&wf.step);
 
+    // --- Adapter test (opt-in, requires npx tsx) ---
+    const adapter_test_cmd = b.addSystemCommand(&.{ "npx", "-y", "tsx", "adapters/typescript_test.ts" });
+    adapter_test_cmd.step.dependOn(codegen_step);
+    const adapter_test_step = b.step("test-adapter", "Run TypeScript adapter test");
+    adapter_test_step.dependOn(&adapter_test_cmd.step);
+
     // --- Benchmark (smoke mode as part of unit-test, real via bench step) ---
     const bench_smoke_options = b.addOptions();
     bench_smoke_options.addOption(bool, "benchmark", false);
