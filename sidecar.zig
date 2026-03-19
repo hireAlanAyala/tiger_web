@@ -85,8 +85,7 @@ pub const SidecarClient = struct {
             return null;
         }
 
-        if (resp.found == 0) return null;
-        assert(resp.found == 1);
+        if (resp.found != 1) return null;
 
         // Validate the operation is a known enum value — catches
         // corrupted responses before the value propagates.
