@@ -344,82 +344,25 @@ Run the full test suite through the sidecar path. All existing
 tests must pass — the sidecar produces the same results as
 Zig-native.
 
-### Step 7: Spot-check
+### Step 7: Annotation scanner — DONE
 
-Implement the determinism spot-check in the commit path. Every N
-operations, run both paths, compare byte-for-byte. Test by
-introducing a deliberate non-determinism in a TypeScript handler
-and verifying the spot-check catches it.
+Annotation scanner validates handler exhaustiveness at build time.
+Accepts `[route]`, `[handle]`, `[render]` annotations. Outputs a
+JSON manifest for language-specific adapters. Clickable file:line
+error messages. Implemented in `annotation_scanner.zig`.
 
-### Step 8: Annotation scanner + HandlerMap
+### Step 8: Adapter system — DONE
 
-Two layers of exhaustiveness checking, each serving a different
-purpose.
+Language-specific adapters read the manifest and generate the
+dispatch file. The TypeScript adapter (`adapters/typescript.ts`)
+extracts function names and generates `dispatch.generated.ts`
+with imports, dispatch tables, and socket server.
 
-**Layer 1: Annotation scanner (language-agnostic, codegen)**
-
-Scan source files for `// [execute] .operation_name` comments.
-Check against the Operation enum. Missing operation → build error.
-Duplicate → build error. Works for any language with comments —
-TypeScript, Python, Ruby, Go. One scanner implementation in the
-codegen, every sidecar language gets exhaustiveness.
-
-```typescript
-// [execute] .create_product
-export function createProduct(cache: PrefetchCache, body: Product): ExecuteResult { ... }
-
-// [execute] .get_product
-export function getProduct(cache: PrefetchCache): ExecuteResult { ... }
+The developer's workflow:
 ```
-
-Errors include clickable file:line locations:
-
+npm run build    # codegen + scan + adapter
+npm run dev      # sidecar + server
 ```
-error: missing handler for operation 'delete_product'
-  hint: add to ts/products.ts:
-    // [execute] .delete_product
-
-error: duplicate handler for operation 'create_product'
-  --> ts/products.ts:14  // [execute] .create_product
-  --> ts/orders.ts:8     // [execute] .create_product
-```
-
-The `file:line` format is a universal terminal/IDE convention —
-clickable in VS Code, JetBrains, vim quickfix, emacs compilation
-mode, and every modern terminal. The scanner runs in Zig, prints
-to stderr. The user's IDE doesn't need to understand Zig — it
-just sees the path and makes it clickable. Works for every
-sidecar language: `ts/products.ts:14`, `py/products.py:27`.
-
-This is the infrastructure investment. The scanner runs during
-`zig build codegen`, which already walks types and emits code.
-Scanning source files for annotations is a small addition to
-the same build step. The annotation pattern is reusable across
-every language the sidecar supports — community contributors
-get exhaustiveness checking for free.
-
-**Layer 2: HandlerMap type (TypeScript-specific, optional)**
-
-For TypeScript, the codegen also emits a `HandlerMap` type.
-The developer can use `satisfies HandlerMap` for live IDE errors:
-
-```typescript
-export default {
-  create_product: createProduct,
-  get_product: getProduct,
-  // miss one → red squiggly, live in IDE
-} satisfies HandlerMap;
-```
-
-This is a TypeScript optimization on top of the scanner, not a
-replacement. The scanner works at build time for every language.
-The HandlerMap adds live IDE feedback for TypeScript specifically.
-
-**Why both:** The annotation scanner is the foundation — it
-compounds across languages. The HandlerMap is polish for the
-primary target language. Build the foundation first (scanner),
-add the polish later (HandlerMap). This follows the project
-philosophy: infrastructure that compounds is the product.
 
 ## Zig validation vs TypeScript validation
 

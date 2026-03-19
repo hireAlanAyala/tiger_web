@@ -8,21 +8,23 @@ Ecommerce HTTP server built in Zig, following TigerBeetle conventions.
 
 ```bash
 sh zig/download.sh          # one-time: download Zig 0.14.1
+npm install                 # one-time: install TS dependencies
 
-# First-time setup — create dev.env (gitignored):
-cat > dev.env << 'EOF'
-export SECRET_KEY="tiger-web-test-key-0123456789ab!"
-EOF
+# --- Sidecar development (TypeScript handlers) ---
+npm run build               # codegen + scan annotations + generate dispatch
+npm run dev                 # start sidecar + server on port 3000
 
-source dev.env                              # load SECRET_KEY
+# --- Zig-native development (no sidecar) ---
 ./zig/zig build run                         # run the server (default port 3000)
 ./zig/zig build run-worker                  # run the worker (polls server)
 ./zig/zig build run -- --log-debug          # enable debug log output
-./zig/zig build run -- --log-debug --log-trace  # per-request trace logs
+
+# --- Testing ---
 ./zig/zig build unit-test    # unit tests (message, state_machine, http, marks, codec)
 ./zig/zig build test         # simulation tests (PRNG-driven, full stack)
 ./zig/zig build fuzz -- state_machine              # random seed
 ./zig/zig build fuzz -- state_machine 12345        # specific seed
+./zig/zig build scan -- ts/handlers/               # validate annotations
 ./zig/zig build fuzz -- --events-max=1000 state_machine  # with options
 ./zig/zig build fuzz -- smoke                      # all fuzzers, small event counts
 ./zig/zig build bench           # state machine benchmark (real measurements)
@@ -39,6 +41,27 @@ http.zig → codec.zig → message.zig → state_machine.zig → storage
                                                 render.zig
                                           (HTML page or SSE fragments)
 ```
+
+With `--sidecar`, the TypeScript sidecar handles routing and rendering:
+```
+http.zig → sidecar (route) → state_machine.zig → sidecar (handle + render)
+                                (prefetch + native commit)
+```
+
+The sidecar communicates over a unix socket using a binary protocol.
+Native commit handles storage, auth, WAL. Sidecar provides HTML.
+
+### Sidecar files
+
+| File | Role |
+|---|---|
+| `codegen.zig` | Comptime type introspection → `generated/types.generated.ts` (types + serde) |
+| `serde_test_codegen.zig` | Generates serde round-trip test vectors |
+| `annotation_scanner.zig` | Scans `[route]`/`[handle]`/`[render]` annotations, outputs manifest |
+| `sidecar.zig` | Unix socket client (`SidecarClient`) — translate + execute_render |
+| `protocol.zig` | Wire format types (TranslateRequest/Response, PrefetchCache, WriteSlot) |
+| `adapters/typescript.ts` | Reads manifest, generates `dispatch.generated.ts` |
+| `ts/handlers/*.ts` | Developer's annotated handler functions |
 
 ### Framework (`framework/`) — domain-free, parameterized on App
 

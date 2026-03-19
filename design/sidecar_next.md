@@ -1,33 +1,15 @@
 # Sidecar — next steps
 
-## 1. Annotation scanner
+## 1. Annotation scanner — DONE
 
-Codegen scans user TS files for `// [translate]`, `// [execute]`,
-`// [render]` annotations. Verifies every Operation has a handler.
-Missing → build error with clickable `file:line`. Duplicate → build
-error with both locations.
+Scanner validates `[route]`, `[handle]`, `[render]` annotations.
+Outputs JSON manifest. Clickable file:line errors.
 
-Language-agnostic — scans comments, works for any sidecar language.
-Runs during `zig build codegen`. The scanner is a new pass in the
-existing codegen binary that reads source files from a configured
-directory (e.g., `ts/`).
+## 2. Adapter system — DONE
 
-Output: `generated/dispatch.generated.ts` — imports annotated
-functions and wires them into the sidecar socket server dispatch.
-
-## 2. Generated sidecar dispatch
-
-The scanner output replaces the hand-written `ts/sidecar.ts` routing.
-The generated dispatch reads the tag byte, calls the annotated
-translate/execute/render function, writes the response. The developer
-never touches socket or protocol code.
-
-```
-zig build codegen
-  → scans ts/*.ts for annotations
-  → generates dispatch.generated.ts
-  → developer runs: node generated/dispatch.generated.ts /tmp/tiger.sock
-```
+TypeScript adapter reads manifest, extracts function names,
+generates dispatch.generated.ts. Language-agnostic manifest
+enables community-contributed adapters.
 
 ## 3. Full sidecar simulator test
 
@@ -44,14 +26,9 @@ Structure: the sim test starts the TS sidecar as a child process,
 starts the Zig server with `--sidecar`, runs the full operation
 sequence, and verifies no failures.
 
-```bash
-./zig/zig build test -- --sidecar    # sim tests through sidecar
-```
-
-This is the correctness proof — the spot-check running on every
-operation with PRNG-driven inputs. If the sidecar's translate,
-execute, or render disagrees with native on any operation, the
-simulator finds a seed that reproduces it.
+This exercises the full stack with random inputs. Crashes, wrong
+status codes, and protocol errors surface as test failures with
+deterministic seeds for reproduction.
 
 ## 4. Battle testing
 
