@@ -522,10 +522,9 @@ const Writer = struct {
         w.raw("  };\n}\n\n");
 
         // --- Write function ---
-        // No bulk zero-fill — each byte is written exactly once.
-        // Reserved/padding regions are zeroed explicitly. _len companions
-        // are set by their parent field's write. Visible fields are written
-        // by emit_serde_write_field.
+        // Each byte written exactly once. Reserved/padding regions zeroed.
+        // _len companions written by their parent field — not zeroed here.
+        // String/array buffers zeroed by emit_serde_write_field before encode.
         w.raw("export function write");
         w.raw(name);
         w.raw("(data: Uint8Array, offset: number, val: ");
@@ -534,14 +533,15 @@ const Writer = struct {
         w.raw("  const dv = new DataView(data.buffer, data.byteOffset, data.byteLength);\n");
         for (fields) |field| {
             if (should_skip(T, field.name)) {
-                // Zero the skipped region (reserved, _len, padding).
-                // _len fields are overwritten by their parent's write below,
-                // but zeroing first is harmless and handles the default case.
-                w.raw("  data.fill(0, offset + ");
-                w.int(@offsetOf(T, field.name));
-                w.raw(", offset + ");
-                w.int(@offsetOf(T, field.name) + @sizeOf(field.type));
-                w.raw(");\n");
+                // Only zero reserved/padding — _len fields are set by their
+                // parent's write, so emitting a zero here would be a redundant write.
+                if (is_reserved_or_padding(field.name)) {
+                    w.raw("  data.fill(0, offset + ");
+                    w.int(@offsetOf(T, field.name));
+                    w.raw(", offset + ");
+                    w.int(@offsetOf(T, field.name) + @sizeOf(field.type));
+                    w.raw(");\n");
+                }
                 continue;
             }
             w.emit_serde_write_field(T, field);
@@ -963,6 +963,11 @@ fn is_array_field(comptime StructT: type, comptime field_name: []const u8) bool 
         if (std.mem.eql(u8, f.name, field_name)) return is_array_type(f.type);
     }
     return false;
+}
+
+/// Returns true if the field name is a reserved or padding region (not a _len companion).
+fn is_reserved_or_padding(comptime field_name: []const u8) bool {
+    return std.mem.startsWith(u8, field_name, "reserved") or std.mem.eql(u8, field_name, "padding");
 }
 
 /// Returns true if a field should be omitted from the TS output.
