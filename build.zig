@@ -98,6 +98,22 @@ pub fn build(b: *std.Build) void {
     const fuzz_step = b.step("fuzz", "Run fuzz tests");
     fuzz_step.dependOn(&fuzz_cmd.step);
 
+    // --- Annotation scanner ---
+    const scanner_exe = b.addExecutable(.{
+        .name = "annotation-scanner",
+        .root_source_file = b.path("annotation_scanner.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    addFramework(scanner_exe.root_module, framework);
+    b.installArtifact(scanner_exe);
+
+    const scanner_cmd = b.addRunArtifact(scanner_exe);
+    scanner_cmd.step.dependOn(b.getInstallStep());
+    if (b.args) |args| scanner_cmd.addArgs(args);
+    const scanner_step = b.step("scan", "Scan annotations for handler exhaustiveness");
+    scanner_step.dependOn(&scanner_cmd.step);
+
     // --- Unit tests for individual modules ---
     const modules = [_][]const u8{
         "message.zig",
@@ -107,6 +123,7 @@ pub fn build(b: *std.Build) void {
         "wal_test.zig",
         "codegen.zig",
         "serde_test_codegen.zig",
+        "annotation_scanner.zig",
     };
     const unit_test_step = b.step("unit-test", "Run unit tests");
     for (modules) |mod| {
