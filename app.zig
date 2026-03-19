@@ -96,8 +96,8 @@ fn spot_check_fail(comptime fmt: []const u8, args: anytype) void {
 }
 
 /// Extract the prefetch cache from the state machine into the protocol struct.
-/// Called after prefetch() succeeds, before execute. Copies all 11 slots
-/// with presence flags for nullable fields.
+/// Called after prefetch() succeeds and BEFORE commit(). Commit resets the
+/// cache — calling this after commit returns all-zeros silently.
 pub fn extract_cache(comptime Storage: type, sm: *const state_machine.StateMachineType(Storage)) protocol.PrefetchCache {
     // Exhaustiveness: if someone adds a prefetch_* field to the SM,
     // this count changes and the build fails — forcing an update here.
