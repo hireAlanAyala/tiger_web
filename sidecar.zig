@@ -40,6 +40,21 @@ pub const SidecarClient = struct {
             return false;
         };
 
+        // Pure handlers should complete in microseconds. A 5-second timeout
+        // catches frozen sidecars (infinite loops, GC pauses) without blocking
+        // the single thread forever.
+        const timeout: std.posix.timeval = .{ .sec = 5, .usec = 0 };
+        std.posix.setsockopt(fd, std.posix.SOL.SOCKET, std.posix.SO.RCVTIMEO, std.mem.asBytes(&timeout)) catch |err| {
+            log.warn("setsockopt RCVTIMEO: {}", .{err});
+            std.posix.close(fd);
+            return false;
+        };
+        std.posix.setsockopt(fd, std.posix.SOL.SOCKET, std.posix.SO.SNDTIMEO, std.mem.asBytes(&timeout)) catch |err| {
+            log.warn("setsockopt SNDTIMEO: {}", .{err});
+            std.posix.close(fd);
+            return false;
+        };
+
         self.fd = fd;
         log.info("connected to {s}", .{self.path});
         return true;
