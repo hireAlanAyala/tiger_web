@@ -177,10 +177,10 @@ const output = blk: {
     for (known_unions) |U| w.emit_union(U);
 
     // --- Handler types (developer-facing API) ---
-    w.raw("export interface TranslateResult {\n");
+    w.raw("export interface TranslateResult<T = unknown> {\n");
     w.raw("  operation: Operation;\n");
     w.raw("  id: string;\n");
-    w.raw("  body?: unknown;\n");
+    w.raw("  body?: T;\n");
     w.raw("}\n\n");
 
     w.raw("export interface HandlerResult {\n");
@@ -193,7 +193,7 @@ const output = blk: {
     // protocol/serde code. Handlers import these — no framework jargon.
     w.raw("// User-facing type aliases.\n");
     w.raw("export type Request = TranslateRequest;\n");
-    w.raw("export type Route = TranslateResult;\n");
+    w.raw("export type Route<T = unknown> = TranslateResult<T>;\n");
     w.raw("export type Response = HandlerResult;\n");
     w.raw("export type Context = PrefetchCache;\n");
     w.raw("export type Change = Write;\n\n");
