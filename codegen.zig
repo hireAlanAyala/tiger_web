@@ -1117,9 +1117,9 @@ fn assert_no_name_collisions() void {
         }
     }
 
-    // Every enum/union type referenced as a struct field is in the known lists.
-    // If someone adds a new enum to message.zig and uses it in a struct field
-    // without adding it to known_enums, this assertion catches it.
+    // Every enum/union/struct type referenced as a field is in the known lists.
+    // If someone adds a new type to message.zig and uses it in a struct field
+    // without adding it to the appropriate known list, this assertion catches it.
     inline for (known_structs) |S| {
         inline for (@typeInfo(S).@"struct".fields) |field| {
             if (@typeInfo(field.type) == .@"enum") {
@@ -1128,11 +1128,17 @@ fn assert_no_name_collisions() void {
             if (@typeInfo(field.type) == .@"union") {
                 assert(is_known_union(field.type));
             }
+            // Nested struct fields (e.g., CollectionWithProducts.products: ProductList)
+            // must be in known_structs so the serde generates readX/writeX for them.
+            if (@typeInfo(field.type) == .@"struct") {
+                assert(is_known_struct(field.type));
+            }
             // Check optional children (e.g., ?FollowupState).
             if (@typeInfo(field.type) == .optional) {
                 const child = @typeInfo(field.type).optional.child;
                 if (@typeInfo(child) == .@"enum") assert(is_known_enum(child));
                 if (@typeInfo(child) == .@"union") assert(is_known_union(child));
+                if (@typeInfo(child) == .@"struct") assert(is_known_struct(child));
             }
         }
     }
