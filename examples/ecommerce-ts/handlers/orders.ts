@@ -1,8 +1,6 @@
 // Order and inventory handlers — each operation groups route → handle → render.
 
-import type { Request, Route, Response, Context } from "tiger-web";
-
-function esc(s: string): string { return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;"); }
+import type { Request, Route, Response, Context, OrderResult } from "tiger-web";
 
 // ========================== create_order ==========================
 
@@ -39,7 +37,9 @@ export function handleGetOrder(ctx: Context): Response {
 
 // [render] .get_order
 export function renderGetOrder(status: string, ctx: Context): string {
-  return status === "ok" ? "<div>Order detail</div>" : `<div>${esc(status)}</div>`;
+  if (status !== "ok") return `<div>${esc(status)}</div>`;
+  const order = assertOrder(ctx);
+  return `<div>Order ${esc(order.id)} — ${esc(order.status)}</div>`;
 }
 
 // ========================== list_orders ==========================
@@ -72,6 +72,8 @@ export function routeCompleteOrder(req: Request): Route | null {
 // [handle] .complete_order
 export function handleCompleteOrder(ctx: Context): Response {
   if (ctx.order === null) return { status: "not_found", writes: [] };
+  // Positive + negative: only pending orders can be completed.
+  if (ctx.order.status !== "pending") return { status: "version_conflict", writes: [] };
   return { status: "ok", writes: [] };
 }
 
@@ -92,6 +94,8 @@ export function routeCancelOrder(req: Request): Route | null {
 // [handle] .cancel_order
 export function handleCancelOrder(ctx: Context): Response {
   if (ctx.order === null) return { status: "not_found", writes: [] };
+  // Can't cancel a completed or already-cancelled order.
+  if (ctx.order.status !== "pending") return { status: "version_conflict", writes: [] };
   return { status: "ok", writes: [] };
 }
 
@@ -117,4 +121,15 @@ export function handleTransferInventory(ctx: Context): Response {
 // [render] .transfer_inventory
 export function renderTransferInventory(status: string): string {
   return status === "ok" ? "<div>Transferred</div>" : `<div>${esc(status)}</div>`;
+}
+
+// ========================== assertions ==========================
+
+function assertOrder(ctx: Context): OrderResult {
+  if (ctx.order === null) throw new Error("render: order is null after ok status");
+  return ctx.order;
+}
+
+function esc(s: string): string {
+  return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 }

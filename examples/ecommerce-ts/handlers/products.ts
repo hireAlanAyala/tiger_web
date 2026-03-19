@@ -7,15 +7,18 @@ import type {
   Context,
   Product,
 } from "tiger-web";
+import { product_name_max, product_description_max } from "tiger-web";
 
 // ========================== create_product ==========================
 
 // [route] .create_product
-export function routeCreateProduct(req: Request): Route | null {
+export function routeCreateProduct(req: Request): Route<Product> | null {
   if (req.method !== "post" || req.path !== "/products") return null;
   const parsed = JSON.parse(req.body || "{}");
   const id = parsed.id || "0".repeat(32);
-  return { operation: "create_product", id, body: makeProduct(parsed, id) };
+  const body = parseProduct(parsed, id);
+  if (body === null) return null;
+  return { operation: "create_product", id, body };
 }
 
 // [handle] .create_product
@@ -42,7 +45,6 @@ export function routeGetProduct(req: Request): Route | null {
 // [handle] .get_product
 export function handleGetProduct(ctx: Context): Response {
   if (ctx.product === null) return { status: "not_found", writes: [] };
-  // Soft delete: inactive products are treated as not found.
   if (!ctx.product.flags.active) return { status: "not_found", writes: [] };
   return { status: "ok", writes: [] };
 }
@@ -50,7 +52,7 @@ export function handleGetProduct(ctx: Context): Response {
 // [render] .get_product
 export function renderGetProduct(status: string, ctx: Context): string {
   if (status !== "ok") return `<div class="error">${esc(status)}</div>`;
-  const p = ctx.product!;
+  const p = assertProduct(ctx);
   return `<div class="card">` +
     `<h3>${esc(p.name)}</h3>` +
     `<p>$${(p.price_cents / 100).toFixed(2)}</p>` +
@@ -82,16 +84,19 @@ export function renderListProducts(status: string, ctx: Context): string {
 // ========================== update_product ==========================
 
 // [route] .update_product
-export function routeUpdateProduct(req: Request): Route | null {
+export function routeUpdateProduct(req: Request): Route<Product> | null {
   const match = req.path.match(/^\/products\/([a-f0-9]{32})$/);
   if (!match || req.method !== "put") return null;
   const parsed = JSON.parse(req.body || "{}");
-  return { operation: "update_product", id: match[1], body: makeProduct(parsed, match[1]) };
+  const body = parseProduct(parsed, match[1]);
+  if (body === null) return null;
+  return { operation: "update_product", id: match[1], body };
 }
 
 // [handle] .update_product
 export function handleUpdateProduct(ctx: Context, body: Product): Response {
   if (ctx.product === null) return { status: "not_found", writes: [] };
+  if (body.version !== ctx.product.version) return { status: "version_conflict", writes: [] };
   return { status: "ok", writes: [] };
 }
 
@@ -113,6 +118,7 @@ export function routeDeleteProduct(req: Request): Route | null {
 // [handle] .delete_product
 export function handleDeleteProduct(ctx: Context): Response {
   if (ctx.product === null) return { status: "not_found", writes: [] };
+  if (!ctx.product.flags.active) return { status: "not_found", writes: [] };
   return { status: "ok", writes: [] };
 }
 
@@ -134,14 +140,15 @@ export function routeGetProductInventory(req: Request): Route | null {
 // [handle] .get_product_inventory
 export function handleGetProductInventory(ctx: Context): Response {
   if (ctx.product === null) return { status: "not_found", writes: [] };
+  if (!ctx.product.flags.active) return { status: "not_found", writes: [] };
   return { status: "ok", writes: [] };
 }
 
 // [render] .get_product_inventory
 export function renderGetProductInventory(status: string, ctx: Context): string {
   if (status !== "ok") return `<div class="error">${esc(status)}</div>`;
-  if (ctx.product) return `<div class="inventory">${ctx.product.inventory}</div>`;
-  return `<div class="error">not_found</div>`;
+  const p = assertProduct(ctx);
+  return `<div class="inventory">${p.inventory}</div>`;
 }
 
 // ========================== search_products ==========================
@@ -162,18 +169,30 @@ export function renderSearchProducts(status: string, ctx: Context): string {
   return `<div class="search-results">Search results</div>`;
 }
 
-// ========================== helpers ==========================
+// ========================== boundary validation ==========================
 
-function makeProduct(parsed: Record<string, unknown>, id: string): Product {
-  return {
-    id,
-    name: String(parsed.name || ""),
-    description: String(parsed.description || ""),
-    price_cents: Number(parsed.price_cents || 0),
-    inventory: Number(parsed.inventory || 0),
-    version: Number(parsed.version || 1),
-    flags: { active: true },
-  };
+function parseProduct(parsed: Record<string, unknown>, id: string): Product | null {
+  const name = String(parsed.name || "");
+  const description = String(parsed.description || "");
+  const price_cents = Number(parsed.price_cents ?? 0);
+  const inventory = Number(parsed.inventory ?? 0);
+  const version = Number(parsed.version ?? 1);
+
+  // Reject at the boundary — inner code never sees invalid data.
+  if (name.length === 0 || name.length > product_name_max) return null;
+  if (description.length > product_description_max) return null;
+  if (!Number.isInteger(price_cents) || price_cents < 0) return null;
+  if (!Number.isInteger(inventory) || inventory < 0) return null;
+  if (!Number.isInteger(version) || version < 1) return null;
+
+  return { id, name, description, price_cents, inventory, version, flags: { active: true } };
+}
+
+// ========================== render assertions ==========================
+
+function assertProduct(ctx: Context): Product {
+  if (ctx.product === null) throw new Error("render: product is null after ok status");
+  return ctx.product;
 }
 
 function esc(s: string): string {

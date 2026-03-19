@@ -1,14 +1,16 @@
 // Collection handlers — each operation groups route → handle → render.
 
-import type { Request, Route, Response, Context } from "tiger-web";
-
-function esc(s: string): string { return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;"); }
+import type { Request, Route, Response, Context, ProductCollection } from "tiger-web";
+import { collection_name_max } from "tiger-web";
 
 // ========================== create_collection ==========================
 
 // [route] .create_collection
 export function routeCreateCollection(req: Request): Route | null {
   if (req.method !== "post" || req.path !== "/collections") return null;
+  const parsed = JSON.parse(req.body || "{}");
+  const name = String(parsed.name || "");
+  if (name.length === 0 || name.length > collection_name_max) return null;
   return { operation: "create_collection", id: "0".repeat(32) };
 }
 
@@ -39,7 +41,9 @@ export function handleGetCollection(ctx: Context): Response {
 
 // [render] .get_collection
 export function renderGetCollection(status: string, ctx: Context): string {
-  return status === "ok" ? "<div>Collection</div>" : `<div>${esc(status)}</div>`;
+  if (status !== "ok") return `<div>${esc(status)}</div>`;
+  const col = assertCollection(ctx);
+  return `<div>Collection: ${esc(col.name)}</div>`;
 }
 
 // ========================== list_collections ==========================
@@ -91,6 +95,7 @@ export function routeAddCollectionMember(req: Request): Route | null {
 
 // [handle] .add_collection_member
 export function handleAddCollectionMember(ctx: Context): Response {
+  if (ctx.collection === null) return { status: "not_found", writes: [] };
   return { status: "ok", writes: [] };
 }
 
@@ -110,10 +115,22 @@ export function routeRemoveCollectionMember(req: Request): Route | null {
 
 // [handle] .remove_collection_member
 export function handleRemoveCollectionMember(ctx: Context): Response {
+  if (ctx.collection === null) return { status: "not_found", writes: [] };
   return { status: "ok", writes: [] };
 }
 
 // [render] .remove_collection_member
 export function renderRemoveCollectionMember(status: string): string {
   return status === "ok" ? "<div>Removed</div>" : `<div>${esc(status)}</div>`;
+}
+
+// ========================== assertions ==========================
+
+function assertCollection(ctx: Context): ProductCollection {
+  if (ctx.collection === null) throw new Error("render: collection is null after ok status");
+  return ctx.collection;
+}
+
+function esc(s: string): string {
+  return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 }
