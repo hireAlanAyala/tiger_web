@@ -434,7 +434,7 @@ fn encode_html_response(send_buf: []u8, operation: message.Operation, resp: mess
 }
 
 /// Write HTTP headers right-aligned into the reserved space before the body.
-/// Always 200 OK — see design/002-always-200.md.
+/// Always 200 OK — see decisions/always-200.md.
 pub fn backfill_headers(send_buf: []u8, body_len: usize, set_cookie_header: ?[]const u8) Response {
     // Build headers into a stack buffer.
     var hdr_buf: [header_reserve]u8 = undefined;

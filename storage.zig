@@ -841,14 +841,14 @@ pub const SqliteStorage = struct {
     // =================================================================
 
     /// Set to a migration function when the next deploy needs a schema change.
-    /// After deploying, clear it back to null and update schema.sql from prod.
+    /// After deploying, clear it back to null and update storage/schema.sql from prod.
     /// Additive only — no drops, no renames, no type changes.
-    /// See design/009-documentation_database.md.
+    /// See decisions/database.md.
     const next_migration: ?*const fn (*c.sqlite3) void = migrate_v3_collection_active;
 
     fn ensure_schema(db: *c.sqlite3) void {
         if (get_schema_version(db) == 0) {
-            exec(db, @embedFile("schema.sql"));
+            exec(db, @embedFile("storage/schema.sql"));
             set_schema_version(db, 3);
         }
         if (next_migration) |migrate| {

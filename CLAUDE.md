@@ -70,7 +70,7 @@ Native commit handles storage, auth, WAL. Sidecar provides HTML.
 |---|---|
 | `framework/server.zig` | `ServerType(App, IO, Storage)` — tick loop, connection pool, accepts, prefetch→execute orchestration |
 | `framework/connection.zig` | `ConnectionType(IO, FollowupState)` — per-connection state machine (accepting → receiving → ready → sending) |
-| `framework/http.zig` | HTTP/1.0+1.1 request parser (pure parser, no response encoding — see design/002-always-200.md) |
+| `framework/http.zig` | HTTP/1.0+1.1 request parser (pure parser, no response encoding — see decisions/always-200.md) |
 | `framework/io.zig` | epoll IO layer (real syscalls) |
 | `framework/wal.zig` | `WalType(Message, root_fn)` — append-only replay log, writes Message entries after commit(), no fsync |
 | `framework/tracer.zig` | `TracerType(Operation, Counter)` — gauges, counters, span timings, trace logging |
