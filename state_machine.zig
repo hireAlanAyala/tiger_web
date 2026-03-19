@@ -459,41 +459,36 @@ pub fn StateMachineType(comptime Storage: type) type {
             };
 
             for (exec_result.writes[0..exec_result.writes_len]) |w| {
-                self.apply_write(w);
+                // Native path: our execute handlers guarantee writes are valid
+                // after prefetch. Assert — a failure here is a programming bug.
+                assert(self.apply_write(w));
             }
             return exec_result.response;
         }
 
-        /// Apply a single write command to storage. Writes are infallible
-        /// after prefetch — prefetch proved the operation is valid.
-        fn apply_write(self: *StateMachine, w: Write) void {
-            switch (w) {
-                .put_product => |p| assert(self.storage.put(&p) == .ok),
-                .update_product => |p| assert(self.storage.update(p.id, &p) == .ok),
-                .put_collection => |col| assert(self.storage.put_collection(&col) == .ok),
-                .update_collection => |col| assert(self.storage.update_collection(col.id, &col) == .ok),
-                .put_membership => |m| assert(self.storage.add_to_collection(m.collection_id, m.product_id) == .ok),
-                .update_membership => |m| {
-                    if (m.removed != 0) {
-                        const r = self.storage.remove_from_collection(m.collection_id, m.product_id);
-                        assert(r == .ok or r == .not_found);
-                    } else {
-                        assert(self.storage.add_to_collection(m.collection_id, m.product_id) == .ok);
-                    }
-                },
-                .put_order => |order| assert(self.storage.put_order(&order) == .ok),
-                .update_order => |order| assert(self.storage.update_order_completion(&order) == .ok),
-                .put_login_code => |lc| {
-                    assert(self.storage.put_login_code(lc.email[0..lc.email_len], &lc.code, lc.expires_at) == .ok);
-                },
-                .consume_login_code => |lc| {
+        /// Apply a single write command to storage. Returns true on success.
+        /// One dispatch table used by both native commit (asserts the result)
+        /// and the sidecar path (validates the result).
+        pub fn apply_write(self: *StateMachine, w: Write) bool {
+            return switch (w) {
+                .put_product => |p| self.storage.put(&p) == .ok,
+                .update_product => |p| self.storage.update(p.id, &p) == .ok,
+                .put_collection => |col| self.storage.put_collection(&col) == .ok,
+                .update_collection => |col| self.storage.update_collection(col.id, &col) == .ok,
+                .put_membership => |m| self.storage.add_to_collection(m.collection_id, m.product_id) == .ok,
+                .update_membership => |m| if (m.removed != 0) blk: {
+                    const r = self.storage.remove_from_collection(m.collection_id, m.product_id);
+                    break :blk r == .ok or r == .not_found;
+                } else self.storage.add_to_collection(m.collection_id, m.product_id) == .ok,
+                .put_order => |order| self.storage.put_order(&order) == .ok,
+                .update_order => |order| self.storage.update_order_completion(&order) == .ok,
+                .put_login_code => |lc| self.storage.put_login_code(lc.email[0..lc.email_len], &lc.code, lc.expires_at) == .ok,
+                .consume_login_code => |lc| blk: {
                     _ = self.storage.consume_login_code(lc.email[0..lc.email_len]);
+                    break :blk true;
                 },
-                .put_user => |u| {
-                    const wr = self.storage.put_user(u.user_id, u.email[0..u.email_len]);
-                    assert(wr == .ok);
-                },
-            }
+                .put_user => |u| self.storage.put_user(u.user_id, u.email[0..u.email_len]) == .ok,
+            };
         }
 
         // --- Per-pattern execute handlers ---
@@ -1024,13 +1019,6 @@ pub fn StateMachineType(comptime Storage: type) type {
             self.prefetch_login_code_entry = null;
             self.prefetch_user_by_email = null;
             self.prefetch_identity = null;
-        }
-
-        /// Reset prefetch state without executing. Called by the sidecar
-        /// path when execute happens externally — the SM's cache must still
-        /// be cleaned up for the next request.
-        pub fn skip_commit(self: *StateMachine) void {
-            self.reset_prefetch();
         }
 
         fn reset_prefetch(self: *StateMachine) void {

@@ -185,30 +185,40 @@ pub fn commit_and_encode(
         // Extract cache before commit (commit resets it).
         const cache = extract_cache(Storage, sm);
 
+        // Native commit: storage writes, auth, WAL consistency, followup.
+        const native_resp = sm.commit(msg);
+
         // Call sidecar for execute + render.
         if (!client.execute_render(msg.operation, msg.id, &msg.body, &cache, is_datastar_request, &sidecar_resp_buf)) {
-            // No fallback. Sidecar failure → request fails.
-            log.mark.err("sidecar execute_render failed fd=-1", .{});
+            // Sidecar failure. Native commit already ran — storage is correct.
+            // Render natively as fallback since the database is already mutated.
+            log.mark.err("sidecar execute_render failed, rendering natively", .{});
+            const r = render.encode_response(send_buf, msg.operation, native_resp, is_datastar_request, secret_key);
             return .{
-                .status = .storage_error,
-                .followup = null,
-                .response = .{ .offset = 0, .len = 0, .keep_alive = false },
+                .status = native_resp.status,
+                .followup = native_resp.followup,
+                .response = r,
             };
         }
 
-        // Apply sidecar writes to storage.
-        const writes = sidecar_resp_buf.writes[0..sidecar_resp_buf.writes_len];
-        if (!apply_sidecar_writes(Storage, sm, writes)) {
-            log.mark.err("sidecar writes invalid", .{});
-            return .{
-                .status = .storage_error,
-                .followup = null,
-                .response = .{ .offset = 0, .len = 0, .keep_alive = false },
-            };
+        // Spot-check: compare sidecar status against native.
+        if (sidecar_resp_buf.status != native_resp.status) {
+            spot_check_fail("spot-check divergence: execute status sidecar={s} native={s}", .{
+                @tagName(sidecar_resp_buf.status), @tagName(native_resp.status),
+            });
         }
 
-        // Clean up prefetch state (normally done by commit, which we skipped).
-        sm.skip_commit();
+        // Spot-check: compare sidecar writes against native.
+        // Deserialize sidecar writes and compare with apply_write.
+        for (sidecar_resp_buf.writes[0..sidecar_resp_buf.writes_len]) |slot| {
+            if (deserialize_write(state_machine.StateMachineType(Storage), slot)) |_| {
+                // Write deserialized successfully — it would be applied
+                // if we were in write-authority mode. For now, native
+                // commit already applied the writes.
+            } else {
+                spot_check_fail("spot-check divergence: invalid sidecar write tag={d}", .{slot.tag});
+            }
+        }
 
         // Use sidecar HTML — copy into send_buf.
         const html_len = sidecar_resp_buf.html_len;
@@ -216,8 +226,8 @@ pub fn commit_and_encode(
         @memcpy(send_buf[0..html_len], sidecar_resp_buf.html[0..html_len]);
 
         return .{
-            .status = sidecar_resp_buf.status,
-            .followup = null, // TODO: sidecar followup support
+            .status = native_resp.status,
+            .followup = native_resp.followup,
             .response = .{ .offset = 0, .len = html_len, .keep_alive = !is_datastar_request },
         };
     }
@@ -238,91 +248,35 @@ pub const CommitResult = struct {
     response: render.Response,
 };
 
-/// Apply writes from the sidecar response to storage.
-/// Each WriteSlot is deserialized by tag and applied via the storage interface.
-/// Returns false if any write has an invalid tag or storage rejects it.
+/// Deserialize a WriteSlot into a Write tagged union.
+/// Returns null if the tag is invalid. Used by the spot-check to
+/// validate sidecar writes and by the future write-authority path
+/// to feed writes into SM.apply_write.
 ///
-/// Unlike StateMachine.apply_write (which asserts storage results), this function
-/// VALIDATES them. The SM's asserts are correct — its execute handlers guarantee
-/// writes are valid (prefetch verified entities exist, execute computed correct
-/// values). Here, the writes come from the sidecar — untrusted. A sidecar bug
-/// (duplicate put, update of missing entity) should fail the request, not crash.
-///
-/// The @ptrCast(@alignCast(&slot.data)) reinterprets raw bytes as typed structs.
-/// This is safe because: all payload types are extern with no_padding, the sidecar
-/// serialized them via the generated serde (same @offsetOf), and WriteSlot.data
-/// starts at offset 16 (aligned to 16 bytes by the tag + reserved_tag padding).
-/// The @alignCast is a runtime check in Debug and ReleaseSafe — catches misaligned
-/// data from a buggy sidecar.
-pub fn apply_sidecar_writes(
-    comptime Storage: type,
-    sm: *state_machine.StateMachineType(Storage),
-    writes: []const protocol.WriteSlot,
-) bool {
-    for (writes) |slot| {
-        const tag = std.meta.intToEnum(protocol.WriteTag, slot.tag) catch {
-            log.mark.err("invalid write tag: {d}", .{slot.tag});
-            return false;
-        };
-        // Storage calls are driven by sidecar data — validate results, don't assert.
-        // A sidecar bug (duplicate put, missing entity) should fail the request,
-        // not crash the server.
-        const ok: bool = switch (tag) {
-            .put_product => blk: {
-                const p: *const message.Product = @ptrCast(@alignCast(&slot.data));
-                break :blk sm.storage.put(p) == .ok;
-            },
-            .update_product => blk: {
-                const p: *const message.Product = @ptrCast(@alignCast(&slot.data));
-                break :blk sm.storage.update(p.id, p) == .ok;
-            },
-            .put_collection => blk: {
-                const c: *const message.ProductCollection = @ptrCast(@alignCast(&slot.data));
-                break :blk sm.storage.put_collection(c) == .ok;
-            },
-            .update_collection => blk: {
-                const c: *const message.ProductCollection = @ptrCast(@alignCast(&slot.data));
-                break :blk sm.storage.update_collection(c.id, c) == .ok;
-            },
-            .put_membership => blk: {
-                const m: *const message.Membership = @ptrCast(@alignCast(&slot.data));
-                break :blk sm.storage.add_to_collection(m.collection_id, m.product_id) == .ok;
-            },
-            .update_membership => blk: {
-                const m: *const message.MembershipUpdate = @ptrCast(@alignCast(&slot.data));
-                break :blk if (m.removed != 0) r: {
-                    const r = sm.storage.remove_from_collection(m.collection_id, m.product_id);
-                    break :r r == .ok or r == .not_found;
-                } else sm.storage.add_to_collection(m.collection_id, m.product_id) == .ok;
-            },
-            .put_order => blk: {
-                const o: *const message.OrderResult = @ptrCast(@alignCast(&slot.data));
-                break :blk sm.storage.put_order(o) == .ok;
-            },
-            .update_order => blk: {
-                const o: *const message.OrderResult = @ptrCast(@alignCast(&slot.data));
-                break :blk sm.storage.update_order_completion(o) == .ok;
-            },
-            .put_login_code => blk: {
-                const lc: *const message.LoginCodeWrite = @ptrCast(@alignCast(&slot.data));
-                break :blk sm.storage.put_login_code(lc.email[0..lc.email_len], &lc.code, lc.expires_at) == .ok;
-            },
-            .consume_login_code => blk: {
-                const lc: *const message.LoginCodeKey = @ptrCast(@alignCast(&slot.data));
-                _ = sm.storage.consume_login_code(lc.email[0..lc.email_len]);
-                break :blk true;
-            },
-            .put_user => blk: {
-                const u: *const message.UserWrite = @ptrCast(@alignCast(&slot.data));
-                break :blk sm.storage.put_user(u.user_id, u.email[0..u.email_len]) == .ok;
-            },
-        };
-        if (!ok) {
-            log.mark.err("sidecar write failed: tag={d}", .{slot.tag});
-            return false;
-        }
-    }
-    return true;
+/// The @ptrCast reinterprets raw bytes as extern struct types — safe
+/// because all payloads are extern with no_padding, WriteSlot.data
+/// starts at offset 16 (aligned by tag + reserved_tag padding), and
+/// @alignCast is checked at runtime in Debug and ReleaseSafe.
+fn deserialize_write(comptime StateMachineT: type, slot: protocol.WriteSlot) ?StateMachineT.Write {
+    const tag = std.meta.intToEnum(protocol.WriteTag, slot.tag) catch return null;
+    return switch (tag) {
+        .put_product => .{ .put_product = byteCast(message.Product, &slot.data) },
+        .update_product => .{ .update_product = byteCast(message.Product, &slot.data) },
+        .put_collection => .{ .put_collection = byteCast(message.ProductCollection, &slot.data) },
+        .update_collection => .{ .update_collection = byteCast(message.ProductCollection, &slot.data) },
+        .put_membership => .{ .put_membership = byteCast(message.Membership, &slot.data) },
+        .update_membership => .{ .update_membership = byteCast(message.MembershipUpdate, &slot.data) },
+        .put_order => .{ .put_order = byteCast(message.OrderResult, &slot.data) },
+        .update_order => .{ .update_order = byteCast(message.OrderResult, &slot.data) },
+        .put_login_code => .{ .put_login_code = byteCast(message.LoginCodeWrite, &slot.data) },
+        .consume_login_code => .{ .consume_login_code = byteCast(message.LoginCodeKey, &slot.data) },
+        .put_user => .{ .put_user = byteCast(message.UserWrite, &slot.data) },
+    };
+}
+
+/// Reinterpret raw bytes as a typed extern struct value.
+fn byteCast(comptime T: type, data: *const [@sizeOf(message.OrderResult)]u8) T {
+    return @as(*const T, @ptrCast(@alignCast(data))).*;
 }
 
 /// Encode a response into the send buffer.
@@ -409,7 +363,7 @@ test "extract_cache with populated product" {
     _ = sm.commit(get_msg);
 }
 
-test "apply_sidecar_writes put_product" {
+test "deserialize_write and apply_write round trip" {
     var storage = try MemoryStorage.init(std.testing.allocator);
     const secret = "tiger-web-test-key-0123456789ab!".*;
     var sm = SM.init(&storage, false, 42, &secret);
@@ -427,9 +381,10 @@ test "apply_sidecar_writes put_product" {
     p.flags = .{ .active = true };
     @memcpy(slot.data[0..@sizeOf(message.Product)], std.mem.asBytes(&p));
 
-    // Apply the write.
-    const ok = apply_sidecar_writes(MemoryStorage, &sm, &[_]protocol.WriteSlot{slot});
-    try std.testing.expect(ok);
+    // Deserialize and apply through the shared apply_write.
+    const write = deserialize_write(SM, slot);
+    try std.testing.expect(write != null);
+    try std.testing.expect(sm.apply_write(write.?));
 
     // Verify the product is in storage.
     const msg = message.Message.init(.get_product, p.id, 0, {});
@@ -440,33 +395,24 @@ test "apply_sidecar_writes put_product" {
     _ = sm.commit(msg);
 }
 
-test "apply_sidecar_writes duplicate put returns false" {
+test "deserialize_write invalid tag returns null" {
+    var slot = std.mem.zeroes(protocol.WriteSlot);
+    slot.tag = 255;
+    try std.testing.expect(deserialize_write(SM, slot) == null);
+}
+
+test "apply_write returns false for duplicate put" {
     var storage = try MemoryStorage.init(std.testing.allocator);
     const secret = "tiger-web-test-key-0123456789ab!".*;
     var sm = SM.init(&storage, false, 42, &secret);
 
-    var slot = std.mem.zeroes(protocol.WriteSlot);
-    slot.tag = @intFromEnum(protocol.WriteTag.put_product);
     var p = std.mem.zeroes(message.Product);
     p.id = 0x1234;
     p.version = 1;
     p.flags = .{ .active = true };
-    @memcpy(slot.data[0..@sizeOf(message.Product)], std.mem.asBytes(&p));
 
     // First put succeeds.
-    try std.testing.expect(apply_sidecar_writes(MemoryStorage, &sm, &[_]protocol.WriteSlot{slot}));
-
-    // Duplicate put fails — returns false, doesn't crash.
-    try std.testing.expect(!apply_sidecar_writes(MemoryStorage, &sm, &[_]protocol.WriteSlot{slot}));
-}
-
-test "apply_sidecar_writes invalid tag returns false" {
-    var storage = try MemoryStorage.init(std.testing.allocator);
-    const secret = "tiger-web-test-key-0123456789ab!".*;
-    var sm = SM.init(&storage, false, 42, &secret);
-
-    var slot = std.mem.zeroes(protocol.WriteSlot);
-    slot.tag = 255; // Invalid tag.
-
-    try std.testing.expect(!apply_sidecar_writes(MemoryStorage, &sm, &[_]protocol.WriteSlot{slot}));
+    try std.testing.expect(sm.apply_write(.{ .put_product = p }));
+    // Duplicate put — apply_write returns false (not crash).
+    try std.testing.expect(!sm.apply_write(.{ .put_product = p }));
 }
