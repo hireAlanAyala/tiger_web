@@ -1,9 +1,6 @@
 // Order handlers — translate, execute, render.
 
-import type { TranslateRequest, PrefetchCache } from "../../generated/types.generated.ts";
-
-interface TranslateResult { operation: string; id: string; body?: Record<string, unknown> | null; }
-interface ExecuteResult { status: string; writes: unknown[]; }
+import type { TranslateRequest, TranslateResult, HandlerResult, PrefetchCache } from "../../generated/types.generated.ts";
 function escapeHtml(s: string): string { return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;"); }
 
 // [translate] .create_order
@@ -47,31 +44,31 @@ export function translateTransferInventory(req: TranslateRequest): TranslateResu
 }
 
 // [execute] .create_order
-export function executeCreateOrder(cache: PrefetchCache): ExecuteResult { return { status: "ok", writes: [] }; }
+export function executeCreateOrder(cache: PrefetchCache): HandlerResult { return { status: "ok", writes: [] }; }
 
 // [execute] .get_order
-export function executeGetOrder(cache: PrefetchCache): ExecuteResult {
+export function executeGetOrder(cache: PrefetchCache): HandlerResult {
   if (cache.order === null) return { status: "not_found", writes: [] };
   return { status: "ok", writes: [] };
 }
 
 // [execute] .list_orders
-export function executeListOrders(cache: PrefetchCache): ExecuteResult { return { status: "ok", writes: [] }; }
+export function executeListOrders(cache: PrefetchCache): HandlerResult { return { status: "ok", writes: [] }; }
 
 // [execute] .complete_order
-export function executeCompleteOrder(cache: PrefetchCache): ExecuteResult {
+export function executeCompleteOrder(cache: PrefetchCache): HandlerResult {
   if (cache.order === null) return { status: "not_found", writes: [] };
   return { status: "ok", writes: [] };
 }
 
 // [execute] .cancel_order
-export function executeCancelOrder(cache: PrefetchCache): ExecuteResult {
+export function executeCancelOrder(cache: PrefetchCache): HandlerResult {
   if (cache.order === null) return { status: "not_found", writes: [] };
   return { status: "ok", writes: [] };
 }
 
 // [execute] .transfer_inventory
-export function executeTransferInventory(cache: PrefetchCache): ExecuteResult { return { status: "ok", writes: [] }; }
+export function executeTransferInventory(cache: PrefetchCache): HandlerResult { return { status: "ok", writes: [] }; }
 
 // [render] .create_order
 export function renderCreateOrder(status: string): string { return status === "ok" ? "<div>Order created</div>" : `<div>${escapeHtml(status)}</div>`; }

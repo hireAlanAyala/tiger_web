@@ -2,17 +2,11 @@
 
 import type {
   TranslateRequest,
+  TranslateResult,
+  HandlerResult,
   PrefetchCache,
   Product,
 } from "../../generated/types.generated.ts";
-
-// TranslateResult — returned by translate handlers.
-// The dispatch serializes the body automatically.
-interface TranslateResult {
-  operation: string;
-  id: string;
-  body?: Record<string, unknown> | null;
-}
 
 // ---------------------------------------------------------------------------
 // Translate
@@ -71,48 +65,43 @@ export function translateSearchProducts(req: TranslateRequest): TranslateResult 
 // Execute
 // ---------------------------------------------------------------------------
 
-interface ExecuteResult {
-  status: string;
-  writes: unknown[];
-}
-
 // [execute] .create_product
-export function executeCreateProduct(cache: PrefetchCache, body: Product): ExecuteResult {
+export function executeCreateProduct(cache: PrefetchCache, body: Product): HandlerResult {
   if (cache.product !== null) return { status: "version_conflict", writes: [] };
   return { status: "ok", writes: [] };
 }
 
 // [execute] .get_product
-export function executeGetProduct(cache: PrefetchCache): ExecuteResult {
+export function executeGetProduct(cache: PrefetchCache): HandlerResult {
   if (cache.product === null) return { status: "not_found", writes: [] };
   return { status: "ok", writes: [] };
 }
 
 // [execute] .list_products
-export function executeListProducts(cache: PrefetchCache): ExecuteResult {
+export function executeListProducts(cache: PrefetchCache): HandlerResult {
   return { status: "ok", writes: [] };
 }
 
 // [execute] .update_product
-export function executeUpdateProduct(cache: PrefetchCache, body: Product): ExecuteResult {
+export function executeUpdateProduct(cache: PrefetchCache, body: Product): HandlerResult {
   if (cache.product === null) return { status: "not_found", writes: [] };
   return { status: "ok", writes: [] };
 }
 
 // [execute] .delete_product
-export function executeDeleteProduct(cache: PrefetchCache): ExecuteResult {
+export function executeDeleteProduct(cache: PrefetchCache): HandlerResult {
   if (cache.product === null) return { status: "not_found", writes: [] };
   return { status: "ok", writes: [] };
 }
 
 // [execute] .get_product_inventory
-export function executeGetProductInventory(cache: PrefetchCache): ExecuteResult {
+export function executeGetProductInventory(cache: PrefetchCache): HandlerResult {
   if (cache.product === null) return { status: "not_found", writes: [] };
   return { status: "ok", writes: [] };
 }
 
 // [execute] .search_products
-export function executeSearchProducts(cache: PrefetchCache): ExecuteResult {
+export function executeSearchProducts(cache: PrefetchCache): HandlerResult {
   return { status: "ok", writes: [] };
 }
 

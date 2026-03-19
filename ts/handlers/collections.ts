@@ -1,9 +1,6 @@
 // Collection handlers — translate, execute, render.
 
-import type { TranslateRequest, PrefetchCache } from "../../generated/types.generated.ts";
-
-interface TranslateResult { operation: string; id: string; body?: Record<string, unknown> | null; }
-interface ExecuteResult { status: string; writes: unknown[]; }
+import type { TranslateRequest, TranslateResult, HandlerResult, PrefetchCache } from "../../generated/types.generated.ts";
 function escapeHtml(s: string): string { return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;"); }
 
 // [translate] .create_collection
@@ -47,28 +44,28 @@ export function translateRemoveCollectionMember(req: TranslateRequest): Translat
 }
 
 // [execute] .create_collection
-export function executeCreateCollection(cache: PrefetchCache): ExecuteResult { return { status: "ok", writes: [] }; }
+export function executeCreateCollection(cache: PrefetchCache): HandlerResult { return { status: "ok", writes: [] }; }
 
 // [execute] .get_collection
-export function executeGetCollection(cache: PrefetchCache): ExecuteResult {
+export function executeGetCollection(cache: PrefetchCache): HandlerResult {
   if (cache.collection === null) return { status: "not_found", writes: [] };
   return { status: "ok", writes: [] };
 }
 
 // [execute] .list_collections
-export function executeListCollections(cache: PrefetchCache): ExecuteResult { return { status: "ok", writes: [] }; }
+export function executeListCollections(cache: PrefetchCache): HandlerResult { return { status: "ok", writes: [] }; }
 
 // [execute] .delete_collection
-export function executeDeleteCollection(cache: PrefetchCache): ExecuteResult {
+export function executeDeleteCollection(cache: PrefetchCache): HandlerResult {
   if (cache.collection === null) return { status: "not_found", writes: [] };
   return { status: "ok", writes: [] };
 }
 
 // [execute] .add_collection_member
-export function executeAddCollectionMember(cache: PrefetchCache): ExecuteResult { return { status: "ok", writes: [] }; }
+export function executeAddCollectionMember(cache: PrefetchCache): HandlerResult { return { status: "ok", writes: [] }; }
 
 // [execute] .remove_collection_member
-export function executeRemoveCollectionMember(cache: PrefetchCache): ExecuteResult { return { status: "ok", writes: [] }; }
+export function executeRemoveCollectionMember(cache: PrefetchCache): HandlerResult { return { status: "ok", writes: [] }; }
 
 // [render] .create_collection
 export function renderCreateCollection(status: string): string { return status === "ok" ? "<div>Created</div>" : `<div>${escapeHtml(status)}</div>`; }

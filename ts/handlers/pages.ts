@@ -1,9 +1,6 @@
 // Page and auth handlers — translate, execute, render.
 
-import type { TranslateRequest, PrefetchCache } from "../../generated/types.generated.ts";
-
-interface TranslateResult { operation: string; id: string; body?: Record<string, unknown> | null; }
-interface ExecuteResult { status: string; writes: unknown[]; }
+import type { TranslateRequest, TranslateResult, HandlerResult, PrefetchCache } from "../../generated/types.generated.ts";
 
 // [translate] .page_load_dashboard
 export function translatePageLoadDashboard(req: TranslateRequest): TranslateResult | null {
@@ -36,19 +33,19 @@ export function translateLogout(req: TranslateRequest): TranslateResult | null {
 }
 
 // [execute] .page_load_dashboard
-export function executePageLoadDashboard(cache: PrefetchCache): ExecuteResult { return { status: "ok", writes: [] }; }
+export function executePageLoadDashboard(cache: PrefetchCache): HandlerResult { return { status: "ok", writes: [] }; }
 
 // [execute] .page_load_login
-export function executePageLoadLogin(): ExecuteResult { return { status: "ok", writes: [] }; }
+export function executePageLoadLogin(): HandlerResult { return { status: "ok", writes: [] }; }
 
 // [execute] .request_login_code
-export function executeRequestLoginCode(cache: PrefetchCache): ExecuteResult { return { status: "ok", writes: [] }; }
+export function executeRequestLoginCode(cache: PrefetchCache): HandlerResult { return { status: "ok", writes: [] }; }
 
 // [execute] .verify_login_code
-export function executeVerifyLoginCode(cache: PrefetchCache): ExecuteResult { return { status: "ok", writes: [] }; }
+export function executeVerifyLoginCode(cache: PrefetchCache): HandlerResult { return { status: "ok", writes: [] }; }
 
 // [execute] .logout
-export function executeLogout(): ExecuteResult { return { status: "ok", writes: [] }; }
+export function executeLogout(): HandlerResult { return { status: "ok", writes: [] }; }
 
 // [render] .page_load_dashboard
 export function renderPageLoadDashboard(status: string, cache: PrefetchCache): string { return "<div>Dashboard</div>"; }

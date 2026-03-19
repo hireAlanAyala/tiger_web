@@ -176,6 +176,18 @@ const output = blk: {
     // --- Tagged unions ---
     for (known_unions) |U| w.emit_union(U);
 
+    // --- Handler types (developer-facing API) ---
+    w.raw("export interface TranslateResult {\n");
+    w.raw("  operation: Operation;\n");
+    w.raw("  id: string;\n");
+    w.raw("  body?: Record<string, unknown> | null;\n");
+    w.raw("}\n\n");
+
+    w.raw("export interface HandlerResult {\n");
+    w.raw("  status: Status;\n");
+    w.raw("  writes: Write[];\n");
+    w.raw("}\n\n");
+
     // --- Serde: binary ↔ TypeScript serialization ---
     w.emit_serde_helpers();
 
@@ -1597,7 +1609,7 @@ test "output is valid structure" {
             if (i + 11 <= output.len and std.mem.eql(u8, output[i..][0..11], "export type")) types += 1;
             if (i + 12 <= output.len and std.mem.eql(u8, output[i..][0..12], "export const")) consts += 1;
         }
-        assert(interfaces == 38);
+        assert(interfaces == 40);
         assert(types == 14);
         assert(consts == 34);
         // 33 extern structs × 2 (read + write) = 66 serde functions
