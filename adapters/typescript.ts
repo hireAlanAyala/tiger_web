@@ -144,6 +144,12 @@ const server = net.createServer((conn) => {
         // Translate: try each handler until one returns found=1.
         // Unlike execute/render, translate determines the operation — we
         // can't dispatch by operation name because we don't know it yet.
+        //
+        // This is O(n) per request — 24 function calls, 23 fail. The
+        // alternative is a generated URL router, which makes the adapter
+        // language-specific (pattern matching varies by language). The
+        // iteration costs ~0.1μs vs ~50μs for the socket round trip.
+        // Correct trade-off for a same-machine unix socket.
         let resp: TranslateResponse = { id: '0'.repeat(32), body: new Uint8Array(672), found: 0, operation: 'root' };
         for (const handler of Object.values(translateHandlers)) {
           const result = handler(req);
