@@ -74,19 +74,19 @@ export function executeCancelOrder(cache: PrefetchCache): ExecuteResult {
 export function executeTransferInventory(cache: PrefetchCache): ExecuteResult { return { status: "ok", writes: [] }; }
 
 // [render] .create_order
-export function renderCreateOrder(_op: string, status: string): string { return status === "ok" ? "<div>Order created</div>" : `<div>${escapeHtml(status)}</div>`; }
+export function renderCreateOrder(status: string): string { return status === "ok" ? "<div>Order created</div>" : `<div>${escapeHtml(status)}</div>`; }
 
 // [render] .get_order
-export function renderGetOrder(_op: string, status: string): string { return status === "ok" ? "<div>Order detail</div>" : `<div>${escapeHtml(status)}</div>`; }
+export function renderGetOrder(status: string, cache: PrefetchCache): string { return status === "ok" ? "<div>Order detail</div>" : `<div>${escapeHtml(status)}</div>`; }
 
 // [render] .list_orders
-export function renderListOrders(): string { return "<div>Orders</div>"; }
+export function renderListOrders(status: string, cache: PrefetchCache): string { return "<div>Orders</div>"; }
 
 // [render] .complete_order
-export function renderCompleteOrder(_op: string, status: string): string { return status === "ok" ? "<div>Completed</div>" : `<div>${escapeHtml(status)}</div>`; }
+export function renderCompleteOrder(status: string): string { return status === "ok" ? "<div>Completed</div>" : `<div>${escapeHtml(status)}</div>`; }
 
 // [render] .cancel_order
-export function renderCancelOrder(_op: string, status: string): string { return status === "ok" ? "<div>Cancelled</div>" : `<div>${escapeHtml(status)}</div>`; }
+export function renderCancelOrder(status: string): string { return status === "ok" ? "<div>Cancelled</div>" : `<div>${escapeHtml(status)}</div>`; }
 
 // [render] .transfer_inventory
-export function renderTransferInventory(_op: string, status: string): string { return status === "ok" ? "<div>Transferred</div>" : `<div>${escapeHtml(status)}</div>`; }
+export function renderTransferInventory(status: string): string { return status === "ok" ? "<div>Transferred</div>" : `<div>${escapeHtml(status)}</div>`; }

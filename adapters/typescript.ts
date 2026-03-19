@@ -101,7 +101,7 @@ import {
   translate_request_size, translate_response_size,
   execute_render_request_size, execute_render_response_size,
   body_max,
-  TagValues, operationBodyWriter,
+  TagValues, operationBodyWriter, operationBodyReader,
   type TranslateResponse,
   type ExecuteRenderResponse,
 } from './types.generated.ts';
@@ -174,8 +174,12 @@ const server = net.createServer((conn) => {
         if (pending.length < execute_render_request_size) break;
         const req = readExecuteRenderRequest(new Uint8Array(pending.buffer, pending.byteOffset, execute_render_request_size), 0);
         pending = pending.subarray(execute_render_request_size);
-        const execResult = executeHandlers[req.operation](req.cache, req.body);
-        const html = renderHandlers[req.operation](req.operation, execResult.status, execResult);
+        // Deserialize the body for the execute handler using the operation's reader.
+        const bodyReader = operationBodyReader[req.operation];
+        const typedBody = bodyReader ? bodyReader(req.body, 0) : null;
+        const execResult = executeHandlers[req.operation](req.cache, typedBody);
+        // Render receives status + cache — all the data it needs for HTML.
+        const html = renderHandlers[req.operation](execResult.status, req.cache);
         const resp: ExecuteRenderResponse = {
           status: execResult.status,
           writes_len: 0, result_tag: 0,

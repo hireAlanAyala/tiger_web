@@ -51,16 +51,16 @@ export function executeVerifyLoginCode(cache: PrefetchCache): ExecuteResult { re
 export function executeLogout(): ExecuteResult { return { status: "ok", writes: [] }; }
 
 // [render] .page_load_dashboard
-export function renderPageLoadDashboard(): string { return "<div>Dashboard</div>"; }
+export function renderPageLoadDashboard(status: string, cache: PrefetchCache): string { return "<div>Dashboard</div>"; }
 
 // [render] .page_load_login
-export function renderPageLoadLogin(): string { return "<div>Login</div>"; }
+export function renderPageLoadLogin(status: string): string { return "<div>Login</div>"; }
 
 // [render] .request_login_code
-export function renderRequestLoginCode(_op: string, status: string): string { return status === "ok" ? "<div>Code sent</div>" : "<div>Error</div>"; }
+export function renderRequestLoginCode(status: string): string { return status === "ok" ? "<div>Code sent</div>" : "<div>Error</div>"; }
 
 // [render] .verify_login_code
-export function renderVerifyLoginCode(_op: string, status: string): string { return status === "ok" ? "<div>Verified</div>" : "<div>Error</div>"; }
+export function renderVerifyLoginCode(status: string): string { return status === "ok" ? "<div>Verified</div>" : "<div>Error</div>"; }
 
 // [render] .logout
-export function renderLogout(): string { return "<div>Logged out</div>"; }
+export function renderLogout(status: string): string { return "<div>Logged out</div>"; }

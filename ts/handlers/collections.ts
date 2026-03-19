@@ -71,19 +71,19 @@ export function executeAddCollectionMember(cache: PrefetchCache): ExecuteResult 
 export function executeRemoveCollectionMember(cache: PrefetchCache): ExecuteResult { return { status: "ok", writes: [] }; }
 
 // [render] .create_collection
-export function renderCreateCollection(_op: string, status: string): string { return status === "ok" ? "<div>Created</div>" : `<div>${escapeHtml(status)}</div>`; }
+export function renderCreateCollection(status: string): string { return status === "ok" ? "<div>Created</div>" : `<div>${escapeHtml(status)}</div>`; }
 
 // [render] .get_collection
-export function renderGetCollection(_op: string, status: string): string { return status === "ok" ? "<div>Collection</div>" : `<div>${escapeHtml(status)}</div>`; }
+export function renderGetCollection(status: string, cache: PrefetchCache): string { return status === "ok" ? "<div>Collection</div>" : `<div>${escapeHtml(status)}</div>`; }
 
 // [render] .list_collections
-export function renderListCollections(): string { return "<div>Collections</div>"; }
+export function renderListCollections(status: string, cache: PrefetchCache): string { return "<div>Collections</div>"; }
 
 // [render] .delete_collection
-export function renderDeleteCollection(_op: string, status: string): string { return status === "ok" ? "<div>Deleted</div>" : `<div>${escapeHtml(status)}</div>`; }
+export function renderDeleteCollection(status: string): string { return status === "ok" ? "<div>Deleted</div>" : `<div>${escapeHtml(status)}</div>`; }
 
 // [render] .add_collection_member
-export function renderAddCollectionMember(_op: string, status: string): string { return status === "ok" ? "<div>Added</div>" : `<div>${escapeHtml(status)}</div>`; }
+export function renderAddCollectionMember(status: string): string { return status === "ok" ? "<div>Added</div>" : `<div>${escapeHtml(status)}</div>`; }
 
 // [render] .remove_collection_member
-export function renderRemoveCollectionMember(_op: string, status: string): string { return status === "ok" ? "<div>Removed</div>" : `<div>${escapeHtml(status)}</div>`; }
+export function renderRemoveCollectionMember(status: string): string { return status === "ok" ? "<div>Removed</div>" : `<div>${escapeHtml(status)}</div>`; }

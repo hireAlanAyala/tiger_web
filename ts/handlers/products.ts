@@ -77,7 +77,7 @@ interface ExecuteResult {
 }
 
 // [execute] .create_product
-export function executeCreateProduct(cache: PrefetchCache, body: Uint8Array): ExecuteResult {
+export function executeCreateProduct(cache: PrefetchCache, body: Product): ExecuteResult {
   if (cache.product !== null) return { status: "version_conflict", writes: [] };
   return { status: "ok", writes: [] };
 }
@@ -94,7 +94,7 @@ export function executeListProducts(cache: PrefetchCache): ExecuteResult {
 }
 
 // [execute] .update_product
-export function executeUpdateProduct(cache: PrefetchCache, body: Uint8Array): ExecuteResult {
+export function executeUpdateProduct(cache: PrefetchCache, body: Product): ExecuteResult {
   if (cache.product === null) return { status: "not_found", writes: [] };
   return { status: "ok", writes: [] };
 }
@@ -121,42 +121,45 @@ export function executeSearchProducts(cache: PrefetchCache): ExecuteResult {
 // ---------------------------------------------------------------------------
 
 // [render] .create_product
-export function renderCreateProduct(op: string, status: string, result: ExecuteResult): string {
+export function renderCreateProduct(status: string, cache: PrefetchCache): string {
   if (status !== "ok") return `<div class="error">${escapeHtml(status)}</div>`;
   return `<div class="product">Created</div>`;
 }
 
 // [render] .get_product
-export function renderGetProduct(op: string, status: string, result: ExecuteResult, cache?: PrefetchCache): string {
+export function renderGetProduct(status: string, cache: PrefetchCache): string {
   if (status !== "ok") return `<div class="error">${escapeHtml(status)}</div>`;
-  return `<div class="product">Product detail</div>`;
+  if (cache.product) return `<div class="product"><h1>${escapeHtml(cache.product.name)}</h1></div>`;
+  return `<div class="error">not_found</div>`;
 }
 
 // [render] .list_products
-export function renderListProducts(op: string, status: string, result: ExecuteResult): string {
-  return `<div class="products">Product list</div>`;
+export function renderListProducts(status: string, cache: PrefetchCache): string {
+  const items = cache.product_list.items;
+  return `<div class="products">${items.map(p => `<div>${escapeHtml(p.name)}</div>`).join("")}</div>`;
 }
 
 // [render] .update_product
-export function renderUpdateProduct(op: string, status: string, result: ExecuteResult): string {
+export function renderUpdateProduct(status: string, cache: PrefetchCache): string {
   if (status !== "ok") return `<div class="error">${escapeHtml(status)}</div>`;
   return `<div class="product">Updated</div>`;
 }
 
 // [render] .delete_product
-export function renderDeleteProduct(op: string, status: string, result: ExecuteResult): string {
+export function renderDeleteProduct(status: string, cache: PrefetchCache): string {
   if (status !== "ok") return `<div class="error">${escapeHtml(status)}</div>`;
   return `<div class="product">Deleted</div>`;
 }
 
 // [render] .get_product_inventory
-export function renderGetProductInventory(op: string, status: string, result: ExecuteResult): string {
+export function renderGetProductInventory(status: string, cache: PrefetchCache): string {
   if (status !== "ok") return `<div class="error">${escapeHtml(status)}</div>`;
-  return `<div class="inventory">Inventory</div>`;
+  if (cache.product) return `<div class="inventory">${cache.product.inventory}</div>`;
+  return `<div class="error">not_found</div>`;
 }
 
 // [render] .search_products
-export function renderSearchProducts(op: string, status: string, result: ExecuteResult): string {
+export function renderSearchProducts(status: string, cache: PrefetchCache): string {
   return `<div class="search-results">Search results</div>`;
 }
 
