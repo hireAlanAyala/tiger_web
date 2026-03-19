@@ -412,9 +412,15 @@ pub const OrderSummary = extern struct {
     }
 };
 
-pub const OrderSummaryList = struct {
+pub const OrderSummaryList = extern struct {
     items: [list_max]OrderSummary,
     len: u32,
+    reserved: [12]u8,
+
+    comptime {
+        assert(stdx.no_padding(OrderSummaryList));
+        assert(@sizeOf(OrderSummaryList) == 5616);
+    }
 };
 
 pub const search_query_max = 128;
@@ -710,20 +716,37 @@ pub const Message = extern struct {
 /// Maximum number of items returned in a single list response.
 pub const list_max = 50;
 
-pub const ProductList = struct {
+pub const ProductList = extern struct {
     items: [list_max]Product,
     len: u32,
+    reserved: [12]u8,
+
+    comptime {
+        assert(stdx.no_padding(ProductList));
+        assert(@sizeOf(ProductList) == 33616);
+    }
 };
 
 /// GET /collections/:id returns the collection and its member products.
-pub const CollectionWithProducts = struct {
+pub const CollectionWithProducts = extern struct {
     collection: ProductCollection,
     products: ProductList,
+
+    comptime {
+        assert(stdx.no_padding(CollectionWithProducts));
+        assert(@sizeOf(CollectionWithProducts) == 33776);
+    }
 };
 
-pub const CollectionList = struct {
+pub const CollectionList = extern struct {
     items: [list_max]ProductCollection,
     len: u32,
+    reserved: [12]u8,
+
+    comptime {
+        assert(stdx.no_padding(CollectionList));
+        assert(@sizeOf(CollectionList) == 8016);
+    }
 };
 
 /// Maximum items per list in a dashboard page load response.
@@ -740,12 +763,14 @@ comptime {
 
 /// Dashboard page load result — all three lists in one response.
 /// Each list is capped to dashboard_list_max by the state machine.
-pub const PageLoadDashboardResult = struct {
+pub const PageLoadDashboardResult = extern struct {
     products: ProductList,
     collections: CollectionList,
     orders: OrderSummaryList,
 
     comptime {
+        assert(stdx.no_padding(PageLoadDashboardResult));
+        assert(@sizeOf(PageLoadDashboardResult) == 47248);
         // The state machine must cap lists before constructing this result.
         // render.zig derives its buffer math from dashboard_list_max, not list_max.
         // If this assert is wrong, fix the state machine — not the buffer.
@@ -755,11 +780,17 @@ pub const PageLoadDashboardResult = struct {
 
 /// Login result — email for the verify page, user_id for session,
 /// code for server-side logging (dev mode).
-pub const LoginResult = struct {
+pub const LoginResult = extern struct {
     user_id: u128,
     email: [email_max]u8,
     code: [code_length]u8,
     email_len: u8,
+    reserved: [9]u8,
+
+    comptime {
+        assert(stdx.no_padding(LoginResult));
+        assert(@sizeOf(LoginResult) == 160);
+    }
 };
 
 /// Result payload — self-describing tagged union for response encoding.

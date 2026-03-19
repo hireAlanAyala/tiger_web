@@ -8,9 +8,9 @@ const http = @import("tiger_framework").http;
 /// Empty dashboard — used for error responses and comptime buffer sizing.
 /// Every non-SSE error renders the full page so the user has a recovery path.
 const empty_dashboard = message.PageLoadDashboardResult{
-    .products = .{ .items = undefined, .len = 0 },
-    .collections = .{ .items = undefined, .len = 0 },
-    .orders = .{ .items = undefined, .len = 0 },
+    .products = .{ .items = undefined, .len = 0, .reserved = .{0} ** 12 },
+    .collections = .{ .items = undefined, .len = 0, .reserved = .{0} ** 12 },
+    .orders = .{ .items = undefined, .len = 0, .reserved = .{0} ** 12 },
 };
 
 // --- Buffer constants ---
@@ -1166,9 +1166,9 @@ test "encode_response full page — empty dashboard" {
         .user_id = 1,
         .is_authenticated = true,
         .result = .{ .page_load_dashboard = .{
-            .products = .{ .items = undefined, .len = 0 },
-            .collections = .{ .items = undefined, .len = 0 },
-            .orders = .{ .items = undefined, .len = 0 },
+            .products = .{ .items = undefined, .len = 0, .reserved = .{0} ** 12 },
+            .collections = .{ .items = undefined, .len = 0, .reserved = .{0} ** 12 },
+            .orders = .{ .items = undefined, .len = 0, .reserved = .{0} ** 12 },
         } },
     };
     const r = encode_response(&send_buf, .page_load_dashboard, resp, false, test_key);
@@ -1188,9 +1188,9 @@ test "encode_response SSE — empty dashboard" {
         .user_id = 1,
         .is_authenticated = true,
         .result = .{ .page_load_dashboard = .{
-            .products = .{ .items = undefined, .len = 0 },
-            .collections = .{ .items = undefined, .len = 0 },
-            .orders = .{ .items = undefined, .len = 0 },
+            .products = .{ .items = undefined, .len = 0, .reserved = .{0} ** 12 },
+            .collections = .{ .items = undefined, .len = 0, .reserved = .{0} ** 12 },
+            .orders = .{ .items = undefined, .len = 0, .reserved = .{0} ** 12 },
         } },
     };
     const r = encode_response(&send_buf, .page_load_dashboard, resp, true, test_key);
@@ -1223,9 +1223,9 @@ test "Set-Cookie header included in HTML response" {
         .is_authenticated = true,
         .is_new_visitor = true,
         .result = .{ .page_load_dashboard = .{
-            .products = .{ .items = undefined, .len = 0 },
-            .collections = .{ .items = undefined, .len = 0 },
-            .orders = .{ .items = undefined, .len = 0 },
+            .products = .{ .items = undefined, .len = 0, .reserved = .{0} ** 12 },
+            .collections = .{ .items = undefined, .len = 0, .reserved = .{0} ** 12 },
+            .orders = .{ .items = undefined, .len = 0, .reserved = .{0} ** 12 },
         } },
     };
     const r = encode_response(&send_buf, .page_load_dashboard, resp, false, test_key);
@@ -1252,7 +1252,7 @@ test "Set-Cookie header included in SSE response" {
 
 test "encode_response with products" {
     var send_buf: [http.send_buf_max]u8 = undefined;
-    var products = message.ProductList{ .items = undefined, .len = 1 };
+    var products = message.ProductList{ .items = undefined, .len = 1, .reserved = .{0} ** 12 };
     products.items[0] = std.mem.zeroes(message.Product);
     products.items[0].id = 0xaabbccdd11223344aabbccdd11223344;
     products.items[0].name_len = 6;
@@ -1268,8 +1268,8 @@ test "encode_response with products" {
         .is_authenticated = true,
         .result = .{ .page_load_dashboard = .{
             .products = products,
-            .collections = .{ .items = undefined, .len = 0 },
-            .orders = .{ .items = undefined, .len = 0 },
+            .collections = .{ .items = undefined, .len = 0, .reserved = .{0} ** 12 },
+            .orders = .{ .items = undefined, .len = 0, .reserved = .{0} ** 12 },
         } },
     };
     const r = encode_response(&send_buf, .page_load_dashboard, resp, false, test_key);
@@ -1281,7 +1281,7 @@ test "encode_response with products" {
 
 test "encode_response SSE — product list" {
     var send_buf: [http.send_buf_max]u8 = undefined;
-    var products = message.ProductList{ .items = undefined, .len = 1 };
+    var products = message.ProductList{ .items = undefined, .len = 1, .reserved = .{0} ** 12 };
     products.items[0] = std.mem.zeroes(message.Product);
     products.items[0].id = 0xaabbccdd11223344aabbccdd11223344;
     products.items[0].name_len = 6;
@@ -1318,7 +1318,7 @@ test "encode_response SSE — collection detail" {
         .is_authenticated = true,
         .result = .{ .collection = .{
             .collection = col,
-            .products = .{ .items = undefined, .len = 0 },
+            .products = .{ .items = undefined, .len = 0, .reserved = .{0} ** 12 },
         } },
     };
     const r = encode_response(&send_buf, .get_collection, resp, true, test_key);
@@ -1374,9 +1374,9 @@ test "encode_response SSE error — targets correct selector" {
 test "encode_followup ok — 3 SSE fragments, no error" {
     var send_buf: [http.send_buf_max]u8 = undefined;
     const dashboard = message.PageLoadDashboardResult{
-        .products = .{ .items = undefined, .len = 0 },
-        .collections = .{ .items = undefined, .len = 0 },
-        .orders = .{ .items = undefined, .len = 0 },
+        .products = .{ .items = undefined, .len = 0, .reserved = .{0} ** 12 },
+        .collections = .{ .items = undefined, .len = 0, .reserved = .{0} ** 12 },
+        .orders = .{ .items = undefined, .len = 0, .reserved = .{0} ** 12 },
     };
     const r = encode_followup(&send_buf, &dashboard, &.{ .operation = .create_product, .status = .ok, .user_id = 0, .kind = .anonymous, .session_action = .none, .is_new_visitor = false }, test_key);
     assert(r.len > 0);
@@ -1392,9 +1392,9 @@ test "encode_followup ok — 3 SSE fragments, no error" {
 test "encode_followup error — 4 SSE fragments with error targeting correct panel" {
     var send_buf: [http.send_buf_max]u8 = undefined;
     const dashboard = message.PageLoadDashboardResult{
-        .products = .{ .items = undefined, .len = 0 },
-        .collections = .{ .items = undefined, .len = 0 },
-        .orders = .{ .items = undefined, .len = 0 },
+        .products = .{ .items = undefined, .len = 0, .reserved = .{0} ** 12 },
+        .collections = .{ .items = undefined, .len = 0, .reserved = .{0} ** 12 },
+        .orders = .{ .items = undefined, .len = 0, .reserved = .{0} ** 12 },
     };
     // Product mutation error → targets #product-list.
     const r1 = encode_followup(&send_buf, &dashboard, &.{ .operation = .create_product, .status = .not_found, .user_id = 0, .kind = .anonymous, .session_action = .none, .is_new_visitor = false }, test_key);
@@ -1426,9 +1426,9 @@ test "Content-Length matches body length — full page" {
         .user_id = 1,
         .is_authenticated = true,
         .result = .{ .page_load_dashboard = .{
-            .products = .{ .items = undefined, .len = 0 },
-            .collections = .{ .items = undefined, .len = 0 },
-            .orders = .{ .items = undefined, .len = 0 },
+            .products = .{ .items = undefined, .len = 0, .reserved = .{0} ** 12 },
+            .collections = .{ .items = undefined, .len = 0, .reserved = .{0} ** 12 },
+            .orders = .{ .items = undefined, .len = 0, .reserved = .{0} ** 12 },
         } },
     };
     const r = encode_response(&send_buf, .page_load_dashboard, resp, false, test_key);

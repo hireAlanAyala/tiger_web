@@ -651,13 +651,21 @@ const Writer = struct {
                 w.raw(type_leaf_name(field.type));
                 w.raw("Values)");
             },
-            .@"struct" => {
-                assert(@typeInfo(field.type).@"struct".layout == .@"packed");
-                w.raw("read");
-                w.raw(type_leaf_name(field.type));
-                w.raw("(dv, offset + ");
-                w.int(@offsetOf(T, field.name));
-                w.raw(")");
+            .@"struct" => |s| {
+                if (s.layout == .@"packed") {
+                    w.raw("read");
+                    w.raw(type_leaf_name(field.type));
+                    w.raw("(dv, offset + ");
+                    w.int(@offsetOf(T, field.name));
+                    w.raw(")");
+                } else {
+                    assert(s.layout == .@"extern");
+                    w.raw("read");
+                    w.raw(type_leaf_name(field.type));
+                    w.raw("(data, offset + ");
+                    w.int(@offsetOf(T, field.name));
+                    w.raw(")");
+                }
             },
             .bool => {
                 w.raw("dv.getUint8(offset + ");
@@ -799,15 +807,25 @@ const Writer = struct {
                 w.raw(field.name);
                 w.raw(");\n");
             },
-            .@"struct" => {
-                assert(@typeInfo(field.type).@"struct".layout == .@"packed");
-                w.raw("  write");
-                w.raw(type_leaf_name(field.type));
-                w.raw("(dv, offset + ");
-                w.int(@offsetOf(T, field.name));
-                w.raw(", val.");
-                w.raw(field.name);
-                w.raw(");\n");
+            .@"struct" => |s| {
+                if (s.layout == .@"packed") {
+                    w.raw("  write");
+                    w.raw(type_leaf_name(field.type));
+                    w.raw("(dv, offset + ");
+                    w.int(@offsetOf(T, field.name));
+                    w.raw(", val.");
+                    w.raw(field.name);
+                    w.raw(");\n");
+                } else {
+                    assert(s.layout == .@"extern");
+                    w.raw("  write");
+                    w.raw(type_leaf_name(field.type));
+                    w.raw("(data, offset + ");
+                    w.int(@offsetOf(T, field.name));
+                    w.raw(", val.");
+                    w.raw(field.name);
+                    w.raw(");\n");
+                }
             },
             .bool => {
                 w.raw("  dv.setUint8(offset + ");
@@ -1306,7 +1324,7 @@ test "output is valid structure" {
         assert(types == 13);
         // 16 constants + 11 Values consts = 27 consts
         assert(consts == 27);
-        // 16 extern structs × 2 (read + write) = 32 serde functions
-        assert(functions == 32);
+        // 22 extern structs × 2 (read + write) = 44 serde functions
+        assert(functions == 44);
     }
 }

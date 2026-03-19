@@ -129,12 +129,12 @@ pub fn StateMachineType(comptime Storage: type) type {
                 .secret_key = secret_key,
                 .now = 0,
                 .prefetch_product = null,
-                .prefetch_product_list = .{ .items = undefined, .len = 0 },
+                .prefetch_product_list = .{ .items = undefined, .len = 0, .reserved = .{0} ** 12 },
                 .prefetch_products = [_]?message.Product{null} ** message.order_items_max,
                 .prefetch_collection = null,
-                .prefetch_collection_list = .{ .items = undefined, .len = 0 },
+                .prefetch_collection_list = .{ .items = undefined, .len = 0, .reserved = .{0} ** 12 },
                 .prefetch_order = null,
-                .prefetch_order_list = .{ .items = undefined, .len = 0 },
+                .prefetch_order_list = .{ .items = undefined, .len = 0, .reserved = .{0} ** 12 },
                 .prefetch_login_code_entry = null,
                 .prefetch_user_by_email = null,
                 .prefetch_result = null,
@@ -615,7 +615,7 @@ pub fn StateMachineType(comptime Storage: type) type {
             return ExecuteResult.single(
                 .{ .status = .ok, .result = .{ .collection = .{
                     .collection = entity,
-                    .products = .{ .items = undefined, .len = 0 },
+                    .products = .{ .items = undefined, .len = 0, .reserved = .{0} ** 12 },
                 } } },
                 .{ .put_collection = entity },
             );
@@ -724,7 +724,7 @@ pub fn StateMachineType(comptime Storage: type) type {
             target.inventory += transfer.quantity;
 
             // Return both updated products.
-            var result_list = message.ProductList{ .items = undefined, .len = 2 };
+            var result_list = message.ProductList{ .items = undefined, .len = 2, .reserved = .{0} ** 12 };
             result_list.items[0] = source;
             result_list.items[1] = target;
 
@@ -949,6 +949,7 @@ pub fn StateMachineType(comptime Storage: type) type {
                         .email = event.email,
                         .code = code,
                         .email_len = event.email_len,
+                        .reserved = .{0} ** 9,
                     } },
                 },
                 .{ .put_login_code = .{
@@ -1010,6 +1011,7 @@ pub fn StateMachineType(comptime Storage: type) type {
                     .email = event.email,
                     .code = .{0} ** message.code_length,
                     .email_len = event.email_len,
+                    .reserved = .{0} ** 9,
                 } },
                 .session_action = .set_authenticated,
             };
