@@ -14,11 +14,16 @@ const assert = std.debug.assert;
 /// arrays, no stack monsters.
 
 pub const effects_max = 16;
+
+/// Inline selector buffer. Worst-case measured: "#col-" + 32-char hex UUID = 37 bytes.
+/// 64 gives headroom for future selectors without buffer indirection.
+/// Total inline cost: 64 × effects_max = 1024 bytes — negligible vs send buffer.
 pub const selector_max = 64;
 
 comptime {
     assert(effects_max > 0);
     assert(selector_max > 0);
+    assert(selector_max >= 37); // must fit "#col-" + 32-char hex UUID
 }
 
 pub const PatchMode = enum {
