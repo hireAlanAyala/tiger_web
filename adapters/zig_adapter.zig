@@ -139,28 +139,6 @@ const OperationEntry = struct {
     is_read_only: bool,
 };
 
-/// Convert "get_product" → "GetProductContext".
-fn pascal_case_context(buf: []u8, snake: []const u8) []const u8 {
-    var pos: usize = 0;
-    var capitalize_next = true;
-    for (snake) |c| {
-        if (c == '_') {
-            capitalize_next = true;
-            continue;
-        }
-        assert(pos < buf.len);
-        buf[pos] = if (capitalize_next) std.ascii.toUpper(c) else c;
-        pos += 1;
-        capitalize_next = false;
-    }
-    // Append "Context"
-    const suffix = "Context";
-    assert(pos + suffix.len <= buf.len);
-    @memcpy(buf[pos..][0..suffix.len], suffix);
-    pos += suffix.len;
-    return buf[0..pos];
-}
-
 fn is_valid_phase(phase: []const u8) bool {
     return std.mem.eql(u8, phase, "translate") or
         std.mem.eql(u8, phase, "prefetch") or
@@ -221,7 +199,6 @@ fn emit_zig_writer(allocator: std.mem.Allocator, w: anytype, ops: *std.StringHas
         \\// AppType validates this tuple at comptime (exhaustiveness, types, signatures).
         \\
         \\const message = @import("../message.zig");
-        \\const HandlerContext = @import("tiger_framework").handler.HandlerContext;
         \\
         \\
     );
@@ -289,23 +266,7 @@ fn emit_zig_writer(allocator: std.mem.Allocator, w: anytype, ops: *std.StringHas
         try w.print("        .handler = {s},\n", .{module});
         try w.print("    }},\n", .{});
     }
-    try w.writeAll("};\n\n");
-
-    // Generate per-operation Context types.
-    // Handlers import these instead of computing HandlerContext manually.
-    var ctx_it = ops.iterator();
-    while (ctx_it.next()) |entry| {
-        const op = entry.value_ptr;
-        const module = files.get(op.file).?;
-
-        // PascalCase context name: "get_product" → "GetProductContext"
-        var name_buf: [128]u8 = undefined;
-        const ctx_name = pascal_case_context(&name_buf, op.operation);
-
-        try w.print("pub const {s} = HandlerContext({s}.Prefetch, message.Operation.EventType(.{s}), message.PrefetchIdentity);\n", .{
-            ctx_name, module, op.operation,
-        });
-    }
+    try w.writeAll("};\n");
 }
 
 /// Generate handlers.generated.zig to a file.
@@ -585,15 +546,4 @@ test "emit_zig e2e" {
     try std.testing.expect(std.mem.indexOf(u8, output, "message.Operation.get_product") != null);
     try std.testing.expect(std.mem.indexOf(u8, output, "message.Operation.create_product") != null);
 
-    // Verify generated Context types.
-    try std.testing.expect(std.mem.indexOf(u8, output, "pub const GetProductContext = HandlerContext(") != null);
-    try std.testing.expect(std.mem.indexOf(u8, output, "pub const CreateProductContext = HandlerContext(") != null);
-}
-
-test "pascal_case_context" {
-    var buf: [128]u8 = undefined;
-    try std.testing.expect(std.mem.eql(u8, "GetProductContext", pascal_case_context(&buf, "get_product")));
-    try std.testing.expect(std.mem.eql(u8, "CreateProductContext", pascal_case_context(&buf, "create_product")));
-    try std.testing.expect(std.mem.eql(u8, "PageLoadDashboardContext", pascal_case_context(&buf, "page_load_dashboard")));
-    try std.testing.expect(std.mem.eql(u8, "LogoutContext", pascal_case_context(&buf, "logout")));
 }
