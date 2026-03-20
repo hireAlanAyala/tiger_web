@@ -41,4 +41,5 @@ pub const prng = @import("prng.zig");
 pub const flags = @import("flags.zig");
 pub const parse = @import("parse.zig");
 pub const effects = @import("effects.zig");
+pub const handler = @import("handler.zig");
 // bench.zig requires build-time bench_options — import directly, not through the module.
