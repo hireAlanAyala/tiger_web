@@ -426,22 +426,38 @@ The user owns domain correctness. Per-handler functions are pure enough to test 
 
 ---
 
-## 5. Migration plan
+## 5. Migration status
 
-### Phase 1: Design validation (get_product + create_order)
-Port the simplest read (`get_product`) and hardest mutation (`create_order`) to the new format. Build the full pipeline: scanner recognizes Zig annotations, Zig adapter generates dispatch, framework validates at comptime, handlers execute correctly. These two operations exercise every edge: skipped handle, simple prefetch, multi-entity prefetch, write arrays.
+### Done
+- **Framework types**: RenderResult, HandlerContext, ValidateHandler, AppType, effects DSL
+- **Typed SQL**: db.query/query_all/execute with struct column mapping
+- **Scanner**: 4 phases, bodyless [handle], scan_file_content testable
+- **Zig adapter**: manifest → handlers.generated.zig
+- **User space**: prelude.zig, html.zig, all 24 handler files with annotations
+- **Routing wired**: app.translate uses new handler routes, old codec bypassed. All 128 sim tests pass.
 
-### Phase 2: Zig adapter
-Build `adapters/zig.zig` (or extend annotation_scanner.zig) to emit `handlers.generated.zig` from the manifest. Wire into `build.zig` so scanner + adapter run before compilation.
+### Next: State machine rewrite (prefetch + execute)
+The new handler prefetch returns `?Prefetch` (null = busy). The new handle takes `Context` and returns `ExecuteResult`. The old state machine stores results in named cache fields (`prefetch_product`, `prefetch_result`, etc.) and passes `StorageResult` to execute. These interfaces are incompatible — prefetch and execute must be swapped together as one atomic change.
 
-### Phase 3: Framework comptime validation
-Add the validation layer in the framework that imports the generated file, checks exhaustiveness, signatures, type flow. Source-map errors back to handler files.
+The cross-cutting concerns stay in the state machine:
+- Transaction boundaries (begin_batch/commit_batch)
+- Credential resolution (resolve_credential)
+- Auth response (apply_auth_response)
+- Followup setup (needs_followup)
+- Status counting
+- Write application (apply_write)
+- Invariants
 
-### Phase 4: Port remaining operations
-Move operations one at a time from the current switch statements to handler files. Old switches shrink as handlers are ported. Fallback: unported operations still work through the existing code path.
+What changes: the dispatch switches inside prefetch() and execute() are replaced by calls to handler functions. The state machine stores a `PrefetchUnion` (comptime-generated tagged union of all handlers' Prefetch types) instead of named cache fields.
 
-### Phase 5: Remove old code paths
-Once all operations are ported, delete codec.zig dispatch switches, state_machine.zig inline switches, render.zig encode switches. The framework dispatch replaces them entirely.
+### After: Render pipeline
+Replace render.encode_response with effects-to-SSE/HTML translation. The handler's RenderResult tuples are translated to Datastar SSE events (page exists) or applied to a page template server-side (first navigation). The old HtmlWriter-based render.zig is deleted.
+
+### After: Delete old code
+- codec.zig dispatch switches (routing already bypassed)
+- state_machine.zig prefetch/execute switches
+- render.zig encode_response/encode_sse_response/encode_html_response
+- Old prefetch cache fields on state machine
 
 ---
 
