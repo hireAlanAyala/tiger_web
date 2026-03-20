@@ -4,7 +4,7 @@ const t = @import("../prelude.zig");
 const get_product = @import("get_product.zig");
 
 pub const Prefetch = struct {
-    products: t.BoundedList(get_product.ProductRow, t.list_max),
+    products: t.BoundedList(t.Product, t.list_max),
 };
 
 const Context = t.HandlerContext(Prefetch, t.Operation.EventType(.list_products), t.Identity);
@@ -33,9 +33,9 @@ pub fn route(method: t.http.Method, raw_path: []const u8, body: []const u8) ?t.M
 pub fn prefetch(storage: *t.Storage, msg: *const t.Message) ?Prefetch {
     _ = msg;
     const products = storage.query_all(
-        get_product.ProductRow,
+        t.Product,
         t.list_max,
-        "SELECT id, name, description, price_cents, inventory, version, description_len, name_len, active FROM products WHERE active = 1 ORDER BY id LIMIT ?1;",
+        "SELECT id, description, name, price_cents, inventory, version, description_len, name_len, active FROM products WHERE active = 1 ORDER BY id LIMIT ?1;",
         .{@as(u32, t.list_max)},
     ) orelse return null;
     return .{ .products = products };
@@ -49,7 +49,7 @@ pub fn render(ctx: Context) t.RenderResult {
     var pos: usize = 0;
 
     for (ctx.prefetched.products.slice()) |*p| {
-        if (!p.active) continue;
+        if (!p.flags.active) continue;
         const card = get_product.render_product_card(buf[pos..], p);
         pos += card.len;
     }

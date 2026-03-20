@@ -3,19 +3,7 @@ const assert = std.debug.assert;
 const t = @import("../prelude.zig");
 
 pub const Prefetch = struct {
-    product: ?ProductRow,
-};
-
-pub const ProductRow = struct {
-    id: u128,
-    name: [t.product_name_max]u8,
-    description: [t.product_description_max]u8,
-    price_cents: u32,
-    inventory: u32,
-    version: u32,
-    description_len: u16,
-    name_len: u8,
-    active: bool,
+    product: ?t.Product,
 };
 
 const Context = t.HandlerContext(Prefetch, t.Operation.EventType(.get_product), t.Identity);
@@ -38,8 +26,8 @@ pub fn route(method: t.http.Method, raw_path: []const u8, body: []const u8) ?t.M
 // [prefetch] .get_product
 pub fn prefetch(storage: *t.Storage, msg: *const t.Message) ?Prefetch {
     const row = storage.query(
-        ProductRow,
-        "SELECT id, name, description, price_cents, inventory, version, description_len, name_len, active FROM products WHERE id = ?1;",
+        t.Product,
+        "SELECT id, description, name, price_cents, inventory, version, description_len, name_len, active FROM products WHERE id = ?1;",
         .{msg.id},
     );
     return .{ .product = row };
@@ -55,7 +43,7 @@ pub fn render(ctx: Context) t.RenderResult {
         });
     };
 
-    if (!product.active) {
+    if (!product.flags.active) {
         return ctx.render(.{
             .{ "patch", "#content", @as([]const u8, "<div class=\"error\">Product not found</div>"), "inner" },
         });
@@ -69,10 +57,10 @@ pub fn render(ctx: Context) t.RenderResult {
     });
 }
 
-pub fn render_product_card(buf: []u8, p: *const ProductRow) []const u8 {
+pub fn render_product_card(buf: []u8, p: *const t.Product) []const u8 {
     var pos: usize = 0;
     pos += t.html.raw(buf[pos..], "<div class=\"card\"><strong>");
-    pos += t.html.escaped(buf[pos..], p.name[0..p.name_len]);
+    pos += t.html.escaped(buf[pos..], p.name_slice());
     pos += t.html.raw(buf[pos..], "</strong> &mdash; ");
     pos += t.html.price(buf[pos..], p.price_cents);
     pos += t.html.raw(buf[pos..], " &mdash; inv: ");
@@ -80,7 +68,7 @@ pub fn render_product_card(buf: []u8, p: *const ProductRow) []const u8 {
     pos += t.html.raw(buf[pos..], " &mdash; v");
     pos += t.html.u32_decimal(buf[pos..], p.version);
 
-    if (!p.active) {
+    if (!p.flags.active) {
         pos += t.html.raw(buf[pos..], " <span class=\"error\">[inactive]</span>");
     }
 
@@ -90,7 +78,7 @@ pub fn render_product_card(buf: []u8, p: *const ProductRow) []const u8 {
 
     if (p.description_len > 0) {
         pos += t.html.raw(buf[pos..], "<div class=\"meta\">");
-        pos += t.html.escaped(buf[pos..], p.description[0..p.description_len]);
+        pos += t.html.escaped(buf[pos..], p.description_slice());
         pos += t.html.raw(buf[pos..], "</div>");
     }
 

@@ -861,6 +861,14 @@ pub const SqliteStorage = struct {
                 @memcpy(arr[0..len], p[0..len]);
             }
             return arr;
+        } else if (@typeInfo(T) == .@"struct" and @typeInfo(T).@"struct".backing_integer != null) {
+            // Packed struct with integer backing (e.g., ProductFlags packed struct(u8)).
+            // Read as integer, bitcast to the packed struct.
+            const BackingInt = @typeInfo(T).@"struct".backing_integer.?;
+            const val = c.sqlite3_column_int64(stmt, col);
+            assert(val >= 0);
+            assert(val <= std.math.maxInt(BackingInt));
+            return @bitCast(@as(BackingInt, @intCast(val)));
         } else {
             @compileError("unsupported column type: " ++ @typeName(T));
         }

@@ -68,14 +68,14 @@ test "get_product render product card" {
         message.PrefetchIdentity,
     );
 
-    var product = std.mem.zeroes(get_product.ProductRow);
+    var product = std.mem.zeroes(message.Product);
     product.id = 0xaabb;
     @memcpy(product.name[0..6], "Widget");
     product.name_len = 6;
     product.price_cents = 999;
     product.inventory = 42;
     product.version = 1;
-    product.active = true;
+    product.flags = .{ .active = true };
 
     var render_buf: [4096]u8 = undefined;
     const ctx = Context{
