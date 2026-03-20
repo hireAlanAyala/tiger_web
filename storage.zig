@@ -754,6 +754,7 @@ pub const SqliteStorage = struct {
         defer finalize_stmt(stmt);
 
         if (step_result(stmt) != .row) return null;
+        assert_column_count(T, stmt);
         return read_row(T, stmt);
     }
 
@@ -763,8 +764,13 @@ pub const SqliteStorage = struct {
         defer finalize_stmt(stmt);
 
         var result = BoundedList(T, max){};
+        var checked_columns = false;
         while (step_result(stmt) == .row) {
-            assert(result.len < max); // query returned more rows than max
+            if (!checked_columns) {
+                assert_column_count(T, stmt);
+                checked_columns = true;
+            }
+            assert(result.len < max);
             result.items[result.len] = read_row(T, stmt);
             result.len += 1;
         }
@@ -802,6 +808,16 @@ pub const SqliteStorage = struct {
 
     fn finalize_stmt(stmt: *c.sqlite3_stmt) void {
         _ = c.sqlite3_finalize(stmt);
+    }
+
+    /// Assert SELECT column count matches struct field count.
+    /// Catches column/field mismatch at the earliest possible point —
+    /// the first row of the first query. If the SELECT has 5 columns
+    /// but the struct has 6 fields, data would silently map wrong.
+    fn assert_column_count(comptime T: type, stmt: *c.sqlite3_stmt) void {
+        const expected = @typeInfo(T).@"struct".fields.len;
+        const actual: usize = @intCast(c.sqlite3_column_count(stmt));
+        assert(actual == expected); // SELECT column count != struct field count
     }
 
     /// Read a single row into struct T. Column order must match field order.
