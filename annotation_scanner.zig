@@ -24,6 +24,7 @@ const Operation = message.Operation;
 /// Phases the scanner recognizes.
 const Phase = enum {
     translate,
+    prefetch,
     execute,
     render,
 };
@@ -34,6 +35,7 @@ const Annotation = struct {
     operation: []const u8,
     file: []const u8,
     line: u32,
+    has_body: bool,
 };
 
 /// Comment prefix by file extension.
@@ -87,6 +89,8 @@ fn parse_annotation(line: []const u8, prefix: []const u8) ?struct { phase: Phase
     // belong to the Zig framework, not handler annotations.
     const phase: Phase = if (std.mem.eql(u8, phase_str, "route"))
         .translate
+    else if (std.mem.eql(u8, phase_str, "prefetch"))
+        .prefetch
     else if (std.mem.eql(u8, phase_str, "handle"))
         .execute
     else if (std.mem.eql(u8, phase_str, "render"))
@@ -123,6 +127,16 @@ fn is_empty(line: []const u8) bool {
         if (ch != ' ' and ch != '\t' and ch != '\r' and ch != '\n') return false;
     }
     return true;
+}
+
+/// Map internal phase names back to user-facing names for error messages.
+fn user_phase_name(phase: Phase) []const u8 {
+    return switch (phase) {
+        .translate => "route",
+        .prefetch => "prefetch",
+        .execute => "handle",
+        .render => "render",
+    };
 }
 
 /// All valid operation names, known at comptime from the Operation enum.
@@ -199,10 +213,42 @@ pub fn main() !void {
 
             if (prev_annotation) |ann| {
                 if (!is_empty(line)) {
-                    if (is_comment(line, prefix)) {
-                        try stderr.print("warning: {s}:{d}: annotation followed by comment, skipping\n", .{ path, ann.line });
+                    // Check if this line is another annotation.
+                    const next_ann = parse_annotation(line, prefix);
+
+                    if (next_ann != null or is_comment(line, prefix)) {
+                        // [handle] without function body = read-only, register it.
+                        // Other phases without a body are warnings.
+                        if (ann.phase == .execute) {
+                            if (!is_valid_operation(ann.operation)) {
+                                try stderr.print("error: {s}:{d}: unknown operation '.{s}'\n", .{ path, ann.line, ann.operation });
+                                errors += 1;
+                            } else {
+                                try annotations.append(.{
+                                    .phase = ann.phase,
+                                    .operation = try allocator.dupe(u8, ann.operation),
+                                    .file = try allocator.dupe(u8, path),
+                                    .line = ann.line,
+                                    .has_body = false,
+                                });
+                            }
+                        } else if (next_ann == null) {
+                            // Non-handle annotation followed by comment.
+                            try stderr.print("warning: {s}:{d}: annotation followed by comment, skipping\n", .{ path, ann.line });
+                        } else {
+                            try stderr.print("error: {s}:{d}: [{s}] .{s} requires a function body\n", .{
+                                path, ann.line, user_phase_name(ann.phase), ann.operation,
+                            });
+                            errors += 1;
+                        }
                         prev_annotation = null;
+
+                        // If this line is a new annotation, start tracking it.
+                        if (next_ann) |na| {
+                            prev_annotation = .{ .phase = na.phase, .operation = na.operation, .line = line_num };
+                        }
                     } else {
+                        // Non-empty, non-comment, non-annotation = code. Register.
                         if (!is_valid_operation(ann.operation)) {
                             try stderr.print("error: {s}:{d}: unknown operation '.{s}'\n", .{ path, ann.line, ann.operation });
                             errors += 1;
@@ -212,6 +258,7 @@ pub fn main() !void {
                                 .operation = try allocator.dupe(u8, ann.operation),
                                 .file = try allocator.dupe(u8, path),
                                 .line = ann.line,
+                                .has_body = true,
                             });
                         }
                         prev_annotation = null;
@@ -220,15 +267,29 @@ pub fn main() !void {
                 } else {
                     continue;
                 }
-            }
-
-            if (parse_annotation(line, prefix)) |ann| {
-                prev_annotation = .{ .phase = ann.phase, .operation = ann.operation, .line = line_num };
+            } else {
+                if (parse_annotation(line, prefix)) |ann| {
+                    prev_annotation = .{ .phase = ann.phase, .operation = ann.operation, .line = line_num };
+                }
             }
         }
 
+        // Handle annotation at EOF.
         if (prev_annotation) |ann| {
-            try stderr.print("warning: {s}:{d}: annotation at end of file, no code follows\n", .{ path, ann.line });
+            if (ann.phase == .execute) {
+                // [handle] at EOF = read-only, register it.
+                if (is_valid_operation(ann.operation)) {
+                    try annotations.append(.{
+                        .phase = ann.phase,
+                        .operation = try allocator.dupe(u8, ann.operation),
+                        .file = try allocator.dupe(u8, path),
+                        .line = ann.line,
+                        .has_body = false,
+                    });
+                }
+            } else {
+                try stderr.print("warning: {s}:{d}: annotation at end of file, no code follows\n", .{ path, ann.line });
+            }
         }
     }
 
@@ -237,7 +298,7 @@ pub fn main() !void {
         for (annotations.items[i + 1 ..]) |b| {
             if (a.phase == b.phase and std.mem.eql(u8, a.operation, b.operation)) {
                 try stderr.print("error: duplicate handler for [{s}] .{s}\n  --> {s}:{d}\n  --> {s}:{d}\n", .{
-                    @tagName(a.phase), a.operation, a.file, a.line, b.file, b.line,
+                    user_phase_name(a.phase), a.operation, a.file, a.line, b.file, b.line,
                 });
                 errors += 1;
             }
@@ -245,7 +306,7 @@ pub fn main() !void {
     }
 
     // Check exhaustiveness — every non-root operation needs a handler for each phase.
-    const phases = [_]Phase{ .translate, .execute, .render };
+    const phases = [_]Phase{ .translate, .prefetch, .execute, .render };
     for (phases) |phase| {
         for (valid_operations) |op| {
             if (std.mem.eql(u8, op, "root")) continue;
@@ -258,7 +319,7 @@ pub fn main() !void {
                 }
             }
             if (!found) {
-                try stderr.print("error: missing handler for [{s}] .{s}\n", .{ @tagName(phase), op });
+                try stderr.print("error: missing handler for [{s}] .{s}\n", .{ user_phase_name(phase), op });
                 errors += 1;
             }
         }
@@ -289,8 +350,8 @@ fn emit_manifest(allocator: std.mem.Allocator, out_path: []const u8, annotations
     try w.writeAll("{\n  \"annotations\": [\n");
     for (annotations, 0..) |ann, i| {
         if (i > 0) try w.writeAll(",\n");
-        try w.print("    {{ \"phase\": \"{s}\", \"operation\": \"{s}\", \"file\": \"{s}\", \"line\": {d} }}", .{
-            @tagName(ann.phase), ann.operation, ann.file, ann.line,
+        try w.print("    {{ \"phase\": \"{s}\", \"operation\": \"{s}\", \"file\": \"{s}\", \"line\": {d}, \"has_body\": {s} }}", .{
+            @tagName(ann.phase), ann.operation, ann.file, ann.line, if (ann.has_body) "true" else "false",
         });
     }
     try w.writeAll("\n  ]\n}\n");
@@ -329,6 +390,10 @@ test "parse_annotation all user-facing phases" {
     try std.testing.expect(route != null);
     try std.testing.expectEqual(route.?.phase, .translate);
 
+    const prefetch = parse_annotation("// [prefetch] .create_product", "//");
+    try std.testing.expect(prefetch != null);
+    try std.testing.expectEqual(prefetch.?.phase, .prefetch);
+
     const handle = parse_annotation("// [handle] .get_product", "//");
     try std.testing.expect(handle != null);
     try std.testing.expectEqual(handle.?.phase, .execute);
@@ -336,6 +401,20 @@ test "parse_annotation all user-facing phases" {
     const render = parse_annotation("// [render] .list_products", "//");
     try std.testing.expect(render != null);
     try std.testing.expectEqual(render.?.phase, .render);
+}
+
+test "parse_annotation rejects internal prefetch name" {
+    // "prefetch" is a valid user-facing name (unlike translate/execute).
+    const result = parse_annotation("// [prefetch] .get_product", "//");
+    try std.testing.expect(result != null);
+    try std.testing.expectEqual(result.?.phase, .prefetch);
+}
+
+test "user_phase_name round-trips" {
+    try std.testing.expect(std.mem.eql(u8, user_phase_name(.translate), "route"));
+    try std.testing.expect(std.mem.eql(u8, user_phase_name(.prefetch), "prefetch"));
+    try std.testing.expect(std.mem.eql(u8, user_phase_name(.execute), "handle"));
+    try std.testing.expect(std.mem.eql(u8, user_phase_name(.render), "render"));
 }
 
 test "parse_annotation rejects internal phase names" {
