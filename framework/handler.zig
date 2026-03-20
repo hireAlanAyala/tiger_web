@@ -22,6 +22,12 @@ const effects = @import("effects.zig");
 ///   const Ctx = HandlerContext(CreateProductPrefetch, Product, PrefetchIdentity);
 ///   // Ctx has: .prefetched, .body, .identity
 pub fn HandlerContext(comptime Prefetch: type, comptime Body: type, comptime Identity: type) type {
+    if (@typeInfo(Prefetch) != .@"struct") {
+        @compileError("Prefetch must be a struct, got " ++ @typeName(Prefetch));
+    }
+    if (@typeInfo(Identity) != .@"struct") {
+        @compileError("Identity must be a struct, got " ++ @typeName(Identity));
+    }
     return struct {
         prefetched: Prefetch,
         body: if (Body == void) void else *const Body,
@@ -49,11 +55,14 @@ pub fn ValidateHandler(
     comptime operation: anytype,
     comptime Identity: type,
 ) type {
-    // Handler must export a Prefetch type.
+    // Handler must export a Prefetch type that is a struct.
     if (!@hasDecl(handler, "Prefetch")) {
         @compileError("handler for ." ++ @tagName(operation) ++ " must export a Prefetch type");
     }
     const Prefetch = handler.Prefetch;
+    if (@typeInfo(Prefetch) != .@"struct") {
+        @compileError("handler for ." ++ @tagName(operation) ++ ": Prefetch must be a struct");
+    }
 
     // Handler must export a route function.
     if (!@hasDecl(handler, "route")) {
