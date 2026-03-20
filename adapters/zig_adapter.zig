@@ -205,7 +205,13 @@ fn emit_zig_writer(allocator: std.mem.Allocator, w: anytype, ops: *std.StringHas
 
     // Collect unique files for imports. Assert no module name collisions.
     var files = std.StringHashMap([]const u8).init(allocator);
+    defer {
+        var val_it = files.valueIterator();
+        while (val_it.next()) |v| allocator.free(v.*);
+        files.deinit();
+    }
     var module_names = std.StringHashMap([]const u8).init(allocator); // module_name → file path
+    defer module_names.deinit();
     var it = ops.iterator();
     while (it.next()) |entry| {
         const op = entry.value_ptr;
@@ -492,13 +498,10 @@ test "is_valid_phase" {
 }
 
 test "emit_zig e2e" {
-    // Use arena — emit_zig_writer allocates internal hash maps that
-    // are freed all at once (same as production usage in main).
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-    const allocator = arena.allocator();
+    const allocator = std.testing.allocator;
 
     var ops = std.StringHashMap(OperationEntry).init(allocator);
+    defer ops.deinit();
 
     try ops.put("get_product", .{
         .operation = "get_product",
@@ -521,6 +524,7 @@ test "emit_zig e2e" {
     });
 
     var buf = std.ArrayList(u8).init(allocator);
+    defer buf.deinit();
     try emit_zig_writer(allocator, buf.writer(), &ops);
 
     const output = buf.items;
