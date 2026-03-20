@@ -52,6 +52,7 @@ pub fn HandlerContext(comptime Prefetch: type, comptime Body: type, comptime Ide
         ///       .{ "sync", "/dashboard" },
         ///   });
         pub fn render(self: @This(), comptime effects_tuple: anytype) effects.RenderResult {
+            assert(self.render_buf.len > 0); // framework must provide a render buffer
             return effects.process_effects(effects_tuple, self.render_buf);
         }
     };

@@ -142,6 +142,8 @@ pub fn process_effects(comptime effects_tuple: anytype, buf: []u8) RenderResult 
         }
     }
 
+    assert(buf.len <= std.math.maxInt(u32)); // buffer must fit in u32 offset space
+
     var result = RenderResult{};
     var pos: u32 = 0;
 
