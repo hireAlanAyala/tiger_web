@@ -29,6 +29,9 @@ pub fn AppType(comptime config: anytype) type {
     // --- Config field validation ---
     // Explicit checks with clear error messages. Without these, a missing
     // field produces a cryptic "no field named X" error from inside the guts.
+    if (@typeInfo(@TypeOf(config)) != .@"struct") {
+        @compileError("AppType config must be a struct");
+    }
     if (!@hasField(@TypeOf(config), "handlers")) @compileError("AppType config missing .handlers");
     if (!@hasField(@TypeOf(config), "Message")) @compileError("AppType config missing .Message");
     if (!@hasField(@TypeOf(config), "MessageResponse")) @compileError("AppType config missing .MessageResponse");
