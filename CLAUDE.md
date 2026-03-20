@@ -4,6 +4,8 @@ Ecommerce HTTP server built in Zig, following TigerBeetle conventions.
 
 **Philosophy:** Build the foundation correctly, then ship confidently. Every layer trusts the one below it because every layer was built to be trusted. Infrastructure isn't overhead — it's the product. Assertions, comptime checks, and round-trip tests are guarantees that compound. Cut corners in the foundation and every layer above inherits the doubt.
 
+When faced with decisions always take the most correct approach never the simplest approach. We are shooting for safety and reliability
+
 ## Quick Reference
 
 ```bash
