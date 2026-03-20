@@ -240,6 +240,25 @@ test "HandlerContext ctx.render with effects" {
     try std.testing.expect(std.mem.eql(u8, "/dashboard", s[1].selector_slice()));
 }
 
+test "HandlerContext ctx.render empty tuple" {
+    const Identity = struct { user_id: u128 };
+    const Prefetch = struct { product: ?u32 };
+    const Ctx = HandlerContext(Prefetch, void, Identity);
+
+    var render_buf: [1024]u8 = undefined;
+    const ctx = Ctx{
+        .prefetched = .{ .product = 42 },
+        .body = {},
+        .identity = .{ .user_id = 1 },
+        .render_buf = &render_buf,
+    };
+
+    const result = ctx.render(.{});
+    try std.testing.expectEqual(@as(u8, 0), result.len);
+    try std.testing.expectEqual(@as(u32, 0), result.buf_used);
+    try std.testing.expectEqual(@as(usize, 0), result.slice().len);
+}
+
 test "HandlerContext exposes type aliases" {
     const Identity = struct { user_id: u128 };
     const Prefetch = struct { product: ?u32 };
