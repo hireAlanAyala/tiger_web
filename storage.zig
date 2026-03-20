@@ -327,7 +327,7 @@ pub const SqliteStorage = struct {
         }
     }
 
-    pub fn search(self: *SqliteStorage, out: *[message.list_max]message.Product, out_len: *u32, query: message.SearchQuery) StorageResult {
+    pub fn search(self: *SqliteStorage, out: *[message.list_max]message.Product, out_len: *u32, search_query: message.SearchQuery) StorageResult {
         const stmt = self.stmt_search_products;
         defer reset_stmt(stmt);
         out_len.* = 0;
@@ -337,7 +337,7 @@ pub const SqliteStorage = struct {
                 .row => {
                     var product: message.Product = undefined;
                     read_product(stmt, &product);
-                    if (query.matches(&product) and out_len.* < message.list_max) {
+                    if (search_query.matches(&product) and out_len.* < message.list_max) {
                         out[out_len.*] = product;
                         out_len.* += 1;
                     }
@@ -730,88 +730,127 @@ pub const SqliteStorage = struct {
         };
     }
 
-    // --- Raw SQL interface ---
+    // --- Typed SQL interface ---
     //
-    // Handlers call db.sql() to query the database with raw SQL.
-    // Parameters are bound (never interpolated) — no SQL injection.
-    // Statements are prepared per-call (not cached). Caching can be
-    // added later as an optimization without changing the interface.
+    // Handlers call db.query() / db.execute() with raw SQL and typed params.
+    // Parameters are bound via SQLite's ?N placeholders (never interpolated).
+    // SQL injection is structurally impossible — there is no string
+    // concatenation path. SQLite handles all query execution, type coercion,
+    // NULL handling, and concurrency internally. We don't re-test SQLite —
+    // it has its own fuzz suite (billions of test cases, 100% branch coverage).
+    //
+    // What we own at this boundary:
+    // 1. Params are bound, never interpolated (API makes injection impossible)
+    // 2. Zig types map correctly to SQLite bind/column calls
+    // 3. Statement lifecycle is correct (prepare, bind, step, finalize)
+    //
+    // Statements are prepared per-call (not cached). Caching can be added
+    // later as an optimization without changing the interface.
 
-    /// Execute a SQL query with typed parameters. Returns a QueryResult
-    /// for iterating rows, or null if the database is busy.
-    pub fn sql(self: *SqliteStorage, comptime query: [*:0]const u8, args: anytype) ?QueryResult {
+    /// Query a single row, mapped to struct T. Returns null if not found or on error.
+    /// Column order in the SELECT must match field declaration order in T.
+    pub fn query(self: *SqliteStorage, comptime T: type, comptime sql_str: [*:0]const u8, args: anytype) ?T {
+        const stmt = self.prepare_and_bind(sql_str, args) orelse return null;
+        defer finalize_stmt(stmt);
+
+        if (step_result(stmt) != .row) return null;
+        return read_row(T, stmt);
+    }
+
+    /// Query multiple rows into a bounded array. Returns null on error.
+    pub fn query_all(self: *SqliteStorage, comptime T: type, comptime max: usize, comptime sql_str: [*:0]const u8, args: anytype) ?BoundedList(T, max) {
+        const stmt = self.prepare_and_bind(sql_str, args) orelse return null;
+        defer finalize_stmt(stmt);
+
+        var result = BoundedList(T, max){};
+        while (step_result(stmt) == .row) {
+            assert(result.len < max); // query returned more rows than max
+            result.items[result.len] = read_row(T, stmt);
+            result.len += 1;
+        }
+        return result;
+    }
+
+    /// Execute a SQL statement (INSERT, UPDATE, DELETE). Returns false on error.
+    pub fn execute(self: *SqliteStorage, comptime sql_str: [*:0]const u8, args: anytype) bool {
+        const stmt = self.prepare_and_bind(sql_str, args) orelse return false;
+        defer finalize_stmt(stmt);
+        return step_result(stmt) == .done;
+    }
+
+    pub fn BoundedList(comptime T: type, comptime max: usize) type {
+        return struct {
+            items: [max]T = undefined,
+            len: usize = 0,
+
+            pub fn slice(self: *const @This()) []const T {
+                return self.items[0..self.len];
+            }
+        };
+    }
+
+    fn prepare_and_bind(self: *SqliteStorage, comptime sql_str: [*:0]const u8, args: anytype) ?*c.sqlite3_stmt {
         var stmt: ?*c.sqlite3_stmt = null;
-        const rc = c.sqlite3_prepare_v2(self.db, query, -1, &stmt, null);
+        const rc = c.sqlite3_prepare_v2(self.db, sql_str, -1, &stmt, null);
         if (rc != c.SQLITE_OK) {
             log.warn("sql: prepare failed: {s}", .{c.sqlite3_errmsg(self.db)});
             return null;
         }
-        const real_stmt = stmt.?;
-
-        // Bind parameters from tuple.
-        bind_params(real_stmt, args);
-
-        return .{ .stmt = real_stmt };
+        bind_params(stmt.?, args);
+        return stmt.?;
     }
 
-    /// Result handle from sql(). Call next() to iterate rows, finish() when done.
-    pub const QueryResult = struct {
-        stmt: *c.sqlite3_stmt,
+    fn finalize_stmt(stmt: *c.sqlite3_stmt) void {
+        _ = c.sqlite3_finalize(stmt);
+    }
 
-        /// Advance to the next row. Returns .row, .done, .busy, .err, or .corruption.
-        pub fn next(self: *QueryResult) StepResult {
-            return step_result(self.stmt);
+    /// Read a single row into struct T. Column order must match field order.
+    fn read_row(comptime T: type, stmt: *c.sqlite3_stmt) T {
+        var result: T = std.mem.zeroes(T);
+        const fields = @typeInfo(T).@"struct".fields;
+        inline for (fields, 0..) |field, i| {
+            const col: c_int = @intCast(i);
+            @field(result, field.name) = read_column(field.type, stmt, col);
         }
+        return result;
+    }
 
-        /// Read a column as u128 (stored as 16-byte BLOB big-endian).
-        /// Column must be a non-NULL 16-byte BLOB — asserts on violation.
-        pub fn col_uuid(self: *QueryResult, col: c_int) u128 {
-            const blob_ptr = c.sqlite3_column_blob(self.stmt, col);
-            assert(blob_ptr != null); // NULL UUID column — query or schema bug
-            const bytes = c.sqlite3_column_bytes(self.stmt, col);
-            assert(bytes == 16); // UUID must be exactly 16 bytes
+    /// Read a single column value, dispatching on Zig type.
+    fn read_column(comptime T: type, stmt: *c.sqlite3_stmt, col: c_int) T {
+        if (T == u128) {
+            const blob_ptr = c.sqlite3_column_blob(stmt, col);
+            assert(blob_ptr != null); // NULL UUID — query or schema bug
+            assert(c.sqlite3_column_bytes(stmt, col) == 16);
             const blob: [*]const u8 = @ptrCast(blob_ptr);
             return std.mem.readInt(u128, blob[0..16], .big);
-        }
-
-        /// Read a column as text. Returns a slice valid until next()/finish().
-        /// NULL columns return empty string.
-        pub fn col_text(self: *QueryResult, col: c_int) []const u8 {
-            const ptr_raw = c.sqlite3_column_text(self.stmt, col);
-            const len: usize = @intCast(c.sqlite3_column_bytes(self.stmt, col));
+        } else if (T == []const u8) {
+            @compileError("cannot read []const u8 — slice lifetime unclear. Use a fixed [N]u8 field.");
+        } else if (T == bool) {
+            return c.sqlite3_column_int(stmt, col) != 0;
+        } else if (T == i64) {
+            return c.sqlite3_column_int64(stmt, col);
+        } else if (@typeInfo(T) == .int) {
+            const val = c.sqlite3_column_int64(stmt, col);
+            assert(val >= 0);
+            assert(val <= std.math.maxInt(T));
+            return @intCast(val);
+        } else if (@typeInfo(T) == .array and @typeInfo(T).array.child == u8) {
+            // Fixed-size text field: [N]u8. Copy from SQLite into the array.
+            const ptr_raw = c.sqlite3_column_text(stmt, col);
+            const len: usize = @intCast(c.sqlite3_column_bytes(stmt, col));
+            var arr: T = .{0} ** @typeInfo(T).array.len;
             if (ptr_raw) |ptr| {
                 const p: [*]const u8 = @ptrCast(ptr);
-                return p[0..len];
+                assert(len <= @typeInfo(T).array.len);
+                @memcpy(arr[0..len], p[0..len]);
             }
-            return "";
+            return arr;
+        } else {
+            @compileError("unsupported column type: " ++ @typeName(T));
         }
-
-        /// Read a column as i64.
-        pub fn col_i64(self: *QueryResult, col: c_int) i64 {
-            return c.sqlite3_column_int64(self.stmt, col);
-        }
-
-        /// Read a column as u32. Asserts value fits in u32.
-        pub fn col_u32(self: *QueryResult, col: c_int) u32 {
-            const val = c.sqlite3_column_int64(self.stmt, col);
-            assert(val >= 0); // negative value in u32 column
-            assert(val <= std.math.maxInt(u32)); // overflow
-            return @intCast(val);
-        }
-
-        /// Read a column as bool (0 = false, non-zero = true).
-        pub fn col_bool(self: *QueryResult, col: c_int) bool {
-            return c.sqlite3_column_int(self.stmt, col) != 0;
-        }
-
-        /// Finalize the statement. Must be called when done reading rows.
-        pub fn finish(self: *QueryResult) void {
-            _ = c.sqlite3_finalize(self.stmt);
-        }
-    };
+    }
 
     /// Bind a tuple of parameters to a prepared statement.
-    /// Supports u128 (as BLOB), []const u8 (as text), integers (as i64), bool (as int).
     fn bind_params(stmt: *c.sqlite3_stmt, args: anytype) void {
         const fields = @typeInfo(@TypeOf(args)).@"struct".fields;
         inline for (fields, 0..) |field, i| {
@@ -830,7 +869,6 @@ pub const SqliteStorage = struct {
         } else if (T == []const u8) {
             _ = c.sqlite3_bind_text(stmt, col, val.ptr, @intCast(val.len), c.SQLITE_TRANSIENT);
         } else if (comptime is_string_literal(T)) {
-            // String literals (*const [N:0]u8) — coerce to slice.
             const slice: []const u8 = val;
             _ = c.sqlite3_bind_text(stmt, col, slice.ptr, @intCast(slice.len), c.SQLITE_TRANSIENT);
         } else if (T == bool) {
@@ -840,7 +878,6 @@ pub const SqliteStorage = struct {
         } else if (@typeInfo(T) == .comptime_int) {
             _ = c.sqlite3_bind_int64(stmt, col, @intCast(val));
         } else if (@typeInfo(T) == .int) {
-            // Assert value fits in i64 — SQLite integers are 64-bit signed.
             assert(@bitSizeOf(T) <= 64);
             _ = c.sqlite3_bind_int64(stmt, col, @intCast(val));
         } else {
@@ -848,7 +885,6 @@ pub const SqliteStorage = struct {
         }
     }
 
-    /// Detect string literal types: *const [N]u8 or *const [N:0]u8.
     fn is_string_literal(comptime T: type) bool {
         const info = @typeInfo(T);
         if (info != .pointer) return false;
@@ -948,17 +984,17 @@ pub const SqliteStorage = struct {
         out.flags = .{ .active = c.sqlite3_column_int64(stmt, 2) != 0 };
     }
 
-    fn prepare(db: *c.sqlite3, query: [*:0]const u8) *c.sqlite3_stmt {
+    fn prepare(db: *c.sqlite3, stmt_sql: [*:0]const u8) *c.sqlite3_stmt {
         var stmt: ?*c.sqlite3_stmt = null;
-        const rc = c.sqlite3_prepare_v2(db, query, -1, &stmt, null);
+        const rc = c.sqlite3_prepare_v2(db, stmt_sql, -1, &stmt, null);
         if (rc != c.SQLITE_OK) {
             @panic("sqlite3_prepare_v2 failed");
         }
         return stmt.?;
     }
 
-    fn exec(db: *c.sqlite3, query: [*:0]const u8) void {
-        const rc = c.sqlite3_exec(db, query, null, null, null);
+    fn exec(db: *c.sqlite3, stmt_sql: [*:0]const u8) void {
+        const rc = c.sqlite3_exec(db, stmt_sql, null, null, null);
         if (rc != c.SQLITE_OK) {
             @panic("sqlite3_exec failed");
         }
@@ -1112,75 +1148,55 @@ test "order items preserve insertion order" {
     try std.testing.expectEqual(out.items[2].product_id, 0x01);
 }
 
-// --- db.sql() tests ---
+// --- Typed SQL interface tests ---
 
-test "sql: insert and select with all param types" {
+const ProductRow = struct {
+    id: u128,
+    name: [message.product_name_max]u8,
+    price_cents: u32,
+    inventory: u32,
+    version: u32,
+    active: bool,
+};
+
+test "query: round-trip insert and select" {
     var s = try SqliteStorage.init(":memory:");
     defer s.deinit();
 
-    // Use the existing products table. Insert via db.sql, read back via db.sql.
     const id: u128 = 0xaabbccdd11223344aabbccdd11223344;
-    const name: []const u8 = "Test Widget";
-    const price: u32 = 999;
-    const inventory: u32 = 42;
-    const active: bool = true;
+    try std.testing.expect(s.execute(
+        "INSERT INTO products (id, name, description, price_cents, inventory, version, active) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7);",
+        .{ id, @as([]const u8, "Test Widget"), @as([]const u8, ""), @as(u32, 999), @as(u32, 42), @as(u32, 1), true },
+    ));
 
-    // Insert — tests u128, []const u8, u32, bool binding.
-    {
-        var result = s.sql(
-            "INSERT INTO products (id, name, description, price_cents, inventory, version, active) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7);",
-            .{ id, name, "", price, inventory, @as(u32, 1), active },
-        ) orelse unreachable;
-        defer result.finish();
-        try std.testing.expectEqual(SqliteStorage.StepResult.done, result.next());
-    }
-
-    // Select — tests column readers.
-    {
-        var result = s.sql(
-            "SELECT id, name, price_cents, inventory, version, active FROM products WHERE id = ?1;",
-            .{id},
-        ) orelse unreachable;
-        defer result.finish();
-        try std.testing.expectEqual(SqliteStorage.StepResult.row, result.next());
-        try std.testing.expectEqual(id, result.col_uuid(0));
-        try std.testing.expect(std.mem.eql(u8, "Test Widget", result.col_text(1)));
-        try std.testing.expectEqual(@as(u32, 999), result.col_u32(2));
-        try std.testing.expectEqual(@as(u32, 42), result.col_u32(3));
-        try std.testing.expectEqual(@as(u32, 1), result.col_u32(4));
-        try std.testing.expect(result.col_bool(5));
-        // No more rows.
-        try std.testing.expectEqual(SqliteStorage.StepResult.done, result.next());
-    }
-}
-
-test "sql: select not found returns done" {
-    var s = try SqliteStorage.init(":memory:");
-    defer s.deinit();
-
-    var result = s.sql(
-        "SELECT id FROM products WHERE id = ?1;",
-        .{@as(u128, 0xdead)},
+    const row = s.query(ProductRow,
+        "SELECT id, name, price_cents, inventory, version, active FROM products WHERE id = ?1;",
+        .{id},
     ) orelse unreachable;
-    defer result.finish();
-    try std.testing.expectEqual(SqliteStorage.StepResult.done, result.next());
+
+    try std.testing.expectEqual(id, row.id);
+    try std.testing.expect(std.mem.startsWith(u8, &row.name, "Test Widget"));
+    try std.testing.expectEqual(@as(u32, 999), row.price_cents);
+    try std.testing.expectEqual(@as(u32, 42), row.inventory);
+    try std.testing.expectEqual(@as(u32, 1), row.version);
+    try std.testing.expect(row.active);
 }
 
-test "sql: empty params" {
+test "query: not found returns null" {
     var s = try SqliteStorage.init(":memory:");
     defer s.deinit();
 
-    var result = s.sql("SELECT COUNT(*) FROM products;", .{}) orelse unreachable;
-    defer result.finish();
-    try std.testing.expectEqual(SqliteStorage.StepResult.row, result.next());
-    try std.testing.expectEqual(@as(i64, 0), result.col_i64(0));
+    const row = s.query(ProductRow,
+        "SELECT id, name, price_cents, inventory, version, active FROM products WHERE id = ?1;",
+        .{@as(u128, 0xdead)},
+    );
+    try std.testing.expect(row == null);
 }
 
-test "sql: multiple rows" {
+test "query_all: multiple rows" {
     var s = try SqliteStorage.init(":memory:");
     defer s.deinit();
 
-    // Insert 3 products via typed method (known-good).
     const p1 = make_test_product(1, "A", 100);
     const p2 = make_test_product(2, "B", 200);
     const p3 = make_test_product(3, "C", 300);
@@ -1188,47 +1204,34 @@ test "sql: multiple rows" {
     assert(s.put(&p2) == .ok);
     assert(s.put(&p3) == .ok);
 
-    // Read back via db.sql.
-    var result = s.sql("SELECT id, name, price_cents FROM products ORDER BY price_cents;", .{}) orelse unreachable;
-    defer result.finish();
+    const PriceRow = struct { price_cents: u32 };
+    const result = s.query_all(PriceRow, 10,
+        "SELECT price_cents FROM products ORDER BY price_cents;",
+        .{},
+    ) orelse unreachable;
 
-    try std.testing.expectEqual(SqliteStorage.StepResult.row, result.next());
-    try std.testing.expectEqual(@as(u32, 100), result.col_u32(2));
-    try std.testing.expectEqual(SqliteStorage.StepResult.row, result.next());
-    try std.testing.expectEqual(@as(u32, 200), result.col_u32(2));
-    try std.testing.expectEqual(SqliteStorage.StepResult.row, result.next());
-    try std.testing.expectEqual(@as(u32, 300), result.col_u32(2));
-    try std.testing.expectEqual(SqliteStorage.StepResult.done, result.next());
+    try std.testing.expectEqual(@as(usize, 3), result.len);
+    try std.testing.expectEqual(@as(u32, 100), result.items[0].price_cents);
+    try std.testing.expectEqual(@as(u32, 200), result.items[1].price_cents);
+    try std.testing.expectEqual(@as(u32, 300), result.items[2].price_cents);
 }
 
-test "sql: invalid SQL returns null" {
+test "query_all: empty result" {
     var s = try SqliteStorage.init(":memory:");
     defer s.deinit();
 
-    const result = s.sql("THIS IS NOT SQL;", .{});
-    try std.testing.expect(result == null);
+    const PriceRow = struct { price_cents: u32 };
+    const result = s.query_all(PriceRow, 10,
+        "SELECT price_cents FROM products;",
+        .{},
+    ) orelse unreachable;
+
+    try std.testing.expectEqual(@as(usize, 0), result.len);
 }
 
-test "sql: i64 param and column" {
+test "execute: invalid SQL returns false" {
     var s = try SqliteStorage.init(":memory:");
     defer s.deinit();
 
-    // Login codes table has expires_at (integer).
-    {
-        var result = s.sql(
-            "INSERT INTO login_codes (email, code, expires_at) VALUES (?1, ?2, ?3);",
-            .{ @as([]const u8, "test@example.com"), @as([]const u8, "123456"), @as(i64, 1700000000) },
-        ) orelse unreachable;
-        defer result.finish();
-        try std.testing.expectEqual(SqliteStorage.StepResult.done, result.next());
-    }
-    {
-        var result = s.sql(
-            "SELECT expires_at FROM login_codes WHERE email = ?1;",
-            .{@as([]const u8, "test@example.com")},
-        ) orelse unreachable;
-        defer result.finish();
-        try std.testing.expectEqual(SqliteStorage.StepResult.row, result.next());
-        try std.testing.expectEqual(@as(i64, 1700000000), result.col_i64(0));
-    }
+    try std.testing.expect(!s.execute("THIS IS NOT SQL;", .{}));
 }
