@@ -154,6 +154,105 @@ fn is_valid_operation(name: []const u8) bool {
     return false;
 }
 
+/// Scan a single file's content for annotations. Returns the number of errors found.
+/// Extracted from main() for testability.
+fn scan_file_content(
+    allocator: std.mem.Allocator,
+    content: []const u8,
+    prefix: []const u8,
+    path: []const u8,
+    annotations: *std.ArrayList(Annotation),
+) !u32 {
+    var errors: u32 = 0;
+    const stderr = std.io.getStdErr().writer();
+
+    var line_num: u32 = 0;
+    var lines = std.mem.splitScalar(u8, content, '\n');
+    var prev_annotation: ?struct { phase: Phase, operation: []const u8, line: u32 } = null;
+
+    while (lines.next()) |line| {
+        line_num += 1;
+
+        if (prev_annotation) |ann| {
+            if (!is_empty(line)) {
+                const next_ann = parse_annotation(line, prefix);
+
+                if (next_ann != null or is_comment(line, prefix)) {
+                    // [handle] without function body = read-only, register it.
+                    // Other phases without a body are warnings/errors.
+                    if (ann.phase == .execute) {
+                        if (!is_valid_operation(ann.operation)) {
+                            try stderr.print("error: {s}:{d}: unknown operation '.{s}'\n", .{ path, ann.line, ann.operation });
+                            errors += 1;
+                        } else {
+                            try annotations.append(.{
+                                .phase = ann.phase,
+                                .operation = try allocator.dupe(u8, ann.operation),
+                                .file = try allocator.dupe(u8, path),
+                                .line = ann.line,
+                                .has_body = false,
+                            });
+                        }
+                    } else if (next_ann == null) {
+                        try stderr.print("warning: {s}:{d}: annotation followed by comment, skipping\n", .{ path, ann.line });
+                    } else {
+                        try stderr.print("error: {s}:{d}: [{s}] .{s} requires a function body\n", .{
+                            path, ann.line, user_phase_name(ann.phase), ann.operation,
+                        });
+                        errors += 1;
+                    }
+                    prev_annotation = null;
+
+                    if (next_ann) |na| {
+                        prev_annotation = .{ .phase = na.phase, .operation = na.operation, .line = line_num };
+                    }
+                } else {
+                    // Non-empty, non-comment, non-annotation = code. Register.
+                    if (!is_valid_operation(ann.operation)) {
+                        try stderr.print("error: {s}:{d}: unknown operation '.{s}'\n", .{ path, ann.line, ann.operation });
+                        errors += 1;
+                    } else {
+                        try annotations.append(.{
+                            .phase = ann.phase,
+                            .operation = try allocator.dupe(u8, ann.operation),
+                            .file = try allocator.dupe(u8, path),
+                            .line = ann.line,
+                            .has_body = true,
+                        });
+                    }
+                    prev_annotation = null;
+                    continue;
+                }
+            } else {
+                continue;
+            }
+        } else {
+            if (parse_annotation(line, prefix)) |ann| {
+                prev_annotation = .{ .phase = ann.phase, .operation = ann.operation, .line = line_num };
+            }
+        }
+    }
+
+    // Handle annotation at EOF.
+    if (prev_annotation) |ann| {
+        if (ann.phase == .execute) {
+            if (is_valid_operation(ann.operation)) {
+                try annotations.append(.{
+                    .phase = ann.phase,
+                    .operation = try allocator.dupe(u8, ann.operation),
+                    .file = try allocator.dupe(u8, path),
+                    .line = ann.line,
+                    .has_body = false,
+                });
+            }
+        } else {
+            try stderr.print("warning: {s}:{d}: annotation at end of file, no code follows\n", .{ path, ann.line });
+        }
+    }
+
+    return errors;
+}
+
 pub fn main() !void {
     var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
     defer arena.deinit();
@@ -204,93 +303,8 @@ pub fn main() !void {
         };
         defer allocator.free(content);
 
-        var line_num: u32 = 0;
-        var lines = std.mem.splitScalar(u8, content, '\n');
-        var prev_annotation: ?struct { phase: Phase, operation: []const u8, line: u32 } = null;
-
-        while (lines.next()) |line| {
-            line_num += 1;
-
-            if (prev_annotation) |ann| {
-                if (!is_empty(line)) {
-                    // Check if this line is another annotation.
-                    const next_ann = parse_annotation(line, prefix);
-
-                    if (next_ann != null or is_comment(line, prefix)) {
-                        // [handle] without function body = read-only, register it.
-                        // Other phases without a body are warnings.
-                        if (ann.phase == .execute) {
-                            if (!is_valid_operation(ann.operation)) {
-                                try stderr.print("error: {s}:{d}: unknown operation '.{s}'\n", .{ path, ann.line, ann.operation });
-                                errors += 1;
-                            } else {
-                                try annotations.append(.{
-                                    .phase = ann.phase,
-                                    .operation = try allocator.dupe(u8, ann.operation),
-                                    .file = try allocator.dupe(u8, path),
-                                    .line = ann.line,
-                                    .has_body = false,
-                                });
-                            }
-                        } else if (next_ann == null) {
-                            // Non-handle annotation followed by comment.
-                            try stderr.print("warning: {s}:{d}: annotation followed by comment, skipping\n", .{ path, ann.line });
-                        } else {
-                            try stderr.print("error: {s}:{d}: [{s}] .{s} requires a function body\n", .{
-                                path, ann.line, user_phase_name(ann.phase), ann.operation,
-                            });
-                            errors += 1;
-                        }
-                        prev_annotation = null;
-
-                        // If this line is a new annotation, start tracking it.
-                        if (next_ann) |na| {
-                            prev_annotation = .{ .phase = na.phase, .operation = na.operation, .line = line_num };
-                        }
-                    } else {
-                        // Non-empty, non-comment, non-annotation = code. Register.
-                        if (!is_valid_operation(ann.operation)) {
-                            try stderr.print("error: {s}:{d}: unknown operation '.{s}'\n", .{ path, ann.line, ann.operation });
-                            errors += 1;
-                        } else {
-                            try annotations.append(.{
-                                .phase = ann.phase,
-                                .operation = try allocator.dupe(u8, ann.operation),
-                                .file = try allocator.dupe(u8, path),
-                                .line = ann.line,
-                                .has_body = true,
-                            });
-                        }
-                        prev_annotation = null;
-                        continue;
-                    }
-                } else {
-                    continue;
-                }
-            } else {
-                if (parse_annotation(line, prefix)) |ann| {
-                    prev_annotation = .{ .phase = ann.phase, .operation = ann.operation, .line = line_num };
-                }
-            }
-        }
-
-        // Handle annotation at EOF.
-        if (prev_annotation) |ann| {
-            if (ann.phase == .execute) {
-                // [handle] at EOF = read-only, register it.
-                if (is_valid_operation(ann.operation)) {
-                    try annotations.append(.{
-                        .phase = ann.phase,
-                        .operation = try allocator.dupe(u8, ann.operation),
-                        .file = try allocator.dupe(u8, path),
-                        .line = ann.line,
-                        .has_body = false,
-                    });
-                }
-            } else {
-                try stderr.print("warning: {s}:{d}: annotation at end of file, no code follows\n", .{ path, ann.line });
-            }
-        }
+        const scan_errors = try scan_file_content(allocator, content, prefix, path, &annotations);
+        errors += scan_errors;
     }
 
     // Check for duplicates.
@@ -461,4 +475,111 @@ test "comment_prefix by extension" {
     try std.testing.expect(std.mem.eql(u8, comment_prefix("bar.py").?, "#"));
     try std.testing.expect(std.mem.eql(u8, comment_prefix("baz.lua").?, "--"));
     try std.testing.expect(comment_prefix("readme.md") == null);
+}
+
+// --- scan_file_content tests ---
+
+fn test_scan(content: []const u8) !struct { annotations: std.ArrayList(Annotation), errors: u32 } {
+    var annotations = std.ArrayList(Annotation).init(std.testing.allocator);
+    const errors = try scan_file_content(std.testing.allocator, content, "//", "test.zig", &annotations);
+    return .{ .annotations = annotations, .errors = errors };
+}
+
+fn free_test_scan(result: *std.ArrayList(Annotation)) void {
+    for (result.items) |ann| {
+        std.testing.allocator.free(ann.operation);
+        std.testing.allocator.free(ann.file);
+    }
+    result.deinit();
+}
+
+test "scan: annotation followed by code" {
+    var result = try test_scan("// [route] .create_product\npub fn route() void {}\n");
+    defer free_test_scan(&result.annotations);
+
+    try std.testing.expectEqual(@as(u32, 0), result.errors);
+    try std.testing.expectEqual(@as(usize, 1), result.annotations.items.len);
+    try std.testing.expectEqual(Phase.translate, result.annotations.items[0].phase);
+    try std.testing.expect(result.annotations.items[0].has_body);
+}
+
+test "scan: bodyless handle followed by next annotation" {
+    var result = try test_scan(
+        \\// [handle] .get_product
+        \\// [render] .get_product
+        \\pub fn render() void {}
+    );
+    defer free_test_scan(&result.annotations);
+
+    try std.testing.expectEqual(@as(u32, 0), result.errors);
+    try std.testing.expectEqual(@as(usize, 2), result.annotations.items.len);
+    // First: handle, bodyless.
+    try std.testing.expectEqual(Phase.execute, result.annotations.items[0].phase);
+    try std.testing.expect(!result.annotations.items[0].has_body);
+    // Second: render, with body.
+    try std.testing.expectEqual(Phase.render, result.annotations.items[1].phase);
+    try std.testing.expect(result.annotations.items[1].has_body);
+}
+
+test "scan: bodyless handle at EOF" {
+    var result = try test_scan("// [handle] .get_product\n");
+    defer free_test_scan(&result.annotations);
+
+    try std.testing.expectEqual(@as(u32, 0), result.errors);
+    try std.testing.expectEqual(@as(usize, 1), result.annotations.items.len);
+    try std.testing.expectEqual(Phase.execute, result.annotations.items[0].phase);
+    try std.testing.expect(!result.annotations.items[0].has_body);
+}
+
+test "scan: non-handle without body followed by annotation is error" {
+    var result = try test_scan(
+        \\// [route] .get_product
+        \\// [prefetch] .get_product
+        \\pub fn prefetch() void {}
+    );
+    defer free_test_scan(&result.annotations);
+
+    // Route without body is an error, prefetch with body succeeds.
+    try std.testing.expectEqual(@as(u32, 1), result.errors);
+    try std.testing.expectEqual(@as(usize, 1), result.annotations.items.len);
+    try std.testing.expectEqual(Phase.prefetch, result.annotations.items[0].phase);
+}
+
+test "scan: all 4 phases with bodyless handle" {
+    var result = try test_scan(
+        \\// [route] .get_product
+        \\pub fn route() void {}
+        \\
+        \\// [prefetch] .get_product
+        \\pub fn prefetch() void {}
+        \\
+        \\// [handle] .get_product
+        \\
+        \\// [render] .get_product
+        \\pub fn render() void {}
+    );
+    defer free_test_scan(&result.annotations);
+
+    try std.testing.expectEqual(@as(u32, 0), result.errors);
+    try std.testing.expectEqual(@as(usize, 4), result.annotations.items.len);
+    try std.testing.expectEqual(Phase.translate, result.annotations.items[0].phase);
+    try std.testing.expect(result.annotations.items[0].has_body);
+    try std.testing.expectEqual(Phase.prefetch, result.annotations.items[1].phase);
+    try std.testing.expect(result.annotations.items[1].has_body);
+    try std.testing.expectEqual(Phase.execute, result.annotations.items[2].phase);
+    try std.testing.expect(!result.annotations.items[2].has_body);
+    try std.testing.expectEqual(Phase.render, result.annotations.items[3].phase);
+    try std.testing.expect(result.annotations.items[3].has_body);
+}
+
+test "scan: handle with body is mutation" {
+    var result = try test_scan(
+        \\// [handle] .create_product
+        \\pub fn handle() void {}
+    );
+    defer free_test_scan(&result.annotations);
+
+    try std.testing.expectEqual(@as(u32, 0), result.errors);
+    try std.testing.expectEqual(@as(usize, 1), result.annotations.items.len);
+    try std.testing.expect(result.annotations.items[0].has_body);
 }
