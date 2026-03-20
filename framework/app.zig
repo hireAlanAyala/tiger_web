@@ -67,8 +67,15 @@ pub fn AppType(comptime config: anytype) type {
         }
         seen_ops[op_int] = true;
 
-        // Validate handler interface.
-        _ = handler_mod.ValidateHandler(h.handler, h.operation, Identity);
+        // Validate handler interface — full signature checking.
+        _ = handler_mod.ValidateHandler(
+            h.handler,
+            h.operation,
+            Identity,
+            Message,
+            config.ExecuteResult,
+            config.RenderEffects,
+        );
     }
 
     // 3. Exhaustiveness — every non-root operation must have a handler.
@@ -158,6 +165,11 @@ const TestMessage = struct {
 const TestResponse = struct { status: TestStatus };
 const TestStatus = enum(u8) { ok = 1, err = 2 };
 const TestFollowup = struct {};
+const TestExecuteResult = struct { status: u8 };
+const TestRenderEffects = struct { len: u8 };
+
+const GetThingCtx = handler_mod.HandlerContext(GetThingHandler.Prefetch, void, TestIdentity);
+const CreateThingCtx = handler_mod.HandlerContext(CreateThingHandler.Prefetch, TestBody, TestIdentity);
 
 const GetThingHandler = struct {
     pub const Prefetch = struct { found: bool };
@@ -168,7 +180,10 @@ const GetThingHandler = struct {
     pub fn prefetch() ?Prefetch {
         return .{ .found = true };
     }
-    pub fn render() void {}
+    // No handle — read-only.
+    pub fn render(_: GetThingCtx) TestRenderEffects {
+        return .{ .len = 0 };
+    }
 };
 
 const CreateThingHandler = struct {
@@ -180,8 +195,12 @@ const CreateThingHandler = struct {
     pub fn prefetch() ?Prefetch {
         return .{ .existing = false };
     }
-    pub fn handle() void {}
-    pub fn render() void {}
+    pub fn handle(_: CreateThingCtx) TestExecuteResult {
+        return .{ .status = 1 };
+    }
+    pub fn render(_: CreateThingCtx) TestRenderEffects {
+        return .{ .len = 0 };
+    }
 };
 
 fn dummy_encode(_: []u8, _: TestOperation, _: TestResponse, _: bool, _: *const [32]u8) void {}
@@ -206,6 +225,8 @@ const TestApp = AppType(.{
     .FollowupState = TestFollowup,
     .StateMachineType = dummy_sm,
     .Wal = struct {},
+    .ExecuteResult = TestExecuteResult,
+    .RenderEffects = TestRenderEffects,
     .encode_response = dummy_encode,
     .encode_followup = dummy_followup,
     .refresh_message = dummy_refresh,

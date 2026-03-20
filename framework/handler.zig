@@ -47,51 +47,105 @@ pub fn HandlerContext(comptime Prefetch: type, comptime Body: type, comptime Ide
 /// Validate that a handler module has the required interface.
 ///
 /// Called at comptime by App() for each handler in the tuple.
-/// Checks that the handler exports the right types and function signatures.
+/// Checks that the handler exports the right types AND full function
+/// signatures (parameter types, return types, parameter count).
+///
+/// All app-level types (Message, ExecuteResult, RenderEffects) are passed
+/// as comptime parameters — the framework never imports app types.
 ///
 /// Returns a descriptor struct with resolved types for dispatch generation.
 pub fn ValidateHandler(
     comptime handler: type,
     comptime operation: anytype,
     comptime Identity: type,
+    comptime Message: type,
+    comptime ExecuteResult: type,
+    comptime RenderEffects: type,
 ) type {
+    const op_name = @tagName(operation);
+
     // Handler must export a Prefetch type that is a struct.
     if (!@hasDecl(handler, "Prefetch")) {
-        @compileError("handler for ." ++ @tagName(operation) ++ " must export a Prefetch type");
+        @compileError("handler for ." ++ op_name ++ " must export a Prefetch type");
     }
     const Prefetch = handler.Prefetch;
     if (@typeInfo(Prefetch) != .@"struct") {
-        @compileError("handler for ." ++ @tagName(operation) ++ ": Prefetch must be a struct");
-    }
-
-    // Handler must export a route function.
-    if (!@hasDecl(handler, "route")) {
-        @compileError("handler for ." ++ @tagName(operation) ++ " must export a route function");
-    }
-
-    // Handler must export a prefetch function.
-    if (!@hasDecl(handler, "prefetch")) {
-        @compileError("handler for ." ++ @tagName(operation) ++ " must export a prefetch function");
-    }
-
-    // Handler must export a render function.
-    if (!@hasDecl(handler, "render")) {
-        @compileError("handler for ." ++ @tagName(operation) ++ " must export a render function");
+        @compileError("handler for ." ++ op_name ++ ": Prefetch must be a struct");
     }
 
     // Resolve the body type from the operation's EventType.
     const Body = operation.EventType();
     const Ctx = HandlerContext(Prefetch, Body, Identity);
 
-    // Handle is optional — if missing, operation is read-only.
-    const has_handle = @hasDecl(handler, "handle");
+    // --- Validate route ---
+    if (!@hasDecl(handler, "route")) {
+        @compileError("handler for ." ++ op_name ++ " must export a route function");
+    }
+    {
+        const info = @typeInfo(@TypeOf(handler.route)).@"fn";
+        if (info.params.len < 3) {
+            @compileError("handler for ." ++ op_name ++ ": route must accept (Method, path, body)");
+        }
+        const Return = info.return_type orelse
+            @compileError("handler for ." ++ op_name ++ ": route must have a return type");
+        if (Return != ?Message) {
+            @compileError("handler for ." ++ op_name ++ ": route must return ?" ++ @typeName(Message));
+        }
+    }
 
-    // Validate prefetch return type is ?Prefetch.
-    const prefetch_info = @typeInfo(@TypeOf(handler.prefetch));
-    const PrefetchReturn = prefetch_info.@"fn".return_type orelse
-        @compileError("handler for ." ++ @tagName(operation) ++ ": prefetch must have a return type");
-    if (PrefetchReturn != ?Prefetch) {
-        @compileError("handler for ." ++ @tagName(operation) ++ ": prefetch must return ?" ++ @typeName(Prefetch));
+    // --- Validate prefetch ---
+    if (!@hasDecl(handler, "prefetch")) {
+        @compileError("handler for ." ++ op_name ++ " must export a prefetch function");
+    }
+    {
+        const info = @typeInfo(@TypeOf(handler.prefetch)).@"fn";
+        const Return = info.return_type orelse
+            @compileError("handler for ." ++ op_name ++ ": prefetch must have a return type");
+        if (Return != ?Prefetch) {
+            @compileError("handler for ." ++ op_name ++ ": prefetch must return ?" ++ @typeName(Prefetch));
+        }
+    }
+
+    // --- Validate handle (optional — missing means read-only) ---
+    const has_handle = @hasDecl(handler, "handle");
+    if (has_handle) {
+        const info = @typeInfo(@TypeOf(handler.handle)).@"fn";
+        if (info.params.len < 1) {
+            @compileError("handler for ." ++ op_name ++ ": handle must accept (ctx)");
+        }
+        // First param should be the Context type.
+        if (info.params[0].type) |T| {
+            if (T != Ctx) {
+                @compileError("handler for ." ++ op_name ++ ": handle first param must be " ++ @typeName(Ctx));
+            }
+        }
+        const Return = info.return_type orelse
+            @compileError("handler for ." ++ op_name ++ ": handle must have a return type");
+        if (Return != ExecuteResult) {
+            @compileError("handler for ." ++ op_name ++ ": handle must return " ++ @typeName(ExecuteResult));
+        }
+    }
+
+    // --- Validate render ---
+    if (!@hasDecl(handler, "render")) {
+        @compileError("handler for ." ++ op_name ++ " must export a render function");
+    }
+    {
+        const info = @typeInfo(@TypeOf(handler.render)).@"fn";
+        if (info.params.len < 1) {
+            @compileError("handler for ." ++ op_name ++ ": render must accept (ctx, ...)");
+        }
+        // First param should be the Context type.
+        if (info.params[0].type) |T| {
+            if (T != Ctx) {
+                @compileError("handler for ." ++ op_name ++ ": render first param must be " ++ @typeName(Ctx));
+            }
+        }
+        const Return = info.return_type orelse
+            @compileError("handler for ." ++ op_name ++ ": render must have a return type");
+        if (Return != RenderEffects) {
+            @compileError("handler for ." ++ op_name ++ ": render must return " ++ @typeName(RenderEffects));
+        }
     }
 
     return struct {
@@ -150,49 +204,72 @@ test "HandlerContext exposes type aliases" {
     try std.testing.expect(Ctx.IdentityType == Identity);
 }
 
+// --- Mock types for testing ---
+
 const MockIdentity = struct { user_id: u128 };
+const MockMessage = struct { operation: MockOp };
+const MockExecuteResult = struct { status: u8 };
+const MockRenderEffects = struct { len: u8 };
+const MockBody = struct { name: u8 };
+
+const MockOp = enum(u8) {
+    root = 0,
+    get_thing = 1,
+    create_thing = 2,
+
+    pub fn EventType(comptime op: MockOp) type {
+        return switch (op) {
+            .root, .get_thing => void,
+            .create_thing => MockBody,
+        };
+    }
+};
+
+// Forward-declare context types using the handler's own Prefetch type.
+// Must match what ValidateHandler computes internally.
 
 const MockReadOnlyHandler = struct {
     pub const Prefetch = struct { product: ?u32 };
-    pub fn route() void {}
+    const Ctx = HandlerContext(Prefetch, void, MockIdentity);
+    pub fn route(_: @import("http.zig").Method, _: []const u8, _: []const u8) ?MockMessage {
+        return null;
+    }
     pub fn prefetch() ?Prefetch {
         return null;
     }
-    pub fn render() void {}
+    pub fn render(_: Ctx) MockRenderEffects {
+        return .{ .len = 0 };
+    }
 };
+
+// Mutation handler — correct signatures for typed EventType.
 
 const MockMutationHandler = struct {
     pub const Prefetch = struct { existing: ?u32 };
-    pub fn route() void {}
+    const Ctx = HandlerContext(Prefetch, MockBody, MockIdentity);
+    pub fn route(_: @import("http.zig").Method, _: []const u8, _: []const u8) ?MockMessage {
+        return null;
+    }
     pub fn prefetch() ?Prefetch {
         return null;
     }
-    pub fn handle() void {}
-    pub fn render() void {}
-};
-
-const MockVoidOp = struct {
-    pub fn EventType() type {
-        return void;
+    pub fn handle(_: Ctx) MockExecuteResult {
+        return .{ .status = 1 };
     }
-};
-
-const MockBodyOp = struct {
-    const Body = struct { name: u8 };
-    pub fn EventType() type {
-        return Body;
+    pub fn render(_: Ctx) MockRenderEffects {
+        return .{ .len = 0 };
     }
 };
 
 test "ValidateHandler read-only" {
-    const V = ValidateHandler(MockReadOnlyHandler, MockVoidOp, MockIdentity);
+    const V = ValidateHandler(MockReadOnlyHandler, MockOp.get_thing, MockIdentity, MockMessage, MockExecuteResult, MockRenderEffects);
     try std.testing.expect(V.is_read_only);
     try std.testing.expect(V.PrefetchType == MockReadOnlyHandler.Prefetch);
     try std.testing.expect(V.BodyType == void);
 }
 
 test "ValidateHandler mutation" {
-    const V = ValidateHandler(MockMutationHandler, MockBodyOp, MockIdentity);
+    const V = ValidateHandler(MockMutationHandler, MockOp.create_thing, MockIdentity, MockMessage, MockExecuteResult, MockRenderEffects);
     try std.testing.expect(!V.is_read_only);
-    try std.testing.expect(V.BodyType == MockBodyOp.Body);
+    try std.testing.expect(V.BodyType == MockBody);
 }
