@@ -18,6 +18,34 @@ pub const SidecarClient = @import("sidecar.zig").SidecarClient;
 
 const log = marks.wrap_log(std.log.scoped(.app));
 
+// All 24 handler modules — route functions aggregated in translate().
+const handlers = .{
+    @import("handlers/get_product.zig"),
+    @import("handlers/create_product.zig"),
+    @import("handlers/list_products.zig"),
+    @import("handlers/update_product.zig"),
+    @import("handlers/delete_product.zig"),
+    @import("handlers/get_product_inventory.zig"),
+    @import("handlers/search_products.zig"),
+    @import("handlers/transfer_inventory.zig"),
+    @import("handlers/create_collection.zig"),
+    @import("handlers/get_collection.zig"),
+    @import("handlers/list_collections.zig"),
+    @import("handlers/delete_collection.zig"),
+    @import("handlers/add_collection_member.zig"),
+    @import("handlers/remove_collection_member.zig"),
+    @import("handlers/create_order.zig"),
+    @import("handlers/get_order.zig"),
+    @import("handlers/list_orders.zig"),
+    @import("handlers/complete_order.zig"),
+    @import("handlers/cancel_order.zig"),
+    @import("handlers/page_load_dashboard.zig"),
+    @import("handlers/page_load_login.zig"),
+    @import("handlers/request_login_code.zig"),
+    @import("handlers/verify_login_code.zig"),
+    @import("handlers/logout.zig"),
+};
+
 pub const Message = message.Message;
 pub const MessageResponse = message.MessageResponse;
 pub const FollowupState = message.FollowupState;
@@ -32,9 +60,20 @@ pub var sidecar: ?SidecarClient = null;
 
 /// Translate an HTTP request into a typed Message. Returns null if the
 /// request doesn't map to a valid operation.
+///
+/// Tries all handler route functions. Asserts at most one matches
+/// (duplicate route detection — always, not just in debug).
 pub fn translate(method: http.Method, path: []const u8, body: []const u8) ?Message {
     if (sidecar) |*client| return client.translate(method, path, body);
-    return codec.translate(method, path, body);
+
+    var result: ?Message = null;
+    inline for (handlers) |H| {
+        if (H.route(method, path, body)) |msg| {
+            assert(result == null); // duplicate route match
+            result = msg;
+        }
+    }
+    return result;
 }
 
 /// Extract the prefetch cache from the state machine into the protocol struct.

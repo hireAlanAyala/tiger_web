@@ -67,7 +67,7 @@ pub fn render(ctx: Context) t.RenderResult {
     return ctx.render(.{});
 }
 
-fn parse_product_json(body: []const u8) ?t.Product {
+pub fn parse_product_json(body: []const u8) ?t.Product {
     var p = std.mem.zeroes(t.Product);
 
     const id_str = t.parse.json_string_field(body, "id") orelse return null;

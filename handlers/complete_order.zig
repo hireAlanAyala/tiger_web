@@ -1,5 +1,6 @@
 const std = @import("std");
 const t = @import("../prelude.zig");
+const message = @import("../message.zig");
 
 pub const Prefetch = struct { order_id: u128 };
 
@@ -14,8 +15,8 @@ pub fn route(method: t.http.Method, raw_path: []const u8, body: []const u8) ?t.M
     if (!segments.has_id) return null;
     if (!std.mem.eql(u8, segments.sub_resource, "complete")) return null;
     if (body.len == 0) return null;
-    // TODO: parse OrderCompletion from JSON
-    return null;
+    const completion = parse_completion_json(body) orelse return null;
+    return t.Message.init(.complete_order, segments.id, 0, completion);
 }
 
 // [prefetch] .complete_order
@@ -26,9 +27,30 @@ pub fn prefetch(storage: *t.Storage, msg: *const t.Message) ?Prefetch {
 
 // [handle] .complete_order
 pub fn handle(ctx: Context) t.ExecuteResult {
+    // TODO: validate order pending, check timeout, set status, restore inventory if failed
     _ = ctx;
     return t.ExecuteResult.read_only(t.Message.MessageResponse.not_found);
 }
 
 // [render] .complete_order
 pub fn render(ctx: Context) t.RenderResult { return ctx.render(.{}); }
+
+fn parse_completion_json(body: []const u8) ?t.OrderCompletion {
+    const result_str = t.parse.json_string_field(body, "result") orelse return null;
+    const result: t.OrderCompletion.OrderCompletionResult =
+        if (std.mem.eql(u8, result_str, "confirmed")) .confirmed
+        else if (std.mem.eql(u8, result_str, "failed")) .failed
+        else return null;
+
+    var completion = std.mem.zeroes(t.OrderCompletion);
+    completion.result = result;
+
+    if (t.parse.json_string_field(body, "payment_ref")) |ref| {
+        if (ref.len > 0 and ref.len <= message.payment_ref_max) {
+            @memcpy(completion.payment_ref[0..ref.len], ref);
+            completion.payment_ref_len = @intCast(ref.len);
+        }
+    }
+
+    return completion;
+}

@@ -16,7 +16,7 @@ pub fn route(method: t.http.Method, raw_path: []const u8, body: []const u8) ?t.M
     if (!segments.has_id or segments.id == 0) return null;
     if (segments.sub_resource.len > 0) return null;
     if (body.len == 0) return null;
-    const product = @import("create_product.zig").parse_product_json(body) orelse return null;
+    const product = parse_update_json(body, segments.id) orelse return null;
     return t.Message.init(.update_product, segments.id, 0, product);
 }
 
@@ -57,3 +57,26 @@ pub fn handle(ctx: Context) t.ExecuteResult {
 
 // [render] .update_product
 pub fn render(ctx: Context) t.RenderResult { return ctx.render(.{}); }
+
+fn parse_update_json(body: []const u8, path_id: u128) ?t.Product {
+    var p = std.mem.zeroes(t.Product);
+    p.id = path_id;
+
+    const name = t.parse.json_string_field(body, "name") orelse return null;
+    if (name.len == 0 or name.len > t.product_name_max) return null;
+    @memcpy(p.name[0..name.len], name);
+    p.name_len = @intCast(name.len);
+
+    if (t.parse.json_string_field(body, "description")) |desc| {
+        if (desc.len > t.product_description_max) return null;
+        @memcpy(p.description[0..desc.len], desc);
+        p.description_len = @intCast(desc.len);
+    }
+
+    p.price_cents = t.parse.json_u32_field(body, "price_cents") orelse 0;
+    p.inventory = t.parse.json_u32_field(body, "inventory") orelse 0;
+    p.version = t.parse.json_u32_field(body, "version") orelse 0;
+    p.flags = .{ .active = t.parse.json_bool_field(body, "active") orelse true };
+
+    return p;
+}

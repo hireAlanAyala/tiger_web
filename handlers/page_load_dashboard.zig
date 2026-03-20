@@ -39,7 +39,6 @@ pub fn prefetch(storage: *t.Storage, msg: *const t.Message) ?Prefetch {
 // [render] .page_load_dashboard
 pub fn render(ctx: Context) t.RenderResult {
     // TODO: render full dashboard page with all three sections
-    _ = ctx;
     return ctx.render(.{
         .{ "patch", "#content", "<div>Dashboard</div>", "inner" },
     });
