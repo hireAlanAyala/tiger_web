@@ -819,6 +819,10 @@ pub const SqliteStorage = struct {
             _ = c.sqlite3_bind_blob(stmt, col, &buf, 16, c.SQLITE_TRANSIENT);
         } else if (T == []const u8) {
             _ = c.sqlite3_bind_text(stmt, col, val.ptr, @intCast(val.len), c.SQLITE_TRANSIENT);
+        } else if (comptime is_string_literal(T)) {
+            // String literals (*const [N:0]u8) — coerce to slice.
+            const slice: []const u8 = val;
+            _ = c.sqlite3_bind_text(stmt, col, slice.ptr, @intCast(slice.len), c.SQLITE_TRANSIENT);
         } else if (T == bool) {
             _ = c.sqlite3_bind_int(stmt, col, if (val) @as(c_int, 1) else @as(c_int, 0));
         } else if (T == i64) {
@@ -828,6 +832,16 @@ pub const SqliteStorage = struct {
         } else {
             @compileError("unsupported parameter type: " ++ @typeName(T));
         }
+    }
+
+    /// Detect string literal types: *const [N]u8 or *const [N:0]u8.
+    fn is_string_literal(comptime T: type) bool {
+        const info = @typeInfo(T);
+        if (info != .pointer) return false;
+        const child = info.pointer.child;
+        const child_info = @typeInfo(child);
+        if (child_info != .array) return false;
+        return child_info.array.child == u8;
     }
 
     // --- Internal helpers ---
@@ -1082,4 +1096,125 @@ test "order items preserve insertion order" {
     try std.testing.expectEqual(out.items[0].product_id, 0xff);
     try std.testing.expectEqual(out.items[1].product_id, 0x80);
     try std.testing.expectEqual(out.items[2].product_id, 0x01);
+}
+
+// --- db.sql() tests ---
+
+test "sql: insert and select with all param types" {
+    var s = try SqliteStorage.init(":memory:");
+    defer s.deinit();
+
+    // Use the existing products table. Insert via db.sql, read back via db.sql.
+    const id: u128 = 0xaabbccdd11223344aabbccdd11223344;
+    const name: []const u8 = "Test Widget";
+    const price: u32 = 999;
+    const inventory: u32 = 42;
+    const active: bool = true;
+
+    // Insert — tests u128, []const u8, u32, bool binding.
+    {
+        var result = s.sql(
+            "INSERT INTO products (id, name, description, price_cents, inventory, version, active) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7);",
+            .{ id, name, "", price, inventory, @as(u32, 1), active },
+        ) orelse unreachable;
+        defer result.finish();
+        try std.testing.expectEqual(SqliteStorage.StepResult.done, result.next());
+    }
+
+    // Select — tests column readers.
+    {
+        var result = s.sql(
+            "SELECT id, name, price_cents, inventory, version, active FROM products WHERE id = ?1;",
+            .{id},
+        ) orelse unreachable;
+        defer result.finish();
+        try std.testing.expectEqual(SqliteStorage.StepResult.row, result.next());
+        try std.testing.expectEqual(id, result.col_uuid(0));
+        try std.testing.expect(std.mem.eql(u8, "Test Widget", result.col_text(1)));
+        try std.testing.expectEqual(@as(u32, 999), result.col_u32(2));
+        try std.testing.expectEqual(@as(u32, 42), result.col_u32(3));
+        try std.testing.expectEqual(@as(u32, 1), result.col_u32(4));
+        try std.testing.expect(result.col_bool(5));
+        // No more rows.
+        try std.testing.expectEqual(SqliteStorage.StepResult.done, result.next());
+    }
+}
+
+test "sql: select not found returns done" {
+    var s = try SqliteStorage.init(":memory:");
+    defer s.deinit();
+
+    var result = s.sql(
+        "SELECT id FROM products WHERE id = ?1;",
+        .{@as(u128, 0xdead)},
+    ) orelse unreachable;
+    defer result.finish();
+    try std.testing.expectEqual(SqliteStorage.StepResult.done, result.next());
+}
+
+test "sql: empty params" {
+    var s = try SqliteStorage.init(":memory:");
+    defer s.deinit();
+
+    var result = s.sql("SELECT COUNT(*) FROM products;", .{}) orelse unreachable;
+    defer result.finish();
+    try std.testing.expectEqual(SqliteStorage.StepResult.row, result.next());
+    try std.testing.expectEqual(@as(i64, 0), result.col_i64(0));
+}
+
+test "sql: multiple rows" {
+    var s = try SqliteStorage.init(":memory:");
+    defer s.deinit();
+
+    // Insert 3 products via typed method (known-good).
+    const p1 = make_test_product(1, "A", 100);
+    const p2 = make_test_product(2, "B", 200);
+    const p3 = make_test_product(3, "C", 300);
+    assert(s.put(&p1) == .ok);
+    assert(s.put(&p2) == .ok);
+    assert(s.put(&p3) == .ok);
+
+    // Read back via db.sql.
+    var result = s.sql("SELECT id, name, price_cents FROM products ORDER BY price_cents;", .{}) orelse unreachable;
+    defer result.finish();
+
+    try std.testing.expectEqual(SqliteStorage.StepResult.row, result.next());
+    try std.testing.expectEqual(@as(u32, 100), result.col_u32(2));
+    try std.testing.expectEqual(SqliteStorage.StepResult.row, result.next());
+    try std.testing.expectEqual(@as(u32, 200), result.col_u32(2));
+    try std.testing.expectEqual(SqliteStorage.StepResult.row, result.next());
+    try std.testing.expectEqual(@as(u32, 300), result.col_u32(2));
+    try std.testing.expectEqual(SqliteStorage.StepResult.done, result.next());
+}
+
+test "sql: invalid SQL returns null" {
+    var s = try SqliteStorage.init(":memory:");
+    defer s.deinit();
+
+    const result = s.sql("THIS IS NOT SQL;", .{});
+    try std.testing.expect(result == null);
+}
+
+test "sql: i64 param and column" {
+    var s = try SqliteStorage.init(":memory:");
+    defer s.deinit();
+
+    // Login codes table has expires_at (integer).
+    {
+        var result = s.sql(
+            "INSERT INTO login_codes (email, code, expires_at) VALUES (?1, ?2, ?3);",
+            .{ @as([]const u8, "test@example.com"), @as([]const u8, "123456"), @as(i64, 1700000000) },
+        ) orelse unreachable;
+        defer result.finish();
+        try std.testing.expectEqual(SqliteStorage.StepResult.done, result.next());
+    }
+    {
+        var result = s.sql(
+            "SELECT expires_at FROM login_codes WHERE email = ?1;",
+            .{@as([]const u8, "test@example.com")},
+        ) orelse unreachable;
+        defer result.finish();
+        try std.testing.expectEqual(SqliteStorage.StepResult.row, result.next());
+        try std.testing.expectEqual(@as(i64, 1700000000), result.col_i64(0));
+    }
 }
