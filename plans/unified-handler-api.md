@@ -165,34 +165,37 @@ export function renderCreateProduct(ctx: CreateProductContext): string { ... }
 
 4 annotations in both languages. Same `db.sql` primitive, same `ctx` shape. Zig calls storage in-process, TS calls storage over the unix socket. Same SQL, same contract.
 
-### Render modes
+### Render model
 
-Renders have two modes, determined by the function signature:
+Handlers always return effects — a list of UI instructions. The framework delivers them based on whether a page exists in the browser:
 
-**String return** — produces HTML. Used for page loads and simple mutations.
+- **Page exists** (Datastar header present) → send effects as SSE events
+- **No page yet** (first navigation) → apply effects to a page template server-side, send as full HTML
 
-```typescript
-// [render] .page_load_dashboard
-export function renderDashboard(ctx: DashboardContext): string {
-    return `<html>...</html>`;
-}
-```
-
-```zig
-// [render] .page_load_dashboard
-pub fn renderDashboard(ctx: DashboardContext, buf: []u8) usize {
-    // write HTML into buf, return bytes written
-}
-```
-
-**RenderEffects return** — composes UI effects as data. Used when a mutation needs to update multiple parts of the page, push notifications, or sync other clients. The render returns a list of effect tuples; the framework executes them after the response is sent.
+The handler never knows which delivery mode is active. One render function, one return type. The page template (DOCTYPE, head, scripts, CSS) is framework-owned. The handler owns the content inside it.
 
 ```typescript
 // [render] .create_product
 export function renderCreateProduct(ctx: CreateProductContext): RenderEffects {
     return render([
         ["patch", "#toast", '<div class="toast">Product created</div>', "append"],
-        ["sync", "/dashboard"],
+        ["patch", "#product-list", renderProductTable(ctx.prefetched.products), "inner"],
+    ]);
+}
+
+// [render] .page_load_dashboard
+export function renderDashboard(ctx: DashboardContext): RenderEffects {
+    return render([
+        ["patch", "#product-list", renderProductTable(ctx.prefetched.products), "inner"],
+        ["patch", "#collection-list", renderCollectionTable(ctx.prefetched.collections), "inner"],
+        ["patch", "#order-list", renderOrderTable(ctx.prefetched.orders), "inner"],
+    ]);
+}
+
+// [render] .verify_login_code (success → redirect)
+export function renderVerifyLogin(ctx: VerifyLoginContext): RenderEffects {
+    return render([
+        ["script", "window.location.href='/'"],
     ]);
 }
 ```
@@ -202,12 +205,14 @@ export function renderCreateProduct(ctx: CreateProductContext): RenderEffects {
 pub fn renderCreateProduct(ctx: CreateProductContext) RenderEffects {
     return render(.{
         .{ "patch", "#toast", "<div class=\"toast\">Product created</div>", "append" },
-        .{ "sync", "/dashboard" },
+        .{ "patch", "#product-list", render_product_table(ctx.prefetched.products), "inner" },
     });
 }
 ```
 
-Tuple syntax — readable in diffs, AI-friendly, compiler catches type mismatches. Each tuple is an independent effect. The framework inspects the list, can deduplicate (two `sync("/dashboard")` becomes one), batch, and execute in order after the response is sent.
+**Delivery translation:**
+- SSE: each tuple becomes a Datastar SSE event (`datastar-patch-elements`, `datastar-patch-signals`)
+- Non-SSE: framework applies patch effects to the page template, producing a complete HTML document. Script effects become `<script>` tags. Signal effects become initial Datastar signal state.
 
 Effect types align 1:1 with Datastar SSE events, generated from a comptime spec:
 
@@ -223,7 +228,7 @@ Patch modes: `outer` (default), `inner`, `replace`, `prepend`, `append`, `before
 
 For the rare cases needing optional params (view transitions, onlyIfMissing), an options object goes at the end of the tuple. 95%+ of usage needs only the positional args.
 
-Start with string returns. When a mutation needs effects, return `RenderEffects` instead. No annotation changes — just a different return type. See [live partial updates recipe](../docs/recipes/live-partial-updates.md).
+See [live partial updates recipe](../docs/recipes/live-partial-updates.md) for optimizing `sync` to targeted `patch` calls.
 
 ---
 
@@ -340,12 +345,11 @@ The framework builds these at comptime:
 
 ```zig
 fn translate(method: Method, path: []const u8, body: []const u8) ?Message {
-    // In test/debug builds: try every route, assert at most one matches (catches duplicate routes).
-    // In release: early return on first match (route table is static, fully exercised by fuzz tests).
+    // Always try every route, assert at most one matches.
+    // ~24 handlers × nanoseconds = negligible vs request latency.
     var result: ?Message = null;
     inline for (handlers) |H| {
         if (H.route(method, path, body)) |msg| {
-            if (is_release) return msg;
             assert(result == null); // duplicate route match
             result = msg;
         }
@@ -465,7 +469,7 @@ Current code has `FollowupState`, `encode_followup()`, `refresh_message()`, and 
 
 8. **Dispatch is comptime-derived.** `framework.App()` returns a type with all dispatch methods. No separate dispatch file. Matches TigerBeetle's pattern.
 
-9. **Render return type determines mode.** String return for static HTML, `RenderEffects` tuple list for composable effects. Both are pure functions returning data. No annotation to distinguish them. Effect types generated from a comptime spec aligned 1:1 with Datastar SSE events.
+9. **Render always returns effects.** Handlers return a tuple list of UI effects. Framework delivers as SSE events (page exists) or applies to page template server-side (first navigation). Handler never knows delivery mode. Effect types generated from a comptime spec aligned 1:1 with Datastar SSE events. Page template (shell, scripts, CSS) is framework-owned.
 
 ---
 

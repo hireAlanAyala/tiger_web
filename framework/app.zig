@@ -102,22 +102,10 @@ pub fn AppType(comptime config: anytype) type {
 
         // --- Generated dispatch ---
 
-        /// Route dispatch: try each handler's route function until one matches.
-        /// In debug/test: assert no duplicate matches (try all, assert at most one).
-        /// In release: early return on first match.
+        /// Route dispatch: try each handler's route function, assert at most one matches.
+        /// Always tries all handlers — duplicate route detection is worth the cost.
+        /// ~24 handlers × nanoseconds per route check = negligible vs request latency.
         pub fn translate(method: http.Method, path: []const u8, body: []const u8) ?Message {
-            const is_release = @import("builtin").mode == .ReleaseFast or
-                @import("builtin").mode == .ReleaseSmall or
-                @import("builtin").mode == .ReleaseSafe;
-
-            if (is_release) {
-                inline for (handlers) |h| {
-                    if (h.handler.route(method, path, body)) |msg| return msg;
-                }
-                return null;
-            }
-
-            // Debug/test: check for duplicate route matches.
             var result: ?Message = null;
             inline for (handlers) |h| {
                 if (h.handler.route(method, path, body)) |msg| {
