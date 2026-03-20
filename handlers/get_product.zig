@@ -7,6 +7,7 @@ const effects = fw.effects;
 const handler = fw.handler;
 const message = @import("../message.zig");
 const Storage = @import("../storage.zig").SqliteStorage;
+const html = @import("../html.zig");
 
 pub const Prefetch = struct {
     product: ?ProductRow,
@@ -57,7 +58,6 @@ pub fn prefetch(storage: *Storage, msg: *const message.Message) ?Prefetch {
 // [render] .get_product
 pub fn render(ctx: Context) effects.RenderResult {
     const product = ctx.prefetched.product orelse {
-        // Not found — patch error message.
         return ctx.render(.{
             .{ "patch", "#content", @as([]const u8, "<div class=\"error\">Product not found</div>"), "inner" },
         });
@@ -69,7 +69,6 @@ pub fn render(ctx: Context) effects.RenderResult {
         });
     }
 
-    // Build product card HTML into the render buffer.
     var card_buf: [2048]u8 = undefined;
     const card_html = render_product_card(&card_buf, &product);
 
@@ -78,95 +77,31 @@ pub fn render(ctx: Context) effects.RenderResult {
     });
 }
 
-/// Render a product card into a buffer. Returns the written slice.
 fn render_product_card(buf: []u8, p: *const ProductRow) []const u8 {
     var pos: usize = 0;
-
-    pos += write(buf[pos..], "<div class=\"card\"><strong>");
-    pos += write_escaped(buf[pos..], p.name[0..p.name_len]);
-    pos += write(buf[pos..], "</strong> &mdash; $");
-    pos += write_price(buf[pos..], p.price_cents);
-    pos += write(buf[pos..], " &mdash; inv: ");
-    pos += write_u32(buf[pos..], p.inventory);
-    pos += write(buf[pos..], " &mdash; v");
-    pos += write_u32(buf[pos..], p.version);
+    pos += html.raw(buf[pos..], "<div class=\"card\"><strong>");
+    pos += html.escaped(buf[pos..], p.name[0..p.name_len]);
+    pos += html.raw(buf[pos..], "</strong> &mdash; ");
+    pos += html.price(buf[pos..], p.price_cents);
+    pos += html.raw(buf[pos..], " &mdash; inv: ");
+    pos += html.u32_decimal(buf[pos..], p.inventory);
+    pos += html.raw(buf[pos..], " &mdash; v");
+    pos += html.u32_decimal(buf[pos..], p.version);
 
     if (!p.active) {
-        pos += write(buf[pos..], " <span class=\"error\">[inactive]</span>");
+        pos += html.raw(buf[pos..], " <span class=\"error\">[inactive]</span>");
     }
 
-    pos += write(buf[pos..], "<div class=\"meta\">");
-    pos += write_uuid(buf[pos..], p.id);
-    pos += write(buf[pos..], "</div>");
+    pos += html.raw(buf[pos..], "<div class=\"meta\">");
+    pos += html.uuid(buf[pos..], p.id);
+    pos += html.raw(buf[pos..], "</div>");
 
     if (p.description_len > 0) {
-        pos += write(buf[pos..], "<div class=\"meta\">");
-        pos += write_escaped(buf[pos..], p.description[0..p.description_len]);
-        pos += write(buf[pos..], "</div>");
+        pos += html.raw(buf[pos..], "<div class=\"meta\">");
+        pos += html.escaped(buf[pos..], p.description[0..p.description_len]);
+        pos += html.raw(buf[pos..], "</div>");
     }
 
-    pos += write(buf[pos..], "</div>");
-
+    pos += html.raw(buf[pos..], "</div>");
     return buf[0..pos];
-}
-
-// --- Minimal HTML helpers (no HtmlWriter dependency) ---
-
-fn write(buf: []u8, s: []const u8) usize {
-    assert(s.len <= buf.len);
-    @memcpy(buf[0..s.len], s);
-    return s.len;
-}
-
-fn write_escaped(buf: []u8, s: []const u8) usize {
-    var pos: usize = 0;
-    for (s) |c| {
-        switch (c) {
-            '<' => pos += write(buf[pos..], "&lt;"),
-            '>' => pos += write(buf[pos..], "&gt;"),
-            '&' => pos += write(buf[pos..], "&amp;"),
-            '"' => pos += write(buf[pos..], "&quot;"),
-            else => {
-                buf[pos] = c;
-                pos += 1;
-            },
-        }
-    }
-    return pos;
-}
-
-fn write_u32(buf: []u8, val: u32) usize {
-    var tmp: [10]u8 = undefined;
-    const s = std.fmt.bufPrint(&tmp, "{d}", .{val}) catch unreachable;
-    return write(buf, s);
-}
-
-fn write_price(buf: []u8, cents: u32) usize {
-    var pos: usize = 0;
-    pos += write_u32(buf[pos..], cents / 100);
-    pos += write(buf[pos..], ".");
-    var frac_buf: [2]u8 = undefined;
-    const frac = cents % 100;
-    if (frac < 10) {
-        frac_buf[0] = '0';
-        frac_buf[1] = '0' + @as(u8, @intCast(frac));
-    } else {
-        frac_buf[0] = '0' + @as(u8, @intCast(frac / 10));
-        frac_buf[1] = '0' + @as(u8, @intCast(frac % 10));
-    }
-    pos += write(buf[pos..], &frac_buf);
-    return pos;
-}
-
-fn write_uuid(buf: []u8, id: u128) usize {
-    const hex = "0123456789abcdef";
-    var bytes: [16]u8 = undefined;
-    std.mem.writeInt(u128, &bytes, id, .big);
-    var pos: usize = 0;
-    for (bytes) |b| {
-        buf[pos] = hex[b >> 4];
-        buf[pos + 1] = hex[b & 0xf];
-        pos += 2;
-    }
-    return pos; // 32 hex chars
 }
