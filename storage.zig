@@ -730,6 +730,106 @@ pub const SqliteStorage = struct {
         };
     }
 
+    // --- Raw SQL interface ---
+    //
+    // Handlers call db.sql() to query the database with raw SQL.
+    // Parameters are bound (never interpolated) — no SQL injection.
+    // Statements are prepared per-call (not cached). Caching can be
+    // added later as an optimization without changing the interface.
+
+    /// Execute a SQL query with typed parameters. Returns a QueryResult
+    /// for iterating rows, or null if the database is busy.
+    pub fn sql(self: *SqliteStorage, comptime query: [*:0]const u8, args: anytype) ?QueryResult {
+        var stmt: ?*c.sqlite3_stmt = null;
+        const rc = c.sqlite3_prepare_v2(self.db, query, -1, &stmt, null);
+        if (rc != c.SQLITE_OK) {
+            log.warn("sql: prepare failed: {s}", .{c.sqlite3_errmsg(self.db)});
+            return null;
+        }
+        const real_stmt = stmt.?;
+
+        // Bind parameters from tuple.
+        bind_params(real_stmt, args);
+
+        return .{ .stmt = real_stmt };
+    }
+
+    /// Result handle from sql(). Call next() to iterate rows, finish() when done.
+    pub const QueryResult = struct {
+        stmt: *c.sqlite3_stmt,
+
+        /// Advance to the next row. Returns .row, .done, .busy, .err, or .corruption.
+        pub fn next(self: *QueryResult) StepResult {
+            return step_result(self.stmt);
+        }
+
+        /// Read a column as u128 (stored as 16-byte BLOB big-endian).
+        pub fn col_uuid(self: *QueryResult, col: c_int) u128 {
+            return read_uuid(self.stmt, col);
+        }
+
+        /// Read a column as text. Returns a slice valid until next()/finish().
+        pub fn col_text(self: *QueryResult, col: c_int) []const u8 {
+            const ptr_raw = c.sqlite3_column_text(self.stmt, col);
+            const len: usize = @intCast(c.sqlite3_column_bytes(self.stmt, col));
+            if (ptr_raw) |ptr| {
+                const p: [*]const u8 = @ptrCast(ptr);
+                return p[0..len];
+            }
+            return "";
+        }
+
+        /// Read a column as i64.
+        pub fn col_i64(self: *QueryResult, col: c_int) i64 {
+            return c.sqlite3_column_int64(self.stmt, col);
+        }
+
+        /// Read a column as u32.
+        pub fn col_u32(self: *QueryResult, col: c_int) u32 {
+            return @intCast(c.sqlite3_column_int64(self.stmt, col));
+        }
+
+        /// Read a column as bool (0 = false, non-zero = true).
+        pub fn col_bool(self: *QueryResult, col: c_int) bool {
+            return c.sqlite3_column_int(self.stmt, col) != 0;
+        }
+
+        /// Finalize the statement. Must be called when done reading rows.
+        pub fn finish(self: *QueryResult) void {
+            _ = c.sqlite3_finalize(self.stmt);
+        }
+    };
+
+    /// Bind a tuple of parameters to a prepared statement.
+    /// Supports u128 (as BLOB), []const u8 (as text), integers (as i64), bool (as int).
+    fn bind_params(stmt: *c.sqlite3_stmt, args: anytype) void {
+        const fields = @typeInfo(@TypeOf(args)).@"struct".fields;
+        inline for (fields, 0..) |field, i| {
+            const col: c_int = @intCast(i + 1); // SQLite params are 1-indexed
+            const val = @field(args, field.name);
+            bind_param(stmt, col, val);
+        }
+    }
+
+    fn bind_param(stmt: *c.sqlite3_stmt, col: c_int, val: anytype) void {
+        const T = @TypeOf(val);
+        if (T == u128) {
+            var buf: [16]u8 = undefined;
+            std.mem.writeInt(u128, &buf, val, .big);
+            _ = c.sqlite3_bind_blob(stmt, col, &buf, 16, c.SQLITE_TRANSIENT);
+        } else if (T == []const u8) {
+            _ = c.sqlite3_bind_text(stmt, col, val.ptr, @intCast(val.len), c.SQLITE_TRANSIENT);
+        } else if (T == bool) {
+            _ = c.sqlite3_bind_int(stmt, col, if (val) @as(c_int, 1) else @as(c_int, 0));
+        } else if (T == i64) {
+            _ = c.sqlite3_bind_int64(stmt, col, val);
+        } else if (@typeInfo(T) == .int or @typeInfo(T) == .comptime_int) {
+            _ = c.sqlite3_bind_int64(stmt, col, @intCast(val));
+        } else {
+            @compileError("unsupported parameter type: " ++ @typeName(T));
+        }
+    }
+
     // --- Internal helpers ---
 
     const StepResult = enum { row, done, busy, err, corruption };
@@ -820,17 +920,17 @@ pub const SqliteStorage = struct {
         out.flags = .{ .active = c.sqlite3_column_int64(stmt, 2) != 0 };
     }
 
-    fn prepare(db: *c.sqlite3, sql: [*:0]const u8) *c.sqlite3_stmt {
+    fn prepare(db: *c.sqlite3, query: [*:0]const u8) *c.sqlite3_stmt {
         var stmt: ?*c.sqlite3_stmt = null;
-        const rc = c.sqlite3_prepare_v2(db, sql, -1, &stmt, null);
+        const rc = c.sqlite3_prepare_v2(db, query, -1, &stmt, null);
         if (rc != c.SQLITE_OK) {
             @panic("sqlite3_prepare_v2 failed");
         }
         return stmt.?;
     }
 
-    fn exec(db: *c.sqlite3, sql: [*:0]const u8) void {
-        const rc = c.sqlite3_exec(db, sql, null, null, null);
+    fn exec(db: *c.sqlite3, query: [*:0]const u8) void {
+        const rc = c.sqlite3_exec(db, query, null, null, null);
         if (rc != c.SQLITE_OK) {
             @panic("sqlite3_exec failed");
         }
@@ -874,8 +974,8 @@ pub const SqliteStorage = struct {
 
     fn set_schema_version(db: *c.sqlite3, version: u32) void {
         var buf: [64]u8 = undefined;
-        const sql = std.fmt.bufPrint(&buf, "PRAGMA user_version = {d};\x00", .{version}) catch unreachable;
-        exec(db, @ptrCast(sql.ptr));
+        const pragma = std.fmt.bufPrint(&buf, "PRAGMA user_version = {d};\x00", .{version}) catch unreachable;
+        exec(db, @ptrCast(pragma.ptr));
     }
 
     fn migrate_v2_login(db: *c.sqlite3) void {
