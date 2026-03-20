@@ -131,7 +131,7 @@ pub const RenderResult = struct {
 ///   .{ "signal", signals_json }
 ///   .{ "script", code }
 ///   .{ "sync", "/route" }
-pub fn process_effects(comptime effects_tuple: anytype, buf: []u8) RenderResult {
+pub fn process_effects(effects_tuple: anytype, buf: []u8) RenderResult {
     comptime {
         const count = std.meta.fields(@TypeOf(effects_tuple)).len;
         if (count > effects_max) {
