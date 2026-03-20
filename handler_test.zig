@@ -6,6 +6,8 @@ const fw = @import("tiger_framework");
 const message = @import("message.zig");
 const state_machine = @import("state_machine.zig");
 const get_product = @import("handlers/get_product.zig");
+const create_product = @import("handlers/create_product.zig");
+const list_products = @import("handlers/list_products.zig");
 
 // Wire one handler through AppType to prove the comptime pipeline works.
 // This is intentionally incomplete — only get_product is registered.
@@ -90,4 +92,50 @@ test "get_product render product card" {
     try std.testing.expect(std.mem.indexOf(u8, html, "Widget") != null);
     try std.testing.expect(std.mem.indexOf(u8, html, "$9.99") != null);
     try std.testing.expect(std.mem.indexOf(u8, html, "inv: 42") != null);
+}
+
+// --- create_product tests ---
+
+test "create_product route matches POST /products" {
+    const body = "{\"id\":\"aabbccdd11223344aabbccdd11223344\",\"name\":\"Widget\"}";
+    const result = create_product.route(.post, "/products", body);
+    try std.testing.expect(result != null);
+    try std.testing.expectEqual(message.Operation.create_product, result.?.operation);
+}
+
+test "create_product route rejects GET" {
+    try std.testing.expect(create_product.route(.get, "/products", "{}") == null);
+}
+
+test "create_product route rejects with id in path" {
+    const body = "{\"id\":\"aabbccdd11223344aabbccdd11223344\",\"name\":\"Widget\"}";
+    try std.testing.expect(create_product.route(.post, "/products/aabbccdd11223344aabbccdd11223344", body) == null);
+}
+
+test "create_product route rejects empty body" {
+    try std.testing.expect(create_product.route(.post, "/products", "") == null);
+}
+
+test "create_product route rejects missing name" {
+    try std.testing.expect(create_product.route(.post, "/products", "{\"id\":\"aabbccdd11223344aabbccdd11223344\"}") == null);
+}
+
+// --- list_products tests ---
+
+test "list_products route matches GET /products" {
+    const result = list_products.route(.get, "/products", "");
+    try std.testing.expect(result != null);
+    try std.testing.expectEqual(message.Operation.list_products, result.?.operation);
+}
+
+test "list_products route rejects POST" {
+    try std.testing.expect(list_products.route(.post, "/products", "") == null);
+}
+
+test "list_products route rejects with id" {
+    try std.testing.expect(list_products.route(.get, "/products/aabbccdd11223344aabbccdd11223344", "") == null);
+}
+
+test "list_products route rejects search query" {
+    try std.testing.expect(list_products.route(.get, "/products?q=widget", "") == null);
 }
