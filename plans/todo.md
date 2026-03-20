@@ -65,3 +65,11 @@ right now the zig code doesnt have a way to declare error html, not sure what to
 - boil all adapters+packaged addons into a plugin api
 - write vanilla html in render without a string  and the compiler turns it to datastar so theres no api to learn
 - add an opt in way for sse to fan out updates to all users for that page
+- the compiler/runtime should output to a file in dev so ai can read it on its own with tail
+- give users zig primitives in their pure functions,
+on compile chunk the user space by where zig is used,
+run a user space chunk,
+pass the result to zig as binary,
+run the zig after that chunk,
+If errors show it on compiler
+benefit: allows the language to have a uniform, assert, and other zig checks
