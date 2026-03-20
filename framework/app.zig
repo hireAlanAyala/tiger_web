@@ -26,12 +26,30 @@ const http = @import("http.zig");
 ///       .refresh_message = refresh_message,
 ///   });
 pub fn AppType(comptime config: anytype) type {
+    // --- Config field validation ---
+    // Explicit checks with clear error messages. Without these, a missing
+    // field produces a cryptic "no field named X" error from inside the guts.
+    if (!@hasField(@TypeOf(config), "handlers")) @compileError("AppType config missing .handlers");
+    if (!@hasField(@TypeOf(config), "Message")) @compileError("AppType config missing .Message");
+    if (!@hasField(@TypeOf(config), "MessageResponse")) @compileError("AppType config missing .MessageResponse");
+    if (!@hasField(@TypeOf(config), "Operation")) @compileError("AppType config missing .Operation");
+    if (!@hasField(@TypeOf(config), "Status")) @compileError("AppType config missing .Status");
+    if (!@hasField(@TypeOf(config), "Identity")) @compileError("AppType config missing .Identity");
+    if (!@hasField(@TypeOf(config), "FollowupState")) @compileError("AppType config missing .FollowupState");
+    if (!@hasField(@TypeOf(config), "StateMachineType")) @compileError("AppType config missing .StateMachineType");
+    if (!@hasField(@TypeOf(config), "Wal")) @compileError("AppType config missing .Wal");
+    if (!@hasField(@TypeOf(config), "ExecuteResult")) @compileError("AppType config missing .ExecuteResult");
+    if (!@hasField(@TypeOf(config), "RenderEffects")) @compileError("AppType config missing .RenderEffects");
+    if (!@hasField(@TypeOf(config), "encode_response")) @compileError("AppType config missing .encode_response");
+    if (!@hasField(@TypeOf(config), "encode_followup")) @compileError("AppType config missing .encode_followup");
+    if (!@hasField(@TypeOf(config), "refresh_message")) @compileError("AppType config missing .refresh_message");
+
     const handlers = config.handlers;
     const Message = config.Message;
     const Operation = config.Operation;
     const Identity = config.Identity;
 
-    // --- Comptime validation ---
+    // --- Type validation ---
 
     // Operation must be an enum with a .root sentinel.
     if (@typeInfo(Operation) != .@"enum") {
@@ -39,6 +57,43 @@ pub fn AppType(comptime config: anytype) type {
     }
     if (!@hasField(Operation, "root")) {
         @compileError("Operation enum must have a .root variant (framework sentinel)");
+    }
+
+    // Operation must have EventType and is_mutation — framework depends on these.
+    if (!@hasDecl(Operation, "EventType")) {
+        @compileError("Operation must have an EventType() comptime function");
+    }
+    if (!@hasDecl(Operation, "is_mutation")) {
+        @compileError("Operation must have an is_mutation() function");
+    }
+
+    // Message must have .operation field and .set_credential method.
+    if (!@hasField(Message, "operation")) {
+        @compileError("Message must have an .operation field");
+    }
+    if (!@hasDecl(Message, "set_credential")) {
+        @compileError("Message must have a set_credential() method");
+    }
+
+    // Status must have .ok variant.
+    if (!@hasField(config.Status, "ok")) {
+        @compileError("Status must have an .ok variant");
+    }
+
+    // Identity must be a struct.
+    if (@typeInfo(Identity) != .@"struct") {
+        @compileError("Identity must be a struct, got " ++ @typeName(Identity));
+    }
+
+    // ExecuteResult must have response, writes, writes_len.
+    if (!@hasField(config.ExecuteResult, "response")) {
+        @compileError("ExecuteResult must have a .response field");
+    }
+    if (!@hasField(config.ExecuteResult, "writes")) {
+        @compileError("ExecuteResult must have a .writes field");
+    }
+    if (!@hasField(config.ExecuteResult, "writes_len")) {
+        @compileError("ExecuteResult must have a .writes_len field");
     }
 
     // 1. Handler count matches operation count (minus root).
@@ -165,7 +220,11 @@ const TestMessage = struct {
 const TestResponse = struct { status: TestStatus };
 const TestStatus = enum(u8) { ok = 1, err = 2 };
 const TestFollowup = struct {};
-const TestExecuteResult = struct { status: u8 };
+const TestExecuteResult = struct {
+    response: TestResponse,
+    writes: [1]u8,
+    writes_len: u8,
+};
 const TestRenderEffects = struct { len: u8 };
 
 const GetThingCtx = handler_mod.HandlerContext(GetThingHandler.Prefetch, void, TestIdentity);
@@ -196,7 +255,7 @@ const CreateThingHandler = struct {
         return .{ .existing = false };
     }
     pub fn handle(_: CreateThingCtx) TestExecuteResult {
-        return .{ .status = 1 };
+        return .{ .response = .{ .status = .ok }, .writes = .{0}, .writes_len = 0 };
     }
     pub fn render(_: CreateThingCtx) TestRenderEffects {
         return .{ .len = 0 };

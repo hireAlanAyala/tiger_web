@@ -208,7 +208,11 @@ test "HandlerContext exposes type aliases" {
 
 const MockIdentity = struct { user_id: u128 };
 const MockMessage = struct { operation: MockOp };
-const MockExecuteResult = struct { status: u8 };
+const MockExecuteResult = struct {
+    response: struct { status: u8 },
+    writes: [1]u8,
+    writes_len: u8,
+};
 const MockRenderEffects = struct { len: u8 };
 const MockBody = struct { name: u8 };
 
@@ -254,7 +258,7 @@ const MockMutationHandler = struct {
         return null;
     }
     pub fn handle(_: Ctx) MockExecuteResult {
-        return .{ .status = 1 };
+        return .{ .response = .{ .status = 1 }, .writes = .{0}, .writes_len = 0 };
     }
     pub fn render(_: Ctx) MockRenderEffects {
         return .{ .len = 0 };
