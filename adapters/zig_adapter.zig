@@ -139,9 +139,17 @@ const OperationEntry = struct {
     is_read_only: bool,
 };
 
+fn is_valid_phase(phase: []const u8) bool {
+    return std.mem.eql(u8, phase, "translate") or
+        std.mem.eql(u8, phase, "prefetch") or
+        std.mem.eql(u8, phase, "execute") or
+        std.mem.eql(u8, phase, "render");
+}
+
 /// Extract a Zig function or type name from the line after an annotation.
 /// Returns null if no name can be extracted (e.g., bodyless [handle]).
 fn extract_zig_name(content: []const u8, annotation_line: u32) ?[]const u8 {
+    assert(annotation_line > 0); // 1-based
     // Find the code line after the annotation.
     var line_num: u32 = 0;
     var lines = std.mem.splitScalar(u8, content, '\n');
@@ -197,15 +205,24 @@ fn emit_zig(allocator: std.mem.Allocator, output_path: []const u8, ops: *std.Str
         \\
     );
 
-    // Collect unique files for imports.
+    // Collect unique files for imports. Assert no module name collisions.
     var files = std.StringHashMap([]const u8).init(allocator);
+    var module_names = std.StringHashMap([]const u8).init(allocator); // module_name → file path
     var it = ops.iterator();
     while (it.next()) |entry| {
         const op = entry.value_ptr;
         if (!files.contains(op.file)) {
-            // Generate import name from filename: "handlers/get_product.zig" → "get_product"
             const basename = std.fs.path.stem(op.file);
-            try files.put(op.file, try allocator.dupe(u8, basename));
+            const module_name = try allocator.dupe(u8, basename);
+            // Two different files must not produce the same module name.
+            if (module_names.get(module_name)) |existing_file| {
+                std.debug.print("error: module name collision '{s}' from '{s}' and '{s}'\n", .{
+                    module_name, existing_file, op.file,
+                });
+                std.process.exit(1);
+            }
+            try module_names.put(module_name, op.file);
+            try files.put(op.file, module_name);
         }
     }
 
@@ -215,6 +232,19 @@ fn emit_zig(allocator: std.mem.Allocator, output_path: []const u8, ops: *std.Str
         try w.print("const {s} = @import(\"../{s}\");\n", .{ entry.value_ptr.*, entry.key_ptr.* });
     }
     try w.writeAll("\n");
+
+    // Validate every operation has all required phases.
+    assert(ops.count() > 0); // empty manifest
+    {
+        var validate_it = ops.iterator();
+        while (validate_it.next()) |entry| {
+            const op = entry.value_ptr;
+            assert(op.route_fn != null); // missing [route]
+            assert(op.prefetch_fn != null); // missing [prefetch]
+            assert(op.render_fn != null); // missing [render]
+            // handle_fn is null for read-only ops — that's valid.
+        }
+    }
 
     // Write handler tuple.
     try w.writeAll("pub const handlers = .{\n");
@@ -250,23 +280,24 @@ fn parse_manifest(allocator: std.mem.Allocator, json: []const u8, out: *std.Arra
         const obj_end = std.mem.indexOfPos(u8, json, phase_key, "}") orelse break;
         const obj = json[obj_start .. obj_end + 1];
 
-        const phase = json_string_field(obj, "phase") orelse {
-            pos = obj_end + 1;
-            continue;
-        };
-        const operation = json_string_field(obj, "operation") orelse {
-            pos = obj_end + 1;
-            continue;
-        };
-        const file = json_string_field(obj, "file") orelse {
-            pos = obj_end + 1;
-            continue;
-        };
-        const line = json_u32_field(obj, "line") orelse {
-            pos = obj_end + 1;
-            continue;
-        };
+        // All fields are required — the scanner produced this manifest.
+        // A missing field is corruption, not a recoverable condition.
+        const phase = json_string_field(obj, "phase") orelse
+            @panic("manifest corruption: annotation object missing 'phase' field");
+        const operation = json_string_field(obj, "operation") orelse
+            @panic("manifest corruption: annotation object missing 'operation' field");
+        const file = json_string_field(obj, "file") orelse
+            @panic("manifest corruption: annotation object missing 'file' field");
+        const line = json_u32_field(obj, "line") orelse
+            @panic("manifest corruption: annotation object missing 'line' field");
         const has_body = json_bool_field(obj, "has_body");
+
+        // Boundary validation — the manifest is a trusted input from the scanner,
+        // but assert structure invariants to catch corruption or format drift.
+        assert(line > 0); // 1-based line numbers
+        assert(operation.len > 0);
+        assert(file.len > 0);
+        assert(is_valid_phase(phase));
 
         try out.append(.{
             .phase = try allocator.dupe(u8, phase),
@@ -411,4 +442,47 @@ test "parse_manifest" {
     try std.testing.expectEqual(@as(u32, 5), annotations.items[0].line);
     try std.testing.expect(annotations.items[0].has_body);
     try std.testing.expect(!annotations.items[1].has_body);
+}
+
+test "parse_manifest empty" {
+    const json = "{}";
+    var annotations = std.ArrayList(ManifestAnnotation).init(std.testing.allocator);
+    defer annotations.deinit();
+    try parse_manifest(std.testing.allocator, json, &annotations);
+    try std.testing.expectEqual(@as(usize, 0), annotations.items.len);
+}
+
+test "json_string_field missing field returns null" {
+    const obj = "{ \"phase\": \"translate\" }";
+    try std.testing.expect(json_string_field(obj, "operation") == null);
+    try std.testing.expect(json_string_field(obj, "nonexistent") == null);
+}
+
+test "json_u32_field missing returns null" {
+    const obj = "{ \"phase\": \"translate\" }";
+    try std.testing.expect(json_u32_field(obj, "line") == null);
+}
+
+test "extract_zig_name non-pub function" {
+    const content = "// [route] .get_product\nfn routeGetProduct() void {}\n";
+    const name = extract_zig_name(content, 1);
+    try std.testing.expect(name != null);
+    try std.testing.expect(std.mem.eql(u8, "routeGetProduct", name.?));
+}
+
+test "extract_zig_name non-function code returns null" {
+    const content = "// [route] .get_product\nvar x: u32 = 5;\n";
+    const name = extract_zig_name(content, 1);
+    try std.testing.expect(name == null);
+}
+
+test "is_valid_phase" {
+    try std.testing.expect(is_valid_phase("translate"));
+    try std.testing.expect(is_valid_phase("prefetch"));
+    try std.testing.expect(is_valid_phase("execute"));
+    try std.testing.expect(is_valid_phase("render"));
+    try std.testing.expect(!is_valid_phase("route")); // user-facing name, not internal
+    try std.testing.expect(!is_valid_phase("handle")); // user-facing name, not internal
+    try std.testing.expect(!is_valid_phase(""));
+    try std.testing.expect(!is_valid_phase("unknown"));
 }

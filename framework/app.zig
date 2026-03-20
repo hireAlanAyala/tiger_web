@@ -33,6 +33,14 @@ pub fn AppType(comptime config: anytype) type {
 
     // --- Comptime validation ---
 
+    // Operation must be an enum with a .root sentinel.
+    if (@typeInfo(Operation) != .@"enum") {
+        @compileError("Operation must be an enum");
+    }
+    if (!@hasField(Operation, "root")) {
+        @compileError("Operation enum must have a .root variant (framework sentinel)");
+    }
+
     // 1. Handler count matches operation count (minus root).
     const op_fields = @typeInfo(Operation).@"enum".fields;
     var non_root_count: usize = 0;
