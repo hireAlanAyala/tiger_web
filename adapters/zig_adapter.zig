@@ -204,8 +204,9 @@ fn emit_zig_writer(allocator: std.mem.Allocator, w: anytype, ops: *std.StringHas
     );
 
     // Collect unique files for imports. Assert no module name collisions.
-    // Defer ordering matters: module_names values point into files values (shared slices).
-    // module_names must deinit before files frees the strings it references.
+    // Defer ordering matters: module_names keys are the same duped strings stored
+    // as files values. files defer frees those strings. module_names must deinit
+    // before files frees the keys it references.
     // Zig defers run in reverse declaration order — module_names deinits first.
     var files = std.StringHashMap([]const u8).init(allocator);
     defer {
