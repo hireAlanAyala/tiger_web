@@ -56,7 +56,7 @@ pub fn render(ctx: Context) t.RenderResult {
 
     if (pos == 0) {
         return ctx.render(.{
-            .{ "patch", "#product-list", @as([]const u8, "<div class=\"meta\">No products</div>"), "inner" },
+            .{ "patch", "#product-list", "<div class=\"meta\">No products</div>", "inner" },
         });
     }
 

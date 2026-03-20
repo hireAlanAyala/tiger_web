@@ -39,13 +39,13 @@ pub fn prefetch(storage: *t.Storage, msg: *const t.Message) ?Prefetch {
 pub fn render(ctx: Context) t.RenderResult {
     const product = ctx.prefetched.product orelse {
         return ctx.render(.{
-            .{ "patch", "#content", @as([]const u8, "<div class=\"error\">Product not found</div>"), "inner" },
+            .{ "patch", "#content", "<div class=\"error\">Product not found</div>", "inner" },
         });
     };
 
     if (!product.flags.active) {
         return ctx.render(.{
-            .{ "patch", "#content", @as([]const u8, "<div class=\"error\">Product not found</div>"), "inner" },
+            .{ "patch", "#content", "<div class=\"error\">Product not found</div>", "inner" },
         });
     }
 

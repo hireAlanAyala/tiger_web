@@ -131,6 +131,22 @@ pub const RenderResult = struct {
 ///   .{ "signal", signals_json }
 ///   .{ "script", code }
 ///   .{ "sync", "/route" }
+/// Coerce string literals (*const [N:0]u8) and slices to []const u8.
+/// Lets handlers pass string literals directly in tuples without @as casts.
+fn to_slice(val: anytype) []const u8 {
+    const T = @TypeOf(val);
+    if (T == []const u8) return val;
+    // String literal or pointer-to-array — coerce to slice.
+    const info = @typeInfo(T);
+    if (info == .pointer) {
+        const child = @typeInfo(info.pointer.child);
+        if (child == .array and child.array.child == u8) {
+            return val;
+        }
+    }
+    @compileError("expected []const u8 or string literal, got " ++ @typeName(T));
+}
+
 pub fn process_effects(effects_tuple: anytype, buf: []u8) RenderResult {
     comptime {
         const count = std.meta.fields(@TypeOf(effects_tuple)).len;
@@ -156,7 +172,7 @@ pub fn process_effects(effects_tuple: anytype, buf: []u8) RenderResult {
                 // .{ "patch", selector, html, mode }
                 comptime assert(std.meta.fields(@TypeOf(effect)).len == 4);
                 const selector = effect.@"1";
-                const html: []const u8 = effect.@"2";
+                const html = to_slice(effect.@"2");
                 const mode = comptime PatchMode.from_comptime_str(effect.@"3");
 
                 var meta = EffectMeta{
@@ -199,7 +215,7 @@ pub fn process_effects(effects_tuple: anytype, buf: []u8) RenderResult {
             .signal => {
                 // .{ "signal", signals_json }
                 comptime assert(std.meta.fields(@TypeOf(effect)).len == 2);
-                const signals: []const u8 = effect.@"1";
+                const signals = to_slice(effect.@"1");
 
                 assert(pos + signals.len <= buf.len);
                 @memcpy(buf[pos..][0..signals.len], signals);
@@ -215,7 +231,7 @@ pub fn process_effects(effects_tuple: anytype, buf: []u8) RenderResult {
             .script => {
                 // .{ "script", code }
                 comptime assert(std.meta.fields(@TypeOf(effect)).len == 2);
-                const code: []const u8 = effect.@"1";
+                const code = to_slice(effect.@"1");
 
                 assert(pos + code.len <= buf.len);
                 @memcpy(buf[pos..][0..code.len], code);
@@ -260,7 +276,7 @@ test "process_effects: single patch" {
     var buf: [4096]u8 = undefined;
     const html = "hello world";
     const result = process_effects(.{
-        .{ "patch", "#target", @as([]const u8, html), "outer" },
+        .{ "patch", "#target", html, "outer" },
     }, &buf);
 
     try std.testing.expectEqual(@as(u8, 1), result.len);
@@ -275,9 +291,9 @@ test "process_effects: mixed effects" {
     const html = "<div>card</div>";
     const signals = "{\"count\":5}";
     const result = process_effects(.{
-        .{ "patch", "#list", @as([]const u8, html), "inner" },
-        .{ "signal", @as([]const u8, signals) },
-        .{ "script", @as([]const u8, "console.log('done')") },
+        .{ "patch", "#list", html, "inner" },
+        .{ "signal", signals },
+        .{ "script", "console.log('done')" },
         .{ "sync", "/dashboard" },
     }, &buf);
 
@@ -316,7 +332,7 @@ test "process_effects: empty returns zero effects" {
 
 test "process_effects: all patch modes" {
     var buf: [4096]u8 = undefined;
-    const html = @as([]const u8, "x");
+    const html = "x";
     const result = process_effects(.{
         .{ "patch", "#a", html, "outer" },
         .{ "patch", "#b", html, "inner" },
@@ -341,7 +357,7 @@ test "process_effects: buffer exactly full" {
     // Buffer of exactly 5 bytes. Write exactly 5 bytes of content.
     var buf: [5]u8 = undefined;
     const result = process_effects(.{
-        .{ "patch", "#x", @as([]const u8, "hello"), "outer" },
+        .{ "patch", "#x", "hello", "outer" },
     }, &buf);
 
     try std.testing.expectEqual(@as(u32, 5), result.buf_used);
@@ -351,10 +367,10 @@ test "process_effects: buffer exactly full" {
 test "process_effects: buf_used tracks total content" {
     var buf: [4096]u8 = undefined;
     const result = process_effects(.{
-        .{ "patch", "#a", @as([]const u8, "abc"), "outer" }, // 3 bytes
-        .{ "signal", @as([]const u8, "{}") }, // 2 bytes
+        .{ "patch", "#a", "abc", "outer" }, // 3 bytes
+        .{ "signal", "{}" }, // 2 bytes
         .{ "remove", "#b" }, // 0 bytes (no content)
-        .{ "script", @as([]const u8, "x()") }, // 3 bytes
+        .{ "script", "x()" }, // 3 bytes
         .{ "sync", "/dashboard" }, // 0 bytes (no content)
     }, &buf);
 
