@@ -32,6 +32,7 @@ pub fn HandlerContext(comptime Prefetch: type, comptime Body: type, comptime Ide
         prefetched: Prefetch,
         body: if (Body == void) void else *const Body,
         identity: Identity,
+        render_buf: []u8,
 
         pub const PrefetchType = Prefetch;
         pub const BodyType = Body;
@@ -40,6 +41,18 @@ pub fn HandlerContext(comptime Prefetch: type, comptime Body: type, comptime Ide
         /// Access body — asserts non-void at comptime.
         pub fn body_val(self: @This()) if (Body == void) @compileError("no body for void EventType") else *const Body {
             return self.body;
+        }
+
+        /// Build render effects from a tuple of effect descriptors.
+        /// Validates effect structure at comptime, writes content at runtime.
+        ///
+        /// Usage:
+        ///   return ctx.render(.{
+        ///       .{ "patch", "#product-card", html, "outer" },
+        ///       .{ "sync", "/dashboard" },
+        ///   });
+        pub fn render(self: @This(), comptime effects_tuple: anytype) effects.RenderResult {
+            return effects.process_effects(effects_tuple, self.render_buf);
         }
     };
 }
@@ -50,8 +63,8 @@ pub fn HandlerContext(comptime Prefetch: type, comptime Body: type, comptime Ide
 /// Checks that the handler exports the right types AND full function
 /// signatures (parameter types, return types, parameter count).
 ///
-/// All app-level types (Message, ExecuteResult, RenderEffects) are passed
-/// as comptime parameters — the framework never imports app types.
+/// App-level types (Message, ExecuteResult) are passed as comptime parameters.
+/// RenderResult is framework-owned (effects.RenderResult) — not app-provided.
 ///
 /// Returns a descriptor struct with resolved types for dispatch generation.
 pub fn ValidateHandler(
@@ -60,7 +73,6 @@ pub fn ValidateHandler(
     comptime Identity: type,
     comptime Message: type,
     comptime ExecuteResult: type,
-    comptime RenderEffects: type,
 ) type {
     const op_name = @tagName(operation);
 
@@ -143,8 +155,8 @@ pub fn ValidateHandler(
         }
         const Return = info.return_type orelse
             @compileError("handler for ." ++ op_name ++ ": render must have a return type");
-        if (Return != RenderEffects) {
-            @compileError("handler for ." ++ op_name ++ ": render must return " ++ @typeName(RenderEffects));
+        if (Return != effects.RenderResult) {
+            @compileError("handler for ." ++ op_name ++ ": render must return " ++ @typeName(effects.RenderResult));
         }
     }
 
@@ -165,10 +177,12 @@ test "HandlerContext void body" {
     const Prefetch = struct { product: ?u32 };
     const Ctx = HandlerContext(Prefetch, void, Identity);
 
+    var render_buf: [1024]u8 = undefined;
     const ctx = Ctx{
         .prefetched = .{ .product = 42 },
         .body = {},
         .identity = .{ .user_id = 1 },
+        .render_buf = &render_buf,
     };
 
     try std.testing.expectEqual(@as(?u32, 42), ctx.prefetched.product);
@@ -184,10 +198,12 @@ test "HandlerContext typed body" {
     var body = Body{ .name = .{0} ** 8, .name_len = 4 };
     @memcpy(body.name[0..4], "test");
 
+    var render_buf: [1024]u8 = undefined;
     const ctx = Ctx{
         .prefetched = .{ .existing = null },
         .body = &body,
         .identity = .{ .user_id = 2 },
+        .render_buf = &render_buf,
     };
 
     try std.testing.expectEqual(@as(?u32, null), ctx.prefetched.existing);
@@ -213,7 +229,6 @@ const MockExecuteResult = struct {
     writes: [1]u8,
     writes_len: u8,
 };
-const MockRenderEffects = struct { len: u8 };
 const MockBody = struct { name: u8 };
 
 const MockOp = enum(u8) {
@@ -241,8 +256,8 @@ const MockReadOnlyHandler = struct {
     pub fn prefetch() ?Prefetch {
         return null;
     }
-    pub fn render(_: Ctx) MockRenderEffects {
-        return .{ .len = 0 };
+    pub fn render(ctx: Ctx) effects.RenderResult {
+        return ctx.render(.{});
     }
 };
 
@@ -260,20 +275,20 @@ const MockMutationHandler = struct {
     pub fn handle(_: Ctx) MockExecuteResult {
         return .{ .response = .{ .status = 1 }, .writes = .{0}, .writes_len = 0 };
     }
-    pub fn render(_: Ctx) MockRenderEffects {
-        return .{ .len = 0 };
+    pub fn render(ctx: Ctx) effects.RenderResult {
+        return ctx.render(.{});
     }
 };
 
 test "ValidateHandler read-only" {
-    const V = ValidateHandler(MockReadOnlyHandler, MockOp.get_thing, MockIdentity, MockMessage, MockExecuteResult, MockRenderEffects);
+    const V = ValidateHandler(MockReadOnlyHandler, MockOp.get_thing, MockIdentity, MockMessage, MockExecuteResult);
     try std.testing.expect(V.is_read_only);
     try std.testing.expect(V.PrefetchType == MockReadOnlyHandler.Prefetch);
     try std.testing.expect(V.BodyType == void);
 }
 
 test "ValidateHandler mutation" {
-    const V = ValidateHandler(MockMutationHandler, MockOp.create_thing, MockIdentity, MockMessage, MockExecuteResult, MockRenderEffects);
+    const V = ValidateHandler(MockMutationHandler, MockOp.create_thing, MockIdentity, MockMessage, MockExecuteResult);
     try std.testing.expect(!V.is_read_only);
     try std.testing.expect(V.BodyType == MockBody);
 }

@@ -1,6 +1,7 @@
 const std = @import("std");
 const assert = std.debug.assert;
 const handler_mod = @import("handler.zig");
+const effects_mod = @import("effects.zig");
 const http = @import("http.zig");
 
 /// Build an App type from a handler tuple and domain types.
@@ -42,7 +43,6 @@ pub fn AppType(comptime config: anytype) type {
     if (!@hasField(@TypeOf(config), "StateMachineType")) @compileError("AppType config missing .StateMachineType");
     if (!@hasField(@TypeOf(config), "Wal")) @compileError("AppType config missing .Wal");
     if (!@hasField(@TypeOf(config), "ExecuteResult")) @compileError("AppType config missing .ExecuteResult");
-    if (!@hasField(@TypeOf(config), "RenderEffects")) @compileError("AppType config missing .RenderEffects");
     if (!@hasField(@TypeOf(config), "encode_response")) @compileError("AppType config missing .encode_response");
     if (!@hasField(@TypeOf(config), "encode_followup")) @compileError("AppType config missing .encode_followup");
     if (!@hasField(@TypeOf(config), "refresh_message")) @compileError("AppType config missing .refresh_message");
@@ -132,7 +132,6 @@ pub fn AppType(comptime config: anytype) type {
             Identity,
             Message,
             config.ExecuteResult,
-            config.RenderEffects,
         );
     }
 
@@ -228,13 +227,9 @@ const TestExecuteResult = struct {
     writes: [1]u8,
     writes_len: u8,
 };
-const TestRenderEffects = struct { len: u8 };
-
-const GetThingCtx = handler_mod.HandlerContext(GetThingHandler.Prefetch, void, TestIdentity);
-const CreateThingCtx = handler_mod.HandlerContext(CreateThingHandler.Prefetch, TestBody, TestIdentity);
-
 const GetThingHandler = struct {
     pub const Prefetch = struct { found: bool };
+    const Ctx = handler_mod.HandlerContext(Prefetch, void, TestIdentity);
     pub fn route(method: http.Method, _: []const u8, _: []const u8) ?TestMessage {
         if (method == .get) return TestMessage{ .operation = .get_thing };
         return null;
@@ -242,14 +237,14 @@ const GetThingHandler = struct {
     pub fn prefetch() ?Prefetch {
         return .{ .found = true };
     }
-    // No handle — read-only.
-    pub fn render(_: GetThingCtx) TestRenderEffects {
-        return .{ .len = 0 };
+    pub fn render(ctx: Ctx) effects_mod.RenderResult {
+        return ctx.render(.{});
     }
 };
 
 const CreateThingHandler = struct {
     pub const Prefetch = struct { existing: bool };
+    const Ctx = handler_mod.HandlerContext(Prefetch, TestBody, TestIdentity);
     pub fn route(method: http.Method, _: []const u8, _: []const u8) ?TestMessage {
         if (method == .post) return TestMessage{ .operation = .create_thing };
         return null;
@@ -257,11 +252,11 @@ const CreateThingHandler = struct {
     pub fn prefetch() ?Prefetch {
         return .{ .existing = false };
     }
-    pub fn handle(_: CreateThingCtx) TestExecuteResult {
+    pub fn handle(_: Ctx) TestExecuteResult {
         return .{ .response = .{ .status = .ok }, .writes = .{0}, .writes_len = 0 };
     }
-    pub fn render(_: CreateThingCtx) TestRenderEffects {
-        return .{ .len = 0 };
+    pub fn render(ctx: Ctx) effects_mod.RenderResult {
+        return ctx.render(.{});
     }
 };
 
@@ -288,7 +283,6 @@ const TestApp = AppType(.{
     .StateMachineType = dummy_sm,
     .Wal = struct {},
     .ExecuteResult = TestExecuteResult,
-    .RenderEffects = TestRenderEffects,
     .encode_response = dummy_encode,
     .encode_followup = dummy_followup,
     .refresh_message = dummy_refresh,

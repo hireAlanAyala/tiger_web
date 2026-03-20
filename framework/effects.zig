@@ -1,31 +1,37 @@
 const std = @import("std");
 const assert = std.debug.assert;
 
-/// Render effects — a list of UI instructions returned by handler render functions.
+/// Render result — metadata describing effects written into a shared buffer.
 ///
-/// The handler always returns effects. The framework delivers them based on
-/// whether a page exists in the browser:
-/// - Page exists (Datastar header) → send as SSE events
-/// - No page yet (first navigation) → apply to page template, send as HTML
+/// Handlers call ctx.render(.{ ... }) with a tuple of effect descriptors.
+/// The ctx.render() method validates the tuple at comptime, writes HTML
+/// content into the framework's send buffer at runtime, and returns this
+/// metadata describing where each effect's content lives in the buffer.
 ///
-/// Effect types align 1:1 with Datastar SSE events.
-/// Effects are small structs with offset/length pairs into a shared buffer
-/// owned by the connection — same pattern as Message.body. No large inline
-/// arrays, no stack monsters.
+/// The framework reads the metadata + buffer to deliver as Datastar SSE
+/// events or full-page HTML.
 
 pub const effects_max = 16;
 
 /// Inline selector buffer. Worst-case measured: "#col-" + 32-char hex UUID = 37 bytes.
 /// 64 gives headroom for future selectors without buffer indirection.
-/// Total inline cost: 64 × effects_max = 1024 bytes — negligible vs send buffer.
 pub const selector_max = 64;
 
 comptime {
     assert(effects_max > 0);
     assert(selector_max > 0);
-    assert(selector_max >= 37); // must fit "#col-" + 32-char hex UUID
+    assert(selector_max >= 37);
 }
 
+/// Maps 1:1 to Datastar SSE event types.
+pub const EventType = enum {
+    /// datastar-patch-elements — morph/append/replace/remove DOM elements.
+    patch_elements,
+    /// datastar-patch-signals — update reactive signal state on client.
+    patch_signals,
+};
+
+/// Element patch modes — matches Datastar's ElementPatchMode enum exactly.
 pub const PatchMode = enum {
     outer,
     inner,
@@ -35,233 +41,279 @@ pub const PatchMode = enum {
     before,
     after,
     remove,
+
+    fn from_comptime_str(comptime s: []const u8) PatchMode {
+        return comptime if (std.mem.eql(u8, s, "outer")) .outer
+        else if (std.mem.eql(u8, s, "inner")) .inner
+        else if (std.mem.eql(u8, s, "replace")) .replace
+        else if (std.mem.eql(u8, s, "prepend")) .prepend
+        else if (std.mem.eql(u8, s, "append")) .append
+        else if (std.mem.eql(u8, s, "before")) .before
+        else if (std.mem.eql(u8, s, "after")) .after
+        else if (std.mem.eql(u8, s, "remove")) .remove
+        else @compileError("invalid patch mode: \"" ++ s ++ "\"");
+    }
 };
 
-pub const EffectKind = enum {
-    /// Morph/append/replace/remove DOM elements.
-    /// Maps to `datastar-patch-elements`.
+/// User-facing effect verbs. These map to Datastar methods:
+///   "patch"   → patchElements (with mode)
+///   "remove"  → patchElements (mode=remove, no html — sugar)
+///   "signal"  → patchSignals
+///   "script"  → patchElements (as <script> tag — sugar)
+///   "sync"    → framework-level: re-run another page's pipeline
+pub const Verb = enum {
     patch,
-
-    /// Update reactive signal state on the client.
-    /// Maps to `datastar-patch-signals`.
+    remove,
     signal,
-
-    /// Execute JS in the browser.
-    /// Maps to `datastar-patch-elements` with script tag.
     script,
-
-    /// Re-run another page's prefetch → render, push to SSE subscribers.
-    /// Framework-level — no direct Datastar event.
     sync,
+
+    fn from_comptime_str(comptime s: []const u8) Verb {
+        return comptime if (std.mem.eql(u8, s, "patch")) .patch
+        else if (std.mem.eql(u8, s, "remove")) .remove
+        else if (std.mem.eql(u8, s, "signal")) .signal
+        else if (std.mem.eql(u8, s, "script")) .script
+        else if (std.mem.eql(u8, s, "sync")) .sync
+        else @compileError("invalid render verb: \"" ++ s ++ "\". Valid: patch, remove, signal, script, sync");
+    }
 };
 
-/// Small descriptor — points into the shared buffer. No inline data.
-pub const Effect = struct {
-    kind: EffectKind,
+/// Per-effect metadata — describes one effect's location in the shared buffer.
+pub const EffectMeta = struct {
+    event_type: EventType,
+    verb: Verb,
     mode: PatchMode = .outer,
-    target: [selector_max]u8 = .{0} ** selector_max,
-    target_len: u8 = 0,
-    /// Offset and length into the shared buffer for HTML/script/signal content.
+    selector: [selector_max]u8 = .{0} ** selector_max,
+    selector_len: u8 = 0,
     content_offset: u32 = 0,
     content_len: u32 = 0,
 
-    pub fn target_slice(self: *const Effect) []const u8 {
-        return self.target[0..self.target_len];
+    pub fn selector_slice(self: *const EffectMeta) []const u8 {
+        return self.selector[0..self.selector_len];
     }
 
-    pub fn content(self: *const Effect, buf: []const u8) []const u8 {
-        // Pair assertion: written by add_*, read here. Offset+len must be in bounds.
+    pub fn content(self: *const EffectMeta, buf: []const u8) []const u8 {
         assert(self.content_offset + self.content_len <= buf.len);
         return buf[self.content_offset..][0..self.content_len];
     }
 };
 
-/// Render effects list. The `buf` is borrowed from the connection's send buffer.
-/// Handler writes HTML content into it via add_* methods. Effects store offsets.
-pub const RenderEffects = struct {
-    effects: [effects_max]Effect = undefined,
+/// Result returned by ctx.render(). Metadata only — content lives in the buffer.
+pub const RenderResult = struct {
+    effects: [effects_max]EffectMeta = undefined,
     len: u8 = 0,
-    buf: []u8,
-    buf_pos: u32 = 0,
+    buf_used: u32 = 0,
 
-    pub fn init(buf: []u8) RenderEffects {
-        assert(buf.len > 0);
-        return .{ .buf = buf };
-    }
-
-    pub fn add_patch(self: *RenderEffects, target: []const u8, html: []const u8, mode: PatchMode) void {
-        assert(self.len < effects_max);
-        assert(target.len > 0);
-        assert(target.len <= selector_max);
-        if (mode == .remove) {
-            assert(html.len == 0); // remove deletes elements, doesn't insert
-        } else {
-            assert(html.len > 0);
-        }
-        var effect = Effect{
-            .kind = .patch,
-            .mode = mode,
-            .content_offset = self.buf_pos,
-            .content_len = @intCast(html.len),
-        };
-        @memcpy(effect.target[0..target.len], target);
-        effect.target_len = @intCast(target.len);
-        self.write_content(html);
-        self.effects[self.len] = effect;
-        self.len += 1;
-    }
-
-    pub fn add_signal(self: *RenderEffects, signals_json: []const u8) void {
-        assert(self.len < effects_max);
-        assert(signals_json.len > 0);
-        const effect = Effect{
-            .kind = .signal,
-            .content_offset = self.buf_pos,
-            .content_len = @intCast(signals_json.len),
-        };
-        self.write_content(signals_json);
-        self.effects[self.len] = effect;
-        self.len += 1;
-    }
-
-    pub fn add_script(self: *RenderEffects, script: []const u8) void {
-        assert(self.len < effects_max);
-        assert(script.len > 0);
-        const effect = Effect{
-            .kind = .script,
-            .content_offset = self.buf_pos,
-            .content_len = @intCast(script.len),
-        };
-        self.write_content(script);
-        self.effects[self.len] = effect;
-        self.len += 1;
-    }
-
-    pub fn add_sync(self: *RenderEffects, route: []const u8) void {
-        assert(self.len < effects_max);
-        assert(route.len > 0);
-        assert(route[0] == '/'); // routes must be absolute paths
-        assert(route.len <= selector_max);
-        var effect = Effect{ .kind = .sync };
-        @memcpy(effect.target[0..route.len], route);
-        effect.target_len = @intCast(route.len);
-        self.effects[self.len] = effect;
-        self.len += 1;
-    }
-
-    pub fn slice(self: *const RenderEffects) []const Effect {
-        self.invariants();
+    pub fn slice(self: *const RenderResult) []const EffectMeta {
         return self.effects[0..self.len];
     }
 
-    fn invariants(self: *const RenderEffects) void {
-        assert(self.len <= effects_max);
-        assert(self.buf_pos <= self.buf.len);
+    fn add(self: *RenderResult, meta: EffectMeta) void {
+        assert(self.len < effects_max);
+        self.effects[self.len] = meta;
+        self.len += 1;
+    }
+};
 
-        for (self.effects[0..self.len]) |e| {
-            switch (e.kind) {
-                .patch => {
-                    assert(e.target_len > 0);
-                    assert(e.content_offset + e.content_len <= self.buf_pos);
-                    if (e.mode == .remove) {
-                        assert(e.content_len == 0);
-                    } else {
-                        assert(e.content_len > 0);
-                    }
-                },
-                .signal, .script => {
-                    assert(e.content_len > 0);
-                    assert(e.content_offset + e.content_len <= self.buf_pos);
-                },
-                .sync => {
-                    assert(e.target_len > 0);
-                    assert(e.target[0] == '/');
-                    assert(e.content_len == 0);
-                },
-            }
+/// Process a comptime-known effect tuple and write content into buf.
+/// Called by HandlerContext.render(). Validates at comptime, writes at runtime.
+///
+/// Each element in the tuple is itself a tuple describing one effect:
+///   .{ "patch", "#selector", html, "mode" }
+///   .{ "remove", "#selector" }
+///   .{ "signal", signals_json }
+///   .{ "script", code }
+///   .{ "sync", "/route" }
+pub fn process_effects(comptime effects_tuple: anytype, buf: []u8) RenderResult {
+    var result = RenderResult{};
+    var pos: u32 = 0;
+
+    inline for (std.meta.fields(@TypeOf(effects_tuple))) |field| {
+        const effect = @field(effects_tuple, field.name);
+        const verb = comptime Verb.from_comptime_str(effect.@"0");
+
+        switch (verb) {
+            .patch => {
+                // .{ "patch", selector, html, mode }
+                comptime assert(std.meta.fields(@TypeOf(effect)).len == 4);
+                const selector = effect.@"1";
+                const html: []const u8 = effect.@"2";
+                const mode = comptime PatchMode.from_comptime_str(effect.@"3");
+
+                var meta = EffectMeta{
+                    .event_type = .patch_elements,
+                    .verb = .patch,
+                    .mode = mode,
+                    .content_offset = pos,
+                    .content_len = @intCast(html.len),
+                };
+                comptime assert(selector.len > 0);
+                comptime assert(selector.len <= selector_max);
+                @memcpy(meta.selector[0..selector.len], selector);
+                meta.selector_len = selector.len;
+
+                if (html.len > 0) {
+                    assert(pos + html.len <= buf.len);
+                    @memcpy(buf[pos..][0..html.len], html);
+                    pos += @intCast(html.len);
+                }
+
+                result.add(meta);
+            },
+            .remove => {
+                // .{ "remove", selector }
+                comptime assert(std.meta.fields(@TypeOf(effect)).len == 2);
+                const selector = effect.@"1";
+
+                var meta = EffectMeta{
+                    .event_type = .patch_elements,
+                    .verb = .remove,
+                    .mode = .remove,
+                };
+                comptime assert(selector.len > 0);
+                comptime assert(selector.len <= selector_max);
+                @memcpy(meta.selector[0..selector.len], selector);
+                meta.selector_len = selector.len;
+
+                result.add(meta);
+            },
+            .signal => {
+                // .{ "signal", signals_json }
+                comptime assert(std.meta.fields(@TypeOf(effect)).len == 2);
+                const signals: []const u8 = effect.@"1";
+
+                assert(pos + signals.len <= buf.len);
+                @memcpy(buf[pos..][0..signals.len], signals);
+
+                result.add(.{
+                    .event_type = .patch_signals,
+                    .verb = .signal,
+                    .content_offset = pos,
+                    .content_len = @intCast(signals.len),
+                });
+                pos += @intCast(signals.len);
+            },
+            .script => {
+                // .{ "script", code }
+                comptime assert(std.meta.fields(@TypeOf(effect)).len == 2);
+                const code: []const u8 = effect.@"1";
+
+                assert(pos + code.len <= buf.len);
+                @memcpy(buf[pos..][0..code.len], code);
+
+                result.add(.{
+                    .event_type = .patch_elements,
+                    .verb = .script,
+                    .content_offset = pos,
+                    .content_len = @intCast(code.len),
+                });
+                pos += @intCast(code.len);
+            },
+            .sync => {
+                // .{ "sync", route }
+                comptime assert(std.meta.fields(@TypeOf(effect)).len == 2);
+                const route = effect.@"1";
+                comptime assert(route.len > 0);
+                comptime assert(route[0] == '/');
+                comptime assert(route.len <= selector_max);
+
+                var meta = EffectMeta{
+                    .event_type = .patch_elements, // framework handles sync internally
+                    .verb = .sync,
+                };
+                @memcpy(meta.selector[0..route.len], route);
+                meta.selector_len = route.len;
+
+                result.add(meta);
+            },
         }
     }
 
-    fn write_content(self: *RenderEffects, data: []const u8) void {
-        const new_pos = self.buf_pos + @as(u32, @intCast(data.len));
-        assert(new_pos >= self.buf_pos); // no overflow
-        assert(new_pos <= self.buf.len);
-        @memcpy(self.buf[self.buf_pos..][0..data.len], data);
-        self.buf_pos = new_pos;
-    }
-};
+    result.buf_used = pos;
+    return result;
+}
 
 // =====================================================================
 // Tests
 // =====================================================================
 
-test "render effects empty" {
+test "process_effects: single patch" {
     var buf: [4096]u8 = undefined;
-    const fx = RenderEffects.init(&buf);
-    try std.testing.expectEqual(@as(u8, 0), fx.len);
-    try std.testing.expectEqual(@as(usize, 0), fx.slice().len);
+    const html = "hello world";
+    const result = process_effects(.{
+        .{ "patch", "#target", @as([]const u8, html), "outer" },
+    }, &buf);
+
+    try std.testing.expectEqual(@as(u8, 1), result.len);
+    try std.testing.expectEqual(Verb.patch, result.effects[0].verb);
+    try std.testing.expectEqual(PatchMode.outer, result.effects[0].mode);
+    try std.testing.expect(std.mem.eql(u8, "#target", result.effects[0].selector_slice()));
+    try std.testing.expect(std.mem.eql(u8, "hello world", result.effects[0].content(&buf)));
 }
 
-test "render effects fill to capacity" {
+test "process_effects: mixed effects" {
     var buf: [4096]u8 = undefined;
-    var fx = RenderEffects.init(&buf);
-    var i: u8 = 0;
-    while (i < effects_max) : (i += 1) {
-        fx.add_patch("#x", "y", .outer);
-    }
-    try std.testing.expectEqual(effects_max, fx.len);
-    // All effects retrievable with correct content.
-    for (fx.slice()) |e| {
-        try std.testing.expect(std.mem.eql(u8, "y", e.content(&buf)));
-        try std.testing.expect(std.mem.eql(u8, "#x", e.target_slice()));
-    }
+    const html = "<div>card</div>";
+    const signals = "{\"count\":5}";
+    const result = process_effects(.{
+        .{ "patch", "#list", @as([]const u8, html), "inner" },
+        .{ "signal", @as([]const u8, signals) },
+        .{ "script", @as([]const u8, "console.log('done')") },
+        .{ "sync", "/dashboard" },
+    }, &buf);
+
+    try std.testing.expectEqual(@as(u8, 4), result.len);
+    try std.testing.expectEqual(Verb.patch, result.effects[0].verb);
+    try std.testing.expectEqual(PatchMode.inner, result.effects[0].mode);
+    try std.testing.expectEqual(Verb.signal, result.effects[1].verb);
+    try std.testing.expectEqual(Verb.script, result.effects[2].verb);
+    try std.testing.expectEqual(Verb.sync, result.effects[3].verb);
+    try std.testing.expect(std.mem.eql(u8, "/dashboard", result.effects[3].selector_slice()));
+
+    // Content is contiguous in buffer.
+    try std.testing.expect(std.mem.eql(u8, html, result.effects[0].content(&buf)));
+    try std.testing.expect(std.mem.eql(u8, signals, result.effects[1].content(&buf)));
 }
 
-test "render effects fill buffer to exact capacity" {
-    // Buffer exactly fits the content — no room to spare.
-    var buf: [5]u8 = undefined;
-    var fx = RenderEffects.init(&buf);
-    fx.add_patch("#a", "hello", .outer); // 5 bytes fills buffer exactly
-    try std.testing.expectEqual(@as(u32, 5), fx.buf_pos);
-    try std.testing.expect(std.mem.eql(u8, "hello", fx.effects[0].content(&buf)));
-}
-
-test "render effects mixed types" {
+test "process_effects: remove sugar" {
     var buf: [4096]u8 = undefined;
-    var fx = RenderEffects.init(&buf);
-    fx.add_patch("#list", "<div>items</div>", .inner);
-    fx.add_signal("{\"count\":3}");
-    fx.add_script("console.log('done')");
-    fx.add_sync("/dashboard");
+    const result = process_effects(.{
+        .{ "remove", "#old-element" },
+    }, &buf);
 
-    try std.testing.expectEqual(@as(u8, 4), fx.len);
-    const s = fx.slice();
-    try std.testing.expectEqual(EffectKind.patch, s[0].kind);
-    try std.testing.expectEqual(EffectKind.signal, s[1].kind);
-    try std.testing.expectEqual(EffectKind.script, s[2].kind);
-    try std.testing.expectEqual(EffectKind.sync, s[3].kind);
-
-    // Content offsets are contiguous, non-overlapping.
-    try std.testing.expect(s[1].content_offset == s[0].content_offset + s[0].content_len);
-    try std.testing.expect(s[2].content_offset == s[1].content_offset + s[1].content_len);
-    // Sync has no content.
-    try std.testing.expectEqual(@as(u32, 0), s[3].content_len);
+    try std.testing.expectEqual(@as(u8, 1), result.len);
+    try std.testing.expectEqual(Verb.remove, result.effects[0].verb);
+    try std.testing.expectEqual(PatchMode.remove, result.effects[0].mode);
+    try std.testing.expectEqual(@as(u32, 0), result.effects[0].content_len);
 }
 
-test "render effects remove mode no html" {
+test "process_effects: empty returns zero effects" {
     var buf: [4096]u8 = undefined;
-    var fx = RenderEffects.init(&buf);
-    fx.add_patch("#old-element", "", .remove);
-    try std.testing.expectEqual(@as(u8, 1), fx.len);
-    try std.testing.expectEqual(PatchMode.remove, fx.effects[0].mode);
-    try std.testing.expectEqual(@as(u32, 0), fx.effects[0].content_len);
+    const result = process_effects(.{}, &buf);
+
+    try std.testing.expectEqual(@as(u8, 0), result.len);
+    try std.testing.expectEqual(@as(u32, 0), result.buf_used);
 }
 
-test "render effects sync shortest route" {
+test "process_effects: all patch modes" {
     var buf: [4096]u8 = undefined;
-    var fx = RenderEffects.init(&buf);
-    fx.add_sync("/");
-    try std.testing.expectEqual(@as(u8, 1), fx.len);
-    try std.testing.expect(std.mem.eql(u8, "/", fx.effects[0].target_slice()));
-}
+    const html = @as([]const u8, "x");
+    const result = process_effects(.{
+        .{ "patch", "#a", html, "outer" },
+        .{ "patch", "#b", html, "inner" },
+        .{ "patch", "#c", html, "replace" },
+        .{ "patch", "#d", html, "prepend" },
+        .{ "patch", "#e", html, "append" },
+        .{ "patch", "#f", html, "before" },
+        .{ "patch", "#g", html, "after" },
+    }, &buf);
 
+    try std.testing.expectEqual(@as(u8, 7), result.len);
+    try std.testing.expectEqual(PatchMode.outer, result.effects[0].mode);
+    try std.testing.expectEqual(PatchMode.inner, result.effects[1].mode);
+    try std.testing.expectEqual(PatchMode.replace, result.effects[2].mode);
+    try std.testing.expectEqual(PatchMode.prepend, result.effects[3].mode);
+    try std.testing.expectEqual(PatchMode.append, result.effects[4].mode);
+    try std.testing.expectEqual(PatchMode.before, result.effects[5].mode);
+    try std.testing.expectEqual(PatchMode.after, result.effects[6].mode);
+}
