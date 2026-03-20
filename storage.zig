@@ -764,11 +764,18 @@ pub const SqliteStorage = struct {
         }
 
         /// Read a column as u128 (stored as 16-byte BLOB big-endian).
+        /// Column must be a non-NULL 16-byte BLOB — asserts on violation.
         pub fn col_uuid(self: *QueryResult, col: c_int) u128 {
-            return read_uuid(self.stmt, col);
+            const blob_ptr = c.sqlite3_column_blob(self.stmt, col);
+            assert(blob_ptr != null); // NULL UUID column — query or schema bug
+            const bytes = c.sqlite3_column_bytes(self.stmt, col);
+            assert(bytes == 16); // UUID must be exactly 16 bytes
+            const blob: [*]const u8 = @ptrCast(blob_ptr);
+            return std.mem.readInt(u128, blob[0..16], .big);
         }
 
         /// Read a column as text. Returns a slice valid until next()/finish().
+        /// NULL columns return empty string.
         pub fn col_text(self: *QueryResult, col: c_int) []const u8 {
             const ptr_raw = c.sqlite3_column_text(self.stmt, col);
             const len: usize = @intCast(c.sqlite3_column_bytes(self.stmt, col));
@@ -784,9 +791,12 @@ pub const SqliteStorage = struct {
             return c.sqlite3_column_int64(self.stmt, col);
         }
 
-        /// Read a column as u32.
+        /// Read a column as u32. Asserts value fits in u32.
         pub fn col_u32(self: *QueryResult, col: c_int) u32 {
-            return @intCast(c.sqlite3_column_int64(self.stmt, col));
+            const val = c.sqlite3_column_int64(self.stmt, col);
+            assert(val >= 0); // negative value in u32 column
+            assert(val <= std.math.maxInt(u32)); // overflow
+            return @intCast(val);
         }
 
         /// Read a column as bool (0 = false, non-zero = true).
@@ -827,7 +837,11 @@ pub const SqliteStorage = struct {
             _ = c.sqlite3_bind_int(stmt, col, if (val) @as(c_int, 1) else @as(c_int, 0));
         } else if (T == i64) {
             _ = c.sqlite3_bind_int64(stmt, col, val);
-        } else if (@typeInfo(T) == .int or @typeInfo(T) == .comptime_int) {
+        } else if (@typeInfo(T) == .comptime_int) {
+            _ = c.sqlite3_bind_int64(stmt, col, @intCast(val));
+        } else if (@typeInfo(T) == .int) {
+            // Assert value fits in i64 — SQLite integers are 64-bit signed.
+            assert(@bitSizeOf(T) <= 64);
             _ = c.sqlite3_bind_int64(stmt, col, @intCast(val));
         } else {
             @compileError("unsupported parameter type: " ++ @typeName(T));
