@@ -64,3 +64,4 @@ right now the zig code doesnt have a way to declare error html, not sure what to
 - make sdk assert no panic in prod
 - boil all adapters+packaged addons into a plugin api
 - write vanilla html in render without a string  and the compiler turns it to datastar so theres no api to learn
+- add an opt in way for sse to fan out updates to all users for that page
