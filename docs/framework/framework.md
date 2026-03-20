@@ -268,6 +268,40 @@ The sidecar can process requests concurrently, in parallel, in any order. The
 determinism lives in the framework's applier, not the sidecar's compute. This
 is the same pattern as TigerBeetle's client protocol.
 
+## Error handling split
+
+Errors are split across three layers: framework, handle, and render.
+
+**Framework handles infrastructure errors.** If storage returns `busy` (transient),
+the framework retries next tick — the handler never runs. If storage returns `err`
+(permanent), the framework skips the handler and sends `storage_error` status
+directly to the render function. The user's `[handle]` function only runs when
+prefetch succeeded and the data is in the cache.
+
+**Handle decides domain errors.** The handler checks business logic and returns a
+status: `ok`, `not_found`, `insufficient_inventory`, `version_conflict`, etc. It
+never sees infrastructure errors.
+
+**Render presents all errors.** The `[render]` function receives the status —
+whether it came from the framework (`storage_error`) or the handler
+(`insufficient_inventory`) — and returns HTML. In practice, render functions use
+a single catch-all for all non-ok statuses:
+
+```ts
+// [render] .create_product
+function renderCreateProduct(status, ctx) {
+  if (status !== "ok") return `<div class="error">${esc(status)}</div>`;
+  return `<div class="product">Created</div>`;
+}
+```
+
+`storage_error` gets the same treatment as every other error — no special case
+needed. The framework doesn't force the user to handle it explicitly because
+the catch-all pattern already covers it. This holds for local SQLite (where
+storage errors are rare) and for third-party databases (where network errors
+are common) — the user's render function handles both without knowing the
+difference.
+
 ## Sidecar failure
 
 The sidecar is a separate process. It can crash, hang, or return garbage.

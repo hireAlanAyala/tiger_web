@@ -36,6 +36,8 @@ Surface the fuzz suite results. The auditor runs continuously on cloud infra, ex
 
 No one self-hosting will rebuild this. It's person-years of test infrastructure presented as a one-click feature.
 
+AI-generated auditors: the cloud generates auditor logic from entity declarations (auto for CRUD, AI-assisted for custom operations). For custom prefetch SQL, AI analyzes the query against the schema and known data to detect bugs — bad joins, missing filters, soft-delete leaks, type mismatches. The user gets fuzz coverage for their custom queries without writing mocks or auditor code.
+
 ### Determinism dashboard
 
 Replay testing — run the same seed twice, compare every response byte-for-byte. Dashboard shows: seeds replayed, divergences detected, which operation diverged, which sidecar handler introduced non-determinism.

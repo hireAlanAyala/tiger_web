@@ -42,6 +42,11 @@ Requires: render needs access to the state machine (or a callback) to run follow
 
 Interim debt: server.zig's followup condition checks `resp.cookie_action == .none and resp.result != .login` to skip followup for login mutations. This is domain logic in the framework. Once refresh is opt-in, remove this condition and the needs_dashboard_refresh field on MessageResponse.
 
+# 6: zig code should use annotation bu not go through the sidecar
+right now the zig code doesnt have a way to declare error html, not sure what to do
+
+# 7. user should be able to call raw sql form prefetch
+
 
 # Backlog
 - Domain logic should assert inputs and outputs to preserve business logic (progress: might be too to demo to new users)
@@ -51,3 +56,11 @@ Interim debt: server.zig's followup condition checks `resp.cookie_action == .non
 - Login code logging removed from server.zig — need a worker that polls for pending codes and sends them
 - User-space spec: test worker, test returning SSE, test DB calls
 - Stressor: multi-tenant user
+- storage can retry forever on err, we should add an upper cap
+- assert prefetch cannot write data in sql
+-- asert commit + handler cannot read data in sql
+- assert the user has atleast 1 assert inside of prefetch to validate the ctx
+- does render have a primitive for launching an operation through the pipeline again for multi-step operations? (or did we not need that)
+- make sdk assert no panic in prod
+- boil all adapters+packaged addons into a plugin api
+- write vanilla html in render without a string  and the compiler turns it to datastar so theres no api to learn
