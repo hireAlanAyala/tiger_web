@@ -105,6 +105,13 @@ pub const RenderResult = struct {
     buf_used: u32 = 0,
 
     pub fn slice(self: *const RenderResult) []const EffectMeta {
+        assert(self.len <= effects_max);
+        for (self.effects[0..self.len]) |e| {
+            // Content must be within the written region.
+            assert(e.content_offset + e.content_len <= self.buf_used);
+            // Remove and sync effects have no content.
+            if (e.verb == .remove or e.verb == .sync) assert(e.content_len == 0);
+        }
         return self.effects[0..self.len];
     }
 
@@ -125,6 +132,16 @@ pub const RenderResult = struct {
 ///   .{ "script", code }
 ///   .{ "sync", "/route" }
 pub fn process_effects(comptime effects_tuple: anytype, buf: []u8) RenderResult {
+    comptime {
+        const count = std.meta.fields(@TypeOf(effects_tuple)).len;
+        if (count > effects_max) {
+            @compileError(std.fmt.comptimePrint(
+                "too many effects ({d}), max is {d}",
+                .{ count, effects_max },
+            ));
+        }
+    }
+
     var result = RenderResult{};
     var pos: u32 = 0;
 
@@ -316,4 +333,29 @@ test "process_effects: all patch modes" {
     try std.testing.expectEqual(PatchMode.append, result.effects[4].mode);
     try std.testing.expectEqual(PatchMode.before, result.effects[5].mode);
     try std.testing.expectEqual(PatchMode.after, result.effects[6].mode);
+}
+
+test "process_effects: buffer exactly full" {
+    // Buffer of exactly 5 bytes. Write exactly 5 bytes of content.
+    var buf: [5]u8 = undefined;
+    const result = process_effects(.{
+        .{ "patch", "#x", @as([]const u8, "hello"), "outer" },
+    }, &buf);
+
+    try std.testing.expectEqual(@as(u32, 5), result.buf_used);
+    try std.testing.expect(std.mem.eql(u8, "hello", result.effects[0].content(&buf)));
+}
+
+test "process_effects: buf_used tracks total content" {
+    var buf: [4096]u8 = undefined;
+    const result = process_effects(.{
+        .{ "patch", "#a", @as([]const u8, "abc"), "outer" }, // 3 bytes
+        .{ "signal", @as([]const u8, "{}") }, // 2 bytes
+        .{ "remove", "#b" }, // 0 bytes (no content)
+        .{ "script", @as([]const u8, "x()") }, // 3 bytes
+        .{ "sync", "/dashboard" }, // 0 bytes (no content)
+    }, &buf);
+
+    try std.testing.expectEqual(@as(u32, 8), result.buf_used); // 3 + 2 + 0 + 3 + 0
+    try std.testing.expectEqual(@as(u8, 5), result.len);
 }

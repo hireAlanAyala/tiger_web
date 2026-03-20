@@ -210,6 +210,35 @@ test "HandlerContext typed body" {
     try std.testing.expectEqual(@as(u8, 4), ctx.body_val().name_len);
 }
 
+test "HandlerContext ctx.render with effects" {
+    const Identity = struct { user_id: u128 };
+    const Prefetch = struct { product: ?u32 };
+    const Ctx = HandlerContext(Prefetch, void, Identity);
+
+    var render_buf: [4096]u8 = undefined;
+    const ctx = Ctx{
+        .prefetched = .{ .product = 42 },
+        .body = {},
+        .identity = .{ .user_id = 1 },
+        .render_buf = &render_buf,
+    };
+
+    const html = "<div>hello</div>";
+    const result = ctx.render(.{
+        .{ "patch", "#target", @as([]const u8, html), "inner" },
+        .{ "sync", "/dashboard" },
+    });
+
+    try std.testing.expectEqual(@as(u8, 2), result.len);
+    const s = result.slice();
+    try std.testing.expectEqual(effects.Verb.patch, s[0].verb);
+    try std.testing.expectEqual(effects.PatchMode.inner, s[0].mode);
+    try std.testing.expect(std.mem.eql(u8, "#target", s[0].selector_slice()));
+    try std.testing.expect(std.mem.eql(u8, html, s[0].content(&render_buf)));
+    try std.testing.expectEqual(effects.Verb.sync, s[1].verb);
+    try std.testing.expect(std.mem.eql(u8, "/dashboard", s[1].selector_slice()));
+}
+
 test "HandlerContext exposes type aliases" {
     const Identity = struct { user_id: u128 };
     const Prefetch = struct { product: ?u32 };
