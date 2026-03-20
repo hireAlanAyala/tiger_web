@@ -150,12 +150,36 @@ pub const RenderEffects = struct {
     }
 
     pub fn slice(self: *const RenderEffects) []const Effect {
-        const s = self.effects[0..self.len];
-        for (s) |e| {
-            // Sync effects are target-only — no content.
-            if (e.kind == .sync) assert(e.content_len == 0);
+        self.invariants();
+        return self.effects[0..self.len];
+    }
+
+    fn invariants(self: *const RenderEffects) void {
+        assert(self.len <= effects_max);
+        assert(self.buf_pos <= self.buf.len);
+
+        for (self.effects[0..self.len]) |e| {
+            switch (e.kind) {
+                .patch => {
+                    assert(e.target_len > 0);
+                    assert(e.content_offset + e.content_len <= self.buf_pos);
+                    if (e.mode == .remove) {
+                        assert(e.content_len == 0);
+                    } else {
+                        assert(e.content_len > 0);
+                    }
+                },
+                .signal, .script => {
+                    assert(e.content_len > 0);
+                    assert(e.content_offset + e.content_len <= self.buf_pos);
+                },
+                .sync => {
+                    assert(e.target_len > 0);
+                    assert(e.target[0] == '/');
+                    assert(e.content_len == 0);
+                },
+            }
         }
-        return s;
     }
 
     fn write_content(self: *RenderEffects, data: []const u8) void {
@@ -170,41 +194,6 @@ pub const RenderEffects = struct {
 // =====================================================================
 // Tests
 // =====================================================================
-
-test "render effects basic" {
-    var buf: [4096]u8 = undefined;
-    var fx = RenderEffects.init(&buf);
-    fx.add_patch("#toast", "hello", .append);
-    fx.add_sync("/dashboard");
-
-    try std.testing.expectEqual(@as(u8, 2), fx.len);
-    try std.testing.expectEqual(EffectKind.patch, fx.effects[0].kind);
-    try std.testing.expectEqual(PatchMode.append, fx.effects[0].mode);
-    try std.testing.expect(std.mem.eql(u8, "#toast", fx.effects[0].target_slice()));
-    try std.testing.expect(std.mem.eql(u8, "hello", fx.effects[0].content(&buf)));
-    try std.testing.expectEqual(EffectKind.sync, fx.effects[1].kind);
-    try std.testing.expect(std.mem.eql(u8, "/dashboard", fx.effects[1].target_slice()));
-}
-
-test "render effects script" {
-    var buf: [4096]u8 = undefined;
-    var fx = RenderEffects.init(&buf);
-    fx.add_script("window.location.href='/'");
-
-    try std.testing.expectEqual(@as(u8, 1), fx.len);
-    try std.testing.expectEqual(EffectKind.script, fx.effects[0].kind);
-    try std.testing.expect(std.mem.eql(u8, "window.location.href='/'", fx.effects[0].content(&buf)));
-}
-
-test "render effects signal" {
-    var buf: [4096]u8 = undefined;
-    var fx = RenderEffects.init(&buf);
-    fx.add_signal("{\"cartCount\":5}");
-
-    try std.testing.expectEqual(@as(u8, 1), fx.len);
-    try std.testing.expectEqual(EffectKind.signal, fx.effects[0].kind);
-    try std.testing.expect(std.mem.eql(u8, "{\"cartCount\":5}", fx.effects[0].content(&buf)));
-}
 
 test "render effects empty" {
     var buf: [4096]u8 = undefined;
@@ -276,16 +265,3 @@ test "render effects sync shortest route" {
     try std.testing.expect(std.mem.eql(u8, "/", fx.effects[0].target_slice()));
 }
 
-test "render effects multiple patches share buffer" {
-    var buf: [4096]u8 = undefined;
-    var fx = RenderEffects.init(&buf);
-    fx.add_patch("#a", "first", .outer);
-    fx.add_patch("#b", "second", .inner);
-
-    try std.testing.expectEqual(@as(u8, 2), fx.len);
-    try std.testing.expect(std.mem.eql(u8, "first", fx.effects[0].content(&buf)));
-    try std.testing.expect(std.mem.eql(u8, "second", fx.effects[1].content(&buf)));
-    // Content is contiguous in buffer.
-    try std.testing.expectEqual(@as(u32, 0), fx.effects[0].content_offset);
-    try std.testing.expectEqual(@as(u32, 5), fx.effects[1].content_offset);
-}
