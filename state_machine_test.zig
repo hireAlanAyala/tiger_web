@@ -558,7 +558,7 @@ test "duplicate ID rejected" {
     const r1 = test_execute(&sm, message.Message.init(.create_product, 0, 1, make_test_product(test_id, "A", 1)));
     try std.testing.expectEqual(r1.status, .ok);
     const r2 = test_execute(&sm, message.Message.init(.create_product, 0, 1, make_test_product(test_id, "B", 2)));
-    try std.testing.expectEqual(r2.status, .storage_error);
+    try std.testing.expectEqual(r2.status, .version_conflict);
 }
 
 test "capacity exhaustion — panics (writes are infallible after prefetch)" {

@@ -20,9 +20,10 @@ pub fn route(method: t.http.Method, raw_path: []const u8, body: []const u8) ?t.M
 
 // [prefetch] .create_collection
 pub fn prefetch(storage: anytype, msg: *const t.Message) ?Prefetch {
+    const collection_id = msg.body_as(t.ProductCollection).id;
     return .{ .existing = storage.query(t.CollectionRow,
         "SELECT id, name, active FROM collections WHERE id = ?1;",
-        .{msg.id}) };
+        .{collection_id}) };
 }
 
 // [handle] .create_collection

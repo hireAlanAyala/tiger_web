@@ -27,9 +27,11 @@ pub fn route(method: t.http.Method, raw_path: []const u8, body: []const u8) ?t.M
 
 // [prefetch] .create_product
 pub fn prefetch(storage: anytype, msg: *const t.Message) ?Prefetch {
+    // Product ID is always in the body — msg.id may be 0 for creates.
+    const product_id = msg.body_as(t.Product).id;
     return .{ .existing = storage.query(t.ProductRow,
         "SELECT id, name, description, price_cents, inventory, version, active FROM products WHERE id = ?1;",
-        .{msg.id}) };
+        .{product_id}) };
 }
 
 // [handle] .create_product

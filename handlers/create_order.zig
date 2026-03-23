@@ -36,9 +36,57 @@ pub fn prefetch(storage: anytype, msg: *const t.Message) ?Prefetch {
 
 // [handle] .create_order
 pub fn handle(ctx: Context) t.ExecuteResult {
-    // TODO: validate inventory, build OrderResult, decrement inventory, return writes
-    _ = ctx;
-    return t.ExecuteResult.read_only(t.HandlerResponse.not_found);
+    const order = ctx.body_val();
+
+    // Validate all products exist.
+    for (ctx.prefetched.products[0..order.items_len]) |maybe_product| {
+        if (maybe_product == null)
+            return t.ExecuteResult.read_only(t.HandlerResponse.not_found);
+    }
+
+    // Validate all have sufficient inventory.
+    for (order.items_slice(), ctx.prefetched.products[0..order.items_len]) |item, maybe_product| {
+        const product = maybe_product.?;
+        if (product.inventory < item.quantity)
+            return t.ExecuteResult.read_only(t.HandlerResponse.insufficient_inventory);
+    }
+
+    // All validated — build order result and decrement inventories.
+    var order_result = std.mem.zeroes(message.OrderResult);
+    order_result.id = order.id;
+    order_result.items_len = order.items_len;
+    order_result.status = .pending;
+    assert(ctx.fw.now > 0);
+    order_result.timeout_at = @intCast(ctx.fw.now + message.order_timeout_seconds);
+
+    var exec_result = t.ExecuteResult{
+        .response = t.HandlerResponse.ok,
+        .writes = undefined,
+        .writes_len = 0,
+    };
+
+    for (order.items_slice(), ctx.prefetched.products[0..order.items_len], 0..) |item, maybe_product, i| {
+        var product = t.productFromRow(maybe_product.?);
+        product.inventory -= item.quantity;
+
+        exec_result.writes[exec_result.writes_len] = .{ .update_product = product };
+        exec_result.writes_len += 1;
+
+        const line_total = @as(u64, product.price_cents) * @as(u64, item.quantity);
+        order_result.items[i] = std.mem.zeroes(message.OrderResultItem);
+        order_result.items[i].product_id = product.id;
+        order_result.items[i].name = product.name;
+        order_result.items[i].name_len = product.name_len;
+        order_result.items[i].quantity = item.quantity;
+        order_result.items[i].price_cents = product.price_cents;
+        order_result.items[i].line_total_cents = line_total;
+        order_result.total_cents +|= line_total;
+    }
+
+    exec_result.writes[exec_result.writes_len] = .{ .put_order = order_result };
+    exec_result.writes_len += 1;
+
+    return exec_result;
 }
 
 // [render] .create_order
