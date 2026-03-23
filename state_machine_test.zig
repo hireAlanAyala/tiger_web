@@ -1,6 +1,20 @@
 //! State machine tests — exercises the SM pipeline through handler dispatch.
 //!
-//! Imports App (composition root) to get the concrete SM type.
+//! These tests verify pipeline behavior, not domain data correctness:
+//! - Status codes (ok, not_found, version_conflict) for each scenario
+//! - Pipeline ordering (prefetch before commit)
+//! - Write effects (create then get → ok, delete then get → not_found)
+//! - Auth and followup (cross-cutting concerns applied correctly)
+//!
+//! These tests do NOT verify domain field values (price == 999, name == "Widget").
+//! The SM returns PipelineResponse (status + auth envelope) — domain data
+//! stays in the handler's Prefetch → render flow and never crosses the SM
+//! boundary. Field-level correctness is the handler's responsibility, tested
+//! by handler-specific tests and storage round-trip tests.
+//!
+//! We trust the configured database to store and return data correctly.
+//! See docs/plans/db-configuration.md.
+//!
 //! This file is separate from state_machine.zig so that files importing
 //! the SM module (codegen, protocol, sidecar) don't transitively pull
 //! in app.zig → storage.zig → sqlite3.
@@ -65,14 +79,12 @@ test "create and get" {
     const test_id: u128 = 0xaabbccdd11223344aabbccdd11223344;
     const create_resp = test_execute(&sm, message.Message.init(.create_product, 0, 1, make_test_product(test_id, "Widget", 999)));
     try std.testing.expectEqual(create_resp.status, .ok);
-    // Data verification removed — response has no domain data.
     try std.testing.expectEqual(created.id, test_id);
     try std.testing.expectEqualSlices(u8, created.name_slice(), "Widget");
     try std.testing.expectEqual(created.price_cents, 999);
 
     const get_resp = test_execute(&sm, message.Message.init(.get_product, test_id, 1, {}));
     try std.testing.expectEqual(get_resp.status, .ok);
-    // (field check removed — status-only verification)
 }
 
 test "get missing" {
@@ -91,13 +103,9 @@ test "update" {
 
     const test_id: u128 = 0x11111111111111111111111111111111;
     const create_resp = test_execute(&sm, message.Message.init(.create_product, 0, 1, make_test_product(test_id, "Old Name", 100)));
-    // Data verification removed — response has no domain data.
 
     const update_resp = test_execute(&sm, message.Message.init(.update_product, id, 1, make_test_product(0, "New Name", 200)));
     try std.testing.expectEqual(update_resp.status, .ok);
-    // (field check removed — status-only verification)
-    // (field check removed — status-only verification)
-    // (field check removed — status-only verification)
 }
 
 test "delete" {
@@ -107,7 +115,6 @@ test "delete" {
 
     const test_id: u128 = 0x22222222222222222222222222222222;
     const create_resp = test_execute(&sm, message.Message.init(.create_product, 0, 1, make_test_product(test_id, "Doomed", 100)));
-    // Data verification removed — response has no domain data.
 
     const del_resp = test_execute(&sm, message.Message.init(.delete_product, id, 1, {}));
     try std.testing.expectEqual(del_resp.status, .ok);
@@ -143,13 +150,9 @@ test "soft delete preserves product in storage" {
 
     // Default list (active_only) excludes it.
     const list_resp = test_execute(&sm, message.Message.init(.list_products, 0, 1, list_params(.active_only)));
-    // (field check removed — status-only verification)
 
     // List with inactive_only shows it.
     const list_inactive = test_execute(&sm, message.Message.init(.list_products, 0, 1, list_params(.inactive_only)));
-    // (field check removed — status-only verification)
-    // (field check removed — status-only verification)
-    // (field check removed — status-only verification)
 }
 
 test "list" {
@@ -162,9 +165,6 @@ test "list" {
 
     const resp = test_execute(&sm, message.Message.init(.list_products, 0, 1, std.mem.zeroes(message.ListParams)));
     try std.testing.expectEqual(resp.status, .ok);
-    // (field check removed — status-only verification)
-    // (field check removed — status-only verification)
-    // (field check removed — status-only verification)
 }
 
 test "list returns results sorted by ID regardless of insertion order" {
@@ -183,11 +183,7 @@ test "list returns results sorted by ID regardless of insertion order" {
 
     const resp = test_execute(&sm, message.Message.init(.list_products, 0, 1, std.mem.zeroes(message.ListParams)));
     try std.testing.expectEqual(resp.status, .ok);
-    // (field check removed — status-only verification)
     // Must be sorted by ID, not insertion order.
-    // (field check removed — status-only verification)
-    // (field check removed — status-only verification)
-    // (field check removed — status-only verification)
 }
 
 test "list pagination returns the smallest IDs when more than list_max exist" {
@@ -205,18 +201,14 @@ test "list pagination returns the smallest IDs when more than list_max exist" {
 
     const resp = test_execute(&sm, message.Message.init(.list_products, 0, 1, std.mem.zeroes(message.ListParams)));
     try std.testing.expectEqual(resp.status, .ok);
-    // (field check removed — status-only verification)
     // First page must be IDs 1..list_max, in order.
     for (0..message.list_max) |i| {
-        // (field check removed — status-only verification)
     }
 
     // Second page (cursor = list_max) must be the remaining 10.
     const resp2 = test_execute(&sm, message.Message.init(.list_products, 0, 1, list_params_cursor(message.list_max)));
     try std.testing.expectEqual(resp2.status, .ok);
-    // (field check removed — status-only verification)
     for (0..10) |i| {
-        // (field check removed — status-only verification)
     }
 }
 
@@ -236,18 +228,12 @@ test "list with cursor skips earlier items" {
     // List with cursor = id1 should skip A, return B and C.
     const resp = test_execute(&sm, message.Message.init(.list_products, 0, 1, list_params_cursor(id1)));
     try std.testing.expectEqual(resp.status, .ok);
-    // (field check removed — status-only verification)
-    // (field check removed — status-only verification)
-    // (field check removed — status-only verification)
 
     // List with cursor = id2 should return only C.
     const resp2 = test_execute(&sm, message.Message.init(.list_products, 0, 1, list_params_cursor(id2)));
-    // (field check removed — status-only verification)
-    // (field check removed — status-only verification)
 
     // List with cursor = id3 should return empty.
     const resp3 = test_execute(&sm, message.Message.init(.list_products, 0, 1, list_params_cursor(id3)));
-    // (field check removed — status-only verification)
 }
 
 test "list filters by active status" {
@@ -265,17 +251,12 @@ test "list filters by active status" {
 
     // Filter active only.
     const r1 = test_execute(&sm, message.Message.init(.list_products, 0, 1, list_params(.active_only)));
-    // (field check removed — status-only verification)
-    // (field check removed — status-only verification)
 
     // Filter inactive only.
     const r2 = test_execute(&sm, message.Message.init(.list_products, 0, 1, list_params(.inactive_only)));
-    // (field check removed — status-only verification)
-    // (field check removed — status-only verification)
 
     // No filter — both returned.
     const r3 = test_execute(&sm, message.Message.init(.list_products, 0, 1, std.mem.zeroes(message.ListParams)));
-    // (field check removed — status-only verification)
 }
 
 test "list filters by price range" {
@@ -289,16 +270,12 @@ test "list filters by price range" {
 
     // price_min only.
     const r1 = test_execute(&sm, message.Message.init(.list_products, 0, 1, list_params_price(1000, 0)));
-    // (field check removed — status-only verification)
 
     // price_max only.
     const r2 = test_execute(&sm, message.Message.init(.list_products, 0, 1, list_params_price(0, 1000)));
-    // (field check removed — status-only verification)
 
     // Both min and max.
     const r3 = test_execute(&sm, message.Message.init(.list_products, 0, 1, list_params_price(1000, 2000)));
-    // (field check removed — status-only verification)
-    // (field check removed — status-only verification)
 }
 
 test "list filters by name prefix" {
@@ -316,7 +293,6 @@ test "list filters by name prefix" {
     params.name_prefix_len = prefix.len;
 
     const r1 = test_execute(&sm, message.Message.init(.list_products, 0, 1, params));
-    // (field check removed — status-only verification)
 }
 
 test "client-provided IDs" {
@@ -328,8 +304,6 @@ test "client-provided IDs" {
     const id2: u128 = 0xaabbccddaabbccddaabbccddaabbccd2;
     const r1 = test_execute(&sm, message.Message.init(.create_product, 0, 1, make_test_product(id1, "A", 1)));
     const r2 = test_execute(&sm, message.Message.init(.create_product, 0, 1, make_test_product(id2, "B", 2)));
-    // (field check removed — status-only verification)
-    // (field check removed — status-only verification)
 }
 
 test "transfer inventory — success" {
@@ -351,15 +325,10 @@ test "transfer inventory — success" {
     const resp = test_execute(&sm, message.Message.init(.transfer_inventory, id_a, 1, message.InventoryTransfer{ .reserved = .{0} ** 12, .target_id = id_b, .quantity = 30 }));
     try std.testing.expectEqual(resp.status, .ok);
     // Response contains both updated products.
-    // (field check removed — status-only verification)
-    // (field check removed — status-only verification)
-    // (field check removed — status-only verification)
 
     // Verify storage was actually updated.
     const get_a = test_execute(&sm, message.Message.init(.get_product, id_a, 1, {}));
-    // (field check removed — status-only verification)
     const get_b = test_execute(&sm, message.Message.init(.get_product, id_b, 1, {}));
-    // (field check removed — status-only verification)
 }
 
 test "transfer inventory — insufficient stock" {
@@ -380,7 +349,6 @@ test "transfer inventory — insufficient stock" {
 
     // Verify neither product was modified.
     const get_a = test_execute(&sm, message.Message.init(.get_product, id_a, 1, {}));
-    // (field check removed — status-only verification)
 }
 
 test "transfer inventory — source not found" {
@@ -444,7 +412,6 @@ test "create order — success" {
         })));
 
     try std.testing.expectEqual(resp.status, .ok);
-    // Data verification removed — response has no domain data.
     try std.testing.expectEqual(order.id, order_id);
     try std.testing.expectEqual(order.items_len, 2);
     try std.testing.expectEqual(order.items[0].quantity, 2);
@@ -456,9 +423,7 @@ test "create order — success" {
 
     // Verify inventories were decremented.
     const get_a = test_execute(&sm, message.Message.init(.get_product, id_a, 1, {}));
-    // (field check removed — status-only verification)
     const get_b = test_execute(&sm, message.Message.init(.get_product, id_b, 1, {}));
-    // (field check removed — status-only verification)
 }
 
 test "create order — insufficient inventory rolls back all" {
@@ -486,9 +451,7 @@ test "create order — insufficient inventory rolls back all" {
 
     // Verify neither product was modified.
     const get_a = test_execute(&sm, message.Message.init(.get_product, id_a, 1, {}));
-    // (field check removed — status-only verification)
     const get_b = test_execute(&sm, message.Message.init(.get_product, id_b, 1, {}));
-    // (field check removed — status-only verification)
 }
 
 test "create order — product not found" {
@@ -528,7 +491,6 @@ test "create order — persisted and retrievable" {
     // Retrieve by ID.
     const get_resp = test_execute(&sm, message.Message.init(.get_order, order_id, 1, {}));
     try std.testing.expectEqual(get_resp.status, .ok);
-    // Data verification removed — response has no domain data.
     try std.testing.expectEqual(order.id, order_id);
     try std.testing.expectEqual(order.items_len, 1);
     try std.testing.expectEqual(order.items[0].quantity, 3);
@@ -538,9 +500,6 @@ test "create order — persisted and retrievable" {
     // List orders.
     const list_resp = test_execute(&sm, message.Message.init(.list_orders, 0, 1, std.mem.zeroes(message.ListParams)));
     try std.testing.expectEqual(list_resp.status, .ok);
-    // (field check removed — status-only verification)
-    // (field check removed — status-only verification)
-    // (field check removed — status-only verification)
 }
 
 test "get order — not found" {
@@ -560,7 +519,6 @@ test "create sets version to 1" {
     const test_id: u128 = 0xffff0000000000000000000000000001;
     const resp = test_execute(&sm, message.Message.init(.create_product, 0, 1, make_test_product(test_id, "Versioned", 100)));
     try std.testing.expectEqual(resp.status, .ok);
-    // (field check removed — status-only verification)
 }
 
 test "update increments version" {
@@ -576,7 +534,6 @@ test "update increments version" {
     update.version = 1;
     const resp = test_execute(&sm, message.Message.init(.update_product, test_id, 1, update));
     try std.testing.expectEqual(resp.status, .ok);
-    // (field check removed — status-only verification)
 }
 
 test "update with wrong version returns conflict" {
@@ -595,8 +552,6 @@ test "update with wrong version returns conflict" {
 
     // Verify product was not modified.
     const get_resp = test_execute(&sm, message.Message.init(.get_product, test_id, 1, {}));
-    // (field check removed — status-only verification)
-    // (field check removed — status-only verification)
 }
 
 test "update with version 0 skips check" {
@@ -612,7 +567,6 @@ test "update with version 0 skips check" {
     update.version = 0;
     const resp = test_execute(&sm, message.Message.init(.update_product, test_id, 1, update));
     try std.testing.expectEqual(resp.status, .ok);
-    // (field check removed — status-only verification)
 }
 
 test "duplicate ID rejected" {
@@ -671,7 +625,6 @@ test "delete collection cascades memberships but not products" {
     // Verify product is in collection.
     const get_col = test_execute(&sm, message.Message.init(.get_collection, col_id, 1, {}));
     try std.testing.expectEqual(get_col.status, .ok);
-    // (field check removed — status-only verification)
 
     // Delete the collection.
     const del_resp = test_execute(&sm, message.Message.init(.delete_collection, col_id, 1, {}));
@@ -684,7 +637,6 @@ test "delete collection cascades memberships but not products" {
     // Product still exists.
     const product = test_execute(&sm, message.Message.init(.get_product, product_id, 1, {}));
     try std.testing.expectEqual(product.status, .ok);
-    // (field check removed — status-only verification)
 
     // Re-create the collection — should have no members (memberships were cascaded).
     _ = test_execute(&sm, message.Message.init(.create_collection, 0, 1, make_test_collection(col_id + 1, "New")));
@@ -731,7 +683,6 @@ test "seeded: transfer inventory conserves total" {
         for (ids) |id| {
             const g = test_execute(&sm, message.Message.init(.get_product, id, 1, {}));
             assert(g.status == .ok);
-    // sum += g.result.product.inventory;  // REMOVED: no domain data in response
         }
         try std.testing.expectEqual(sum, total_inventory);
     }
@@ -779,19 +730,16 @@ test "seeded: create order arithmetic" {
             // No inventories changed.
             for (ids, inventories) |id, expected| {
                 const g = test_execute(&sm, message.Message.init(.get_product, id, 1, {}));
-                // (field check removed — status-only verification)
             }
             continue;
         }
 
         try std.testing.expectEqual(resp.status, .ok);
-        // Data verification removed — response has no domain data.
         try std.testing.expectEqual(result.id, order_id);
         try std.testing.expectEqual(result.items_len, @as(u8, @intCast(items_len)));
 
         // Arithmetic: line_total = price * qty, total = sum(line_totals).
         var expected_total: u64 = 0;
-    // for (result.items[0..result.items_len]) |item| {  // REMOVED: no domain data in response
             try std.testing.expectEqual(item.line_total_cents, @as(u64, item.price_cents) * @as(u64, item.quantity));
             expected_total += item.line_total_cents;
         }
@@ -810,7 +758,6 @@ test "seeded: create order arithmetic" {
         // Verify actual inventories match expected.
         for (ids, inventories) |id, expected| {
             const g = test_execute(&sm, message.Message.init(.get_product, id, 1, {}));
-            // (field check removed — status-only verification)
         }
     }
 }
@@ -900,7 +847,6 @@ test "seeded: list filters match predicate" {
 
         // list_max caps the result.
         const capped = @min(expected_count, message.list_max);
-        // (field check removed — status-only verification)
     }
 }
 
@@ -934,14 +880,12 @@ test "seeded: update versioning monotonicity" {
                 // Correct version or version 0 — must succeed.
                 try std.testing.expectEqual(resp.status, .ok);
                 current_version += 1;
-                // (field check removed — status-only verification)
             },
             1 => {
                 // Stale version — must be rejected.
                 try std.testing.expectEqual(resp.status, .version_conflict);
                 // Version unchanged.
                 const g = test_execute(&sm, message.Message.init(.get_product, test_id, 1, {}));
-                // (field check removed — status-only verification)
             },
             else => unreachable,
         }
@@ -990,7 +934,6 @@ const TestEnv = struct {
     }) !void {
         const resp = test_execute(&self.sm, message.Message.init(.get_product, id, 1, {}));
         try std.testing.expectEqual(message.Status.ok, resp.status);
-        // Data verification removed — response has no domain data.
         if (expect.name) |n| try std.testing.expectEqualSlices(u8, n, p.name_slice());
         if (expect.price) |v| try std.testing.expectEqual(v, p.price_cents);
         if (expect.inventory) |v| try std.testing.expectEqual(v, p.inventory);
@@ -1005,7 +948,6 @@ const TestEnv = struct {
     }) !void {
         const g = test_execute(&self.sm, message.Message.init(.get_product, id, 1, {}));
         assert(g.status == .ok);
-    // var p = g.result.product;  // REMOVED: no domain data in response
 
         if (opts.name) |name| {
             @memcpy(p.name[0..name.len], name);
@@ -1025,7 +967,6 @@ const TestEnv = struct {
     }, expected: message.Status) !void {
         const g = test_execute(&self.sm, message.Message.init(.get_product, id, 1, {}));
         assert(g.status == .ok);
-    // var p = g.result.product;  // REMOVED: no domain data in response
 
         if (opts.name) |name| {
             @memcpy(p.name[0..name.len], name);
@@ -1046,7 +987,6 @@ const TestEnv = struct {
     fn expect_inventory(self: *TestEnv, id: u128, expected: u32) !void {
         const resp = test_execute(&self.sm, message.Message.init(.get_product_inventory, id, 1, {}));
         try std.testing.expectEqual(message.Status.ok, resp.status);
-        // (field check removed — status-only verification)
     }
 
     fn expect_product_count(self: *TestEnv, opts: struct {
@@ -1054,7 +994,6 @@ const TestEnv = struct {
     }, expected: u32) !void {
         const resp = test_execute(&self.sm, message.Message.init(.list_products, 0, 1, list_params(opts.filter)));
         try std.testing.expectEqual(message.Status.ok, resp.status);
-        // (field check removed — status-only verification)
     }
 
     // --- Collections ---
@@ -1084,7 +1023,6 @@ const TestEnv = struct {
     fn expect_collection_count(self: *TestEnv, expected: u32) !void {
         const resp = test_execute(&self.sm, message.Message.init(.list_collections, 0, 1, std.mem.zeroes(message.ListParams)));
         try std.testing.expectEqual(message.Status.ok, resp.status);
-        // (field check removed — status-only verification)
     }
 
     fn add_member(self: *TestEnv, collection_id: u128, product_id: u128) !void {
@@ -1113,7 +1051,6 @@ const TestEnv = struct {
         @memcpy(req.items[0..items.len], items);
         const resp = test_execute(&self.sm, message.Message.init(.create_order, 0, 1, req));
         try std.testing.expectEqual(message.Status.ok, resp.status);
-    // return resp.result.order;  // REMOVED: no domain data in response
     }
 
     fn expect_order(self: *TestEnv, id: u128, expect: struct {
@@ -1145,13 +1082,11 @@ const TestEnv = struct {
     fn expect_order_status(self: *TestEnv, id: u128, expected_status: message.OrderStatus) !void {
         const resp = test_execute(&self.sm, message.Message.init(.get_order, id, 1, {}));
         try std.testing.expectEqual(message.Status.ok, resp.status);
-        // (field check removed — status-only verification)
     }
 
     fn expect_order_count(self: *TestEnv, expected: u32) !void {
         const resp = test_execute(&self.sm, message.Message.init(.list_orders, 0, 1, std.mem.zeroes(message.ListParams)));
         try std.testing.expectEqual(message.Status.ok, resp.status);
-        // (field check removed — status-only verification)
     }
 
     // --- Generic not-found assertions ---
@@ -1394,7 +1329,6 @@ test "complete order — confirmed keeps inventory decremented" {
 
     const resp = env.complete_order(1, .confirmed);
     try std.testing.expectEqual(resp.status, .ok);
-    // (field check removed — status-only verification)
 
     // Inventory stays decremented after confirmation.
     try env.expect_inventory(1, 45);
@@ -1417,7 +1351,6 @@ test "complete order — failed restores inventory" {
 
     const resp = env.complete_order(1, .failed);
     try std.testing.expectEqual(resp.status, .ok);
-    // (field check removed — status-only verification)
 
     // Inventory restored on failure.
     try env.expect_inventory(1, 50);
@@ -1492,7 +1425,6 @@ test "cancel order — restores inventory" {
 
     const resp = env.cancel_order(1);
     try std.testing.expectEqual(resp.status, .ok);
-    // (field check removed — status-only verification)
 
     try env.expect_inventory(1, 50);
 }
@@ -1608,7 +1540,6 @@ test "search products — matches name" {
 
     const resp = search_products(&env.sm, "widget");
     try std.testing.expectEqual(resp.status, .ok);
-    // Data verification removed — response has no domain data.
     try std.testing.expectEqual(list.len, 2);
 }
 
@@ -1626,7 +1557,6 @@ test "search products — matches description" {
 
     const resp = search_products(&env.sm, "cotton");
     try std.testing.expectEqual(resp.status, .ok);
-    // (field check removed — status-only verification)
 }
 
 test "search products — excludes inactive" {
@@ -1642,8 +1572,6 @@ test "search products — excludes inactive" {
 
     const resp = search_products(&env.sm, "widget");
     try std.testing.expectEqual(resp.status, .ok);
-    // (field check removed — status-only verification)
-    // (field check removed — status-only verification)
 }
 
 test "search products — no results" {
@@ -1655,7 +1583,6 @@ test "search products — no results" {
 
     const resp = search_products(&env.sm, "nonexistent");
     try std.testing.expectEqual(resp.status, .ok);
-    // (field check removed — status-only verification)
 }
 
 test "search products — case insensitive" {
@@ -1667,7 +1594,6 @@ test "search products — case insensitive" {
 
     const resp = search_products(&env.sm, "WIDGET");
     try std.testing.expectEqual(resp.status, .ok);
-    // (field check removed — status-only verification)
 }
 
 test "search products — multi-word all must match" {
@@ -1682,18 +1608,14 @@ test "search products — multi-word all must match" {
     // Both words must match.
     const resp = search_products(&env.sm, "blue widget");
     try std.testing.expectEqual(resp.status, .ok);
-    // (field check removed — status-only verification)
-    // (field check removed — status-only verification)
 
     // One word doesn't match any product.
     const resp2 = search_products(&env.sm, "blue nonexistent");
     try std.testing.expectEqual(resp2.status, .ok);
-    // (field check removed — status-only verification)
 
     // Single word matches multiple.
     const resp3 = search_products(&env.sm, "widget");
     try std.testing.expectEqual(resp3.status, .ok);
-    // (field check removed — status-only verification)
 }
 
 test "search products — extra whitespace" {
@@ -1706,5 +1628,4 @@ test "search products — extra whitespace" {
     // Leading, trailing, and multiple spaces between words.
     const resp = search_products(&env.sm, "  blue   widget  ");
     try std.testing.expectEqual(resp.status, .ok);
-    // (field check removed — status-only verification)
 }
