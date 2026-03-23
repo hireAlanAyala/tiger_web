@@ -142,35 +142,61 @@ SQLite. The framework doesn't know or care that it's SQL. It sees
 handlers would write Postgres SQL. If they configured an ORM, handlers
 would call ORM methods. The framework is uninvolved.
 
+## MemoryStorage Is a Configurable DB, Not a Framework Concern
+
+MemoryStorage isn't deleted. It's just another database the user can
+configure — same as SQLite or Postgres. The framework doesn't care
+which one is configured.
+
+MemoryStorage has ReadView. It has get/list/search methods. Handlers
+written for MemoryStorage call those methods. Handlers written for
+SQLite call query(). Different db, different handler code. The framework
+is uninvolved in this choice.
+
+For the ecommerce example: production uses SQLite. The 1:1 local
+equivalent is `SqliteStorage(":memory:")` — same type, same interface,
+same handlers. This is what the sim/fuzz/benchmark use.
+
+MemoryStorage survives as an option for users who want a zero-dependency
+in-memory backend with fault injection built in. It has its own ReadView,
+its own methods. The framework treats it identically to any other db.
+
 ## What This Means for the Codebase
 
 ### Framework (framework/)
-- ReadOnlyStorage: deny-list wrapper, no db-specific methods
-- No MemoryStorage
-- No query/query_all awareness
-- No BoundedList (moves to user space or SqliteStorage)
+- ReadView pattern: Storage types define their own read-only view
+- `assertReadView(Storage)` — comptime check that Storage exports ReadView
+- FaultWrapper(Storage) — generic PRNG fault injection around any db
+- No db-specific method awareness (no query, no get, no BoundedList)
 
 ### SqliteStorage (user space, storage.zig)
 - Owns column name matching, bind assertions, pair assertions
 - Owns query/query_all/execute interface
 - Owns BoundedList, read_row, read_column
+- Defines ReadView exposing query/query_all + legacy reads
 - These are SQLite features, not framework features
 
-### MemoryStorage (user space or deleted)
-- Not a framework concern
-- If kept: example-specific test double for legacy SM tests
-- If deleted: replaced by SqliteStorage(":memory:") + FaultWrapper
+### MemoryStorage (user space, memory_storage.zig)
+- A configurable db option, not framework infrastructure
+- Defines ReadView exposing get/list/search
+- Has built-in PRNG fault injection (busy/err on reads)
+- Handlers written for MemoryStorage call its interface directly
 
 ### Handlers (user space, handlers/)
 - Call storage.query() because the configured db is SqliteStorage
 - Use flat row types because that's how SqliteStorage maps results
 - Coupled to SQLite — that's the user's choice, not the framework's
 
-### FaultWrapper (framework/ or user space)
+### FaultWrapper (framework/)
 - Generic wrapper: FaultWrapper(Storage) adds PRNG-driven faults
-- Delegates all methods to inner storage
+- Delegates all methods to inner storage, including ReadView
 - Returns busy/err based on probability before calling the real method
-- Replaces MemoryStorage's fault injection role
+- For sim testing with any db type
+
+### Ecommerce Example (sim/fuzz/benchmark)
+- Switches from MemoryStorage to SqliteStorage(":memory:")
+- Handlers use SQL — same code path as production
+- FaultWrapper adds sim-time faults around the real SQLite calls
 
 ## Decisions Made
 
@@ -178,9 +204,37 @@ would call ORM methods. The framework is uninvolved.
 |----------|-----|
 | Framework doesn't own storage | We don't own the disk |
 | Storage is a type parameter | Comptime composition, no runtime dispatch |
-| ReadOnlyStorage is deny-list | Can't enumerate all read methods on all dbs |
-| No MemoryStorage in framework | Cargo-culted from TB, unnatural for our layer |
+| Storage defines its own ReadView | Framework can't enumerate all read methods |
+| MemoryStorage is a db option, not framework | It's a user choice, same as SQLite |
 | Handlers use storage: anytype | Db interface is the user's choice |
 | SQL safety lives in SqliteStorage | Column matching, bind checks are db-specific |
 | Same type for prod and test | Real users use one db with different instances |
-| FaultWrapper replaces MemoryStorage | Preserves interface, adds faults generically |
+| FaultWrapper is framework | Generic fault injection for any db |
+
+## Implementation Status
+
+### Done (committed)
+- Design doc (this file)
+- ReadView concept and assertReadView in read_only_storage.zig
+- Handler dispatch switch in app.zig (TigerBeetle-style)
+- PrefetchCache tagged union in app.zig
+- HandlersType interface for SM parameterization
+- Write/ExecuteResult moved to module-level state_machine.zig
+- SM parameterized on (Storage, Handlers)
+- All handlers have pub const Context
+- resolve_credential/apply_auth_response made pub on SM
+
+### In Stash (27 compile errors, needs next session)
+- ReadView on SqliteStorage (written, needs MemoryStorage removal from fuzz/sim)
+- ReadView on MemoryStorage (written)
+- SM prefetch/commit using Handlers interface
+- enum support in read_column
+- undefined instead of zeroes in read_row_mapped
+
+### Not Started
+- FaultWrapper(Storage) — generic PRNG fault injection wrapper
+- Switch sim/fuzz/benchmark from MemoryStorage to SqliteStorage(":memory:")
+- Delete old SM prefetch/execute dispatch (~800 lines)
+- Update extract_cache for new SM shape (sidecar path)
+- Update sim.zig to use FaultWrapper(SqliteStorage)
+- Wire handler dispatch into server process_inbox
