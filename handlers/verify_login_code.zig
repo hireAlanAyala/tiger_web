@@ -27,7 +27,7 @@ pub fn route(method: t.http.Method, raw_path: []const u8, body: []const u8) ?t.M
 }
 
 // [prefetch] .verify_login_code
-pub fn prefetch(storage: *t.Storage, msg: *const t.Message) ?Prefetch {
+pub fn prefetch(storage: anytype, msg: *const t.Message) ?Prefetch {
     _ = storage; _ = msg;
     return .{};
 }

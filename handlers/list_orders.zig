@@ -1,7 +1,7 @@
 const std = @import("std");
 const t = @import("../prelude.zig");
 
-pub const Prefetch = struct { orders: t.BoundedList(t.OrderSummary, t.list_max) };
+pub const Prefetch = struct { orders: ?t.BoundedList(t.OrderRow, t.list_max) };
 
 const Context = t.HandlerContext(Prefetch, t.Operation.EventType(.list_orders), t.Identity);
 
@@ -17,17 +17,20 @@ pub fn route(method: t.http.Method, raw_path: []const u8, body: []const u8) ?t.M
 }
 
 // [prefetch] .list_orders
-pub fn prefetch(storage: *t.Storage, msg: *const t.Message) ?Prefetch {
-    _ = storage; _ = msg;
-    // TODO: query orders table
-    return .{ .orders = .{} };
+pub fn prefetch(storage: anytype, msg: *const t.Message) ?Prefetch {
+    _ = msg;
+    return .{ .orders = storage.query_all(t.OrderRow, t.list_max,
+        "SELECT id, total_cents, items_len, status, timeout_at, payment_ref FROM orders ORDER BY id LIMIT ?1;",
+        .{@as(u32, t.list_max)}) };
 }
 
 // [handle] .list_orders
 
 // [render] .list_orders
 pub fn render(ctx: Context) t.RenderResult {
-    if (ctx.prefetched.orders.len == 0)
+    const orders = ctx.prefetched.orders orelse
+        return ctx.render(.{ .{ "patch", "#order-list", "<div class=\"meta\">No orders</div>", "inner" } });
+    if (orders.len == 0)
         return ctx.render(.{ .{ "patch", "#order-list", "<div class=\"meta\">No orders</div>", "inner" } });
     return ctx.render(.{}); // TODO: render order cards
 }

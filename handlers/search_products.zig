@@ -2,7 +2,7 @@ const std = @import("std");
 const t = @import("../prelude.zig");
 const get_product = @import("get_product.zig");
 
-pub const Prefetch = struct { products: t.BoundedList(t.Product, t.list_max) };
+pub const Prefetch = struct { products: ?t.BoundedList(t.ProductRow, t.list_max) };
 
 const Context = t.HandlerContext(Prefetch, t.Operation.EventType(.search_products), t.Identity);
 
@@ -30,21 +30,23 @@ pub fn route(method: t.http.Method, raw_path: []const u8, body: []const u8) ?t.M
 }
 
 // [prefetch] .search_products
-pub fn prefetch(storage: *t.Storage, msg: *const t.Message) ?Prefetch {
+pub fn prefetch(storage: anytype, msg: *const t.Message) ?Prefetch {
     _ = msg;
-    return .{ .products = storage.query_all(t.Product, t.list_max,
-        "SELECT id, description, name, price_cents, inventory, version, description_len, name_len, active FROM products WHERE active = 1 ORDER BY id LIMIT ?1;",
-        .{@as(u32, t.list_max)}) orelse return null };
+    return .{ .products = storage.query_all(t.ProductRow, t.list_max,
+        "SELECT id, name, description, price_cents, inventory, version, active FROM products WHERE active = 1 ORDER BY id;",
+        .{}) };
 }
 
 // [handle] .search_products
 
 // [render] .search_products
 pub fn render(ctx: Context) t.RenderResult {
+    const products_list = ctx.prefetched.products orelse
+        return ctx.render(.{ .{ "patch", "#product-list", "<div class=\"meta\">No results</div>", "inner" } });
     var buf: [32 * 1024]u8 = undefined;
     var pos: usize = 0;
-    for (ctx.prefetched.products.slice()) |*p| {
-        if (!p.flags.active) continue;
+    for (products_list.slice()) |*p| {
+        if (!p.active) continue;
         const card = get_product.render_product_card(buf[pos..], p);
         pos += card.len;
     }

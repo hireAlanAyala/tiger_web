@@ -1,7 +1,7 @@
 const std = @import("std");
 const t = @import("../prelude.zig");
 
-pub const Prefetch = struct { product: ?t.Product };
+pub const Prefetch = struct { product: ?t.ProductRow };
 
 const Context = t.HandlerContext(Prefetch, t.Operation.EventType(.get_product_inventory), t.Identity);
 
@@ -18,9 +18,9 @@ pub fn route(method: t.http.Method, raw_path: []const u8, body: []const u8) ?t.M
 }
 
 // [prefetch] .get_product_inventory
-pub fn prefetch(storage: *t.Storage, msg: *const t.Message) ?Prefetch {
-    return .{ .product = storage.query(t.Product,
-        "SELECT id, description, name, price_cents, inventory, version, description_len, name_len, active FROM products WHERE id = ?1;",
+pub fn prefetch(storage: anytype, msg: *const t.Message) ?Prefetch {
+    return .{ .product = storage.query(t.ProductRow,
+        "SELECT id, name, description, price_cents, inventory, version, active FROM products WHERE id = ?1;",
         .{msg.id}) };
 }
 
@@ -30,7 +30,7 @@ pub fn prefetch(storage: *t.Storage, msg: *const t.Message) ?Prefetch {
 pub fn render(ctx: Context) t.RenderResult {
     const product = ctx.prefetched.product orelse
         return ctx.render(.{ .{ "patch", "#content", "Product not found", "inner" } });
-    if (!product.flags.active)
+    if (!product.active)
         return ctx.render(.{ .{ "patch", "#content", "Product not found", "inner" } });
     var buf: [64]u8 = undefined;
     var pos: usize = 0;

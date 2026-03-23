@@ -42,10 +42,62 @@ pub const product_description_max = message.product_description_max;
 pub const collection_name_max = message.collection_name_max;
 pub const list_max = message.list_max;
 pub const order_items_max = message.order_items_max;
+pub const payment_ref_max = message.payment_ref_max;
+pub const OrderStatus = message.OrderStatus;
 
 // --- Storage ---
 pub const Storage = @import("storage.zig").SqliteStorage;
 pub const BoundedList = fw.stdx.BoundedList;
+
+// --- Query row types ---
+//
+// Flat structs shaped by SQL queries, not by the wire format. Field names
+// match SQL column names (use AS aliases where they differ). No _len
+// companion fields — those are a Zig extern struct concern, not a SQL
+// concern. Handlers construct extern structs (Product, etc.) for writes
+// by setting fields explicitly.
+//
+// This separation exists because domain types (Product, ProductCollection)
+// are extern structs designed for WAL serialization and byte-wise equality.
+// They have _len fields, packed flags, and alignment-driven field order —
+// none of which map naturally to SQL columns. Query row types are the
+// bridge: one field per SQL column, matched by name.
+//
+// This is sidecar-language-agnostic: every language maps query results to
+// flat types with one field per column. The Zig framework does the same.
+
+pub const ProductRow = struct {
+    id: u128,
+    name: [product_name_max]u8,
+    description: [product_description_max]u8,
+    price_cents: u32,
+    inventory: u32,
+    version: u32,
+    active: bool,
+};
+
+pub const CollectionRow = struct {
+    id: u128,
+    name: [collection_name_max]u8,
+    active: bool,
+};
+
+pub const OrderRow = struct {
+    id: u128,
+    total_cents: u64,
+    items_len: u8,
+    status: OrderStatus,
+    timeout_at: u64,
+    payment_ref: [payment_ref_max]u8,
+};
+
+pub const OrderItemRow = struct {
+    product_id: u128,
+    name: [product_name_max]u8,
+    quantity: u32,
+    price_cents: u32,
+    line_total_cents: u64,
+};
 
 // --- State machine types (for handle phase) ---
 pub const ExecuteResult = sm.StateMachineType(Storage).ExecuteResult;

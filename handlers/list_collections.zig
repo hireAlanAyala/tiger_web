@@ -1,7 +1,7 @@
 const std = @import("std");
 const t = @import("../prelude.zig");
 
-pub const Prefetch = struct { collections: t.BoundedList(t.ProductCollection, t.list_max) };
+pub const Prefetch = struct { collections: ?t.BoundedList(t.CollectionRow, t.list_max) };
 
 const Context = t.HandlerContext(Prefetch, t.Operation.EventType(.list_collections), t.Identity);
 
@@ -17,23 +17,25 @@ pub fn route(method: t.http.Method, raw_path: []const u8, body: []const u8) ?t.M
 }
 
 // [prefetch] .list_collections
-pub fn prefetch(storage: *t.Storage, msg: *const t.Message) ?Prefetch {
+pub fn prefetch(storage: anytype, msg: *const t.Message) ?Prefetch {
     _ = msg;
-    return .{ .collections = storage.query_all(t.ProductCollection, t.list_max,
-        "SELECT id, name, active, name_len FROM product_collections WHERE active = 1 ORDER BY id LIMIT ?1;",
-        .{@as(u32, t.list_max)}) orelse return null };
+    return .{ .collections = storage.query_all(t.CollectionRow, t.list_max,
+        "SELECT id, name, active FROM collections WHERE active = 1 ORDER BY id LIMIT ?1;",
+        .{@as(u32, t.list_max)}) };
 }
 
 // [handle] .list_collections
 
 // [render] .list_collections
 pub fn render(ctx: Context) t.RenderResult {
+    const collections = ctx.prefetched.collections orelse
+        return ctx.render(.{ .{ "patch", "#collection-list", "<div class=\"meta\">No collections</div>", "inner" } });
     var buf: [16 * 1024]u8 = undefined;
     var pos: usize = 0;
-    for (ctx.prefetched.collections.slice()) |*col| {
-        if (!col.flags.active) continue;
+    for (collections.slice()) |*col| {
+        if (!col.active) continue;
         pos += t.html.raw(buf[pos..], "<div class=\"card\"><strong>");
-        pos += t.html.escaped(buf[pos..], col.name[0..col.name_len]);
+        pos += t.html.escaped(buf[pos..], std.mem.sliceTo(&col.name, 0));
         pos += t.html.raw(buf[pos..], "</strong><div class=\"meta\">");
         pos += t.html.uuid(buf[pos..], col.id);
         pos += t.html.raw(buf[pos..], "</div></div>");

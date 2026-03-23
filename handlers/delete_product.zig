@@ -1,7 +1,7 @@
 const std = @import("std");
 const t = @import("../prelude.zig");
 
-pub const Prefetch = struct { existing: ?t.Product };
+pub const Prefetch = struct { existing: ?t.ProductRow };
 
 const Context = t.HandlerContext(Prefetch, t.Operation.EventType(.delete_product), t.Identity);
 
@@ -18,23 +18,33 @@ pub fn route(method: t.http.Method, raw_path: []const u8, body: []const u8) ?t.M
 }
 
 // [prefetch] .delete_product
-pub fn prefetch(storage: *t.Storage, msg: *const t.Message) ?Prefetch {
-    return .{ .existing = storage.query(t.Product,
-        "SELECT id, description, name, price_cents, inventory, version, description_len, name_len, active FROM products WHERE id = ?1;",
+pub fn prefetch(storage: anytype, msg: *const t.Message) ?Prefetch {
+    return .{ .existing = storage.query(t.ProductRow,
+        "SELECT id, name, description, price_cents, inventory, version, active FROM products WHERE id = ?1;",
         .{msg.id}) };
 }
 
 // [handle] .delete_product
 pub fn handle(ctx: Context) t.ExecuteResult {
-    var product = ctx.prefetched.existing orelse
+    const row = ctx.prefetched.existing orelse
         return t.ExecuteResult.read_only(t.Message.MessageResponse.not_found);
-    if (!product.flags.active)
+    if (!row.active)
         return t.ExecuteResult.read_only(t.Message.MessageResponse.not_found);
-    product.flags.active = false;
-    product.version += 1;
+
+    var entity = std.mem.zeroes(t.Product);
+    entity.id = row.id;
+    entity.name = row.name;
+    entity.name_len = @intCast(std.mem.sliceTo(&row.name, 0).len);
+    entity.description = row.description;
+    entity.description_len = @intCast(std.mem.sliceTo(&row.description, 0).len);
+    entity.price_cents = row.price_cents;
+    entity.inventory = row.inventory;
+    entity.version = row.version + 1;
+    entity.flags = .{ .active = false };
+
     return t.ExecuteResult.single(
         .{ .status = .ok, .result = .{ .empty = {} } },
-        .{ .update_product = product },
+        .{ .update_product = entity },
     );
 }
 

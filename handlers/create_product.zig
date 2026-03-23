@@ -3,7 +3,7 @@ const assert = std.debug.assert;
 const t = @import("../prelude.zig");
 
 pub const Prefetch = struct {
-    existing: ?t.Product,
+    existing: ?t.ProductRow,
 };
 
 const Context = t.HandlerContext(Prefetch, t.Operation.EventType(.create_product), t.Identity);
@@ -26,13 +26,10 @@ pub fn route(method: t.http.Method, raw_path: []const u8, body: []const u8) ?t.M
 }
 
 // [prefetch] .create_product
-pub fn prefetch(storage: *t.Storage, msg: *const t.Message) ?Prefetch {
-    const existing = storage.query(
-        t.Product,
-        "SELECT id, description, name, price_cents, inventory, version, description_len, name_len, active FROM products WHERE id = ?1;",
-        .{msg.body_as(t.Product).id},
-    );
-    return .{ .existing = existing };
+pub fn prefetch(storage: anytype, msg: *const t.Message) ?Prefetch {
+    return .{ .existing = storage.query(t.ProductRow,
+        "SELECT id, name, description, price_cents, inventory, version, active FROM products WHERE id = ?1;",
+        .{msg.id}) };
 }
 
 // [handle] .create_product

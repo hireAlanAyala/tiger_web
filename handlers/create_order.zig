@@ -4,7 +4,7 @@ const t = @import("../prelude.zig");
 const message = @import("../message.zig");
 
 pub const Prefetch = struct {
-    products: [t.order_items_max]?t.Product,
+    products: [t.order_items_max]?t.ProductRow,
     order_id: u128,
 };
 
@@ -23,12 +23,12 @@ pub fn route(method: t.http.Method, raw_path: []const u8, body: []const u8) ?t.M
 }
 
 // [prefetch] .create_order
-pub fn prefetch(storage: *t.Storage, msg: *const t.Message) ?Prefetch {
+pub fn prefetch(storage: anytype, msg: *const t.Message) ?Prefetch {
     const order = msg.body_as(t.OrderRequest);
     var result = Prefetch{ .products = .{null} ** t.order_items_max, .order_id = order.id };
     for (order.items_slice(), 0..) |item, i| {
-        result.products[i] = storage.query(t.Product,
-            "SELECT id, description, name, price_cents, inventory, version, description_len, name_len, active FROM products WHERE id = ?1;",
+        result.products[i] = storage.query(t.ProductRow,
+            "SELECT id, name, description, price_cents, inventory, version, active FROM products WHERE id = ?1;",
             .{item.product_id});
     }
     return result;

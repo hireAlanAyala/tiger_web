@@ -1,7 +1,7 @@
 const std = @import("std");
 const t = @import("../prelude.zig");
 
-pub const Prefetch = struct { collection_id: u128, product_id: u128, collection: ?t.ProductCollection };
+pub const Prefetch = struct { collection_id: u128, product_id: u128, collection: ?t.CollectionRow };
 
 const Context = t.HandlerContext(Prefetch, t.Operation.EventType(.remove_collection_member), t.Identity);
 
@@ -19,12 +19,12 @@ pub fn route(method: t.http.Method, raw_path: []const u8, body: []const u8) ?t.M
 }
 
 // [prefetch] .remove_collection_member
-pub fn prefetch(storage: *t.Storage, msg: *const t.Message) ?Prefetch {
+pub fn prefetch(storage: anytype, msg: *const t.Message) ?Prefetch {
     return .{
         .collection_id = msg.id,
         .product_id = msg.body_as(u128).*,
-        .collection = storage.query(t.ProductCollection,
-            "SELECT id, name, active, name_len FROM product_collections WHERE id = ?1;", .{msg.id}),
+        .collection = storage.query(t.CollectionRow,
+            "SELECT id, name, active FROM product_collections WHERE id = ?1;", .{msg.id}),
     };
 }
 

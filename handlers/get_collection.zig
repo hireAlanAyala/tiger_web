@@ -1,7 +1,7 @@
 const std = @import("std");
 const t = @import("../prelude.zig");
 
-pub const Prefetch = struct { collection: ?t.ProductCollection };
+pub const Prefetch = struct { collection: ?t.CollectionRow };
 
 const Context = t.HandlerContext(Prefetch, t.Operation.EventType(.get_collection), t.Identity);
 
@@ -18,9 +18,9 @@ pub fn route(method: t.http.Method, raw_path: []const u8, body: []const u8) ?t.M
 }
 
 // [prefetch] .get_collection
-pub fn prefetch(storage: *t.Storage, msg: *const t.Message) ?Prefetch {
-    return .{ .collection = storage.query(t.ProductCollection,
-        "SELECT id, name, active, name_len FROM product_collections WHERE id = ?1;",
+pub fn prefetch(storage: anytype, msg: *const t.Message) ?Prefetch {
+    return .{ .collection = storage.query(t.CollectionRow,
+        "SELECT id, name, active FROM collections WHERE id = ?1;",
         .{msg.id}) };
 }
 
@@ -30,12 +30,12 @@ pub fn prefetch(storage: *t.Storage, msg: *const t.Message) ?Prefetch {
 pub fn render(ctx: Context) t.RenderResult {
     const col = ctx.prefetched.collection orelse
         return ctx.render(.{ .{ "patch", "#content", "Collection not found", "inner" } });
-    if (!col.flags.active)
+    if (!col.active)
         return ctx.render(.{ .{ "patch", "#content", "Collection not found", "inner" } });
     var buf: [2048]u8 = undefined;
     var pos: usize = 0;
     pos += t.html.raw(buf[pos..], "<div class=\"card\"><strong>");
-    pos += t.html.escaped(buf[pos..], col.name[0..col.name_len]);
+    pos += t.html.escaped(buf[pos..], std.mem.sliceTo(&col.name, 0));
     pos += t.html.raw(buf[pos..], "</strong><div class=\"meta\">");
     pos += t.html.uuid(buf[pos..], col.id);
     pos += t.html.raw(buf[pos..], "</div></div>");

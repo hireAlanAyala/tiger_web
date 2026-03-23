@@ -1,7 +1,7 @@
 const std = @import("std");
 const t = @import("../prelude.zig");
 
-pub const Prefetch = struct { existing: ?t.ProductCollection };
+pub const Prefetch = struct { existing: ?t.CollectionRow };
 
 const Context = t.HandlerContext(Prefetch, t.Operation.EventType(.delete_collection), t.Identity);
 
@@ -18,19 +18,24 @@ pub fn route(method: t.http.Method, raw_path: []const u8, body: []const u8) ?t.M
 }
 
 // [prefetch] .delete_collection
-pub fn prefetch(storage: *t.Storage, msg: *const t.Message) ?Prefetch {
-    return .{ .existing = storage.query(t.ProductCollection,
-        "SELECT id, name, active, name_len FROM product_collections WHERE id = ?1;",
+pub fn prefetch(storage: anytype, msg: *const t.Message) ?Prefetch {
+    return .{ .existing = storage.query(t.CollectionRow,
+        "SELECT id, name, active FROM collections WHERE id = ?1;",
         .{msg.id}) };
 }
 
 // [handle] .delete_collection
 pub fn handle(ctx: Context) t.ExecuteResult {
-    var col = ctx.prefetched.existing orelse
+    const row = ctx.prefetched.existing orelse
         return t.ExecuteResult.read_only(t.Message.MessageResponse.not_found);
-    if (!col.flags.active)
+    if (!row.active)
         return t.ExecuteResult.read_only(t.Message.MessageResponse.not_found);
-    col.flags.active = false;
+    // Construct extern ProductCollection for the write
+    var col = std.mem.zeroes(t.ProductCollection);
+    col.id = row.id;
+    @memcpy(col.name[0..std.mem.sliceTo(&row.name, 0).len], std.mem.sliceTo(&row.name, 0));
+    col.name_len = @intCast(std.mem.sliceTo(&row.name, 0).len);
+    col.flags = .{ .active = false };
     return t.ExecuteResult.single(
         .{ .status = .ok, .result = .{ .empty = {} } },
         .{ .update_collection = col },

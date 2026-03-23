@@ -1,7 +1,7 @@
 const std = @import("std");
 const t = @import("../prelude.zig");
 
-pub const Prefetch = struct { order: ?t.OrderResult };
+pub const Prefetch = struct { order: ?t.OrderRow };
 
 const Context = t.HandlerContext(Prefetch, t.Operation.EventType(.get_order), t.Identity);
 
@@ -18,11 +18,10 @@ pub fn route(method: t.http.Method, raw_path: []const u8, body: []const u8) ?t.M
 }
 
 // [prefetch] .get_order
-pub fn prefetch(storage: *t.Storage, msg: *const t.Message) ?Prefetch {
-    // TODO: query order from orders table. For now use typed method.
-    _ = storage;
-    _ = msg;
-    return .{ .order = null };
+pub fn prefetch(storage: anytype, msg: *const t.Message) ?Prefetch {
+    return .{ .order = storage.query(t.OrderRow,
+        "SELECT id, total_cents, items_len, status, timeout_at, payment_ref FROM orders WHERE id = ?1;",
+        .{msg.id}) };
 }
 
 // [handle] .get_order

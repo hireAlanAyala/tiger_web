@@ -1,10 +1,9 @@
 const std = @import("std");
-const assert = std.debug.assert;
 const t = @import("../prelude.zig");
 const get_product = @import("get_product.zig");
 
 pub const Prefetch = struct {
-    products: t.BoundedList(t.Product, t.list_max),
+    products: ?t.BoundedList(t.ProductRow, t.list_max),
 };
 
 const Context = t.HandlerContext(Prefetch, t.Operation.EventType(.list_products), t.Identity);
@@ -25,47 +24,32 @@ pub fn route(method: t.http.Method, raw_path: []const u8, body: []const u8) ?t.M
     if (segments.has_id) return null;
     if (t.parse.query_param(query_string, "q") != null) return null;
 
-    const list_params = parse_list_params(query_string);
-    return t.Message.init(.list_products, 0, 0, list_params);
+    return t.Message.init(.list_products, 0, 0, std.mem.zeroes(t.ListParams));
 }
 
 // [prefetch] .list_products
-pub fn prefetch(storage: *t.Storage, msg: *const t.Message) ?Prefetch {
+pub fn prefetch(storage: anytype, msg: *const t.Message) ?Prefetch {
     _ = msg;
-    const products = storage.query_all(
-        t.Product,
-        t.list_max,
-        "SELECT id, description, name, price_cents, inventory, version, description_len, name_len, active FROM products WHERE active = 1 ORDER BY id LIMIT ?1;",
-        .{@as(u32, t.list_max)},
-    ) orelse return null;
-    return .{ .products = products };
+    return .{ .products = storage.query_all(t.ProductRow, t.list_max,
+        "SELECT id, name, description, price_cents, inventory, version, active FROM products ORDER BY id LIMIT ?1;",
+        .{@as(u32, t.list_max)}) };
 }
 
 // [handle] .list_products
 
 // [render] .list_products
 pub fn render(ctx: Context) t.RenderResult {
+    const products_list = ctx.prefetched.products orelse
+        return ctx.render(.{ .{ "patch", "#product-list", "<div class=\"meta\">No products</div>", "inner" } });
     var buf: [32 * 1024]u8 = undefined;
     var pos: usize = 0;
 
-    for (ctx.prefetched.products.slice()) |*p| {
-        if (!p.flags.active) continue;
+    for (products_list.slice()) |*p| {
+        if (!p.active) continue;
         const card = get_product.render_product_card(buf[pos..], p);
         pos += card.len;
     }
 
-    if (pos == 0) {
-        return ctx.render(.{
-            .{ "patch", "#product-list", "<div class=\"meta\">No products</div>", "inner" },
-        });
-    }
-
-    return ctx.render(.{
-        .{ "patch", "#product-list", buf[0..pos], "inner" },
-    });
-}
-
-fn parse_list_params(query_string: []const u8) t.ListParams {
-    _ = query_string;
-    return std.mem.zeroes(t.ListParams);
+    if (pos == 0) return ctx.render(.{ .{ "patch", "#product-list", "<div class=\"meta\">No products</div>", "inner" } });
+    return ctx.render(.{ .{ "patch", "#product-list", buf[0..pos], "inner" } });
 }

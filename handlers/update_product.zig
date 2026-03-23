@@ -2,7 +2,7 @@ const std = @import("std");
 const t = @import("../prelude.zig");
 
 pub const Prefetch = struct {
-    existing: ?t.Product,
+    existing: ?t.ProductRow,
 };
 
 const Context = t.HandlerContext(Prefetch, t.Operation.EventType(.update_product), t.Identity);
@@ -21,24 +21,24 @@ pub fn route(method: t.http.Method, raw_path: []const u8, body: []const u8) ?t.M
 }
 
 // [prefetch] .update_product
-pub fn prefetch(storage: *t.Storage, msg: *const t.Message) ?Prefetch {
-    return .{ .existing = storage.query(t.Product,
-        "SELECT id, description, name, price_cents, inventory, version, description_len, name_len, active FROM products WHERE id = ?1;",
+pub fn prefetch(storage: anytype, msg: *const t.Message) ?Prefetch {
+    return .{ .existing = storage.query(t.ProductRow,
+        "SELECT id, name, description, price_cents, inventory, version, active FROM products WHERE id = ?1;",
         .{msg.id}) };
 }
 
 // [handle] .update_product
 pub fn handle(ctx: Context) t.ExecuteResult {
-    const existing = ctx.prefetched.existing orelse
+    const row = ctx.prefetched.existing orelse
         return t.ExecuteResult.read_only(t.Message.MessageResponse.not_found);
     const event = ctx.body_val();
 
     // Version check for optimistic concurrency.
-    if (event.version != 0 and event.version != existing.version)
+    if (event.version != 0 and event.version != row.version)
         return t.ExecuteResult.read_only(.{ .status = .version_conflict, .result = .{ .empty = {} } });
 
     var entity = std.mem.zeroes(t.Product);
-    entity.id = existing.id;
+    entity.id = row.id;
     @memcpy(entity.name[0..event.name_len], event.name[0..event.name_len]);
     entity.name_len = event.name_len;
     if (event.description_len > 0)
@@ -46,8 +46,8 @@ pub fn handle(ctx: Context) t.ExecuteResult {
     entity.description_len = event.description_len;
     entity.price_cents = event.price_cents;
     entity.inventory = event.inventory;
-    entity.version = existing.version + 1;
-    entity.flags = existing.flags;
+    entity.version = row.version + 1;
+    entity.flags = .{ .active = row.active };
 
     return t.ExecuteResult.single(
         .{ .status = .ok, .result = .{ .product = entity } },

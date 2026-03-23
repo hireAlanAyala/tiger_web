@@ -3,8 +3,8 @@ const assert = std.debug.assert;
 const t = @import("../prelude.zig");
 
 pub const Prefetch = struct {
-    source: ?t.Product,
-    target: ?t.Product,
+    source: ?t.ProductRow,
+    target: ?t.ProductRow,
 };
 
 const Context = t.HandlerContext(Prefetch, t.Operation.EventType(.transfer_inventory), t.Identity);
@@ -30,29 +30,33 @@ pub fn route(method: t.http.Method, raw_path: []const u8, body: []const u8) ?t.M
 }
 
 // [prefetch] .transfer_inventory
-pub fn prefetch(storage: *t.Storage, msg: *const t.Message) ?Prefetch {
-    const source = storage.query(t.Product,
-        "SELECT id, description, name, price_cents, inventory, version, description_len, name_len, active FROM products WHERE id = ?1;",
-        .{msg.id});
-    const target = storage.query(t.Product,
-        "SELECT id, description, name, price_cents, inventory, version, description_len, name_len, active FROM products WHERE id = ?1;",
-        .{msg.body_as(t.InventoryTransfer).target_id});
-    return .{ .source = source, .target = target };
+pub fn prefetch(storage: anytype, msg: *const t.Message) ?Prefetch {
+    return .{
+        .source = storage.query(t.ProductRow,
+            "SELECT id, name, description, price_cents, inventory, version, active FROM products WHERE id = ?1;",
+            .{msg.id}),
+        .target = storage.query(t.ProductRow,
+            "SELECT id, name, description, price_cents, inventory, version, active FROM products WHERE id = ?1;",
+            .{msg.body_as(t.InventoryTransfer).target_id}),
+    };
 }
 
 // [handle] .transfer_inventory
 pub fn handle(ctx: Context) t.ExecuteResult {
-    var source = ctx.prefetched.source orelse
+    const source_row = ctx.prefetched.source orelse
         return t.ExecuteResult.read_only(t.Message.MessageResponse.not_found);
-    var target = ctx.prefetched.target orelse
+    const target_row = ctx.prefetched.target orelse
         return t.ExecuteResult.read_only(t.Message.MessageResponse.not_found);
 
     const transfer = ctx.body_val();
-    if (source.inventory < transfer.quantity)
+    if (source_row.inventory < transfer.quantity)
         return t.ExecuteResult.read_only(.{ .status = .insufficient_inventory, .result = .{ .empty = {} } });
 
+    var source = row_to_product(source_row);
     source.inventory -= transfer.quantity;
     source.version += 1;
+
+    var target = row_to_product(target_row);
     target.inventory += transfer.quantity;
     target.version += 1;
 
@@ -64,6 +68,22 @@ pub fn handle(ctx: Context) t.ExecuteResult {
     result.writes[0] = .{ .update_product = source };
     result.writes[1] = .{ .update_product = target };
     return result;
+}
+
+fn row_to_product(row: t.ProductRow) t.Product {
+    var p = std.mem.zeroes(t.Product);
+    p.id = row.id;
+    p.price_cents = row.price_cents;
+    p.inventory = row.inventory;
+    p.version = row.version;
+    p.flags = .{ .active = row.active };
+    const name = std.mem.sliceTo(&row.name, 0);
+    @memcpy(p.name[0..name.len], name);
+    p.name_len = @intCast(name.len);
+    const desc = std.mem.sliceTo(&row.description, 0);
+    @memcpy(p.description[0..desc.len], desc);
+    p.description_len = @intCast(desc.len);
+    return p;
 }
 
 // [render] .transfer_inventory

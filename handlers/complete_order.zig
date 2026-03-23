@@ -2,7 +2,7 @@ const std = @import("std");
 const t = @import("../prelude.zig");
 const message = @import("../message.zig");
 
-pub const Prefetch = struct { order_id: u128 };
+pub const Prefetch = struct { order: ?t.OrderRow };
 
 const Context = t.HandlerContext(Prefetch, t.Operation.EventType(.complete_order), t.Identity);
 
@@ -20,9 +20,10 @@ pub fn route(method: t.http.Method, raw_path: []const u8, body: []const u8) ?t.M
 }
 
 // [prefetch] .complete_order
-pub fn prefetch(storage: *t.Storage, msg: *const t.Message) ?Prefetch {
-    _ = storage;
-    return .{ .order_id = msg.id };
+pub fn prefetch(storage: anytype, msg: *const t.Message) ?Prefetch {
+    return .{ .order = storage.query(t.OrderRow,
+        "SELECT id, total_cents, items_len, status, timeout_at, payment_ref FROM orders WHERE id = ?1;",
+        .{msg.id}) };
 }
 
 // [handle] .complete_order
