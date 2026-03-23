@@ -6,7 +6,7 @@ pub const Prefetch = struct {
     products: ?t.BoundedList(t.ProductRow, t.list_max),
 };
 
-const Context = t.HandlerContext(Prefetch, t.Operation.EventType(.list_products), t.Identity);
+pub const Context = t.HandlerContext(Prefetch, t.Operation.EventType(.list_products), t.Identity);
 
 // [route] .list_products
 pub fn route(method: t.http.Method, raw_path: []const u8, body: []const u8) ?t.Message {

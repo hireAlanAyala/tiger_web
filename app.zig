@@ -76,6 +76,144 @@ pub fn translate(method: http.Method, path: []const u8, body: []const u8) ?Messa
     return result;
 }
 
+// =====================================================================
+// Handler dispatch — replaces state_machine.prefetch() + commit()
+//
+// The switch IS the dispatch table (TigerBeetle pattern). No handler
+// maps, no function pointers, no comptime-generated tables. Each arm
+// resolves the concrete handler module and its Prefetch type. The
+// compiler verifies exhaustiveness — adding a new operation without
+// a handler arm is a compile error.
+//
+// Why a switch and not a handler map:
+// - The decision and the code are in the same place
+// - The compiler enforces exhaustiveness
+// - No indirection — you read the arm to see what runs
+// - Matches TigerBeetle's state_machine.zig dispatch exactly
+// =====================================================================
+
+const ReadOnlyStorage = @import("tiger_framework").read_only_storage.ReadOnlyStorage;
+const handler_fw = @import("tiger_framework").handler;
+
+/// Unified prefetch + execute dispatch through handler modules.
+/// Replaces the old two-phase state_machine.prefetch() + commit().
+///
+/// Returns null if prefetch returned busy (storage unavailable).
+/// The caller should skip this message and retry next tick.
+///
+/// Cross-cutting concerns (auth, followup, status counting) are handled
+/// here so handlers don't have to. Same responsibility as the old
+/// state_machine.commit().
+pub fn dispatch(
+    comptime Storage: type,
+    sm: *state_machine.StateMachineType(Storage),
+    msg: Message,
+) ?MessageResponse {
+    // Auth: resolve cookie credential → identity.
+    sm.resolve_credential(msg);
+
+    // Dispatch prefetch + execute through the handler switch.
+    var resp = dispatch_handler(Storage, sm, msg) orelse return null;
+
+    // Cross-cutting: apply auth identity to response.
+    sm.apply_auth_response(&resp);
+
+    // SSE followup: mutations that modify data need a dashboard refresh.
+    if (msg.operation.needs_followup() and resp.followup == null) {
+        resp.followup = .{
+            .operation = msg.operation,
+            .status = resp.status,
+            .user_id = resp.user_id,
+            .kind = resp.kind,
+            .session_action = resp.session_action,
+            .is_new_visitor = resp.is_new_visitor,
+        };
+    }
+
+    // Cross-cutting: count every response status.
+    sm.tracer.count_status(resp.status);
+
+    return resp;
+}
+
+/// The switch — dispatches to the correct handler based on msg.operation.
+/// Each arm calls handler.prefetch() with ReadOnlyStorage, constructs the
+/// HandlerContext, calls handler.handle(), and applies writes.
+///
+/// Returns null if prefetch returns null (storage busy).
+fn dispatch_handler(
+    comptime Storage: type,
+    sm: *state_machine.StateMachineType(Storage),
+    msg: Message,
+) ?MessageResponse {
+    const StateMachine = state_machine.StateMachineType(Storage);
+    return switch (msg.operation) {
+        .root => unreachable,
+        .get_product => dispatch_one(@import("handlers/get_product.zig"), StateMachine, sm, msg),
+        .create_product => dispatch_one(@import("handlers/create_product.zig"), StateMachine, sm, msg),
+        .list_products => dispatch_one(@import("handlers/list_products.zig"), StateMachine, sm, msg),
+        .update_product => dispatch_one(@import("handlers/update_product.zig"), StateMachine, sm, msg),
+        .delete_product => dispatch_one(@import("handlers/delete_product.zig"), StateMachine, sm, msg),
+        .get_product_inventory => dispatch_one(@import("handlers/get_product_inventory.zig"), StateMachine, sm, msg),
+        .search_products => dispatch_one(@import("handlers/search_products.zig"), StateMachine, sm, msg),
+        .transfer_inventory => dispatch_one(@import("handlers/transfer_inventory.zig"), StateMachine, sm, msg),
+        .create_collection => dispatch_one(@import("handlers/create_collection.zig"), StateMachine, sm, msg),
+        .get_collection => dispatch_one(@import("handlers/get_collection.zig"), StateMachine, sm, msg),
+        .list_collections => dispatch_one(@import("handlers/list_collections.zig"), StateMachine, sm, msg),
+        .delete_collection => dispatch_one(@import("handlers/delete_collection.zig"), StateMachine, sm, msg),
+        .add_collection_member => dispatch_one(@import("handlers/add_collection_member.zig"), StateMachine, sm, msg),
+        .remove_collection_member => dispatch_one(@import("handlers/remove_collection_member.zig"), StateMachine, sm, msg),
+        .create_order => dispatch_one(@import("handlers/create_order.zig"), StateMachine, sm, msg),
+        .get_order => dispatch_one(@import("handlers/get_order.zig"), StateMachine, sm, msg),
+        .list_orders => dispatch_one(@import("handlers/list_orders.zig"), StateMachine, sm, msg),
+        .complete_order => dispatch_one(@import("handlers/complete_order.zig"), StateMachine, sm, msg),
+        .cancel_order => dispatch_one(@import("handlers/cancel_order.zig"), StateMachine, sm, msg),
+        .page_load_dashboard => dispatch_one(@import("handlers/page_load_dashboard.zig"), StateMachine, sm, msg),
+        .page_load_login => dispatch_one(@import("handlers/page_load_login.zig"), StateMachine, sm, msg),
+        .request_login_code => dispatch_one(@import("handlers/request_login_code.zig"), StateMachine, sm, msg),
+        .verify_login_code => dispatch_one(@import("handlers/verify_login_code.zig"), StateMachine, sm, msg),
+        .logout => dispatch_one(@import("handlers/logout.zig"), StateMachine, sm, msg),
+    };
+}
+
+/// Execute one handler's full lifecycle: prefetch → handle → apply writes.
+/// The handler's Prefetch type is resolved per-arm by the comptime H parameter.
+///
+/// The HandlerContext is constructed here from the handler's Prefetch type
+/// and the operation's EventType — handlers don't need to export Context.
+fn dispatch_one(
+    comptime H: type,
+    comptime StateMachine: type,
+    sm: *StateMachine,
+    msg: Message,
+) ?MessageResponse {
+    // Prefetch: read from storage through ReadOnlyStorage.
+    const StorageType = @TypeOf(sm.storage.*);
+    const ro = ReadOnlyStorage(StorageType).init(sm.storage);
+    const prefetched = H.prefetch(ro, &msg) orelse return null; // busy
+
+    // Handle: if the handler has a handle function, call it.
+    // Read-only handlers (no handle) return an empty ok response.
+    if (@hasDecl(H, "handle")) {
+        const ctx = H.Context{
+            .prefetched = prefetched,
+            .body = if (H.Context.BodyType == void) {} else msg.body_as(H.Context.BodyType),
+            .identity = sm.prefetch_identity orelse std.mem.zeroes(message.PrefetchIdentity),
+            .render_buf = &.{}, // render not wired yet
+        };
+
+        const exec_result = H.handle(ctx);
+
+        for (exec_result.writes[0..exec_result.writes_len]) |w| {
+            assert(sm.apply_write(w));
+        }
+
+        return exec_result.response;
+    } else {
+        return MessageResponse.empty_ok;
+    }
+}
+
 /// Extract the prefetch cache from the state machine into the protocol struct.
 /// Called after prefetch() succeeds and BEFORE commit(). Commit resets the
 /// cache — calling this after commit returns all-zeros silently.

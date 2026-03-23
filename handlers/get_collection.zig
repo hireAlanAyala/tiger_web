@@ -3,7 +3,7 @@ const t = @import("../prelude.zig");
 
 pub const Prefetch = struct { collection: ?t.CollectionRow };
 
-const Context = t.HandlerContext(Prefetch, t.Operation.EventType(.get_collection), t.Identity);
+pub const Context = t.HandlerContext(Prefetch, t.Operation.EventType(.get_collection), t.Identity);
 
 // [route] .get_collection
 pub fn route(method: t.http.Method, raw_path: []const u8, body: []const u8) ?t.Message {

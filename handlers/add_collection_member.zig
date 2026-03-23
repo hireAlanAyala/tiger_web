@@ -8,7 +8,7 @@ pub const Prefetch = struct {
     product: ?t.ProductRow,
 };
 
-const Context = t.HandlerContext(Prefetch, t.Operation.EventType(.add_collection_member), t.Identity);
+pub const Context = t.HandlerContext(Prefetch, t.Operation.EventType(.add_collection_member), t.Identity);
 
 // [route] .add_collection_member
 pub fn route(method: t.http.Method, raw_path: []const u8, body: []const u8) ?t.Message {

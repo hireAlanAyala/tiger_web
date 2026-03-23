@@ -8,7 +8,7 @@ pub const Prefetch = struct {
     orders: ?t.BoundedList(t.OrderRow, t.list_max),
 };
 
-const Context = t.HandlerContext(Prefetch, t.Operation.EventType(.page_load_dashboard), t.Identity);
+pub const Context = t.HandlerContext(Prefetch, t.Operation.EventType(.page_load_dashboard), t.Identity);
 
 // [route] .page_load_dashboard
 pub fn route(method: t.http.Method, raw_path: []const u8, body: []const u8) ?t.Message {

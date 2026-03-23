@@ -8,7 +8,7 @@ pub const Prefetch = struct {
     order_id: u128,
 };
 
-const Context = t.HandlerContext(Prefetch, t.Operation.EventType(.create_order), t.Identity);
+pub const Context = t.HandlerContext(Prefetch, t.Operation.EventType(.create_order), t.Identity);
 
 // [route] .create_order
 pub fn route(method: t.http.Method, raw_path: []const u8, body: []const u8) ?t.Message {

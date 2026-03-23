@@ -3,7 +3,7 @@ const t = @import("../prelude.zig");
 
 pub const Prefetch = struct { order: ?t.OrderRow };
 
-const Context = t.HandlerContext(Prefetch, t.Operation.EventType(.cancel_order), t.Identity);
+pub const Context = t.HandlerContext(Prefetch, t.Operation.EventType(.cancel_order), t.Identity);
 
 // [route] .cancel_order
 pub fn route(method: t.http.Method, raw_path: []const u8, body: []const u8) ?t.Message {

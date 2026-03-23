@@ -4,7 +4,7 @@ const get_product = @import("get_product.zig");
 
 pub const Prefetch = struct { products: ?t.BoundedList(t.ProductRow, t.list_max) };
 
-const Context = t.HandlerContext(Prefetch, t.Operation.EventType(.search_products), t.Identity);
+pub const Context = t.HandlerContext(Prefetch, t.Operation.EventType(.search_products), t.Identity);
 
 // [route] .search_products
 pub fn route(method: t.http.Method, raw_path: []const u8, body: []const u8) ?t.Message {

@@ -1038,7 +1038,7 @@ pub fn StateMachineType(comptime Storage: type) type {
         /// Resolve credential from the message. Called at the top of commit.
         /// Verifies cookie if present, mints a new identity if absent or invalid.
         /// Does not mutate the message — the resolved identity lives on self.
-        fn resolve_credential(self: *StateMachine, msg: message.Message) void {
+        pub fn resolve_credential(self: *StateMachine, msg: message.Message) void {
             if (msg.credential_slice()) |cv| {
                 if (auth.verify_cookie(cv, self.secret_key)) |verified| {
                     self.prefetch_identity = .{
@@ -1064,7 +1064,7 @@ pub fn StateMachineType(comptime Storage: type) type {
 
         /// Copy resolved identity onto the response. The render layer uses
         /// these structured fields to format Set-Cookie headers.
-        fn apply_auth_response(self: *StateMachine, resp: *message.MessageResponse) void {
+        pub fn apply_auth_response(self: *StateMachine, resp: *message.MessageResponse) void {
             const identity = self.prefetch_identity orelse return;
             resp.user_id = identity.user_id;
             resp.is_authenticated = identity.is_authenticated != 0;

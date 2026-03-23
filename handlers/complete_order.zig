@@ -4,7 +4,7 @@ const message = @import("../message.zig");
 
 pub const Prefetch = struct { order: ?t.OrderRow };
 
-const Context = t.HandlerContext(Prefetch, t.Operation.EventType(.complete_order), t.Identity);
+pub const Context = t.HandlerContext(Prefetch, t.Operation.EventType(.complete_order), t.Identity);
 
 // [route] .complete_order
 pub fn route(method: t.http.Method, raw_path: []const u8, body: []const u8) ?t.Message {
