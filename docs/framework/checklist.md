@@ -11,12 +11,13 @@ After implementing a feature, walk through these before committing.
 - [ ] Preconditions asserted at public entry — private helpers trust the caller
 - [ ] No runtime assert for something comptime can check
 - [ ] No re-checking what a caller already proved (unless pair assertion from a different code path)
+- [ ] Pair assertions where data flows between two code paths (write path → storage → read path). The read side asserts what the write side promised. Example: `bind_param` writes u128 as 16-byte big-endian BLOB; `read_column` asserts `column_type == SQLITE_BLOB` and `column_bytes == 16`. Catches schema drift, column reordering, or a type change on one side without updating the other.
 
 ## Tests
-- [ ] New operation added to auditor
 - [ ] New encoding path covered by fuzzer
 - [ ] New state transition exercised by sim
 - [ ] Worst-case sizing validated (comptime derivation or unit test)
+- [ ] New type in bind_param/read_column has a fixed-input round-trip test and is covered by the seeded round-trip fuzzer
 
 ## Concepts
 - [ ] No intermediate abstraction that just forwards a value without transforming it
