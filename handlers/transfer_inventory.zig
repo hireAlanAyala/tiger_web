@@ -52,11 +52,11 @@ pub fn handle(ctx: Context) t.ExecuteResult {
     if (source_row.inventory < transfer.quantity)
         return t.ExecuteResult.read_only(.{ .status = .insufficient_inventory, .result = .{ .empty = {} } });
 
-    var source = row_to_product(source_row);
+    var source = t.productFromRow(source_row);
     source.inventory -= transfer.quantity;
     source.version += 1;
 
-    var target = row_to_product(target_row);
+    var target = t.productFromRow(target_row);
     target.inventory += transfer.quantity;
     target.version += 1;
 
@@ -68,22 +68,6 @@ pub fn handle(ctx: Context) t.ExecuteResult {
     result.writes[0] = .{ .update_product = source };
     result.writes[1] = .{ .update_product = target };
     return result;
-}
-
-fn row_to_product(row: t.ProductRow) t.Product {
-    var p = std.mem.zeroes(t.Product);
-    p.id = row.id;
-    p.price_cents = row.price_cents;
-    p.inventory = row.inventory;
-    p.version = row.version;
-    p.flags = .{ .active = row.active };
-    const name = std.mem.sliceTo(&row.name, 0);
-    @memcpy(p.name[0..name.len], name);
-    p.name_len = @intCast(name.len);
-    const desc = std.mem.sliceTo(&row.description, 0);
-    @memcpy(p.description[0..desc.len], desc);
-    p.description_len = @intCast(desc.len);
-    return p;
 }
 
 // [render] .transfer_inventory

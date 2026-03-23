@@ -31,15 +31,8 @@ pub fn handle(ctx: Context) t.ExecuteResult {
     if (!row.active)
         return t.ExecuteResult.read_only(t.Message.MessageResponse.not_found);
 
-    var entity = std.mem.zeroes(t.Product);
-    entity.id = row.id;
-    entity.name = row.name;
-    entity.name_len = @intCast(std.mem.sliceTo(&row.name, 0).len);
-    entity.description = row.description;
-    entity.description_len = @intCast(std.mem.sliceTo(&row.description, 0).len);
-    entity.price_cents = row.price_cents;
-    entity.inventory = row.inventory;
-    entity.version = row.version + 1;
+    var entity = t.productFromRow(row);
+    entity.version += 1;
     entity.flags = .{ .active = false };
 
     return t.ExecuteResult.single(

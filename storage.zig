@@ -777,25 +777,28 @@ pub const SqliteStorage = struct {
         assert(c.sqlite3_stmt_readonly(stmt) != 0); // query() called with a mutating statement
 
         if (step_result(stmt) != .row) return null;
-        assert_column_count(T, stmt);
-        return read_row(T, stmt);
+        const mapping = build_column_mapping(T, stmt);
+        return read_row_mapped(T, stmt, mapping);
     }
 
     /// Query multiple rows into a bounded array. Returns null on step error.
+    /// Column→field name mapping is built once on the first row, then reused
+    /// for all subsequent rows — no per-row string comparisons.
     pub fn query_all(self: *SqliteStorage, comptime T: type, comptime max: usize, comptime sql_str: [*:0]const u8, args: anytype) ?BoundedList(T, max) {
         const stmt = self.prepare_and_bind(sql_str, args);
         defer finalize_stmt(stmt);
         assert(c.sqlite3_stmt_readonly(stmt) != 0); // query_all() called with a mutating statement
 
         var result = BoundedList(T, max){};
-        var checked_columns = false;
+        var mapping_built = false;
+        var mapping: ColumnMapping(T) = undefined;
         while (step_result(stmt) == .row) {
-            if (!checked_columns) {
-                assert_column_count(T, stmt);
-                checked_columns = true;
+            if (!mapping_built) {
+                mapping = build_column_mapping(T, stmt);
+                mapping_built = true;
             }
             assert(result.len < max);
-            result.items[result.len] = read_row(T, stmt);
+            result.items[result.len] = read_row_mapped(T, stmt, mapping);
             result.len += 1;
         }
         return result;
@@ -837,24 +840,25 @@ pub const SqliteStorage = struct {
         _ = c.sqlite3_finalize(stmt);
     }
 
-    /// Assert SELECT column count matches struct field count.
-    /// This is the gate — if counts disagree, the query and struct are
-    /// fundamentally mismatched. Name matching (in read_row) handles
-    /// the column-to-field mapping.
-    fn assert_column_count(comptime T: type, stmt: *c.sqlite3_stmt) void {
-        const expected = @typeInfo(T).@"struct".fields.len;
-        const actual: usize = @intCast(c.sqlite3_column_count(stmt));
-        assert(actual == expected); // SELECT column count != struct field count
+    /// Column-to-field mapping array. Built once per query from column
+    /// names, then reused for every row. Avoids O(rows × fields) string
+    /// comparisons in query_all.
+    fn ColumnMapping(comptime T: type) type {
+        return [max_fields(T)]usize;
     }
 
-    /// Read a single row into struct T, matching SQL columns to struct
-    /// fields by name.
+    fn max_fields(comptime T: type) usize {
+        return @typeInfo(T).@"struct".fields.len;
+    }
+
+    /// Build the column→field name mapping on the first row of a query.
+    /// Asserts column count matches field count, and every column name
+    /// matches exactly one struct field name. Called once per query, not
+    /// per row.
     ///
     /// Column order in the SELECT does not need to match field declaration
-    /// order. Each SQL column is matched to a struct field by comparing
-    /// sqlite3_column_name() to the field name. Use AS aliases in SQL
-    /// when the column name differs from the field name (e.g.,
-    /// "SELECT active AS active FROM ..." for a bool field).
+    /// order. Use AS aliases when the column name differs from the field
+    /// name (e.g., "SELECT active AS active FROM ...").
     ///
     /// This design exists because:
     /// - Position-based mapping silently corrupts data when columns are
@@ -864,14 +868,12 @@ pub const SqliteStorage = struct {
     ///   framework matches them. See docs/plans/storage-boundary.md.
     /// - This is sidecar-language-agnostic: every language maps query
     ///   results to structs by column name. The Zig framework does the same.
-    fn read_row(comptime T: type, stmt: *c.sqlite3_stmt) T {
-        var result: T = std.mem.zeroes(T);
+    fn build_column_mapping(comptime T: type, stmt: *c.sqlite3_stmt) ColumnMapping(T) {
         const fields = @typeInfo(T).@"struct".fields;
         const col_count: usize = @intCast(c.sqlite3_column_count(stmt));
+        assert(col_count == fields.len); // SELECT column count != struct field count
 
-        // Build a column index → field index mapping.
-        // For each SQL column, find the struct field with the same name.
-        var col_to_field: [fields.len]?usize = .{null} ** fields.len;
+        var mapping: ColumnMapping(T) = undefined;
         for (0..col_count) |col_idx| {
             const col: c_int = @intCast(col_idx);
             const sql_name_ptr: [*c]const u8 = c.sqlite3_column_name(stmt, col);
@@ -881,23 +883,26 @@ pub const SqliteStorage = struct {
             var matched = false;
             inline for (fields, 0..) |field, field_idx| {
                 if (std.mem.eql(u8, sql_name, field.name)) {
-                    assert(col_to_field[col_idx] == null); // duplicate column name
-                    col_to_field[col_idx] = field_idx;
+                    mapping[col_idx] = field_idx;
                     matched = true;
                 }
             }
             assert(matched); // SQL column has no matching struct field
         }
 
-        // Every field must be covered by exactly one column.
-        // Column count == field count (asserted by caller) + every column
-        // matched (asserted above) guarantees every field is covered.
-        // No separate check needed — pigeonhole principle.
+        // Pigeonhole: col_count == fields.len + every column matched a
+        // unique field → every field is covered. No separate check needed.
+        return mapping;
+    }
 
-        // Read each column into its matched field.
-        for (0..col_count) |col_idx| {
+    /// Read a single row using a precomputed column→field mapping.
+    fn read_row_mapped(comptime T: type, stmt: *c.sqlite3_stmt, mapping: ColumnMapping(T)) T {
+        var result: T = std.mem.zeroes(T);
+        const fields = @typeInfo(T).@"struct".fields;
+
+        for (0..fields.len) |col_idx| {
             const col: c_int = @intCast(col_idx);
-            const field_idx = col_to_field[col_idx].?;
+            const field_idx = mapping[col_idx];
             inline for (fields, 0..) |_, fi| {
                 if (fi == field_idx) {
                     @field(result, fields[fi].name) = read_column(fields[fi].type, stmt, col);

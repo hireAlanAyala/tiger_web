@@ -114,8 +114,39 @@ pub fn main(_: std.mem.Allocator, args: FuzzArgs) !void {
         coverage.record(operation);
         features.record_message(msg, resp);
 
-        // Track created entity IDs for future message generation.
+        // Track created entity IDs and verify structural invariants.
         tracker.on_commit(msg, resp);
+
+        // Cross-operation probe: after a successful create, immediately
+        // get the entity back and assert it exists. Catches write-then-read
+        // bugs where the storage accepted the write but can't find it.
+        // Only fires when no faults are injected (prefetch succeeds).
+        if (resp.status == .ok) {
+            switch (msg.operation) {
+                .create_product => {
+                    const probe = message.Message.init(.get_product, resp.result.product.id, 1, {});
+                    if (sm.prefetch(probe)) {
+                        const probe_resp = sm.commit(probe);
+                        assert(probe_resp.status == .ok or probe_resp.status == .storage_error);
+                    }
+                },
+                .create_collection => {
+                    const probe = message.Message.init(.get_collection, resp.result.collection.collection.id, 1, {});
+                    if (sm.prefetch(probe)) {
+                        const probe_resp = sm.commit(probe);
+                        assert(probe_resp.status == .ok or probe_resp.status == .storage_error);
+                    }
+                },
+                .create_order => {
+                    const probe = message.Message.init(.get_order, resp.result.order.id, 1, {});
+                    if (sm.prefetch(probe)) {
+                        const probe_resp = sm.commit(probe);
+                        assert(probe_resp.status == .ok or probe_resp.status == .storage_error);
+                    }
+                },
+                else => {},
+            }
+        }
     }
 
     coverage.assert_full_coverage(op_weights);
@@ -170,12 +201,25 @@ pub const IdTracker = struct {
         };
     }
 
+    /// Track created IDs and verify structural response invariants.
+    ///
+    /// This is NOT domain validation (that's user-space). These are
+    /// framework-level structural invariants:
+    /// - create returns the entity that was created (id matches)
+    /// - get of a known-created entity returns ok or not_found (not garbage)
+    /// - status is a valid enum value (not undefined)
+    /// - response result tag matches the operation's expected result type
     pub fn on_commit(self: *IdTracker, msg: message.Message, resp: message.MessageResponse) void {
         if (resp.status == .storage_error) return;
+
+        // Structural: status must be a known value (not undefined bits).
+        _ = @tagName(resp.status);
 
         switch (msg.operation) {
             .create_product => {
                 if (resp.status == .ok) {
+                    // Create returns the entity — ID must match what was sent.
+                    assert(resp.result.product.id == msg.body_as(message.Product).id);
                     self.product_count += 1;
                     if (self.product_id_count < id_pool_capacity) {
                         self.product_ids[self.product_id_count] = resp.result.product.id;
@@ -183,8 +227,23 @@ pub const IdTracker = struct {
                     }
                 }
             },
+            .get_product, .get_product_inventory => {
+                // Get must return ok or not_found — never a create-style status.
+                assert(resp.status == .ok or resp.status == .not_found);
+            },
+            .update_product => {
+                assert(resp.status == .ok or resp.status == .not_found or resp.status == .version_conflict);
+                if (resp.status == .ok) {
+                    // Update returns the entity — ID must match the request.
+                    assert(resp.result.product.id == msg.id);
+                }
+            },
+            .delete_product => {
+                assert(resp.status == .ok or resp.status == .not_found);
+            },
             .create_collection => {
                 if (resp.status == .ok) {
+                    assert(resp.result.collection.collection.id == msg.body_as(message.ProductCollection).id);
                     self.collection_count += 1;
                     if (self.collection_id_count < id_pool_capacity) {
                         self.collection_ids[self.collection_id_count] = resp.result.collection.collection.id;
@@ -192,8 +251,12 @@ pub const IdTracker = struct {
                     }
                 }
             },
+            .get_collection => {
+                assert(resp.status == .ok or resp.status == .not_found);
+            },
             .create_order => {
                 if (resp.status == .ok) {
+                    assert(resp.result.order.id == msg.body_as(message.OrderRequest).id);
                     self.order_count += 1;
                     if (self.order_id_count < id_pool_capacity) {
                         self.order_ids[self.order_id_count] = resp.result.order.id;
@@ -201,8 +264,14 @@ pub const IdTracker = struct {
                     }
                 }
             },
+            .get_order => {
+                assert(resp.status == .ok or resp.status == .not_found);
+            },
             .add_collection_member => {
                 if (resp.status == .ok) self.membership_count += 1;
+            },
+            .transfer_inventory => {
+                assert(resp.status == .ok or resp.status == .not_found or resp.status == .insufficient_inventory);
             },
             else => {},
         }

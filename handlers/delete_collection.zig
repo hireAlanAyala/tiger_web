@@ -30,11 +30,7 @@ pub fn handle(ctx: Context) t.ExecuteResult {
         return t.ExecuteResult.read_only(t.Message.MessageResponse.not_found);
     if (!row.active)
         return t.ExecuteResult.read_only(t.Message.MessageResponse.not_found);
-    // Construct extern ProductCollection for the write
-    var col = std.mem.zeroes(t.ProductCollection);
-    col.id = row.id;
-    @memcpy(col.name[0..std.mem.sliceTo(&row.name, 0).len], std.mem.sliceTo(&row.name, 0));
-    col.name_len = @intCast(std.mem.sliceTo(&row.name, 0).len);
+    var col = t.collectionFromRow(row);
     col.flags = .{ .active = false };
     return t.ExecuteResult.single(
         .{ .status = .ok, .result = .{ .empty = {} } },
