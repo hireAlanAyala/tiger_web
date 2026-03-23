@@ -35,6 +35,11 @@ pub fn prefetch(storage: anytype, msg: *const t.Message) ?Prefetch {
 }
 
 // [handle] .page_load_dashboard
+pub fn handle(ctx: Context) t.ExecuteResult {
+    _ = ctx;
+    return t.ExecuteResult.read_only(t.HandlerResponse.ok);
+}
+
 
 // [render] .page_load_dashboard
 pub fn render(ctx: Context) t.RenderResult {

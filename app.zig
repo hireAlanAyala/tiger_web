@@ -270,10 +270,6 @@ fn execute_one(
     fw: anytype,
 ) state_machine.ExecuteResult {
     const prefetched = @field(cache, @tagName(op));
-
-    if (!@hasDecl(H, "handle"))
-        return state_machine.ExecuteResult.read_only(message.HandlerResponse.ok);
-
     const ctx = H.Context{
         .prefetched = prefetched,
         .body = if (H.Context.BodyType == void) {} else msg.body_as(H.Context.BodyType),

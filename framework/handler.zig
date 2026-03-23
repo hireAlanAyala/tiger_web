@@ -135,9 +135,14 @@ pub fn ValidateHandler(
         }
     }
 
-    // --- Validate handle (optional — missing means read-only) ---
-    const has_handle = @hasDecl(handler, "handle");
-    if (has_handle) {
+    // --- Validate handle (required) ---
+    // Every handler must export handle(). The handler decides the status —
+    // the framework can't guess. Even read-only handlers must declare
+    // "this always succeeds" explicitly. No default ok, no silent guessing.
+    if (!@hasDecl(handler, "handle")) {
+        @compileError("handler for ." ++ op_name ++ " must export a handle function");
+    }
+    {
         const info = @typeInfo(@TypeOf(handler.handle)).@"fn";
         if (info.params.len < 1) {
             @compileError("handler for ." ++ op_name ++ ": handle must accept (ctx)");
@@ -181,7 +186,6 @@ pub fn ValidateHandler(
         pub const Context = Ctx;
         pub const PrefetchType = Prefetch;
         pub const BodyType = Body;
-        pub const is_read_only = !has_handle;
     };
 }
 
@@ -314,14 +318,17 @@ const MockOp = enum(u8) {
 
 const MockReadOnlyHandler = struct {
     pub const Prefetch = struct { product: ?u32 };
-    const Ctx = HandlerContext(Prefetch, void, MockIdentity);
+    pub const Context = HandlerContext(Prefetch, void, MockIdentity);
     pub fn route(_: @import("http.zig").Method, _: []const u8, _: []const u8) ?MockMessage {
         return null;
     }
     pub fn prefetch() ?Prefetch {
         return null;
     }
-    pub fn render(ctx: Ctx) effects.RenderResult {
+    pub fn handle(_: Context) MockExecuteResult {
+        return .{ .response = .{ .status = 1 }, .writes = .{0}, .writes_len = 0 };
+    }
+    pub fn render(ctx: Context) effects.RenderResult {
         return ctx.render(.{});
     }
 };
@@ -347,13 +354,11 @@ const MockMutationHandler = struct {
 
 test "ValidateHandler read-only" {
     const V = ValidateHandler(MockReadOnlyHandler, MockOp.get_thing, MockIdentity, MockMessage, MockExecuteResult);
-    try std.testing.expect(V.is_read_only);
     try std.testing.expect(V.PrefetchType == MockReadOnlyHandler.Prefetch);
     try std.testing.expect(V.BodyType == void);
 }
 
 test "ValidateHandler mutation" {
     const V = ValidateHandler(MockMutationHandler, MockOp.create_thing, MockIdentity, MockMessage, MockExecuteResult);
-    try std.testing.expect(!V.is_read_only);
     try std.testing.expect(V.BodyType == MockBody);
 }

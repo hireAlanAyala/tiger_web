@@ -25,6 +25,12 @@ pub fn prefetch(storage: anytype, msg: *const t.Message) ?Prefetch {
 }
 
 // [handle] .get_order
+pub fn handle(ctx: Context) t.ExecuteResult {
+    if (ctx.prefetched.order == null)
+        return t.ExecuteResult.read_only(t.HandlerResponse.not_found);
+    return t.ExecuteResult.read_only(t.HandlerResponse.ok);
+}
+
 
 // [render] .get_order
 pub fn render(ctx: Context) t.RenderResult {

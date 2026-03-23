@@ -21,6 +21,11 @@ pub fn prefetch(storage: anytype, msg: *const t.Message) ?Prefetch {
 }
 
 // [handle] .logout
+pub fn handle(ctx: Context) t.ExecuteResult {
+    _ = ctx;
+    return t.ExecuteResult.read_only(.{ .status = .ok, .session_action = .clear });
+}
+
 
 // [render] .logout
 pub fn render(ctx: Context) t.RenderResult {
