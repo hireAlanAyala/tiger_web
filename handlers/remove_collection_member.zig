@@ -24,7 +24,7 @@ pub fn prefetch(storage: anytype, msg: *const t.Message) ?Prefetch {
         .collection_id = msg.id,
         .product_id = msg.body_as(u128).*,
         .collection = storage.query(t.CollectionRow,
-            "SELECT id, name, active FROM product_collections WHERE id = ?1;", .{msg.id}),
+            "SELECT id, name, active FROM collections WHERE id = ?1;", .{msg.id}),
     };
 }
 

@@ -30,7 +30,7 @@ pub fn prefetch(storage: anytype, msg: *const t.Message) ?Prefetch {
         .collection_id = msg.id,
         .product_id = product_id,
         .collection = storage.query(t.CollectionRow,
-            "SELECT id, name, active FROM product_collections WHERE id = ?1;", .{msg.id}),
+            "SELECT id, name, active FROM collections WHERE id = ?1;", .{msg.id}),
         .product = storage.query(t.ProductRow,
             "SELECT id, name, description, price_cents, inventory, version, active FROM products WHERE id = ?1;",
             .{product_id}),
