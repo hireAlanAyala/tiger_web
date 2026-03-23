@@ -101,6 +101,10 @@ pub fn input_valid(msg: message.Message) bool {
         .create_product => {
             const p = msg.body_as(message.Product);
             if (p.id == 0) return false;
+            // msg.id must agree with body ID or be 0.
+            // Route sets msg.id = body.id. Tests may set msg.id = 0.
+            // Disagreement (msg.id = X, body.id = Y, X != Y) is invalid.
+            if (msg.id != 0 and msg.id != p.id) return false;
             if (p.name_len == 0 or p.name_len > message.product_name_max) return false;
             if (p.description_len > message.product_description_max) return false;
             if (p.flags.padding != 0) return false;
@@ -119,6 +123,7 @@ pub fn input_valid(msg: message.Message) bool {
         .create_collection => {
             const col = msg.body_as(message.ProductCollection);
             if (col.id == 0) return false;
+            if (msg.id != 0 and msg.id != col.id) return false;
             if (col.name_len == 0 or col.name_len > message.collection_name_max) return false;
             if (col.flags.padding != 0) return false;
             if (!stdx.zeroed(&col.reserved)) return false;
@@ -133,6 +138,7 @@ pub fn input_valid(msg: message.Message) bool {
         .create_order => {
             const order = msg.body_as(message.OrderRequest);
             if (order.id == 0) return false;
+            if (msg.id != 0 and msg.id != order.id) return false;
             if (order.items_len == 0) return false;
             if (order.items_len > message.order_items_max) return false;
             for (order.items_slice()) |item| {
