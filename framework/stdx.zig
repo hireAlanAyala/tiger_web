@@ -251,3 +251,21 @@ fn has_pointers(comptime T: type) bool {
         },
     }
 }
+
+/// Fixed-capacity list backed by an array. No allocations.
+/// Used as the return type for multi-row queries (query_all).
+///
+/// Framework-owned, not storage-owned. BoundedList is a query result
+/// shape — how the framework returns bounded result sets. Storage
+/// backends fill it, handlers consume it. If it lived on Storage,
+/// every new backend would have to redefine the same type.
+pub fn BoundedList(comptime T: type, comptime max: usize) type {
+    return struct {
+        items: [max]T = undefined,
+        len: usize = 0,
+
+        pub fn slice(self: *const @This()) []const T {
+            return self.items[0..self.len];
+        }
+    };
+}

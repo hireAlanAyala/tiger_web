@@ -20,7 +20,7 @@ After implementing a feature, walk through these before committing.
 - [ ] New type in bind_param/read_column has a fixed-input round-trip test and is covered by the seeded round-trip fuzzer
 
 ## Concepts
-- [ ] No intermediate abstraction that just forwards a value without transforming it
+- [ ] No intermediate abstraction that just forwards a value without transforming it (exception: capability restriction wrappers like ReadOnlyStorage that subtract methods are structural, not indirection)
 - [ ] Decision made at the layer that has the information (not forwarded through a wrapper)
 
 ## Hardening

@@ -45,7 +45,7 @@ pub const order_items_max = message.order_items_max;
 
 // --- Storage ---
 pub const Storage = @import("storage.zig").SqliteStorage;
-pub const BoundedList = Storage.BoundedList;
+pub const BoundedList = fw.stdx.BoundedList;
 
 // --- State machine types (for handle phase) ---
 pub const ExecuteResult = sm.StateMachineType(Storage).ExecuteResult;

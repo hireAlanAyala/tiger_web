@@ -43,4 +43,5 @@ pub const parse = @import("parse.zig");
 pub const effects = @import("effects.zig");
 pub const handler = @import("handler.zig");
 pub const app = @import("app.zig");
+pub const read_only_storage = @import("read_only_storage.zig");
 // bench.zig requires build-time bench_options — import directly, not through the module.

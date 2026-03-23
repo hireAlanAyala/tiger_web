@@ -25,6 +25,7 @@ const assert = std.debug.assert;
 const message = @import("message.zig");
 const state_machine = @import("state_machine.zig");
 const StorageResult = state_machine.StorageResult;
+const stdx = @import("tiger_framework").stdx;
 const marks = @import("tiger_framework").marks;
 const log = marks.wrap_log(std.log.scoped(.storage));
 
@@ -810,16 +811,9 @@ pub const SqliteStorage = struct {
         return step_result(stmt) == .done;
     }
 
-    pub fn BoundedList(comptime T: type, comptime max: usize) type {
-        return struct {
-            items: [max]T = undefined,
-            len: usize = 0,
-
-            pub fn slice(self: *const @This()) []const T {
-                return self.items[0..self.len];
-            }
-        };
-    }
+    /// Re-export framework's BoundedList so existing callers of
+    /// SqliteStorage.BoundedList continue to work during migration.
+    pub const BoundedList = stdx.BoundedList;
 
     /// Prepare and bind a SQL statement. The SQL string is comptime — if
     /// prepare fails, the schema and code disagree. That's a programming
