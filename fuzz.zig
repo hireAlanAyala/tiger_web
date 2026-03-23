@@ -1,8 +1,12 @@
 //! Message-level state machine fuzzer.
 //!
 //! Bypasses HTTP parsing — generates random Message structs and calls
-//! prefetch/commit directly. Matches TigerBeetle's state_machine_fuzz.zig
-//! pattern: library called by fuzz_tests.zig dispatcher.
+//! prefetch/commit directly. Exercises framework invariants (prefetch/
+//! execute ordering, fault handling, input validation) with PRNG-driven
+//! fault injection on MemoryStorage.
+//!
+//! Does NOT validate domain correctness — that's a user-space concern.
+//! See docs/plans/storage-boundary.md.
 
 const std = @import("std");
 const assert = std.debug.assert;
@@ -14,7 +18,6 @@ const fuzz_lib = @import("fuzz_lib.zig");
 const FuzzArgs = fuzz_lib.FuzzArgs;
 const MemoryStorage = state_machine.MemoryStorage;
 const StateMachine = state_machine.StateMachineType(MemoryStorage);
-const Auditor = @import("auditor.zig").Auditor;
 const PRNG = @import("tiger_framework").prng;
 
 const fuzz_test_key: *const [auth.key_length]u8 = "tiger-web-test-key-0123456789ab!";
@@ -49,7 +52,7 @@ pub fn int_edge_biased(prng: *PRNG, comptime T: type) T {
     }
 }
 
-pub fn main(allocator: std.mem.Allocator, args: FuzzArgs) !void {
+pub fn main(_: std.mem.Allocator, args: FuzzArgs) !void {
     const seed = args.seed;
     const events_max = args.events_max orelse 50_000;
     var prng = PRNG.from_seed(seed);
@@ -76,10 +79,10 @@ pub fn main(allocator: std.mem.Allocator, args: FuzzArgs) !void {
     var sm = StateMachine.init(&storage, false, seed, fuzz_test_key);
     sm.now = 1_700_000_000;
 
-    // Auditor: independent reference model that validates every response.
-    // Tracks entity state and provides ID pools for message generation.
-    var auditor = try Auditor.init(allocator);
-    defer auditor.deinit(allocator);
+    // ID tracker: lightweight pool for generating messages that reference
+    // existing entities. No domain validation — just remembers IDs that
+    // were successfully created so subsequent operations target real entities.
+    var tracker = IdTracker{};
 
     // Swarm testing: random weights per seed so different seeds stress
     // different operation mixes (TigerBeetle workload pattern).
@@ -97,9 +100,9 @@ pub fn main(allocator: std.mem.Allocator, args: FuzzArgs) !void {
 
         log.debug("Running fuzz_ops[{}/{}] == {s}", .{ event_i, events_max, @tagName(operation) });
 
-        if (auditor.at_capacity(operation)) continue;
+        if (tracker.at_capacity(operation)) continue;
 
-        const msg = gen_message(&prng, operation, auditor.id_pools()) orelse continue;
+        const msg = gen_message(&prng, operation, tracker.pools()) orelse continue;
 
         // Gate: skip invalid inputs — matches TB's input_valid pattern.
         if (!StateMachine.input_valid(msg)) continue;
@@ -111,14 +114,100 @@ pub fn main(allocator: std.mem.Allocator, args: FuzzArgs) !void {
         coverage.record(operation);
         features.record_message(msg, resp);
 
-        // Auditor validates the response against its model, then updates
-        // its state. On storage_error (injected fault), skips validation.
-        auditor.on_commit(msg, resp);
+        // Track created entity IDs for future message generation.
+        tracker.on_commit(msg, resp);
     }
 
     coverage.assert_full_coverage(op_weights);
     features.assert_full_coverage(&coverage);
 }
+
+// =====================================================================
+// IdTracker — lightweight entity ID pool for message generation.
+//
+// Remembers IDs of successfully created entities so the fuzzer can
+// generate operations that target existing entities (get, update,
+// delete, transfer). No domain validation, no state tracking — just
+// IDs and capacity awareness.
+// =====================================================================
+
+pub const IdTracker = struct {
+    product_ids: [id_pool_capacity]u128 = undefined,
+    product_id_count: u32 = 0,
+    collection_ids: [id_pool_capacity]u128 = undefined,
+    collection_id_count: u32 = 0,
+    order_ids: [id_pool_capacity]u128 = undefined,
+    order_id_count: u32 = 0,
+
+    // Counts for capacity gating — prevents MemoryStorage from filling
+    // up, which would cause all creates to fail and starve the fuzzer.
+    product_count: u32 = 0,
+    collection_count: u32 = 0,
+    order_count: u32 = 0,
+    membership_count: u32 = 0,
+
+    pub fn pools(self: *const IdTracker) IdPools {
+        return .{
+            .product_ids = self.product_ids[0..self.product_id_count],
+            .collection_ids = self.collection_ids[0..self.collection_id_count],
+            .order_ids = self.order_ids[0..self.order_id_count],
+        };
+    }
+
+    pub fn at_capacity(self: *const IdTracker, operation: message.Operation) bool {
+        const threshold = struct {
+            fn f(comptime cap: u32) u32 {
+                return cap - cap / 8;
+            }
+        }.f;
+        return switch (operation) {
+            .root => unreachable,
+            .create_product => self.product_count >= threshold(MemoryStorage.product_capacity),
+            .create_collection => self.collection_count >= threshold(MemoryStorage.collection_capacity),
+            .create_order => self.order_count >= threshold(MemoryStorage.order_capacity),
+            .add_collection_member => self.membership_count >= threshold(MemoryStorage.membership_capacity),
+            else => false,
+        };
+    }
+
+    pub fn on_commit(self: *IdTracker, msg: message.Message, resp: message.MessageResponse) void {
+        if (resp.status == .storage_error) return;
+
+        switch (msg.operation) {
+            .create_product => {
+                if (resp.status == .ok) {
+                    self.product_count += 1;
+                    if (self.product_id_count < id_pool_capacity) {
+                        self.product_ids[self.product_id_count] = resp.result.product.id;
+                        self.product_id_count += 1;
+                    }
+                }
+            },
+            .create_collection => {
+                if (resp.status == .ok) {
+                    self.collection_count += 1;
+                    if (self.collection_id_count < id_pool_capacity) {
+                        self.collection_ids[self.collection_id_count] = resp.result.collection.collection.id;
+                        self.collection_id_count += 1;
+                    }
+                }
+            },
+            .create_order => {
+                if (resp.status == .ok) {
+                    self.order_count += 1;
+                    if (self.order_id_count < id_pool_capacity) {
+                        self.order_ids[self.order_id_count] = resp.result.order.id;
+                        self.order_id_count += 1;
+                    }
+                }
+            },
+            .add_collection_member => {
+                if (resp.status == .ok) self.membership_count += 1;
+            },
+            else => {},
+        }
+    }
+};
 
 /// Tracks which operations were actually committed during a fuzz run.
 /// Asserts full coverage at the end — catches gen_message handlers that
@@ -301,9 +390,7 @@ pub fn gen_product_with_id(prng: *PRNG, id: u128) message.Product {
     p.inventory = prng.range_inclusive(u32, 0, 10_000);
     p.version = 1;
     p.flags = .{ .active = prng.boolean() };
-    // Name: 1..name_max random UTF-8 chars.
     p.name_len = @intCast(gen_utf8_text(prng, &p.name, 1, message.product_name_max));
-    // Description: 0..desc_max random UTF-8 chars.
     const desc_len = gen_utf8_text(prng, &p.description, 0, message.product_description_max);
     p.description_len = @intCast(desc_len);
     return p;
@@ -323,7 +410,6 @@ pub fn gen_order(prng: *PRNG, product_ids: []const u128) message.OrderRequest {
     const max_items: u8 = @intCast(@min(message.order_items_max, product_ids.len));
     order.items_len = prng.range_inclusive(u8, 1, max_items);
 
-    // Track used product indices to avoid duplicate product_ids.
     var used: [message.order_items_max]usize = undefined;
     var used_count: u8 = 0;
 
@@ -355,8 +441,6 @@ pub fn gen_order(prng: *PRNG, product_ids: []const u128) message.OrderRequest {
 
 /// Generate a message with random fields — likely invalid, exercises input_valid.
 pub fn gen_random_message(prng: *PRNG, operation: message.Operation) message.Message {
-    // Use random scalars for each field rather than prng.fill on the whole
-    // struct — avoids undefined behavior from invalid enum/bool bit patterns.
     const id = prng.int(u128);
     const user_id = prng.int(u128) | 1;
     const M = message.Message;
@@ -465,7 +549,6 @@ pub fn gen_utf8_text(prng: *PRNG, buf: []u8, min_len: u16, max_len: u16) u16 {
 
     const use_multibyte = prng.chance(PRNG.ratio(3, 10));
     if (!use_multibyte) {
-        // Pure ASCII — fast path.
         const len = prng.range_inclusive(u16, min_len, max_len);
         for (buf[0..len]) |*c| {
             c.* = 'a' + @as(u8, @intCast(prng.int_inclusive(u8, 25)));
@@ -473,29 +556,22 @@ pub fn gen_utf8_text(prng: *PRNG, buf: []u8, min_len: u16, max_len: u16) u16 {
         return len;
     }
 
-    // Mixed: fill with a combination of 1, 2, and 3-byte sequences.
-    // Sample codepoints from common non-ASCII ranges.
     var pos: u16 = 0;
     while (pos < min_len or (pos < max_len and prng.boolean())) {
         const remaining = max_len - pos;
         if (remaining == 0) break;
 
-        // Choose a codepoint class based on remaining space.
         const cp: u21 = if (remaining >= 3 and prng.chance(PRNG.ratio(1, 4)))
-            // 3-byte: CJK, Cyrillic supplement, common symbols (U+0800..U+9FFF)
             prng.range_inclusive(u21, 0x0800, 0x9FFF)
         else if (remaining >= 2 and prng.chance(PRNG.ratio(1, 3)))
-            // 2-byte: Latin extended, Greek, Cyrillic, accented (U+00C0..U+07FF)
             prng.range_inclusive(u21, 0x00C0, 0x07FF)
         else
-            // ASCII
             @as(u21, 'a') + prng.int_inclusive(u21, 25);
 
         const seq_len = std.unicode.utf8Encode(cp, buf[pos..max_len]) catch break;
         pos += @intCast(seq_len);
     }
 
-    // Ensure minimum length — pad with ASCII if needed.
     while (pos < min_len) {
         buf[pos] = 'a' + @as(u8, @intCast(prng.int_inclusive(u8, 25)));
         pos += 1;

@@ -19,7 +19,6 @@ const log = std.log.scoped(.fuzz);
 const Fuzzers = .{
     .state_machine = @import("fuzz.zig"),
     .codec = @import("codec_fuzz.zig"),
-    .storage = @import("storage_fuzz.zig"),
     .render = @import("render_fuzz.zig"),
     .replay = @import("replay_fuzz.zig"),
     .sidecar = @import("sidecar_fuzz.zig"),
@@ -58,7 +57,6 @@ fn main_smoke() !void {
             .smoke => continue,
             .state_machine => 10_000,
             .codec => 10_000,
-            .storage => 10_000,
             .render => 10_000,
             .replay => 5_000,
             .sidecar => 5_000,

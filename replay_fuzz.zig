@@ -19,7 +19,6 @@ const MemoryStorage = state_machine.MemoryStorage;
 const SqliteStorage = @import("storage.zig").SqliteStorage;
 const Wal = @import("tiger_framework").wal.WalType(message.Message, message.wal_root);
 const replay_mod = @import("replay.zig");
-const Auditor = @import("auditor.zig").Auditor;
 const fuzz_lib = @import("fuzz_lib.zig");
 const FuzzArgs = fuzz_lib.FuzzArgs;
 const PRNG = @import("tiger_framework").prng;
@@ -33,7 +32,7 @@ const log = std.log.scoped(.fuzz);
 const MemSM = state_machine.StateMachineType(MemoryStorage);
 const SqlSM = state_machine.StateMachineType(SqliteStorage);
 
-pub fn main(allocator: std.mem.Allocator, args: FuzzArgs) !void {
+pub fn main(_: std.mem.Allocator, args: FuzzArgs) !void {
     const seed = args.seed;
     const events_max = args.events_max orelse 10_000;
     var prng = PRNG.from_seed(seed);
@@ -45,8 +44,7 @@ pub fn main(allocator: std.mem.Allocator, args: FuzzArgs) !void {
     var mem_sm = MemSM.init(&mem_storage, false, seed, replay_fuzz_test_key);
     mem_sm.now = 1_700_000_000;
 
-    var auditor = try Auditor.init(allocator);
-    defer auditor.deinit(allocator);
+    var tracker = gen.IdTracker{};
 
     // Only mutations enter the WAL — filter to mutation operations only.
     var op_weights = fuzz_lib.random_enum_weights(&prng, message.Operation);
@@ -81,9 +79,9 @@ pub fn main(allocator: std.mem.Allocator, args: FuzzArgs) !void {
 
             const operation = prng.enum_weighted(message.Operation, op_weights);
 
-            if (auditor.at_capacity(operation)) continue;
+            if (tracker.at_capacity(operation)) continue;
 
-            const msg = gen.gen_message(&prng, operation, auditor.id_pools()) orelse continue;
+            const msg = gen.gen_message(&prng, operation, tracker.pools()) orelse continue;
 
             if (!MemSM.input_valid(msg)) continue;
 
@@ -91,7 +89,7 @@ pub fn main(allocator: std.mem.Allocator, args: FuzzArgs) !void {
             if (!mem_sm.prefetch(msg)) @panic("prefetch returned busy with no faults");
 
             const resp = mem_sm.commit(msg);
-            auditor.on_commit(msg, resp);
+            tracker.on_commit(msg, resp);
 
             // All operations reaching here are mutations (non-mutation weights
             // are zeroed) with no fault injection (MemoryStorage has no prng).

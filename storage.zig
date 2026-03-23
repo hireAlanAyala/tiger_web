@@ -1,3 +1,25 @@
+//! SqliteStorage — production storage backend backed by SQLite.
+//!
+//! Responsibilities:
+//!   1. Translate domain operations into SQL. Prepared statements, parameter
+//!      binding (never interpolation), WAL mode for concurrent reads.
+//!   2. Map SQL results back to Zig structs. Column-to-field mapping by
+//!      declaration order, with assert_column_count as a boundary check.
+//!   3. Report availability honestly. Returns busy/err/corruption so the
+//!      framework can retry or degrade — never panics on transient failures.
+//!
+//! NOT responsibilities:
+//!   - Verifying SQL correctness against a reference model. We trust SQLite
+//!     to execute SQL correctly. See docs/plans/storage-boundary.md.
+//!   - Domain logic. This file knows table schemas, not business rules.
+//!     Whether an inventory transfer preserves totals is the handler's
+//!     concern, not storage's.
+//!
+//! The typed SQL interface (query/execute/query_all) is the forward path —
+//! new handlers use it exclusively. The legacy prepared-statement methods
+//! (get/put/list/etc.) exist for the old state_machine dispatch and will
+//! be removed as handlers migrate to the new API.
+
 const std = @import("std");
 const assert = std.debug.assert;
 const message = @import("message.zig");
@@ -9,9 +31,6 @@ const log = marks.wrap_log(std.log.scoped(.storage));
 const c = @cImport({
     @cInclude("sqlite3.h");
 });
-
-/// SQLite-backed persistent storage. Uses prepared statements for all
-/// operations. WAL mode for concurrent reads. IDs stored as 16-byte BLOBs.
 pub const SqliteStorage = struct {
     pub const LoginCodeEntry = message.LoginCodeEntry;
 
@@ -732,17 +751,18 @@ pub const SqliteStorage = struct {
 
     // --- Typed SQL interface ---
     //
-    // Handlers call db.query() / db.execute() with raw SQL and typed params.
-    // Parameters are bound via SQLite's ?N placeholders (never interpolated).
-    // SQL injection is structurally impossible — there is no string
-    // concatenation path. SQLite handles all query execution, type coercion,
-    // NULL handling, and concurrency internally. We don't re-test SQLite —
-    // it has its own fuzz suite (billions of test cases, 100% branch coverage).
+    // The production-path API. Handlers call db.query() / db.execute()
+    // with raw SQL and typed params. This is the boundary we own and test:
     //
-    // What we own at this boundary:
-    // 1. Params are bound, never interpolated (API makes injection impossible)
-    // 2. Zig types map correctly to SQLite bind/column calls
-    // 3. Statement lifecycle is correct (prepare, bind, step, finalize)
+    // 1. Params are bound, never interpolated (injection is structurally
+    //    impossible — there is no string concatenation path).
+    // 2. Zig types map correctly to SQLite bind/column calls.
+    // 3. Column count matches struct field count (assert_column_count).
+    // 4. Statement lifecycle is correct (prepare, bind, step, finalize).
+    //
+    // We do NOT test that SQLite executes SQL correctly — it has its own
+    // fuzz suite (billions of test cases, 100% branch coverage). Our
+    // round-trip tests verify the translation boundary, not the database.
     //
     // Statements are prepared per-call (not cached). Caching can be added
     // later as an optimization without changing the interface.
