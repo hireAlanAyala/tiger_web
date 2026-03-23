@@ -269,10 +269,39 @@ its own methods. The framework treats it identically to any other db.
 - enum support in read_column
 - undefined instead of zeroes in read_row_mapped
 
+## CommitResponse: Framework Envelope, Not Domain Data
+
+MessageResponse is a tagged union of every domain result (product, order,
+collection, login). It exists so the old monolithic render function could
+switch on the result type. It mixes framework concerns (status, auth,
+followup) with domain concerns (the actual data).
+
+The new system splits them:
+
+**CommitResponse** — what the framework needs from the execute phase:
+- status: did the operation succeed (tracer, HTTP status, followup decisions)
+- session_action: set/clear/none (Set-Cookie headers)
+- user_id, is_new_visitor, is_authenticated (cookie signing)
+- followup: does this SSE mutation need a dashboard refresh
+
+**Handler Prefetch → render flow** — where domain data lives:
+- The handler's Prefetch struct has the queried data
+- The handler's handle() reads Prefetch, returns CommitResponse + writes
+- The handler's render() reads Prefetch + CommitResponse, produces HTML
+- The framework never sees domain data. It routes the envelope.
+
+This means every handler has a handle() function — read-only or not.
+Read-only handlers return CommitResponse with no writes. Mutation handlers
+return CommitResponse with writes. The framework treats them identically.
+
+MessageResponse.result (the domain tagged union) is deleted when all
+handlers are wired. Until then, both types coexist — the old SM uses
+MessageResponse, the new dispatch uses CommitResponse.
+
 ### Not Started
-- FaultReadView — PRNG fault injection wrapping ReadView at dispatch boundary
-- Migrate handlers from StorageResult to ?T return pattern
+- Define CommitResponse (framework metadata only, no domain data)
+- Give all read-only handlers a handle() function
+- Fault injection at dispatch boundary
 - Switch sim/fuzz/benchmark from MemoryStorage to SqliteStorage(":memory:")
 - Delete old SM prefetch/execute dispatch (~800 lines)
-- Update extract_cache for new SM shape (sidecar path)
 - Wire handler dispatch into server process_inbox
