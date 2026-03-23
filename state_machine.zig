@@ -293,10 +293,16 @@ pub fn StateMachineType(comptime Storage: type, comptime Handlers: type) type {
             defer self.prefetch_cache = null;
             defer self.prefetch_identity = null;
 
+            const fw = Handlers.FwCtx{
+                .identity = self.prefetch_identity orelse std.mem.zeroes(message.PrefetchIdentity),
+                .now = self.now,
+                .is_sse = false, // Set by server when render is wired.
+            };
+
             const exec_result = Handlers.handler_execute(
                 cache,
                 msg,
-                self.prefetch_identity,
+                fw,
             );
 
             // Apply writes — handlers return writes, the SM applies them.

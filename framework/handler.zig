@@ -8,19 +8,39 @@ const effects = @import("effects.zig");
 /// to generate per-operation Context structs and validate handler signatures.
 /// The framework never imports app types directly.
 
+/// Framework-provided context — resolved once before prefetch, immutable
+/// through the entire request lifecycle. Available in all handler phases
+/// (prefetch, handle, render).
+///
+/// Three fields, deliberately small:
+/// - identity: who is making the request (resolved from cookie credential)
+/// - now: wall-clock timestamp (seconds since epoch)
+/// - is_sse: true if this is a Datastar SSE request (affects render format)
+///
+/// Everything else the handler needs is either in the message body (user
+/// input) or in the prefetch data (storage results). The framework context
+/// is "things about the request environment that aren't the request itself."
+pub fn FrameworkCtx(comptime Identity: type) type {
+    return struct {
+        identity: Identity,
+        now: i64,
+        is_sse: bool,
+    };
+}
+
 /// Generate a per-operation context type.
 ///
 /// Handlers receive this as their single parameter in handle and render.
 /// The framework assembles it from prefetched data, the typed request body,
-/// and the visitor identity.
+/// and the framework context (identity, timestamp, request metadata).
 ///
 /// Usage (inside App comptime):
 ///   const Ctx = HandlerContext(GetProductPrefetch, void, PrefetchIdentity);
-///   // Ctx has: .prefetched, .identity
+///   // Ctx has: .prefetched, .fw (identity, now, is_sse)
 ///   // .body is omitted when EventType is void (read-only operations)
 ///
 ///   const Ctx = HandlerContext(CreateProductPrefetch, Product, PrefetchIdentity);
-///   // Ctx has: .prefetched, .body, .identity
+///   // Ctx has: .prefetched, .body, .fw (identity, now, is_sse)
 pub fn HandlerContext(comptime Prefetch: type, comptime Body: type, comptime Identity: type) type {
     if (@typeInfo(Prefetch) != .@"struct") {
         @compileError("Prefetch must be a struct, got " ++ @typeName(Prefetch));
@@ -28,15 +48,17 @@ pub fn HandlerContext(comptime Prefetch: type, comptime Body: type, comptime Ide
     if (@typeInfo(Identity) != .@"struct") {
         @compileError("Identity must be a struct, got " ++ @typeName(Identity));
     }
+    const FwCtx = FrameworkCtx(Identity);
     return struct {
         prefetched: Prefetch,
         body: if (Body == void) void else *const Body,
-        identity: Identity,
+        fw: FwCtx,
         render_buf: []u8,
 
         pub const PrefetchType = Prefetch;
         pub const BodyType = Body;
         pub const IdentityType = Identity;
+        pub const FwCtxType = FwCtx;
 
         /// Access body — asserts non-void at comptime.
         pub fn body_val(self: @This()) if (Body == void) @compileError("no body for void EventType") else *const Body {
@@ -45,14 +67,8 @@ pub fn HandlerContext(comptime Prefetch: type, comptime Body: type, comptime Ide
 
         /// Build render effects from a tuple of effect descriptors.
         /// Validates effect structure at comptime, writes content at runtime.
-        ///
-        /// Usage:
-        ///   return ctx.render(.{
-        ///       .{ "patch", "#product-card", html, "outer" },
-        ///       .{ "sync", "/dashboard" },
-        ///   });
         pub fn render(self: @This(), effects_tuple: anytype) effects.RenderResult {
-            assert(self.render_buf.len > 0); // framework must provide a render buffer
+            assert(self.render_buf.len > 0);
             return effects.process_effects(effects_tuple, self.render_buf);
         }
     };
@@ -182,12 +198,12 @@ test "HandlerContext void body" {
     const ctx = Ctx{
         .prefetched = .{ .product = 42 },
         .body = {},
-        .identity = .{ .user_id = 1 },
+        .fw = .{ .identity = .{ .user_id = 1 }, .now = 0, .is_sse = false },
         .render_buf = &render_buf,
     };
 
     try std.testing.expectEqual(@as(?u32, 42), ctx.prefetched.product);
-    try std.testing.expectEqual(@as(u128, 1), ctx.identity.user_id);
+    try std.testing.expectEqual(@as(u128, 1), ctx.fw.identity.user_id);
 }
 
 test "HandlerContext typed body" {
@@ -203,7 +219,7 @@ test "HandlerContext typed body" {
     const ctx = Ctx{
         .prefetched = .{ .existing = null },
         .body = &body,
-        .identity = .{ .user_id = 2 },
+        .fw = .{ .identity = .{ .user_id = 2 }, .now = 0, .is_sse = false },
         .render_buf = &render_buf,
     };
 
@@ -220,7 +236,7 @@ test "HandlerContext ctx.render with effects" {
     const ctx = Ctx{
         .prefetched = .{ .product = 42 },
         .body = {},
-        .identity = .{ .user_id = 1 },
+        .fw = .{ .identity = .{ .user_id = 1 }, .now = 0, .is_sse = false },
         .render_buf = &render_buf,
     };
 
@@ -249,7 +265,7 @@ test "HandlerContext ctx.render empty tuple" {
     const ctx = Ctx{
         .prefetched = .{ .product = 42 },
         .body = {},
-        .identity = .{ .user_id = 1 },
+        .fw = .{ .identity = .{ .user_id = 1 }, .now = 0, .is_sse = false },
         .render_buf = &render_buf,
     };
 
