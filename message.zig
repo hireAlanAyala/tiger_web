@@ -22,6 +22,26 @@ pub const Status = enum(u8) {
     code_expired = 15,
 };
 
+/// HandlerResponse — what a handler's handle() function returns.
+///
+/// Just the handler's decision: did it succeed, and should the session
+/// change? No auth fields (user_id, is_authenticated) — those are the
+/// SM's concern, filled from the resolved credential after the handler
+/// returns. No domain data — that stays in the Prefetch → render flow.
+/// Session action — shared between HandlerResponse, MessageResponse, and FollowupState.
+pub const SessionAction = enum { none, set_authenticated, clear };
+
+pub const HandlerResponse = struct {
+    status: Status = .ok,
+    session_action: SessionAction = .none,
+
+    pub const ok = HandlerResponse{};
+    pub const not_found = HandlerResponse{ .status = .not_found };
+    pub const storage_error = HandlerResponse{ .status = .storage_error };
+    pub const version_conflict = HandlerResponse{ .status = .version_conflict };
+    pub const insufficient_inventory = HandlerResponse{ .status = .insufficient_inventory };
+};
+
 /// Flat operation enum — encodes entity type AND action in a single tag,
 /// following TigerBeetle's pattern. Adding a new entity type means adding
 /// new variants here; the compiler forces every switch site to handle them.
@@ -909,7 +929,7 @@ pub const FollowupState = struct {
     status: Status,
     user_id: u128,
     kind: MessageResponse.SessionKind,
-    session_action: MessageResponse.SessionAction,
+    session_action: SessionAction,
     is_new_visitor: bool,
 };
 
@@ -934,15 +954,6 @@ pub const MessageResponse = struct {
         authenticated = 1,
     };
 
-    pub const SessionAction = enum {
-        /// Don't touch the cookie.
-        none,
-        /// Set an authenticated session cookie. The user_id comes from
-        /// the login result.
-        set_authenticated,
-        /// Clear the cookie (logout).
-        clear,
-    };
 
     pub const empty_ok = MessageResponse{
         .status = .ok,

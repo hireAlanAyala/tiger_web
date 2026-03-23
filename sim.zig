@@ -3,8 +3,8 @@ const assert = std.debug.assert;
 const message = @import("message.zig");
 const http = @import("tiger_framework").http;
 const state_machine = @import("state_machine.zig");
-const MemoryStorage = state_machine.MemoryStorage;
-const StateMachine = state_machine.StateMachineType(MemoryStorage);
+const App.Storage = App.Storage;
+const StateMachine = App.SM;
 const App = @import("app.zig");
 const ServerType = @import("tiger_framework").server.ServerType;
 const ConnectionType = @import("tiger_framework").connection.ConnectionType;
@@ -578,7 +578,7 @@ fn format_u32(buf: *[10]u8, val: u32) []const u8 {
     return buf[pos..10];
 }
 
-const Server = ServerType(App, SimIO, MemoryStorage);
+const Server = ServerType(App, SimIO, App.Storage);
 const test_key: *const [auth.key_length]u8 = "tiger-web-test-key-0123456789ab!";
 
 /// Write "Cookie: <name>=<signed_value>\r\n" into buf. Returns bytes written.
@@ -675,7 +675,7 @@ test "deterministic replay — same seed same result" {
 
     for (0..2) |run| {
         var sim_io = SimIO.init(12345);
-        var storage = try MemoryStorage.init(std.testing.allocator);
+        var storage = try App.Storage.init(std.testing.allocator);
         defer storage.deinit(std.testing.allocator);
         var sm = StateMachine.init(&storage, false, 0, test_key);
         var time_sim = TimeSim{};
@@ -703,7 +703,7 @@ test "deterministic replay — same seed same result" {
 
 test "pipelining — back-to-back requests on one connection" {
     var sim_io = SimIO.init(0x1234);
-    var storage = try MemoryStorage.init(std.testing.allocator);
+    var storage = try App.Storage.init(std.testing.allocator);
     defer storage.deinit(std.testing.allocator);
     var sm = StateMachine.init(&storage, false, 0, test_key);
     var time_sim = TimeSim{};
@@ -732,7 +732,7 @@ test "pipelining — back-to-back requests on one connection" {
 
 test "connection drops and reconnects — state machine survives" {
     var sim_io = SimIO.init(0xdead);
-    var storage = try MemoryStorage.init(std.testing.allocator);
+    var storage = try App.Storage.init(std.testing.allocator);
     defer storage.deinit(std.testing.allocator);
     var sm = StateMachine.init(&storage, false, 0, test_key);
     var time_sim = TimeSim{};
@@ -769,7 +769,7 @@ test "connection drops and reconnects — state machine survives" {
 
 test "timeout — partial request triggers close" {
     var sim_io = SimIO.init(0xface);
-    var storage = try MemoryStorage.init(std.testing.allocator);
+    var storage = try App.Storage.init(std.testing.allocator);
     defer storage.deinit(std.testing.allocator);
     var sm = StateMachine.init(&storage, false, 0, test_key);
     var time_sim = TimeSim{};
@@ -818,7 +818,7 @@ test "timeout — partial request triggers close" {
 
 test "mark: disconnect triggers recv peer closed" {
     var sim_io = SimIO.init(0xa001);
-    var storage = try MemoryStorage.init(std.testing.allocator);
+    var storage = try App.Storage.init(std.testing.allocator);
     defer storage.deinit(std.testing.allocator);
     var sm = StateMachine.init(&storage, false, 0, test_key);
     var time_sim = TimeSim{};
@@ -836,7 +836,7 @@ test "mark: disconnect triggers recv peer closed" {
 
 test "mark: send fault triggers send error" {
     var sim_io = SimIO.init(0xa002);
-    var storage = try MemoryStorage.init(std.testing.allocator);
+    var storage = try App.Storage.init(std.testing.allocator);
     defer storage.deinit(std.testing.allocator);
     var sm = StateMachine.init(&storage, false, 0, test_key);
     var time_sim = TimeSim{};
@@ -864,7 +864,7 @@ test "mark: send fault triggers send error" {
 
 test "mark: idle connection triggers timeout" {
     var sim_io = SimIO.init(0xa003);
-    var storage = try MemoryStorage.init(std.testing.allocator);
+    var storage = try App.Storage.init(std.testing.allocator);
     defer storage.deinit(std.testing.allocator);
     var sm = StateMachine.init(&storage, false, 0, test_key);
     var time_sim = TimeSim{};
@@ -890,7 +890,7 @@ test "mark: idle connection triggers timeout" {
 
 test "mark: garbage bytes trigger invalid HTTP" {
     var sim_io = SimIO.init(0xa004);
-    var storage = try MemoryStorage.init(std.testing.allocator);
+    var storage = try App.Storage.init(std.testing.allocator);
     defer storage.deinit(std.testing.allocator);
     var sm = StateMachine.init(&storage, false, 0, test_key);
     var time_sim = TimeSim{};
@@ -908,7 +908,7 @@ test "mark: garbage bytes trigger invalid HTTP" {
 
 test "mark: unknown route triggers unmapped request" {
     var sim_io = SimIO.init(0xa005);
-    var storage = try MemoryStorage.init(std.testing.allocator);
+    var storage = try App.Storage.init(std.testing.allocator);
     defer storage.deinit(std.testing.allocator);
     var sm = StateMachine.init(&storage, false, 0, test_key);
     var time_sim = TimeSim{};
@@ -936,7 +936,7 @@ test "mark: unknown route triggers unmapped request" {
 
 test "first request without cookie gets identity + Set-Cookie" {
     var sim_io = SimIO.init(0xa010);
-    var storage = try MemoryStorage.init(std.testing.allocator);
+    var storage = try App.Storage.init(std.testing.allocator);
     defer storage.deinit(std.testing.allocator);
     var sm = StateMachine.init(&storage, false, 0, test_key);
     var time_sim = TimeSim{};
@@ -959,7 +959,7 @@ test "first request without cookie gets identity + Set-Cookie" {
 
 test "request with valid cookie — no Set-Cookie header" {
     var sim_io = SimIO.init(0xa011);
-    var storage = try MemoryStorage.init(std.testing.allocator);
+    var storage = try App.Storage.init(std.testing.allocator);
     defer storage.deinit(std.testing.allocator);
     var sm = StateMachine.init(&storage, false, 0, test_key);
     var time_sim = TimeSim{};
@@ -980,7 +980,7 @@ test "request with valid cookie — no Set-Cookie header" {
 
 test "mark: accept failure logs warning" {
     var sim_io = SimIO.init(0xa007);
-    var storage = try MemoryStorage.init(std.testing.allocator);
+    var storage = try App.Storage.init(std.testing.allocator);
     defer storage.deinit(std.testing.allocator);
     var sm = StateMachine.init(&storage, false, 0, test_key);
     var time_sim = TimeSim{};
@@ -997,7 +997,7 @@ test "mark: accept failure logs warning" {
 
 test "mark: SSE mutation triggers follow-up" {
     var sim_io = SimIO.init(0xf001);
-    var storage = try MemoryStorage.init(std.testing.allocator);
+    var storage = try App.Storage.init(std.testing.allocator);
     defer storage.deinit(std.testing.allocator);
     var sm = StateMachine.init(&storage, false, 0, test_key);
     var time_sim = TimeSim{};
@@ -1035,7 +1035,7 @@ test "mark: SSE mutation triggers follow-up" {
 
 test "storage busy fault — prefetch retries next tick then succeeds" {
     var sim_io = SimIO.init(0xc001);
-    var storage = try MemoryStorage.init(std.testing.allocator);
+    var storage = try App.Storage.init(std.testing.allocator);
     defer storage.deinit(std.testing.allocator);
     var sm = StateMachine.init(&storage, false, 0, test_key);
     var time_sim = TimeSim{};
@@ -1076,7 +1076,7 @@ test "storage busy fault — prefetch retries next tick then succeeds" {
 
 test "storage err fault — renders dashboard page" {
     var sim_io = SimIO.init(0xc002);
-    var storage = try MemoryStorage.init(std.testing.allocator);
+    var storage = try App.Storage.init(std.testing.allocator);
     defer storage.deinit(std.testing.allocator);
     var sm = StateMachine.init(&storage, false, 0, test_key);
     var time_sim = TimeSim{};
@@ -1101,7 +1101,7 @@ test "storage err fault — renders dashboard page" {
 
 test "concurrent connections — busy client deferred, ready client served" {
     var sim_io = SimIO.init(0xd010);
-    var storage = try MemoryStorage.init(std.testing.allocator);
+    var storage = try App.Storage.init(std.testing.allocator);
     defer storage.deinit(std.testing.allocator);
     var sm = StateMachine.init(&storage, false, 0, test_key);
     var time_sim = TimeSim{};
@@ -1145,7 +1145,7 @@ test "concurrent connections — busy client deferred, ready client served" {
 
 test "interleaved writes — update and delete same entity across connections" {
     var sim_io = SimIO.init(0xd021);
-    var storage = try MemoryStorage.init(std.testing.allocator);
+    var storage = try App.Storage.init(std.testing.allocator);
     defer storage.deinit(std.testing.allocator);
     var sm = StateMachine.init(&storage, false, 0, test_key);
     var time_sim = TimeSim{};
@@ -1207,7 +1207,7 @@ const test_order_uuid = "eeddccbb11223344eeddccbb11220001";
 
 test "two-phase order — create on client 0, complete on client 1" {
     var sim_io = SimIO.init(0xe001);
-    var storage = try MemoryStorage.init(std.testing.allocator);
+    var storage = try App.Storage.init(std.testing.allocator);
     defer storage.deinit(std.testing.allocator);
     var sm = StateMachine.init(&storage, false, 0, test_key);
     var time_sim = TimeSim{};
@@ -1252,7 +1252,7 @@ test "two-phase order — create on client 0, complete on client 1" {
 
 test "two-phase order — failed completion restores inventory" {
     var sim_io = SimIO.init(0xe002);
-    var storage = try MemoryStorage.init(std.testing.allocator);
+    var storage = try App.Storage.init(std.testing.allocator);
     defer storage.deinit(std.testing.allocator);
     var sm = StateMachine.init(&storage, false, 0, test_key);
     var time_sim = TimeSim{};
@@ -1292,7 +1292,7 @@ test "two-phase order — failed completion restores inventory" {
 
 test "two-phase order — completion after timeout expires" {
     var sim_io = SimIO.init(0xe003);
-    var storage = try MemoryStorage.init(std.testing.allocator);
+    var storage = try App.Storage.init(std.testing.allocator);
     defer storage.deinit(std.testing.allocator);
     var sm = StateMachine.init(&storage, false, 0, test_key);
     var time_sim = TimeSim{};
@@ -1335,7 +1335,7 @@ test "two-phase order — completion after timeout expires" {
 
 test "two-phase order — idempotent same-result retry" {
     var sim_io = SimIO.init(0xe004);
-    var storage = try MemoryStorage.init(std.testing.allocator);
+    var storage = try App.Storage.init(std.testing.allocator);
     defer storage.deinit(std.testing.allocator);
     var sm = StateMachine.init(&storage, false, 0, test_key);
     var time_sim = TimeSim{};
@@ -1382,7 +1382,7 @@ test "two-phase order — idempotent same-result retry" {
 
 test "two-phase order — poll pending then complete (worker pattern)" {
     var sim_io = SimIO.init(0xe005);
-    var storage = try MemoryStorage.init(std.testing.allocator);
+    var storage = try App.Storage.init(std.testing.allocator);
     defer storage.deinit(std.testing.allocator);
     var sm = StateMachine.init(&storage, false, 0, test_key);
     var time_sim = TimeSim{};
@@ -1433,7 +1433,7 @@ test "two-phase order — poll pending then complete (worker pattern)" {
 
 test "cancel order — client cancels, worker completion rejected" {
     var sim_io = SimIO.init(0xe010);
-    var storage = try MemoryStorage.init(std.testing.allocator);
+    var storage = try App.Storage.init(std.testing.allocator);
     defer storage.deinit(std.testing.allocator);
     var sm = StateMachine.init(&storage, false, 0, test_key);
     var time_sim = TimeSim{};
@@ -1481,7 +1481,7 @@ test "cancel order — client cancels, worker completion rejected" {
 
 test "cancel order — cancel already confirmed is rejected" {
     var sim_io = SimIO.init(0xe011);
-    var storage = try MemoryStorage.init(std.testing.allocator);
+    var storage = try App.Storage.init(std.testing.allocator);
     defer storage.deinit(std.testing.allocator);
     var sm = StateMachine.init(&storage, false, 0, test_key);
     var time_sim = TimeSim{};
@@ -1591,7 +1591,7 @@ const Fuzzer = struct {
         };
     }
 
-    fn step(self: *Fuzzer, action: FuzzAction, prng: *PRNG, io: *SimIO, server: *Server, storage: *MemoryStorage) void {
+    fn step(self: *Fuzzer, action: FuzzAction, prng: *PRNG, io: *SimIO, server: *Server, storage: *App.Storage) void {
         switch (action) {
             .connect_client => self.step_connect(prng, io, server),
             .disconnect_client => self.step_disconnect(prng, io, server),
@@ -2005,7 +2005,7 @@ const Fuzzer = struct {
 
     // --- Fault injection ---
 
-    fn step_toggle_faults(self: *Fuzzer, prng: *PRNG, io: *SimIO, storage: *MemoryStorage) void {
+    fn step_toggle_faults(self: *Fuzzer, prng: *PRNG, io: *SimIO, storage: *App.Storage) void {
         _ = self;
         io.accept_fault_probability = if (prng.boolean()) PRNG.ratio(prng.range_inclusive(u64, 1, 30), 100) else PRNG.Ratio.zero();
         io.recv_fault_probability = if (prng.boolean()) PRNG.ratio(prng.range_inclusive(u64, 1, 20), 100) else PRNG.Ratio.zero();
@@ -2249,7 +2249,7 @@ fn run_fuzz(seed: u64) !void {
     var prng = PRNG.from_seed(seed);
 
     var sim_io = SimIO.init(prng.int(u64));
-    var storage = try MemoryStorage.init(std.testing.allocator);
+    var storage = try App.Storage.init(std.testing.allocator);
     defer storage.deinit(std.testing.allocator);
     storage.prng = PRNG.from_seed(prng.int(u64));
     var sm = StateMachine.init(&storage, false, 0, test_key);

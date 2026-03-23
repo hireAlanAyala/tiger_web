@@ -1,6 +1,6 @@
 //! State machine benchmark — measures prefetch/commit throughput per operation.
 //!
-//! Runs against MemoryStorage with no fault injection, so measurements reflect
+//! Runs against App.Storage with no fault injection, so measurements reflect
 //! pure decision logic cost. Use as a regression detector: if the numbers move,
 //! your code changed — not your environment.
 //!
@@ -12,9 +12,9 @@ const assert = std.debug.assert;
 const Bench = @import("framework/bench.zig");
 const message = @import("message.zig");
 const state_machine = @import("state_machine.zig");
+const App = @import("app.zig");
 const auth = @import("tiger_framework").auth;
-const MemoryStorage = state_machine.MemoryStorage;
-const StateMachine = state_machine.StateMachineType(MemoryStorage);
+const StateMachine = App.SM;
 const fuzz = @import("fuzz.zig");
 const PRNG = @import("tiger_framework").prng;
 
@@ -31,8 +31,8 @@ test "benchmark: state machine" {
 
     var prng = PRNG.from_seed(bench.seed);
 
-    var storage = try MemoryStorage.init(std.heap.page_allocator);
-    defer storage.deinit(std.heap.page_allocator);
+    var storage = try App.Storage.init(":memory:");
+    defer storage.deinit();
     var sm = StateMachine.init(&storage, false, 0, bench_test_key);
 
     // --- Seed phase (untimed) ---
@@ -45,7 +45,7 @@ test "benchmark: state machine" {
         if (product_count >= entity_count) break;
         const p = fuzz.gen_product(&prng);
         const msg = message.Message.init(.create_product, 0, 1, p);
-        if (!StateMachine.input_valid(msg)) continue;
+        if (!state_machine.input_valid(msg)) continue;
         assert(sm.prefetch(msg));
         const resp = sm.commit(msg);
         if (resp.status == .ok) {

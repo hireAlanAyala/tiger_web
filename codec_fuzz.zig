@@ -16,7 +16,7 @@ const state_machine = @import("state_machine.zig");
 const FuzzArgs = @import("fuzz_lib.zig").FuzzArgs;
 const PRNG = @import("tiger_framework").prng;
 
-const StateMachine = state_machine.StateMachineType(state_machine.MemoryStorage);
+const StateMachine = state_machine.ERROR_SHOULD_NOT_EXIST;
 
 const log = std.log.scoped(.fuzz);
 
@@ -59,7 +59,7 @@ fn fuzz_translate(prng: *PRNG) bool {
 
     // Core invariant: if translate returns a result, the message must pass input_valid.
     if (msg) |m| {
-        assert(StateMachine.input_valid(m));
+        assert(state_machine.input_valid(m));
         return true;
     }
     return false;

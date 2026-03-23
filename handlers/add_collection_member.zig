@@ -40,11 +40,11 @@ pub fn prefetch(storage: anytype, msg: *const t.Message) ?Prefetch {
 // [handle] .add_collection_member
 pub fn handle(ctx: Context) t.ExecuteResult {
     _ = ctx.prefetched.collection orelse
-        return t.ExecuteResult.read_only(t.Message.MessageResponse.not_found);
+        return t.ExecuteResult.read_only(t.HandlerResponse.not_found);
     _ = ctx.prefetched.product orelse
-        return t.ExecuteResult.read_only(t.Message.MessageResponse.not_found);
+        return t.ExecuteResult.read_only(t.HandlerResponse.not_found);
     return t.ExecuteResult.single(
-        .{ .status = .ok, .result = .{ .empty = {} } },
+        t.HandlerResponse.ok,
         .{ .put_membership = .{ .collection_id = ctx.prefetched.collection_id, .product_id = ctx.prefetched.product_id } },
     );
 }

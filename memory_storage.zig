@@ -35,6 +35,55 @@ const log = marks.wrap_log(std.log.scoped(.state_machine));
 const PRNG = @import("tiger_framework").prng;
 
 pub const MemoryStorage = struct {
+    /// Read-only view for prefetch phase. Delegates to self with fault injection.
+    pub const ReadView = struct {
+        storage: *MemoryStorage,
+
+        pub fn init(storage: *MemoryStorage) ReadView {
+            return .{ .storage = storage };
+        }
+
+        pub fn get(self: ReadView, id: u128, out: *message.Product) StorageResult {
+            return self.storage.get(id, out);
+        }
+
+        pub fn get_collection(self: ReadView, id: u128, out: *message.ProductCollection) StorageResult {
+            return self.storage.get_collection(id, out);
+        }
+
+        pub fn get_order(self: ReadView, id: u128, out: *message.OrderResult) StorageResult {
+            return self.storage.get_order(id, out);
+        }
+
+        pub fn list(self: ReadView, out: *[message.list_max]message.Product, out_len: *u32, params: message.ListParams) StorageResult {
+            return self.storage.list(out, out_len, params);
+        }
+
+        pub fn list_collections(self: ReadView, out: *[message.list_max]message.ProductCollection, out_len: *u32, cursor: u128) StorageResult {
+            return self.storage.list_collections(out, out_len, cursor);
+        }
+
+        pub fn list_products_in_collection(self: ReadView, collection_id: u128, out: *[message.list_max]message.Product, out_len: *u32) StorageResult {
+            return self.storage.list_products_in_collection(collection_id, out, out_len);
+        }
+
+        pub fn list_orders(self: ReadView, out: *[message.list_max]message.OrderSummary, out_len: *u32, cursor: u128) StorageResult {
+            return self.storage.list_orders(out, out_len, cursor);
+        }
+
+        pub fn search(self: ReadView, out: *[message.list_max]message.Product, out_len: *u32, query: message.SearchQuery) StorageResult {
+            return self.storage.search(out, out_len, query);
+        }
+
+        pub fn get_login_code(self: ReadView, email: []const u8, out: *LoginCodeEntry) StorageResult {
+            return self.storage.get_login_code(email, out);
+        }
+
+        pub fn get_user_by_email(self: ReadView, email: []const u8, out: *u128) StorageResult {
+            return self.storage.get_user_by_email(email, out);
+        }
+    };
+
     pub const product_capacity = 1024;
     pub const collection_capacity = 256;
     pub const membership_capacity = 1024;

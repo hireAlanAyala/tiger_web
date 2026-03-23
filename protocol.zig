@@ -12,7 +12,6 @@ const assert = std.debug.assert;
 const stdx = @import("tiger_framework").stdx;
 const message = @import("message.zig");
 const state_machine = @import("state_machine.zig");
-const SM = state_machine.StateMachineType(state_machine.MemoryStorage);
 const render = @import("render.zig");
 
 /// Maximum URL path length in the translate request.
@@ -197,7 +196,7 @@ pub const ExecuteRenderResponse = extern struct {
     result_tag: u8,
     reserved: [13]u8,
     result: [@sizeOf(message.PageLoadDashboardResult)]u8,
-    writes: [SM.writes_max]WriteSlot,
+    writes: [state_machine.writes_max]WriteSlot,
     html_len: u32,
     html: [html_max]u8,
     // Tail padding: struct alignment is 4 (from html_len u32).
@@ -210,7 +209,7 @@ pub const ExecuteRenderResponse = extern struct {
     comptime {
         assert(stdx.no_padding(ExecuteRenderResponse));
         assert(@sizeOf(ExecuteRenderResponse) % 4 == 0);
-        assert(SM.writes_max == 21);
+        assert(state_machine.writes_max == 21);
     }
 };
 

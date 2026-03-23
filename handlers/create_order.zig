@@ -38,7 +38,7 @@ pub fn prefetch(storage: anytype, msg: *const t.Message) ?Prefetch {
 pub fn handle(ctx: Context) t.ExecuteResult {
     // TODO: validate inventory, build OrderResult, decrement inventory, return writes
     _ = ctx;
-    return t.ExecuteResult.read_only(t.Message.MessageResponse.not_found);
+    return t.ExecuteResult.read_only(t.HandlerResponse.not_found);
 }
 
 // [render] .create_order

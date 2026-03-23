@@ -1,48 +1,35 @@
 //! ReadOnlyStorage — compile-time enforcement of the prefetch read-only contract.
 //!
-//! Wraps a *Storage pointer and exposes only read methods (query, query_all).
-//! The framework passes this to handler prefetch functions instead of the raw
-//! storage. If a prefetch handler tries to call execute(), put(), delete(), or
-//! any write method, it's a compile error — the method doesn't exist on the type.
+//! The framework does not define which methods are reads and which are
+//! writes. That's the storage type's responsibility. Each storage type
+//! exports `pub const ReadView` — a wrapper that exposes only its read
+//! methods. The framework uses this for prefetch.
 //!
-//! Only the typed SQL interface is forwarded. Handlers define flat row types
-//! shaped by their queries and use query()/query_all() exclusively.
-//! See docs/plans/storage-boundary.md.
+//! This design exists because:
+//! - The framework doesn't own the database. The user configures it.
+//! - The framework can't enumerate all possible read methods on all
+//!   possible databases. An allow-list in the framework would need to
+//!   be extended for every new db type.
+//! - The storage type knows its own read/write split. It declares it
+//!   via ReadView. The framework enforces it via the pipeline.
+//!
+//! Contract: Storage must export `pub const ReadView` with an `init(*Storage)`
+//! constructor. The framework calls `Storage.ReadView.init(storage)` and
+//! passes the result to handler prefetch functions.
+//!
+//! If a handler tries to call a write method during prefetch, it's a
+//! compile error — the method doesn't exist on ReadView.
 
 const std = @import("std");
 
-/// Compile-time read-only wrapper over a storage backend.
-///
-/// Handlers receive this as `storage: anytype` — the wrapper is invisible
-/// to them as long as they only call query/query_all. If they try to call
-/// execute/put/delete, the compiler rejects it.
-pub fn ReadOnlyStorage(comptime Storage: type) type {
-    comptime {
-        if (!@hasDecl(Storage, "query")) @compileError("Storage missing query()");
-        if (!@hasDecl(Storage, "query_all")) @compileError("Storage missing query_all()");
+/// Validate that a Storage type has the required ReadView interface.
+/// Called at comptime by the SM when the Storage type is first used.
+pub fn assertReadView(comptime Storage: type) void {
+    if (!@hasDecl(Storage, "ReadView")) {
+        @compileError(@typeName(Storage) ++ " must export pub const ReadView — " ++
+            "a type exposing only read methods for the prefetch phase. " ++
+            "See docs/plans/db-configuration.md.");
     }
-
-    return struct {
-        const Self = @This();
-
-        storage: *Storage,
-
-        pub fn init(storage: *Storage) Self {
-            return .{ .storage = storage };
-        }
-
-        pub fn query(self: Self, comptime T: type, comptime sql: [*:0]const u8, args: anytype) ?T {
-            return self.storage.query(T, sql, args);
-        }
-
-        pub fn query_all(self: Self, comptime T: type, comptime max: usize, comptime sql: [*:0]const u8, args: anytype) ?@import("stdx.zig").BoundedList(T, max) {
-            return self.storage.query_all(T, max, sql, args);
-        }
-
-        // Write methods (execute, put, update, delete, begin, commit)
-        // are intentionally absent. Any attempt to call them from a
-        // prefetch handler is a compile error.
-    };
 }
 
 // =====================================================================
@@ -52,40 +39,46 @@ pub fn ReadOnlyStorage(comptime Storage: type) type {
 const assert = std.debug.assert;
 
 const MockStorage = struct {
-    const BoundedList = @import("stdx.zig").BoundedList;
+    value: u32,
 
-    fn query(_: *MockStorage, comptime T: type, comptime _: [*:0]const u8, _: anytype) ?T {
-        return null;
+    pub const ReadView = struct {
+        storage: *const MockStorage,
+
+        pub fn init(storage: *MockStorage) ReadView {
+            return .{ .storage = storage };
+        }
+
+        pub fn get(self: ReadView, id: u32) ?u32 {
+            _ = id;
+            return self.storage.value;
+        }
+    };
+
+    pub fn get(self: *MockStorage, id: u32) ?u32 {
+        _ = id;
+        return self.value;
     }
 
-    fn query_all(_: *MockStorage, comptime T: type, comptime max: usize, comptime _: [*:0]const u8, _: anytype) ?BoundedList(T, max) {
-        return .{};
+    pub fn put(self: *MockStorage, val: u32) void {
+        self.value = val;
     }
-
-    fn execute(_: *MockStorage, comptime _: [*:0]const u8, _: anytype) bool {
-        return true;
-    }
-
-    fn put(_: *MockStorage) void {}
-    fn begin(_: *MockStorage) void {}
-    fn commit(_: *MockStorage) void {}
 };
 
-test "ReadOnlyStorage: read methods are accessible" {
-    var mock = MockStorage{};
-    const db = ReadOnlyStorage(MockStorage).init(&mock);
-
-    const Row = struct { x: u32 };
-    _ = db.query(Row, "SELECT x;", .{});
-    _ = db.query_all(Row, 10, "SELECT x;", .{});
+test "ReadView: read methods accessible" {
+    var mock = MockStorage{ .value = 42 };
+    const ro = MockStorage.ReadView.init(&mock);
+    try std.testing.expectEqual(@as(?u32, 42), ro.get(1));
 }
 
-test "ReadOnlyStorage: write methods are absent" {
-    const RO = ReadOnlyStorage(MockStorage);
+test "ReadView: write methods absent" {
     comptime {
-        assert(!@hasDecl(RO, "execute"));
-        assert(!@hasDecl(RO, "put"));
-        assert(!@hasDecl(RO, "begin"));
-        assert(!@hasDecl(RO, "commit"));
+        assert(!@hasDecl(MockStorage.ReadView, "put"));
+        assert(@hasDecl(MockStorage.ReadView, "get"));
+    }
+}
+
+test "assertReadView: valid storage passes" {
+    comptime {
+        assertReadView(MockStorage);
     }
 }

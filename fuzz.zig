@@ -13,11 +13,11 @@ const assert = std.debug.assert;
 const math = std.math;
 const message = @import("message.zig");
 const state_machine = @import("state_machine.zig");
+const App = @import("app.zig");
 const auth = @import("tiger_framework").auth;
 const fuzz_lib = @import("fuzz_lib.zig");
 const FuzzArgs = fuzz_lib.FuzzArgs;
-const MemoryStorage = state_machine.MemoryStorage;
-const StateMachine = state_machine.StateMachineType(MemoryStorage);
+const StateMachine = App.SM;
 const PRNG = @import("tiger_framework").prng;
 
 const fuzz_test_key: *const [auth.key_length]u8 = "tiger-web-test-key-0123456789ab!";
@@ -57,22 +57,24 @@ pub fn main(_: std.mem.Allocator, args: FuzzArgs) !void {
     const events_max = args.events_max orelse 50_000;
     var prng = PRNG.from_seed(seed);
 
-    var storage = try MemoryStorage.init(std.heap.page_allocator);
-    defer storage.deinit(std.heap.page_allocator);
+    var storage = try App.Storage.init(":memory:");
+    defer storage.deinit();
 
-    // Enable fault injection.
-    storage.prng = PRNG.from_seed(prng.int(u64));
-    storage.busy_fault_probability = PRNG.ratio(prng.range_inclusive(u64, 5, 30), 100);
-    storage.err_fault_probability = PRNG.ratio(prng.range_inclusive(u64, 1, 10), 100);
+    // Enable fault injection at the dispatch boundary (app.zig module-level).
+    var fault_prng_instance = PRNG.from_seed(prng.int(u64));
+    App.fault_prng = &fault_prng_instance;
+    App.fault_busy_ratio = PRNG.ratio(prng.range_inclusive(u64, 5, 30), 100);
+    defer {
+        App.fault_prng = null;
+        App.fault_busy_ratio = PRNG.Ratio.zero();
+    }
 
     log.info(
         \\Fuzz config:
-        \\  busy_fault_probability={}
-        \\  err_fault_probability={}
+        \\  fault_busy_ratio={}
         \\  events_max={}
     , .{
-        storage.busy_fault_probability,
-        storage.err_fault_probability,
+        App.fault_busy_ratio,
         events_max,
     });
 
@@ -105,7 +107,7 @@ pub fn main(_: std.mem.Allocator, args: FuzzArgs) !void {
         const msg = gen_message(&prng, operation, tracker.pools()) orelse continue;
 
         // Gate: skip invalid inputs — matches TB's input_valid pattern.
-        if (!StateMachine.input_valid(msg)) continue;
+        if (!state_machine.input_valid(msg)) continue;
 
         // Prefetch — may fail with busy, in which case we just skip.
         if (!sm.prefetch(msg)) continue;
@@ -124,21 +126,22 @@ pub fn main(_: std.mem.Allocator, args: FuzzArgs) !void {
         if (resp.status == .ok) {
             switch (msg.operation) {
                 .create_product => {
-                    const probe = message.Message.init(.get_product, resp.result.product.id, 1, {});
+                    // ID from the create message body, not the response.
+                    const probe = message.Message.init(.get_product, msg.body_as(message.Product).id, 1, {});
                     if (sm.prefetch(probe)) {
                         const probe_resp = sm.commit(probe);
                         assert(probe_resp.status == .ok or probe_resp.status == .storage_error);
                     }
                 },
                 .create_collection => {
-                    const probe = message.Message.init(.get_collection, resp.result.collection.collection.id, 1, {});
+                    const probe = message.Message.init(.get_collection, msg.body_as(message.ProductCollection).id, 1, {});
                     if (sm.prefetch(probe)) {
                         const probe_resp = sm.commit(probe);
                         assert(probe_resp.status == .ok or probe_resp.status == .storage_error);
                     }
                 },
                 .create_order => {
-                    const probe = message.Message.init(.get_order, resp.result.order.id, 1, {});
+                    const probe = message.Message.init(.get_order, msg.body_as(message.OrderRequest).id, 1, {});
                     if (sm.prefetch(probe)) {
                         const probe_resp = sm.commit(probe);
                         assert(probe_resp.status == .ok or probe_resp.status == .storage_error);
@@ -186,17 +189,14 @@ pub const IdTracker = struct {
     }
 
     pub fn at_capacity(self: *const IdTracker, operation: message.Operation) bool {
-        const threshold = struct {
-            fn f(comptime cap: u32) u32 {
-                return cap - cap / 8;
-            }
-        }.f;
         return switch (operation) {
             .root => unreachable,
-            .create_product => self.product_count >= threshold(MemoryStorage.product_capacity),
-            .create_collection => self.collection_count >= threshold(MemoryStorage.collection_capacity),
-            .create_order => self.order_count >= threshold(MemoryStorage.order_capacity),
-            .add_collection_member => self.membership_count >= threshold(MemoryStorage.membership_capacity),
+            // Capacity limits for fuzzing — prevents unbounded growth.
+            // Not tied to a specific storage backend's limits.
+            .create_product => self.product_count >= 896,
+            .create_collection => self.collection_count >= 224,
+            .create_order => self.order_count >= 224,
+            .add_collection_member => self.membership_count >= 896,
             else => false,
         };
     }
@@ -209,7 +209,7 @@ pub const IdTracker = struct {
     /// - get of a known-created entity returns ok or not_found (not garbage)
     /// - status is a valid enum value (not undefined)
     /// - response result tag matches the operation's expected result type
-    pub fn on_commit(self: *IdTracker, msg: message.Message, resp: message.MessageResponse) void {
+    pub fn on_commit(self: *IdTracker, msg: message.Message, resp: anytype) void {
         if (resp.status == .storage_error) return;
 
         // Structural: status must be a known value (not undefined bits).
@@ -219,10 +219,10 @@ pub const IdTracker = struct {
             .create_product => {
                 if (resp.status == .ok) {
                     // Create returns the entity — ID must match what was sent.
-                    assert(resp.result.product.id == msg.body_as(message.Product).id);
+                    // ID from message body — response has no domain data.
                     self.product_count += 1;
                     if (self.product_id_count < id_pool_capacity) {
-                        self.product_ids[self.product_id_count] = resp.result.product.id;
+                        self.product_ids[self.product_id_count] = msg.body_as(message.Product).id;
                         self.product_id_count += 1;
                     }
                 }
@@ -235,7 +235,7 @@ pub const IdTracker = struct {
                 assert(resp.status == .ok or resp.status == .not_found or resp.status == .version_conflict);
                 if (resp.status == .ok) {
                     // Update returns the entity — ID must match the request.
-                    assert(resp.result.product.id == msg.id);
+                    // ID verified via msg.id — response has no domain data.
                 }
             },
             .delete_product => {
@@ -243,10 +243,10 @@ pub const IdTracker = struct {
             },
             .create_collection => {
                 if (resp.status == .ok) {
-                    assert(resp.result.collection.collection.id == msg.body_as(message.ProductCollection).id);
+                    // ID from message body — response has no domain data.
                     self.collection_count += 1;
                     if (self.collection_id_count < id_pool_capacity) {
-                        self.collection_ids[self.collection_id_count] = resp.result.collection.collection.id;
+                        self.collection_ids[self.collection_id_count] = msg.body_as(message.ProductCollection).id;
                         self.collection_id_count += 1;
                     }
                 }
@@ -256,10 +256,10 @@ pub const IdTracker = struct {
             },
             .create_order => {
                 if (resp.status == .ok) {
-                    assert(resp.result.order.id == msg.body_as(message.OrderRequest).id);
+                    // ID from message body — response has no domain data.
                     self.order_count += 1;
                     if (self.order_id_count < id_pool_capacity) {
-                        self.order_ids[self.order_id_count] = resp.result.order.id;
+                        self.order_ids[self.order_id_count] = msg.body_as(message.OrderRequest).id;
                         self.order_id_count += 1;
                     }
                 }
@@ -312,7 +312,7 @@ pub const FeatureCoverage = struct {
     list_with_cursor: bool = false,
     utf8_multibyte_name: bool = false,
 
-    pub fn record_message(self: *FeatureCoverage, msg: message.Message, resp: message.MessageResponse) void {
+    pub fn record_message(self: *FeatureCoverage, msg: message.Message, resp: anytype) void {
         switch (msg.operation) {
             .list_products, .list_collections, .list_orders => {
                 const lp = msg.body_as(message.ListParams);

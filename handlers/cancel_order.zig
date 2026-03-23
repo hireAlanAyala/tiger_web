@@ -27,7 +27,7 @@ pub fn prefetch(storage: anytype, msg: *const t.Message) ?Prefetch {
 // [handle] .cancel_order
 pub fn handle(ctx: Context) t.ExecuteResult {
     _ = ctx;
-    return t.ExecuteResult.read_only(t.Message.MessageResponse.not_found);
+    return t.ExecuteResult.read_only(t.HandlerResponse.not_found);
 }
 
 // [render] .cancel_order

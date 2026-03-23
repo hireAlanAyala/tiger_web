@@ -116,15 +116,17 @@ pub fn build(b: *std.Build) void {
     scanner_step.dependOn(&scanner_cmd.step);
 
     // --- Unit tests for individual modules ---
+    // Modules with no C dependencies.
+    // These must NOT import app.zig (which pulls in SqliteStorage → sqlite3).
+    // They use state_machine and message module-level types directly.
     const modules = [_][]const u8{
         "message.zig",
-        "state_machine.zig",
         "codec.zig",
         "render.zig",
         "wal_test.zig",
+        "annotation_scanner.zig",
         "codegen.zig",
         "serde_test_codegen.zig",
-        "annotation_scanner.zig",
     };
     const unit_test_step = b.step("unit-test", "Run unit tests");
     for (modules) |mod| {
@@ -138,8 +140,8 @@ pub fn build(b: *std.Build) void {
         unit_test_step.dependOn(&run_unit_test.step);
     }
 
-    // Modules that need libc only.
-    for ([_][]const u8{"sidecar.zig"}) |mod| {
+    // Modules that need libc only (no sqlite3).
+    for ([_][]const u8{}) |mod| {
         const unit_test = b.addTest(.{
             .root_source_file = b.path(mod),
             .target = target,
@@ -150,8 +152,10 @@ pub fn build(b: *std.Build) void {
         unit_test_step.dependOn(&b.addRunArtifact(unit_test).step);
     }
 
-    // Modules that need sqlite3 + libc.
-    for ([_][]const u8{ "storage.zig", "replay.zig" }) |mod| {
+    // Modules that need sqlite3 + libc (import app.zig → storage.zig → sqlite3).
+    // state_machine_test.zig is separate from state_machine.zig so that
+    // files importing the SM module don't transitively need sqlite3.
+    for ([_][]const u8{ "storage.zig", "replay.zig", "state_machine_test.zig", "sidecar.zig" }) |mod| {
         const unit_test = b.addTest(.{
             .root_source_file = b.path(mod),
             .target = target,
@@ -230,6 +234,8 @@ pub fn build(b: *std.Build) void {
     });
     addFramework(bench_smoke.root_module, framework);
     bench_smoke.root_module.addOptions("bench_options", bench_smoke_options);
+    bench_smoke.linkSystemLibrary("sqlite3");
+    bench_smoke.linkLibC();
     unit_test_step.dependOn(&b.addRunArtifact(bench_smoke).step);
 
     const bench_real_options = b.addOptions();
@@ -242,6 +248,8 @@ pub fn build(b: *std.Build) void {
     });
     addFramework(bench_real.root_module, framework);
     bench_real.root_module.addOptions("bench_options", bench_real_options);
+    bench_real.linkSystemLibrary("sqlite3");
+    bench_real.linkLibC();
     const bench_run = b.addRunArtifact(bench_real);
     bench_run.has_side_effects = true;
     const bench_step = b.step("bench", "Run state machine benchmark");

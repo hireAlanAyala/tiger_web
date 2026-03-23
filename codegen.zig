@@ -5,7 +5,6 @@ const message = @import("message.zig");
 const state_machine = @import("state_machine.zig");
 const protocol = @import("protocol.zig");
 
-const SM = state_machine.StateMachineType(state_machine.MemoryStorage);
 
 /// Single source of truth for all struct types emitted as TS interfaces.
 /// The emit block, is_known_struct, and the uniqueness assertion all
@@ -39,7 +38,7 @@ const known_structs = .{
     message.FollowupState,
     message.MessageResponse,
     // SM-internal (LoginCodeWrite/LoginCodeKey now shared from message.zig)
-    SM.ExecuteResult,
+    state_machine.ExecuteResult,
     // Sidecar types
     message.LoginCodeEntry,
     message.LoginCodeWrite,
@@ -67,7 +66,7 @@ const known_enums = .{
     message.EventTag,
     state_machine.StorageResult,
     message.MessageResponse.SessionKind,
-    message.MessageResponse.SessionAction,
+    message.SessionAction,
     // Protocol
     protocol.Tag,
     protocol.Method,
@@ -77,7 +76,7 @@ const known_enums = .{
 /// All union types emitted as TS discriminated unions.
 const known_unions = .{
     message.Result,
-    SM.Write,
+    state_machine.Write,
 };
 
 const output = blk: {
@@ -101,7 +100,7 @@ const output = blk: {
     w.emit_const("payment_ref_max", message.payment_ref_max);
     w.emit_const("order_timeout_seconds", message.order_timeout_seconds);
     w.emit_const("credential_max", message.Message.credential_max);
-    w.emit_const("writes_max", SM.writes_max);
+    w.emit_const("writes_max", state_machine.writes_max);
     w.emit_const("path_max", protocol.path_max);
     w.emit_const("json_body_max", protocol.json_body_max);
     w.emit_const("translate_request_size", @sizeOf(protocol.TranslateRequest));
@@ -217,10 +216,10 @@ const output = blk: {
 
     // Union variant counts — if a variant is added, codegen must be updated.
     assert(@typeInfo(message.Result).@"union".fields.len == 10);
-    assert(@typeInfo(SM.Write).@"union".fields.len == 11);
+    assert(@typeInfo(state_machine.Write).@"union".fields.len == 11);
 
     // Anon struct counts — ties emit_union_anon_structs to emit_union.
-    assert(count_anon_structs(SM.Write) == 0);
+    assert(count_anon_structs(state_machine.Write) == 0);
     assert(count_anon_structs(message.Result) == 0);
 
     // Every Operation.EventType references a type we handle.
@@ -1411,7 +1410,7 @@ test "int_str decimal formatting" {
     comptime assert(std.mem.eql(u8, int_str(-60), "-60"));
     comptime assert(std.mem.eql(u8, int_str(message.body_max), "672"));
     comptime assert(std.mem.eql(u8, int_str(message.list_max), "50"));
-    comptime assert(std.mem.eql(u8, int_str(SM.writes_max), "21"));
+    comptime assert(std.mem.eql(u8, int_str(state_machine.writes_max), "21"));
     comptime assert(std.mem.eql(u8, int_str(@sizeOf(message.Message)), "880"));
 }
 
@@ -1531,14 +1530,14 @@ test "type_leaf_name extracts last segment" {
 
     // Nested types (enum inside struct).
     comptime assert(std.mem.eql(u8, type_leaf_name(message.MessageResponse.SessionKind), "SessionKind"));
-    comptime assert(std.mem.eql(u8, type_leaf_name(message.MessageResponse.SessionAction), "SessionAction"));
+    comptime assert(std.mem.eql(u8, type_leaf_name(message.SessionAction), "SessionAction"));
     comptime assert(std.mem.eql(u8, type_leaf_name(message.ListParams.ActiveFilter), "ActiveFilter"));
     comptime assert(std.mem.eql(u8, type_leaf_name(message.OrderCompletion.OrderCompletionResult), "OrderCompletionResult"));
 
     // Generic instantiation — SM types have long @typeName with parens.
-    comptime assert(std.mem.eql(u8, type_leaf_name(SM.Write), "Write"));
-    comptime assert(std.mem.eql(u8, type_leaf_name(SM.LoginCodeWrite), "LoginCodeWrite"));
-    comptime assert(std.mem.eql(u8, type_leaf_name(SM.ExecuteResult), "ExecuteResult"));
+    comptime assert(std.mem.eql(u8, type_leaf_name(state_machine.Write), "Write"));
+    comptime assert(std.mem.eql(u8, type_leaf_name(message.LoginCodeWrite), "LoginCodeWrite"));
+    comptime assert(std.mem.eql(u8, type_leaf_name(state_machine.ExecuteResult), "ExecuteResult"));
 }
 
 test "get_len_info offset and bit width" {
@@ -1603,7 +1602,7 @@ test "is_known_struct covers all union variant types" {
 
     // Every non-void Write variant is either known or anonymous (struct).
     comptime {
-        for (@typeInfo(SM.Write).@"union".fields) |field| {
+        for (@typeInfo(state_machine.Write).@"union".fields) |field| {
             if (field.type == void) continue;
             const info = @typeInfo(field.type);
             if (info == .@"struct") continue;

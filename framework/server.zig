@@ -311,21 +311,24 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
                 server.state_machine.tracer.stop(.prefetch, msg.operation);
 
                 server.state_machine.tracer.start(.execute);
-                const resp = server.state_machine.commit(msg);
+                const pipeline_resp = server.state_machine.commit(msg);
                 server.state_machine.tracer.stop(.execute, msg.operation);
 
                 // Refresh failed (storage error). The mutation already committed —
                 // just close the connection. The client sees a disconnect and
                 // can refresh the page.
-                if (resp.status != .ok) {
+                if (pipeline_resp.status != .ok) {
                     conn.followup = null;
                     conn.state = .closing;
                     continue;
                 }
 
+                // TODO: Replace with handler render. Currently bridges to
+                // legacy MessageResponse for the old encode_followup.
+                const legacy_resp = App.to_legacy_response(Storage, pipeline_resp);
                 const r = App.encode_followup(
                     &conn.send_buf,
-                    resp,
+                    legacy_resp,
                     &followup,
                     server.state_machine.secret_key,
                 );

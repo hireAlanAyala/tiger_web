@@ -30,7 +30,7 @@ pub fn prefetch(storage: anytype, msg: *const t.Message) ?Prefetch {
 pub fn handle(ctx: Context) t.ExecuteResult {
     // TODO: validate order pending, check timeout, set status, restore inventory if failed
     _ = ctx;
-    return t.ExecuteResult.read_only(t.Message.MessageResponse.not_found);
+    return t.ExecuteResult.read_only(t.HandlerResponse.not_found);
 }
 
 // [render] .complete_order

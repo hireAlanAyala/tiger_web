@@ -4,7 +4,6 @@ const message = @import("message.zig");
 const state_machine = @import("state_machine.zig");
 const protocol = @import("protocol.zig");
 
-const SM = state_machine.StateMachineType(state_machine.MemoryStorage);
 
 const output = blk: {
     @setEvalBranchQuota(200000);

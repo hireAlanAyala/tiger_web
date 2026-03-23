@@ -10,7 +10,6 @@ const assert = std.debug.assert;
 const message = @import("message.zig");
 const protocol = @import("protocol.zig");
 const state_machine = @import("state_machine.zig");
-const SM = state_machine.StateMachineType(state_machine.MemoryStorage);
 const http = @import("tiger_framework").http;
 
 const log = std.log.scoped(.sidecar);
@@ -160,8 +159,8 @@ pub const SidecarClient = struct {
             self.handle_disconnect();
             return false;
         };
-        if (resp_buf.writes_len > SM.writes_max) {
-            log.err("{s}: handler returned {d} writes (max {d}) — check your handle function's writes array", .{ @tagName(operation), resp_buf.writes_len, SM.writes_max });
+        if (resp_buf.writes_len > state_machine.writes_max) {
+            log.err("{s}: handler returned {d} writes (max {d}) — check your handle function's writes array", .{ @tagName(operation), resp_buf.writes_len, state_machine.writes_max });
             self.handle_disconnect();
             return false;
         }

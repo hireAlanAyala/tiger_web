@@ -1,14 +1,13 @@
 const std = @import("std");
 const IO = @import("tiger_framework").io.IO;
 const App = @import("app.zig");
-const SqliteStorage = @import("storage.zig").SqliteStorage;
-const StateMachine = App.StateMachineType(SqliteStorage);
+const StateMachine = App.SM;
 const ServerType = @import("tiger_framework").server.ServerType;
 const TimeReal = @import("tiger_framework").time.TimeReal;
 const auth = @import("tiger_framework").auth;
 const flags = @import("tiger_framework").flags;
 
-const Server = ServerType(App, IO, SqliteStorage);
+const Server = ServerType(App, IO, App.Storage);
 const marks = @import("tiger_framework").marks;
 const log = marks.wrap_log(std.log.scoped(.main));
 
@@ -62,7 +61,7 @@ pub fn main() !void {
     var io = try IO.init();
     defer io.deinit();
 
-    var storage = try SqliteStorage.init("tiger_web.db");
+    var storage = try App.Storage.init("tiger_web.db");
     defer storage.deinit();
     const sm_seed: u64 = @truncate(std.crypto.random.int(u128));
     var sm = StateMachine.init(&storage, cli.log_trace, sm_seed, secret_key);
