@@ -100,6 +100,40 @@ var storage = FaultWrapper(SqliteStorage).init(&inner, prng);
 
 FaultWrapper preserves the interface. Handlers can't tell.
 
+## Error Signatures: ?T, Not StorageResult
+
+The old storage interface returned `StorageResult` — an enum with five
+variants: `ok, not_found, err, busy, corruption`. This was over-specified
+for a framework that doesn't own the storage.
+
+The framework cares about one thing: **did the storage cooperate?**
+The handler cares about two things: **did I get data, or didn't I?**
+
+The typed SQL interface already encodes this correctly:
+- `query(T, sql, args) → ?T` — got a row, or didn't
+- `query_all(T, max, sql, args) → ?BoundedList(T, max)` — got rows, or didn't
+
+`null` means "no result" — not found, busy, error, corruption. The handler
+doesn't know which, and it doesn't need to. For prefetch, null means "I
+can't proceed" — the SM retries or skips. For execute, the handler got
+what it got and decides from there.
+
+This simplifies fault injection to one signal: **return null sometimes.**
+No need to distinguish busy from err from corruption at the framework level.
+The PRNG rolls, and if it hits, the read returns null. The handler sees null,
+returns null from prefetch, the SM treats it as busy. One type, one signal,
+one injection point.
+
+StorageResult survives inside SqliteStorage as an internal type — it helps
+SqliteStorage decide whether to retry, log, or panic based on the SQLite
+error code. But it doesn't cross the handler boundary. Handlers see `?T`.
+
+This means:
+- Handler prefetch returns `?Prefetch` (null = storage didn't cooperate)
+- Handler handle receives non-null Prefetch (framework guarantees it)
+- Fault injection returns null from ReadView methods
+- No StorageResult in the framework, no StorageResult in handler signatures
+
 ## Why MemoryStorage Was Wrong
 
 MemoryStorage was a TigerBeetle pattern we cargo-culted. TigerBeetle
@@ -187,11 +221,14 @@ its own methods. The framework treats it identically to any other db.
 - Use flat row types because that's how SqliteStorage maps results
 - Coupled to SQLite — that's the user's choice, not the framework's
 
-### FaultWrapper (framework/)
-- Generic wrapper: FaultWrapper(Storage) adds PRNG-driven faults
-- Delegates all methods to inner storage, including ReadView
-- Returns busy/err based on probability before calling the real method
-- For sim testing with any db type
+### Fault Injection (framework/, at dispatch boundary)
+- Fault injection wraps ReadView at the dispatch boundary in HandlersType
+- Not a separate storage type — the storage is clean, the handler is clean
+- The Handlers interface wraps ReadView in FaultReadView before passing to handler
+- FaultReadView returns null from read methods based on PRNG probability
+- One signal (null), one injection point (ReadView), one mechanism (PRNG)
+- Production: Handlers passes raw ReadView (no faults)
+- Sim: Handlers passes FaultReadView wrapping ReadView
 
 ### Ecommerce Example (sim/fuzz/benchmark)
 - Switches from MemoryStorage to SqliteStorage(":memory:")
@@ -209,7 +246,8 @@ its own methods. The framework treats it identically to any other db.
 | Handlers use storage: anytype | Db interface is the user's choice |
 | SQL safety lives in SqliteStorage | Column matching, bind checks are db-specific |
 | Same type for prod and test | Real users use one db with different instances |
-| FaultWrapper is framework | Generic fault injection for any db |
+| Fault injection at dispatch boundary | Wraps ReadView, returns null, one signal |
+| ?T not StorageResult at handler boundary | Framework cares about cooperated-or-not, not why |
 
 ## Implementation Status
 
@@ -232,9 +270,9 @@ its own methods. The framework treats it identically to any other db.
 - undefined instead of zeroes in read_row_mapped
 
 ### Not Started
-- FaultWrapper(Storage) — generic PRNG fault injection wrapper
+- FaultReadView — PRNG fault injection wrapping ReadView at dispatch boundary
+- Migrate handlers from StorageResult to ?T return pattern
 - Switch sim/fuzz/benchmark from MemoryStorage to SqliteStorage(":memory:")
 - Delete old SM prefetch/execute dispatch (~800 lines)
 - Update extract_cache for new SM shape (sidecar path)
-- Update sim.zig to use FaultWrapper(SqliteStorage)
 - Wire handler dispatch into server process_inbox
