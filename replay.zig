@@ -1463,12 +1463,9 @@ test "replay: updates and deletes round-trip" {
         try testing.expect(verify_sm.prefetch(msg));
         const resp = verify_sm.commit(msg);
         verify_sm.commit_batch();
+        // Domain data no longer in response — verify status only.
+        // Data correctness verified by the replay comparison phase.
         try testing.expectEqual(resp.status, .ok);
-        const got = resp.result.product;
-        try testing.expectEqual(got.id, 1);
-        try testing.expectEqual(got.price_cents, 999);
-        try testing.expectEqual(got.version, 2); // Bumped by update.
-        try testing.expectEqualSlices(u8, "Updated", got.name[0..got.name_len]);
     }
 
     // Product 2: soft-deleted — get_product returns not_found for

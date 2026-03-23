@@ -73,3 +73,50 @@ pass the result to zig as binary,
 run the zig after that chunk,
 If errors show it on compiler
 benefit: allows the language to have a uniform, assert, and other zig checks
+
+wal should track if request was in prod or local
+
+compiler should force error handling in render
+
+ci ideas
+
+  tiger init my-app
+  tiger add operation get_product --read
+  tiger add operation create_product --mutation
+
+## Framework audit primitives
+
+The framework exposes building blocks for users to write simulation tests
+with domain-specific oracles. Framework owns the harness, user owns the
+oracle. See `storage-boundary.md` for rationale.
+
+### Workload generator
+- PRNG-driven operation sequencer with user-configured weights
+- Swarm testing: random weights per seed, different seeds stress different mixes
+- `random_enum_weights` and `gen_random_message` exist internally in fuzz_lib/fuzz.zig
+- Need generic `WorkloadType(App)` that takes the user's operation enum
+
+### Auditor interface
+- Hook point where user plugs in their reference model
+- Shape: `on_commit(msg, resp)`, `at_capacity(op) bool`, `id_pools() IdPools`
+- `IdTracker` in fuzz.zig is the minimal version (IDs + capacity, no validation)
+- User auditor extends with domain state and assertions
+- Should be comptime-validated interface like `StateMachineType(Storage)`
+
+### Coverage tracking
+- `OperationCoverage` + `FeatureCoverage` exist internally in fuzz.zig
+- Need to be generic over user's operation enum
+- Feature coverage should be user-extensible
+
+### Richer fault injection
+- MemoryStorage currently does busy/err only
+- Add: latency variation, partial batch failures, transient-then-recover
+- Consider letting users bring their own MemoryStorage (just implement interface)
+
+### Delivery order
+1. Extract fuzz_lib utilities into framework/ (weights, FuzzArgs)
+2. Make OperationCoverage generic over any operation enum
+3. Define auditor interface as comptime contract
+4. Build WorkloadType(App) wiring generator + coverage + auditor
+5. Example auditor for ecommerce app in examples/
+6. Enrich fault injection

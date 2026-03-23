@@ -35,6 +35,68 @@ const c = @cImport({
 pub const SqliteStorage = struct {
     pub const LoginCodeEntry = message.LoginCodeEntry;
 
+    /// Read-only view of SqliteStorage for the prefetch phase.
+    /// Exposes query/query_all and legacy read methods.
+    /// Write methods (execute, put, update, delete, begin, commit) are absent.
+    /// The framework uses this type — handlers receive it as `storage: anytype`.
+    pub const ReadView = struct {
+        storage: *SqliteStorage,
+
+        pub fn init(storage: *SqliteStorage) ReadView {
+            return .{ .storage = storage };
+        }
+
+        // Typed SQL reads
+        pub fn query(self: ReadView, comptime T: type, comptime sql_str: [*:0]const u8, args: anytype) ?T {
+            return self.storage.query(T, sql_str, args);
+        }
+
+        pub fn query_all(self: ReadView, comptime T: type, comptime max: usize, comptime sql_str: [*:0]const u8, args: anytype) ?BoundedList(T, max) {
+            return self.storage.query_all(T, max, sql_str, args);
+        }
+
+        // Legacy reads — kept for handlers that use domain extern structs
+        pub fn get(self: ReadView, id: u128, out: *message.Product) StorageResult {
+            return self.storage.get(id, out);
+        }
+
+        pub fn get_collection(self: ReadView, id: u128, out: *message.ProductCollection) StorageResult {
+            return self.storage.get_collection(id, out);
+        }
+
+        pub fn get_order(self: ReadView, id: u128, out: *message.OrderResult) StorageResult {
+            return self.storage.get_order(id, out);
+        }
+
+        pub fn list(self: ReadView, out: *[message.list_max]message.Product, out_len: *u32, params: message.ListParams) StorageResult {
+            return self.storage.list(out, out_len, params);
+        }
+
+        pub fn list_collections(self: ReadView, out: *[message.list_max]message.ProductCollection, out_len: *u32, cursor: u128) StorageResult {
+            return self.storage.list_collections(out, out_len, cursor);
+        }
+
+        pub fn list_products_in_collection(self: ReadView, collection_id: u128, out: *[message.list_max]message.Product, out_len: *u32) StorageResult {
+            return self.storage.list_products_in_collection(collection_id, out, out_len);
+        }
+
+        pub fn list_orders(self: ReadView, out: *[message.list_max]message.OrderSummary, out_len: *u32, cursor: u128) StorageResult {
+            return self.storage.list_orders(out, out_len, cursor);
+        }
+
+        pub fn search(self: ReadView, out: *[message.list_max]message.Product, out_len: *u32, search_query: message.SearchQuery) StorageResult {
+            return self.storage.search(out, out_len, search_query);
+        }
+
+        pub fn get_login_code(self: ReadView, email: []const u8, out: *LoginCodeEntry) StorageResult {
+            return self.storage.get_login_code(email, out);
+        }
+
+        pub fn get_user_by_email(self: ReadView, email: []const u8, out: *u128) StorageResult {
+            return self.storage.get_user_by_email(email, out);
+        }
+    };
+
     db: *c.sqlite3,
     stmt_get: *c.sqlite3_stmt,
     stmt_put: *c.sqlite3_stmt,
@@ -897,7 +959,10 @@ pub const SqliteStorage = struct {
 
     /// Read a single row using a precomputed column→field mapping.
     fn read_row_mapped(comptime T: type, stmt: *c.sqlite3_stmt, mapping: ColumnMapping(T)) T {
-        var result: T = std.mem.zeroes(T);
+        // Use undefined, not zeroes — enum fields may not have a zero value.
+        // Every field is overwritten by the column mapping (guaranteed by
+        // build_column_mapping's pigeonhole check).
+        var result: T = undefined;
         const fields = @typeInfo(T).@"struct".fields;
 
         for (0..fields.len) |col_idx| {
@@ -961,6 +1026,12 @@ pub const SqliteStorage = struct {
                 @memcpy(arr[0..len], p[0..len]);
             }
             return arr;
+        } else if (@typeInfo(T) == .@"enum") {
+            // Pair: bind_param writes enums as INTEGER via their tag value.
+            assert(c.sqlite3_column_type(stmt, col) == c.SQLITE_INTEGER);
+            const val = c.sqlite3_column_int64(stmt, col);
+            assert(val >= 0);
+            return @enumFromInt(@as(@typeInfo(T).@"enum".tag_type, @intCast(val)));
         } else if (@typeInfo(T) == .@"struct" and @typeInfo(T).@"struct".backing_integer != null) {
             // Pair: bind_param writes the backing integer as INTEGER.
             assert(c.sqlite3_column_type(stmt, col) == c.SQLITE_INTEGER);
