@@ -8,6 +8,7 @@ pub const Prefetch = struct { collections: ?t.BoundedList(t.CollectionRow, t.lis
 pub const Context = t.HandlerContext(Prefetch, t.Operation.EventType(.list_collections), t.Identity, Status);
 
 // [route] .list_collections
+// match GET /collections
 pub fn route(method: t.http.Method, raw_path: []const u8, body: []const u8) ?t.Message {
     _ = body;
     if (method != .get) return null;

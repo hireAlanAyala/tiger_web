@@ -8,6 +8,7 @@ pub const Prefetch = struct { existing: ?t.CollectionRow };
 pub const Context = t.HandlerContext(Prefetch, t.Operation.EventType(.create_collection), t.Identity, Status);
 
 // [route] .create_collection
+// match POST /collections
 pub fn route(method: t.http.Method, raw_path: []const u8, body: []const u8) ?t.Message {
     if (method != .post) return null;
     if (raw_path.len == 0 or raw_path[0] != '/') return null;

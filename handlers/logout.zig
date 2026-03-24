@@ -8,6 +8,7 @@ pub const Prefetch = struct {};
 pub const Context = t.HandlerContext(Prefetch, t.Operation.EventType(.logout), t.Identity, Status);
 
 // [route] .logout
+// match POST /logout
 pub fn route(method: t.http.Method, raw_path: []const u8, body: []const u8) ?t.Message {
     _ = body;
     if (method != .post) return null;

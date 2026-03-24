@@ -6,6 +6,7 @@ import { assert } from "tiger-web";
 // ========================== create_order ==========================
 
 // [route] .create_order
+// match POST /orders
 export function routeCreateOrder(req: Request): Route | null {
   if (req.method !== "post" || req.path !== "/orders") return null;
   return { operation: "create_order", id: "0".repeat(32) };
@@ -24,6 +25,7 @@ export function renderCreateOrder(status: string): string {
 // ========================== get_order ==========================
 
 // [route] .get_order
+// match GET /orders/:id
 export function routeGetOrder(req: Request): Route | null {
   const m = req.path.match(/^\/orders\/([a-f0-9]{32})$/);
   if (!m || req.method !== "get") return null;
@@ -46,6 +48,7 @@ export function renderGetOrder(status: string, ctx: Context): string {
 // ========================== list_orders ==========================
 
 // [route] .list_orders
+// match GET /orders
 export function routeListOrders(req: Request): Route | null {
   if (req.method !== "get" || req.path !== "/orders") return null;
   return { operation: "list_orders", id: "0".repeat(32) };
@@ -64,6 +67,7 @@ export function renderListOrders(status: string, ctx: Context): string {
 // ========================== complete_order ==========================
 
 // [route] .complete_order
+// match POST /orders/:id/complete
 export function routeCompleteOrder(req: Request): Route | null {
   const m = req.path.match(/^\/orders\/([a-f0-9]{32})\/complete$/);
   if (!m || req.method !== "post") return null;
@@ -86,6 +90,7 @@ export function renderCompleteOrder(status: string): string {
 // ========================== cancel_order ==========================
 
 // [route] .cancel_order
+// match POST /orders/:id/cancel
 export function routeCancelOrder(req: Request): Route | null {
   const m = req.path.match(/^\/orders\/([a-f0-9]{32})\/cancel$/);
   if (!m || req.method !== "post") return null;
@@ -108,6 +113,7 @@ export function renderCancelOrder(status: string): string {
 // ========================== transfer_inventory ==========================
 
 // [route] .transfer_inventory
+// match POST /products/:id/transfer_inventory/:sub_id
 export function routeTransferInventory(req: Request): Route | null {
   const m = req.path.match(/^\/products\/([a-f0-9]{32})\/transfer-inventory\/([a-f0-9]{32})$/);
   if (!m || req.method !== "post") return null;

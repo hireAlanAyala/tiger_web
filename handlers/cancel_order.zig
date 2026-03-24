@@ -8,6 +8,7 @@ pub const Prefetch = struct { order: ?t.OrderRow };
 pub const Context = t.HandlerContext(Prefetch, t.Operation.EventType(.cancel_order), t.Identity, Status);
 
 // [route] .cancel_order
+// match POST /orders/:id/cancel
 pub fn route(method: t.http.Method, raw_path: []const u8, body: []const u8) ?t.Message {
     _ = body;
     if (method != .post) return null;

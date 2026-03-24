@@ -6,6 +6,7 @@ import { assert } from "tiger-web";
 // ========================== create_collection ==========================
 
 // [route] .create_collection
+// match POST /collections
 export function routeCreateCollection(req: Request): Route | null {
   if (req.method !== "post" || req.path !== "/collections") return null;
   const parsed = JSON.parse(req.body || "{}");
@@ -27,6 +28,7 @@ export function renderCreateCollection(status: string): string {
 // ========================== get_collection ==========================
 
 // [route] .get_collection
+// match GET /collections/:id
 export function routeGetCollection(req: Request): Route | null {
   const m = req.path.match(/^\/collections\/([a-f0-9]{32})$/);
   if (!m || req.method !== "get") return null;
@@ -49,6 +51,7 @@ export function renderGetCollection(status: string, ctx: Context): string {
 // ========================== list_collections ==========================
 
 // [route] .list_collections
+// match GET /collections
 export function routeListCollections(req: Request): Route | null {
   if (req.method !== "get" || req.path !== "/collections") return null;
   return { operation: "list_collections", id: "0".repeat(32) };
@@ -67,6 +70,7 @@ export function renderListCollections(status: string, ctx: Context): string {
 // ========================== delete_collection ==========================
 
 // [route] .delete_collection
+// match DELETE /collections/:id
 export function routeDeleteCollection(req: Request): Route | null {
   const m = req.path.match(/^\/collections\/([a-f0-9]{32})$/);
   if (!m || req.method !== "delete") return null;
@@ -87,6 +91,7 @@ export function renderDeleteCollection(status: string): string {
 // ========================== add_collection_member ==========================
 
 // [route] .add_collection_member
+// match POST /collections/:id/members
 export function routeAddCollectionMember(req: Request): Route | null {
   const m = req.path.match(/^\/collections\/([a-f0-9]{32})\/members$/);
   if (!m || req.method !== "post") return null;
@@ -107,6 +112,7 @@ export function renderAddCollectionMember(status: string): string {
 // ========================== remove_collection_member ==========================
 
 // [route] .remove_collection_member
+// match DELETE /collections/:id/members/:sub_id
 export function routeRemoveCollectionMember(req: Request): Route | null {
   const m = req.path.match(/^\/collections\/([a-f0-9]{32})\/members\/([a-f0-9]{32})$/);
   if (!m || req.method !== "delete") return null;

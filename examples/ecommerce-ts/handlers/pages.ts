@@ -5,6 +5,7 @@ import type { Request, Route, Response, Context } from "tiger-web";
 // ========================== page_load_dashboard ==========================
 
 // [route] .page_load_dashboard
+// match GET /
 export function routePageLoadDashboard(req: Request): Route | null {
   if (req.method !== "get" || req.path !== "/") return null;
   return { operation: "page_load_dashboard", id: "0".repeat(32) };
@@ -23,6 +24,7 @@ export function renderPageLoadDashboard(status: string, ctx: Context): string {
 // ========================== page_load_login ==========================
 
 // [route] .page_load_login
+// match GET /login
 export function routePageLoadLogin(req: Request): Route | null {
   if (req.method !== "get" || req.path !== "/login") return null;
   return { operation: "page_load_login", id: "0".repeat(32) };
@@ -41,6 +43,7 @@ export function renderPageLoadLogin(status: string): string {
 // ========================== request_login_code ==========================
 
 // [route] .request_login_code
+// match POST /login/request
 export function routeRequestLoginCode(req: Request): Route | null {
   if (req.method !== "post" || req.path !== "/login/request") return null;
   return { operation: "request_login_code", id: "0".repeat(32) };
@@ -59,6 +62,7 @@ export function renderRequestLoginCode(status: string): string {
 // ========================== verify_login_code ==========================
 
 // [route] .verify_login_code
+// match POST /login/verify
 export function routeVerifyLoginCode(req: Request): Route | null {
   if (req.method !== "post" || req.path !== "/login/verify") return null;
   return { operation: "verify_login_code", id: "0".repeat(32) };
@@ -77,6 +81,7 @@ export function renderVerifyLoginCode(status: string): string {
 // ========================== logout ==========================
 
 // [route] .logout
+// match POST /logout
 export function routeLogout(req: Request): Route | null {
   if (req.method !== "post" || req.path !== "/logout") return null;
   return { operation: "logout", id: "0".repeat(32) };

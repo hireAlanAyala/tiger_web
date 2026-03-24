@@ -12,6 +12,7 @@ import { assert } from "tiger-web";
 // ========================== create_product ==========================
 
 // [route] .create_product
+// match POST /products
 export function routeCreateProduct(req: Request): Route<Product> | null {
   if (req.method !== "post" || req.path !== "/products") return null;
   const parsed = JSON.parse(req.body || "{}");
@@ -36,6 +37,7 @@ export function renderCreateProduct(status: string, ctx: Context): string {
 // ========================== get_product ==========================
 
 // [route] .get_product
+// match GET /products/:id
 export function routeGetProduct(req: Request): Route | null {
   const match = req.path.match(/^\/products\/([a-f0-9]{32})$/);
   if (!match || req.method !== "get") return null;
@@ -65,6 +67,7 @@ export function renderGetProduct(status: string, ctx: Context): string {
 // ========================== list_products ==========================
 
 // [route] .list_products
+// match GET /products
 export function routeListProducts(req: Request): Route | null {
   if (req.method !== "get" || req.path !== "/products") return null;
   return { operation: "list_products", id: "0".repeat(32) };
@@ -84,6 +87,7 @@ export function renderListProducts(status: string, ctx: Context): string {
 // ========================== update_product ==========================
 
 // [route] .update_product
+// match PUT /products/:id
 export function routeUpdateProduct(req: Request): Route<Product> | null {
   const match = req.path.match(/^\/products\/([a-f0-9]{32})$/);
   if (!match || req.method !== "put") return null;
@@ -109,6 +113,7 @@ export function renderUpdateProduct(status: string, ctx: Context): string {
 // ========================== delete_product ==========================
 
 // [route] .delete_product
+// match DELETE /products/:id
 export function routeDeleteProduct(req: Request): Route | null {
   const match = req.path.match(/^\/products\/([a-f0-9]{32})$/);
   if (!match || req.method !== "delete") return null;
@@ -131,6 +136,7 @@ export function renderDeleteProduct(status: string, ctx: Context): string {
 // ========================== get_product_inventory ==========================
 
 // [route] .get_product_inventory
+// match GET /products/:id/inventory
 export function routeGetProductInventory(req: Request): Route | null {
   const match = req.path.match(/^\/products\/([a-f0-9]{32})\/inventory$/);
   if (!match || req.method !== "get") return null;

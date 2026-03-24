@@ -13,6 +13,7 @@ pub const Prefetch = struct {
 pub const Context = t.HandlerContext(Prefetch, t.Operation.EventType(.add_collection_member), t.Identity, Status);
 
 // [route] .add_collection_member
+// match POST /collections/:id/products/:sub_id
 pub fn route(method: t.http.Method, raw_path: []const u8, body: []const u8) ?t.Message {
     _ = body;
     if (method != .post) return null;

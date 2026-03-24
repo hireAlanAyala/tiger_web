@@ -11,6 +11,7 @@ pub const Prefetch = struct {
 pub const Context = t.HandlerContext(Prefetch, t.Operation.EventType(.transfer_inventory), t.Identity, Status);
 
 // [route] .transfer_inventory
+// match POST /products/:id/transfer_inventory/:sub_id
 pub fn route(method: t.http.Method, raw_path: []const u8, body: []const u8) ?t.Message {
     if (method != .post) return null;
     if (raw_path.len == 0 or raw_path[0] != '/') return null;

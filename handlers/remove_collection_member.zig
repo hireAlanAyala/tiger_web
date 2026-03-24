@@ -8,6 +8,7 @@ pub const Prefetch = struct { collection_id: u128, product_id: u128, collection:
 pub const Context = t.HandlerContext(Prefetch, t.Operation.EventType(.remove_collection_member), t.Identity, Status);
 
 // [route] .remove_collection_member
+// match DELETE /collections/:id/products/:sub_id
 pub fn route(method: t.http.Method, raw_path: []const u8, body: []const u8) ?t.Message {
     _ = body;
     if (method != .delete) return null;

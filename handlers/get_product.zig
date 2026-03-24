@@ -11,6 +11,7 @@ pub const Prefetch = struct {
 pub const Context = t.HandlerContext(Prefetch, t.Operation.EventType(.get_product), t.Identity, Status);
 
 // [route] .get_product
+// match GET /products/:id
 pub fn route(method: t.http.Method, raw_path: []const u8, body: []const u8) ?t.Message {
     _ = body;
     if (method != .get) return null;

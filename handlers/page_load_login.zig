@@ -8,6 +8,7 @@ pub const Prefetch = struct {};
 pub const Context = t.HandlerContext(Prefetch, t.Operation.EventType(.page_load_login), t.Identity, Status);
 
 // [route] .page_load_login
+// match GET /login
 pub fn route(method: t.http.Method, raw_path: []const u8, body: []const u8) ?t.Message {
     _ = body;
     if (method != .get) return null;
