@@ -30,14 +30,14 @@ pub fn prefetch(storage: anytype, msg: *const t.Message) ?Prefetch {
 }
 
 // [handle] .update_product
-pub fn handle(ctx: Context) t.ExecuteResult {
+pub fn handle(ctx: Context, writes: *t.WriteQueue) t.HandleResult {
     const row = ctx.prefetched.existing orelse
-        return t.ExecuteResult.read_only(.not_found);
+        return .{ .status = .not_found };
     const event = ctx.body_val();
 
     // Version check for optimistic concurrency.
     if (event.version != 0 and event.version != row.version)
-        return t.ExecuteResult.read_only(.version_conflict);
+        return .{ .status = .version_conflict };
 
     var entity = std.mem.zeroes(t.Product);
     entity.id = row.id;
@@ -51,10 +51,8 @@ pub fn handle(ctx: Context) t.ExecuteResult {
     entity.version = row.version + 1;
     entity.flags = .{ .active = row.active };
 
-    return t.ExecuteResult.single(
-        .ok,
-        .{ .update_product = entity },
-    );
+    writes.add(.{ .update_product = entity });
+    return .{};
 }
 
 // [render] .update_product

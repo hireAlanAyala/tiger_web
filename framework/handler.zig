@@ -38,7 +38,7 @@ pub fn FrameworkCtx(comptime Identity: type) type {
 ///
 /// Usage (in handler):
 ///   pub const Context = HandlerContext(Prefetch, Body, Identity, Status);
-///   pub fn handle(ctx: Context) ExecuteResult { ... }
+///   pub fn handle(ctx: Context, writes: *WriteQueue) HandleResult { ... }
 ///   pub fn render(ctx: Context) []const u8 { ... }
 ///   pub fn render(ctx: Context, db: anytype) []const u8 { ... }  // with db
 pub fn HandlerContext(comptime Prefetch: type, comptime Body: type, comptime Identity: type, comptime Status: type) type {
@@ -80,7 +80,7 @@ pub fn HandlerContext(comptime Prefetch: type, comptime Body: type, comptime Ide
 /// Checks that the handler exports the right types AND full function
 /// signatures (parameter types, return types, parameter count).
 ///
-/// App-level types (Message, ExecuteResult) are passed as comptime parameters.
+/// App-level types (Message, HandleResult) are passed as comptime parameters.
 /// Render returns []const u8 or a comptime tuple — validated by the framework.
 ///
 /// Returns a descriptor struct with resolved types for dispatch generation.
@@ -90,7 +90,7 @@ pub fn ValidateHandler(
     comptime Identity: type,
     comptime Status: type,
     comptime Message: type,
-    comptime ExecuteResult: type,
+    comptime HandleResult: type,
 ) type {
     const op_name = @tagName(operation);
 
@@ -145,8 +145,8 @@ pub fn ValidateHandler(
     }
     {
         const info = @typeInfo(@TypeOf(handler.handle)).@"fn";
-        if (info.params.len < 1) {
-            @compileError("handler for ." ++ op_name ++ ": handle must accept (ctx)");
+        if (info.params.len < 2) {
+            @compileError("handler for ." ++ op_name ++ ": handle must accept (ctx, writes)");
         }
         // First param should be the Context type.
         if (info.params[0].type) |T| {
@@ -154,10 +154,11 @@ pub fn ValidateHandler(
                 @compileError("handler for ." ++ op_name ++ ": handle first param must be " ++ @typeName(Ctx));
             }
         }
+        // Second param is *WriteQueue (anytype — validated by usage, not by type check).
         const Return = info.return_type orelse
             @compileError("handler for ." ++ op_name ++ ": handle must have a return type");
-        if (Return != ExecuteResult) {
-            @compileError("handler for ." ++ op_name ++ ": handle must return " ++ @typeName(ExecuteResult));
+        if (Return != HandleResult) {
+            @compileError("handler for ." ++ op_name ++ ": handle must return " ++ @typeName(HandleResult));
         }
     }
 
@@ -265,10 +266,8 @@ test "HandlerContext exposes type aliases" {
 
 const MockIdentity = struct { user_id: u128 };
 const MockMessage = struct { operation: MockOp };
-const MockExecuteResult = struct {
-    response: struct { status: u8 },
-    writes: [1]u8,
-    writes_len: u8,
+const MockHandleResult = struct {
+    status: u8,
 };
 const MockBody = struct { name: u8 };
 
@@ -297,8 +296,8 @@ const MockReadOnlyHandler = struct {
     pub fn prefetch() ?Prefetch {
         return null;
     }
-    pub fn handle(_: Context) MockExecuteResult {
-        return .{ .response = .{ .status = 1 }, .writes = .{0}, .writes_len = 0 };
+    pub fn handle(_: Context, _: anytype) MockHandleResult {
+        return .{ .status = 1 };
     }
     pub fn render(ctx: Context) []const u8 {
         _ = ctx;
@@ -317,8 +316,8 @@ const MockMutationHandler = struct {
     pub fn prefetch() ?Prefetch {
         return null;
     }
-    pub fn handle(_: Ctx) MockExecuteResult {
-        return .{ .response = .{ .status = 1 }, .writes = .{0}, .writes_len = 0 };
+    pub fn handle(_: Ctx, _: anytype) MockHandleResult {
+        return .{ .status = 1 };
     }
     pub fn render(ctx: Ctx) []const u8 {
         _ = ctx;
@@ -327,12 +326,12 @@ const MockMutationHandler = struct {
 };
 
 test "ValidateHandler read-only" {
-    const V = ValidateHandler(MockReadOnlyHandler, MockOp.get_thing, MockIdentity, MockStatus, MockMessage, MockExecuteResult);
+    const V = ValidateHandler(MockReadOnlyHandler, MockOp.get_thing, MockIdentity, MockStatus, MockMessage, MockHandleResult);
     try std.testing.expect(V.PrefetchType == MockReadOnlyHandler.Prefetch);
     try std.testing.expect(V.BodyType == void);
 }
 
 test "ValidateHandler mutation" {
-    const V = ValidateHandler(MockMutationHandler, MockOp.create_thing, MockIdentity, MockStatus, MockMessage, MockExecuteResult);
+    const V = ValidateHandler(MockMutationHandler, MockOp.create_thing, MockIdentity, MockStatus, MockMessage, MockHandleResult);
     try std.testing.expect(V.BodyType == MockBody);
 }

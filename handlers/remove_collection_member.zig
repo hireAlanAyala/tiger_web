@@ -31,18 +31,16 @@ pub fn prefetch(storage: anytype, msg: *const t.Message) ?Prefetch {
 }
 
 // [handle] .remove_collection_member
-pub fn handle(ctx: Context) t.ExecuteResult {
+pub fn handle(ctx: Context, writes: *t.WriteQueue) t.HandleResult {
     _ = ctx.prefetched.collection orelse
-        return t.ExecuteResult.read_only(.not_found);
-    return t.ExecuteResult.single(
-        .ok,
-        .{ .update_membership = .{
-            .collection_id = ctx.prefetched.collection_id,
-            .product_id = ctx.prefetched.product_id,
-            .removed = 1,
-            .reserved = .{0} ** 15,
-        } },
-    );
+        return .{ .status = .not_found };
+    writes.add(.{ .update_membership = .{
+        .collection_id = ctx.prefetched.collection_id,
+        .product_id = ctx.prefetched.product_id,
+        .removed = 1,
+        .reserved = .{0} ** 15,
+    } });
+    return .{};
 }
 
 // [render] .remove_collection_member

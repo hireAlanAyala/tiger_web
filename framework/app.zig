@@ -35,7 +35,7 @@ pub fn AppType(comptime config: anytype) type {
     if (!@hasField(@TypeOf(config), "Identity")) @compileError("AppType config missing .Identity");
     if (!@hasField(@TypeOf(config), "StateMachineType")) @compileError("AppType config missing .StateMachineType");
     if (!@hasField(@TypeOf(config), "Wal")) @compileError("AppType config missing .Wal");
-    if (!@hasField(@TypeOf(config), "ExecuteResult")) @compileError("AppType config missing .ExecuteResult");
+    if (!@hasField(@TypeOf(config), "HandleResult")) @compileError("AppType config missing .HandleResult");
 
     const handlers = config.handlers;
     const Message = config.Message;
@@ -78,15 +78,9 @@ pub fn AppType(comptime config: anytype) type {
         @compileError("Identity must be a struct, got " ++ @typeName(Identity));
     }
 
-    // ExecuteResult must have response, writes, writes_len.
-    if (!@hasField(config.ExecuteResult, "response")) {
-        @compileError("ExecuteResult must have a .response field");
-    }
-    if (!@hasField(config.ExecuteResult, "writes")) {
-        @compileError("ExecuteResult must have a .writes field");
-    }
-    if (!@hasField(config.ExecuteResult, "writes_len")) {
-        @compileError("ExecuteResult must have a .writes_len field");
+    // HandleResult must have status field.
+    if (!@hasField(config.HandleResult, "status")) {
+        @compileError("HandleResult must have a .status field");
     }
 
     // 1. Handler count matches operation count (minus root).
@@ -122,7 +116,7 @@ pub fn AppType(comptime config: anytype) type {
             Identity,
             config.Status,
             Message,
-            config.ExecuteResult,
+            config.HandleResult,
         );
     }
 
@@ -205,10 +199,8 @@ const TestMessage = struct {
 const TestResponse = struct { status: TestStatus };
 const TestStatus = enum(u8) { ok = 1, err = 2 };
 const TestFollowup = struct {};
-const TestExecuteResult = struct {
-    response: TestResponse,
-    writes: [1]u8,
-    writes_len: u8,
+const TestHandleResult = struct {
+    status: TestStatus = .ok,
 };
 const GetThingHandler = struct {
     pub const Prefetch = struct { found: bool };
@@ -220,8 +212,8 @@ const GetThingHandler = struct {
     pub fn prefetch() ?Prefetch {
         return .{ .found = true };
     }
-    pub fn handle(_: Ctx) TestExecuteResult {
-        return .{ .response = .{ .status = .ok }, .writes = .{0}, .writes_len = 0 };
+    pub fn handle(_: Ctx, _: anytype) TestHandleResult {
+        return .{};
     }
     pub fn render(ctx: Ctx) []const u8 {
         _ = ctx;
@@ -239,8 +231,8 @@ const CreateThingHandler = struct {
     pub fn prefetch() ?Prefetch {
         return .{ .existing = false };
     }
-    pub fn handle(_: Ctx) TestExecuteResult {
-        return .{ .response = .{ .status = .ok }, .writes = .{0}, .writes_len = 0 };
+    pub fn handle(_: Ctx, _: anytype) TestHandleResult {
+        return .{};
     }
     pub fn render(ctx: Ctx) []const u8 {
         _ = ctx;
@@ -263,7 +255,7 @@ const TestApp = AppType(.{
     .Identity = TestIdentity,
     .StateMachineType = dummy_sm,
     .Wal = struct {},
-    .ExecuteResult = TestExecuteResult,
+    .HandleResult = TestHandleResult,
 });
 
 test "AppType translate routes GET to get_thing" {

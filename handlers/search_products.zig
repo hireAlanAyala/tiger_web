@@ -40,9 +40,10 @@ pub fn prefetch(storage: anytype, msg: *const t.Message) ?Prefetch {
 }
 
 // [handle] .search_products
-pub fn handle(ctx: Context) t.ExecuteResult {
+pub fn handle(ctx: Context, writes: *t.WriteQueue) t.HandleResult {
     _ = ctx;
-    return t.ExecuteResult.read_only(.ok);
+    _ = writes;
+    return .{};
 }
 
 

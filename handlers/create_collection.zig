@@ -29,19 +29,17 @@ pub fn prefetch(storage: anytype, msg: *const t.Message) ?Prefetch {
 }
 
 // [handle] .create_collection
-pub fn handle(ctx: Context) t.ExecuteResult {
+pub fn handle(ctx: Context, writes: *t.WriteQueue) t.HandleResult {
     if (ctx.prefetched.existing != null)
-        return t.ExecuteResult.read_only(.version_conflict);
+        return .{ .status = .version_conflict };
     const event = ctx.body_val();
     var entity = std.mem.zeroes(t.ProductCollection);
     entity.id = event.id;
     @memcpy(entity.name[0..event.name_len], event.name[0..event.name_len]);
     entity.name_len = event.name_len;
     entity.flags = .{ .active = true };
-    return t.ExecuteResult.single(
-        .ok,
-        .{ .put_collection = entity },
-    );
+    writes.add(.{ .put_collection = entity });
+    return .{};
 }
 
 // [render] .create_collection

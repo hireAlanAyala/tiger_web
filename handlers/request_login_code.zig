@@ -29,10 +29,11 @@ pub fn prefetch(storage: anytype, msg: *const t.Message) ?Prefetch {
 }
 
 // [handle] .request_login_code
-pub fn handle(ctx: Context) t.ExecuteResult {
+pub fn handle(ctx: Context, writes: *t.WriteQueue) t.HandleResult {
     // TODO: generate login code, write to storage
     _ = ctx;
-    return t.ExecuteResult.read_only(.ok);
+    _ = writes;
+    return .{};
 }
 
 // [render] .request_login_code

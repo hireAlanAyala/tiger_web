@@ -63,34 +63,29 @@ comptime {
     assert(writes_max == 21);
 }
 
-/// Result of a handler's execute phase: status + session action + collected writes.
-///
-/// The handler returns its decision (status) and optional session action.
-/// The SM adds auth fields from the resolved credential after the handler returns.
-pub const ExecuteResult = struct {
+/// Handler's decision — status + optional session action.
+/// Session action moves to writes in a future phase; until then,
+/// only logout.zig sets it. All other handlers return bare status.
+pub const HandleResult = struct {
     status: message.Status = .ok,
     session_action: message.SessionAction = .none,
-    writes: [writes_max]Write,
-    writes_len: u8,
+};
 
-    /// Read-only operation — no writes.
-    pub fn read_only(status: message.Status) ExecuteResult {
-        return .{
-            .status = status,
-            .writes = undefined,
-            .writes_len = 0,
-        };
+/// Write queue — handle fills this, the SM drains it after handle returns.
+/// Fixed-size, no allocations. The handler calls `writes.add(...)` to queue
+/// mutations. The framework applies them inside the transaction.
+pub const WriteQueue = struct {
+    entries: [writes_max]Write = undefined,
+    len: u8 = 0,
+
+    pub fn add(self: *WriteQueue, write: Write) void {
+        assert(self.len < writes_max);
+        self.entries[self.len] = write;
+        self.len += 1;
     }
 
-    /// Single-write operation.
-    pub fn single(status: message.Status, write: Write) ExecuteResult {
-        var result = ExecuteResult{
-            .status = status,
-            .writes = undefined,
-            .writes_len = 1,
-        };
-        result.writes[0] = write;
-        return result;
+    pub fn slice(self: *const WriteQueue) []const Write {
+        return self.entries[0..self.len];
     }
 };
 
@@ -313,24 +308,26 @@ pub fn StateMachineType(comptime Storage: type, comptime Handlers: type) type {
                 .is_sse = false, // Set by server when render is wired.
             };
 
-            const exec_result = Handlers.handler_execute(
+            var writes = WriteQueue{};
+            const handle_result = Handlers.handler_execute(
                 cache,
                 msg,
                 fw,
+                &writes,
             );
 
-            // Apply writes — handlers return writes, the SM applies them.
-            for (exec_result.writes[0..exec_result.writes_len]) |w| {
+            // Apply writes — handle queued them, the SM drains.
+            for (writes.slice()) |w| {
                 assert(self.apply_write(w));
             }
 
             const identity = self.prefetch_identity orelse std.mem.zeroes(message.PrefetchIdentity);
             const is_auth = identity.is_authenticated != 0 or
-                exec_result.session_action == .set_authenticated;
+                handle_result.session_action == .set_authenticated;
 
             const resp = PipelineResponse{
-                .status = exec_result.status,
-                .session_action = exec_result.session_action,
+                .status = handle_result.status,
+                .session_action = handle_result.session_action,
                 .user_id = identity.user_id,
                 .is_authenticated = is_auth,
                 .is_new_visitor = identity.is_new != 0,
@@ -344,9 +341,8 @@ pub fn StateMachineType(comptime Storage: type, comptime Handlers: type) type {
             };
         }
 
-        /// Dispatch to per-pattern handlers. Private — only called by commit().
-        /// Handlers return ExecuteResult (response + writes). The dispatch
-        /// loop applies writes — handlers never call storage directly.
+        /// Apply a single write to storage. Called by commit() to drain
+        /// the WriteQueue after handle returns.
         pub fn apply_write(self: *StateMachine, w: Write) bool {
             return switch (w) {
                 .put_product => |p| self.storage.put(&p) == .ok,

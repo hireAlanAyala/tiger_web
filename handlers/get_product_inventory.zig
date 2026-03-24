@@ -27,11 +27,12 @@ pub fn prefetch(storage: anytype, msg: *const t.Message) ?Prefetch {
 }
 
 // [handle] .get_product_inventory
-pub fn handle(ctx: Context) t.ExecuteResult {
+pub fn handle(ctx: Context, writes: *t.WriteQueue) t.HandleResult {
+    _ = writes;
     const product = ctx.prefetched.product orelse
-        return t.ExecuteResult.read_only(.not_found);
-    if (!product.active) return t.ExecuteResult.read_only(.not_found);
-    return t.ExecuteResult.read_only(.ok);
+        return .{ .status = .not_found };
+    if (!product.active) return .{ .status = .not_found };
+    return .{};
 }
 
 

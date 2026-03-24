@@ -27,20 +27,18 @@ pub fn prefetch(storage: anytype, msg: *const t.Message) ?Prefetch {
 }
 
 // [handle] .delete_product
-pub fn handle(ctx: Context) t.ExecuteResult {
+pub fn handle(ctx: Context, writes: *t.WriteQueue) t.HandleResult {
     const row = ctx.prefetched.existing orelse
-        return t.ExecuteResult.read_only(.not_found);
+        return .{ .status = .not_found };
     if (!row.active)
-        return t.ExecuteResult.read_only(.not_found);
+        return .{ .status = .not_found };
 
     var entity = t.productFromRow(row);
     entity.version += 1;
     entity.flags = .{ .active = false };
 
-    return t.ExecuteResult.single(
-        .ok,
-        .{ .update_product = entity },
-    );
+    writes.add(.{ .update_product = entity });
+    return .{};
 }
 
 // [render] .delete_product

@@ -188,7 +188,8 @@ pub fn collectionFromRow(row: CollectionRow) ProductCollection {
 }
 
 // --- State machine types (for handle phase) ---
-pub const ExecuteResult = sm.ExecuteResult;
+pub const HandleResult = sm.HandleResult;
+pub const WriteQueue = sm.WriteQueue;
 pub const Write = sm.Write;
 
 // --- HTML helpers ---

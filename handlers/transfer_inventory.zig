@@ -44,15 +44,15 @@ pub fn prefetch(storage: anytype, msg: *const t.Message) ?Prefetch {
 }
 
 // [handle] .transfer_inventory
-pub fn handle(ctx: Context) t.ExecuteResult {
+pub fn handle(ctx: Context, writes: *t.WriteQueue) t.HandleResult {
     const source_row = ctx.prefetched.source orelse
-        return t.ExecuteResult.read_only(.not_found);
+        return .{ .status = .not_found };
     const target_row = ctx.prefetched.target orelse
-        return t.ExecuteResult.read_only(.not_found);
+        return .{ .status = .not_found };
 
     const transfer = ctx.body_val();
     if (source_row.inventory < transfer.quantity)
-        return t.ExecuteResult.read_only(.insufficient_inventory);
+        return .{ .status = .insufficient_inventory };
 
     var source = t.productFromRow(source_row);
     source.inventory -= transfer.quantity;
@@ -62,14 +62,9 @@ pub fn handle(ctx: Context) t.ExecuteResult {
     target.inventory += transfer.quantity;
     target.version += 1;
 
-    var result = t.ExecuteResult{
-        .status = .ok,
-        .writes = undefined,
-        .writes_len = 2,
-    };
-    result.writes[0] = .{ .update_product = source };
-    result.writes[1] = .{ .update_product = target };
-    return result;
+    writes.add(.{ .update_product = source });
+    writes.add(.{ .update_product = target });
+    return .{};
 }
 
 // [render] .transfer_inventory

@@ -37,9 +37,9 @@ pub fn prefetch(storage: anytype, msg: *const t.Message) ?Prefetch {
 }
 
 // [handle] .create_product
-pub fn handle(ctx: Context) t.ExecuteResult {
+pub fn handle(ctx: Context, writes: *t.WriteQueue) t.HandleResult {
     if (ctx.prefetched.existing != null) {
-        return t.ExecuteResult.read_only(.version_conflict);
+        return .{ .status = .version_conflict };
     }
 
     const event = ctx.body_val();
@@ -57,10 +57,8 @@ pub fn handle(ctx: Context) t.ExecuteResult {
     entity.version = 1;
     entity.flags = .{ .active = true };
 
-    return t.ExecuteResult.single(
-        .ok,
-        .{ .put_product = entity },
-    );
+    writes.add(.{ .put_product = entity });
+    return .{};
 }
 
 // [render] .create_product

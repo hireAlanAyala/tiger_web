@@ -37,7 +37,7 @@ const known_structs = .{
     message.LoginResult,
     message.MessageResponse,
     // SM-internal
-    state_machine.ExecuteResult,
+    state_machine.HandleResult,
     // Sidecar types
     message.LoginCodeEntry,
     message.LoginCodeWrite,
@@ -1536,7 +1536,7 @@ test "type_leaf_name extracts last segment" {
     // Generic instantiation — SM types have long @typeName with parens.
     comptime assert(std.mem.eql(u8, type_leaf_name(state_machine.Write), "Write"));
     comptime assert(std.mem.eql(u8, type_leaf_name(message.LoginCodeWrite), "LoginCodeWrite"));
-    comptime assert(std.mem.eql(u8, type_leaf_name(state_machine.ExecuteResult), "ExecuteResult"));
+    comptime assert(std.mem.eql(u8, type_leaf_name(state_machine.HandleResult), "HandleResult"));
 }
 
 test "get_len_info offset and bit width" {

@@ -33,12 +33,13 @@ pub fn prefetch(storage: anytype, msg: *const t.Message) ?Prefetch {
 }
 
 // [handle] .get_product
-pub fn handle(ctx: Context) t.ExecuteResult {
+pub fn handle(ctx: Context, writes: *t.WriteQueue) t.HandleResult {
+    _ = writes;
     if (ctx.prefetched.product == null)
-        return t.ExecuteResult.read_only(.not_found);
+        return .{ .status = .not_found };
     if (!ctx.prefetched.product.?.active)
-        return t.ExecuteResult.read_only(.not_found);
-    return t.ExecuteResult.read_only(.ok);
+        return .{ .status = .not_found };
+    return .{};
 }
 
 // [render] .get_product
