@@ -287,33 +287,34 @@ fn dispatch_render(
     status: message.Status,
     fw: anytype,
     render_buf: []u8,
+    storage: anytype,
 ) []const u8 {
     return switch (operation) {
         .root => unreachable,
-        .get_product => render_one(@import("handlers/get_product.zig"), .get_product, cache, status, fw, render_buf),
-        .create_product => render_one(@import("handlers/create_product.zig"), .create_product, cache, status, fw, render_buf),
-        .list_products => render_one(@import("handlers/list_products.zig"), .list_products, cache, status, fw, render_buf),
-        .update_product => render_one(@import("handlers/update_product.zig"), .update_product, cache, status, fw, render_buf),
-        .delete_product => render_one(@import("handlers/delete_product.zig"), .delete_product, cache, status, fw, render_buf),
-        .get_product_inventory => render_one(@import("handlers/get_product_inventory.zig"), .get_product_inventory, cache, status, fw, render_buf),
-        .search_products => render_one(@import("handlers/search_products.zig"), .search_products, cache, status, fw, render_buf),
-        .transfer_inventory => render_one(@import("handlers/transfer_inventory.zig"), .transfer_inventory, cache, status, fw, render_buf),
-        .create_collection => render_one(@import("handlers/create_collection.zig"), .create_collection, cache, status, fw, render_buf),
-        .get_collection => render_one(@import("handlers/get_collection.zig"), .get_collection, cache, status, fw, render_buf),
-        .list_collections => render_one(@import("handlers/list_collections.zig"), .list_collections, cache, status, fw, render_buf),
-        .delete_collection => render_one(@import("handlers/delete_collection.zig"), .delete_collection, cache, status, fw, render_buf),
-        .add_collection_member => render_one(@import("handlers/add_collection_member.zig"), .add_collection_member, cache, status, fw, render_buf),
-        .remove_collection_member => render_one(@import("handlers/remove_collection_member.zig"), .remove_collection_member, cache, status, fw, render_buf),
-        .create_order => render_one(@import("handlers/create_order.zig"), .create_order, cache, status, fw, render_buf),
-        .get_order => render_one(@import("handlers/get_order.zig"), .get_order, cache, status, fw, render_buf),
-        .list_orders => render_one(@import("handlers/list_orders.zig"), .list_orders, cache, status, fw, render_buf),
-        .complete_order => render_one(@import("handlers/complete_order.zig"), .complete_order, cache, status, fw, render_buf),
-        .cancel_order => render_one(@import("handlers/cancel_order.zig"), .cancel_order, cache, status, fw, render_buf),
-        .page_load_dashboard => render_one(@import("handlers/page_load_dashboard.zig"), .page_load_dashboard, cache, status, fw, render_buf),
-        .page_load_login => render_one(@import("handlers/page_load_login.zig"), .page_load_login, cache, status, fw, render_buf),
-        .request_login_code => render_one(@import("handlers/request_login_code.zig"), .request_login_code, cache, status, fw, render_buf),
-        .verify_login_code => render_one(@import("handlers/verify_login_code.zig"), .verify_login_code, cache, status, fw, render_buf),
-        .logout => render_one(@import("handlers/logout.zig"), .logout, cache, status, fw, render_buf),
+        .get_product => render_one(@import("handlers/get_product.zig"), .get_product, cache, status, fw, render_buf, storage),
+        .create_product => render_one(@import("handlers/create_product.zig"), .create_product, cache, status, fw, render_buf, storage),
+        .list_products => render_one(@import("handlers/list_products.zig"), .list_products, cache, status, fw, render_buf, storage),
+        .update_product => render_one(@import("handlers/update_product.zig"), .update_product, cache, status, fw, render_buf, storage),
+        .delete_product => render_one(@import("handlers/delete_product.zig"), .delete_product, cache, status, fw, render_buf, storage),
+        .get_product_inventory => render_one(@import("handlers/get_product_inventory.zig"), .get_product_inventory, cache, status, fw, render_buf, storage),
+        .search_products => render_one(@import("handlers/search_products.zig"), .search_products, cache, status, fw, render_buf, storage),
+        .transfer_inventory => render_one(@import("handlers/transfer_inventory.zig"), .transfer_inventory, cache, status, fw, render_buf, storage),
+        .create_collection => render_one(@import("handlers/create_collection.zig"), .create_collection, cache, status, fw, render_buf, storage),
+        .get_collection => render_one(@import("handlers/get_collection.zig"), .get_collection, cache, status, fw, render_buf, storage),
+        .list_collections => render_one(@import("handlers/list_collections.zig"), .list_collections, cache, status, fw, render_buf, storage),
+        .delete_collection => render_one(@import("handlers/delete_collection.zig"), .delete_collection, cache, status, fw, render_buf, storage),
+        .add_collection_member => render_one(@import("handlers/add_collection_member.zig"), .add_collection_member, cache, status, fw, render_buf, storage),
+        .remove_collection_member => render_one(@import("handlers/remove_collection_member.zig"), .remove_collection_member, cache, status, fw, render_buf, storage),
+        .create_order => render_one(@import("handlers/create_order.zig"), .create_order, cache, status, fw, render_buf, storage),
+        .get_order => render_one(@import("handlers/get_order.zig"), .get_order, cache, status, fw, render_buf, storage),
+        .list_orders => render_one(@import("handlers/list_orders.zig"), .list_orders, cache, status, fw, render_buf, storage),
+        .complete_order => render_one(@import("handlers/complete_order.zig"), .complete_order, cache, status, fw, render_buf, storage),
+        .cancel_order => render_one(@import("handlers/cancel_order.zig"), .cancel_order, cache, status, fw, render_buf, storage),
+        .page_load_dashboard => render_one(@import("handlers/page_load_dashboard.zig"), .page_load_dashboard, cache, status, fw, render_buf, storage),
+        .page_load_login => render_one(@import("handlers/page_load_login.zig"), .page_load_login, cache, status, fw, render_buf, storage),
+        .request_login_code => render_one(@import("handlers/request_login_code.zig"), .request_login_code, cache, status, fw, render_buf, storage),
+        .verify_login_code => render_one(@import("handlers/verify_login_code.zig"), .verify_login_code, cache, status, fw, render_buf, storage),
+        .logout => render_one(@import("handlers/logout.zig"), .logout, cache, status, fw, render_buf, storage),
     };
 }
 
@@ -324,6 +325,7 @@ fn render_one(
     status: message.Status,
     fw: anytype,
     render_buf: []u8,
+    storage: anytype,
 ) []const u8 {
     const prefetched = @field(cache, @tagName(op));
     const ctx = H.Context{
@@ -333,7 +335,14 @@ fn render_one(
         .render_buf = render_buf,
         .status = status,
     };
-    return H.render(ctx);
+
+    // Detect at comptime whether the handler's render takes (ctx, db) or just (ctx).
+    const render_fn_info = @typeInfo(@TypeOf(H.render)).@"fn";
+    if (render_fn_info.params.len >= 2) {
+        return H.render(ctx, storage);
+    } else {
+        return H.render(ctx);
+    }
 }
 
 // Render scratch buffer — module-level, single-threaded. Used by the
@@ -382,7 +391,8 @@ pub fn commit_and_encode(
 
         // Render into a temporary region after the headers.
         const render_buf = send_buf[pos..];
-        const html = dispatch_render(cache, msg.operation, pipeline_resp.status, fw, render_buf);
+        const ro = StorageParam.ReadView.init(sm.storage);
+        const html = dispatch_render(cache, msg.operation, pipeline_resp.status, fw, render_buf, ro);
 
         // Encode the render result as SSE events after the headers.
         if (html.len > 0) {
@@ -398,7 +408,8 @@ pub fn commit_and_encode(
         // Scratch buffer avoids aliasing — render may return a string literal
         // (rodata) or a slice of the scratch buffer. Either way, one memcpy
         // into send_buf is correct and non-overlapping.
-        const html = dispatch_render(cache, msg.operation, pipeline_resp.status, fw, &render_scratch_buf);
+        const ro = StorageParam.ReadView.init(sm.storage);
+        const html = dispatch_render(cache, msg.operation, pipeline_resp.status, fw, &render_scratch_buf, ro);
 
         if (html.len > 0) {
             @memcpy(send_buf[http_response.header_reserve..][0..html.len], html);
