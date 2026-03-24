@@ -5,12 +5,12 @@ const http = @import("http.zig");
 const marks = @import("marks.zig");
 const log = marks.wrap_log(std.log.scoped(.connection));
 
-/// Per-connection state machine. Parameterized on IO type and a FollowupState
-/// type so the same connection logic works with real epoll IO or simulated IO.
+/// Per-connection state machine. Parameterized on IO type so the same
+/// connection logic works with real epoll IO or simulated IO.
 ///
 /// IO callbacks only update buffers and set state. They never call into
 /// the application state machine — that's the server tick's job.
-pub fn ConnectionType(comptime IO: type, comptime FollowupState: type) type {
+pub fn ConnectionType(comptime IO: type) type {
     return struct {
         const Connection = @This();
 
@@ -61,13 +61,6 @@ pub fn ConnectionType(comptime IO: type, comptime FollowupState: type) type {
         // The render layer uses this to decide full-page HTML vs SSE fragments.
         is_datastar_request: bool,
 
-        // SSE follow-up: when non-null, the server defers rendering to
-        // process_followups next tick for a dashboard refresh. Carries the
-        // original mutation's auth decision as an opaque blob — the connection
-        // never reads or branches on the fields. How auth works is domain
-        // logic (state machine); that auth exists is framework logic (here).
-        followup: ?FollowupState,
-
         pub fn init_free() Connection {
             return .{
                 .state = .free,
@@ -86,7 +79,6 @@ pub fn ConnectionType(comptime IO: type, comptime FollowupState: type) type {
                 .send_activity = false,
                 .keep_alive = true,
                 .is_datastar_request = false,
-                .followup = null,
             };
         }
 
@@ -136,7 +128,6 @@ pub fn ConnectionType(comptime IO: type, comptime FollowupState: type) type {
                     assert(conn.recv_completion.operation == .none);
                     assert(conn.send_completion.operation == .none);
                     assert(!conn.is_datastar_request);
-                    assert(conn.followup == null);
                 },
                 .accepting => {
                     assert(conn.fd == 0);
@@ -144,20 +135,17 @@ pub fn ConnectionType(comptime IO: type, comptime FollowupState: type) type {
                 .receiving => {
                     assert(conn.fd > 0);
                     assert(conn.recv_pos <= conn.recv_buf.len);
-                    assert(conn.followup == null);
                 },
                 .ready => {
                     assert(conn.fd > 0);
                     assert(conn.request_consumed > 0);
                     assert(conn.request_consumed <= conn.recv_pos);
-                    if (conn.followup != null) assert(conn.is_datastar_request);
                 },
                 .sending => {
                     assert(conn.fd > 0);
                     assert(conn.send_len > 0);
                     assert(conn.send_start + conn.send_len <= conn.send_buf.len);
                     assert(conn.send_pos <= conn.send_len);
-                    assert(conn.followup == null);
                 },
                 .closing => {
                     assert(conn.fd > 0);
@@ -291,7 +279,6 @@ pub fn ConnectionType(comptime IO: type, comptime FollowupState: type) type {
                 assert(conn.recv_pos <= conn.recv_buf.len);
                 conn.request_consumed = 0;
                 conn.is_datastar_request = false;
-                conn.followup = null;
                 conn.state = .receiving;
 
                 // Try to parse pipelined data immediately. If a complete

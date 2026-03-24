@@ -48,7 +48,6 @@ const handlers = .{
 
 pub const Message = message.Message;
 pub const MessageResponse = message.MessageResponse;
-pub const FollowupState = message.FollowupState;
 pub const Operation = message.Operation;
 pub const Status = message.Status;
 /// PrefetchCache — tagged union of all handler Prefetch types.
@@ -179,7 +178,7 @@ pub fn translate(method: http.Method, path: []const u8, body: []const u8) ?Messa
 // - dispatch_execute: unpacks PrefetchCache, constructs HandlerContext,
 //   calls handler.handle(), applies writes via callback.
 //
-// The SM owns the cross-cutting concerns (auth, followup, tracer).
+// The SM owns the cross-cutting concerns (auth, tracer).
 // These functions own the handler dispatch logic.
 // =====================================================================
 

@@ -28,7 +28,7 @@ pub const Status = enum(u8) {
 /// change? No auth fields (user_id, is_authenticated) — those are the
 /// SM's concern, filled from the resolved credential after the handler
 /// returns. No domain data — that stays in the Prefetch → render flow.
-/// Session action — shared between HandlerResponse, MessageResponse, and FollowupState.
+/// Session action — shared between HandlerResponse and MessageResponse.
 pub const SessionAction = enum { none, set_authenticated, clear };
 
 pub const HandlerResponse = struct {
@@ -142,28 +142,6 @@ pub const Operation = enum(u8) {
             .transfer_inventory,
             .request_login_code, .verify_login_code,
             => true,
-        };
-    }
-
-    /// Whether this mutation needs an SSE dashboard refresh after commit.
-    /// Self-contained mutations (login, logout) render their own response.
-    /// All other mutations need the server to re-fetch the dashboard.
-    pub fn needs_followup(op: Operation) bool {
-        return switch (op) {
-            .create_product, .update_product, .delete_product,
-            .create_collection, .delete_collection,
-            .add_collection_member, .remove_collection_member,
-            .create_order, .complete_order, .cancel_order,
-            .transfer_inventory,
-            => true,
-            .root,
-            .page_load_dashboard, .page_load_login,
-            .logout,
-            .list_products, .list_collections, .list_orders,
-            .get_product, .get_collection, .get_order,
-            .get_product_inventory, .search_products,
-            .request_login_code, .verify_login_code,
-            => false,
         };
     }
 
@@ -920,18 +898,6 @@ pub const Result = union(enum) {
     empty: void,
 };
 
-/// SSE follow-up state — carried on the connection between the mutation
-/// tick and the dashboard refresh tick. Captures the original mutation's
-/// domain context so the follow-up render can produce correct headers
-/// and error fragments.
-pub const FollowupState = struct {
-    operation: Operation,
-    status: Status,
-    user_id: u128,
-    kind: MessageResponse.SessionKind,
-    session_action: SessionAction,
-    is_new_visitor: bool,
-};
 
 /// Response from the state machine back through the codec layer.
 pub const MessageResponse = struct {
@@ -944,10 +910,6 @@ pub const MessageResponse = struct {
     is_authenticated: bool = false,
     kind: SessionKind = .anonymous,
     is_new_visitor: bool = false,
-    /// SSE follow-up: when set, the server defers rendering and runs a
-    /// dashboard refresh next tick. The state machine decides — the server
-    /// reads the field without inspecting which operation ran.
-    followup: ?FollowupState = null,
 
     pub const SessionKind = enum(u8) {
         anonymous = 0,

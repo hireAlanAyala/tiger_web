@@ -278,7 +278,7 @@ pub fn StateMachineType(comptime Storage: type, comptime Handlers: type) type {
         }
 
         /// Phase 2: commit — dispatch to handler.handle() via Handlers interface.
-        /// Cross-cutting concerns (auth, followup, tracer) handled here so
+        /// Cross-cutting concerns (auth, tracer) handled here so
         /// handlers don't have to. Must only be called after prefetch() returned true.
         ///
         /// Pipeline response — the framework envelope. Handler decision + auth.

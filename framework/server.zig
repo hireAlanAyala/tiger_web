@@ -38,7 +38,7 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
         assert(@hasDecl(App.Operation, "is_mutation"));
     }
 
-    const Connection = ConnectionType(IO, App.FollowupState);
+    const Connection = ConnectionType(IO);
     const StateMachine = App.StateMachineType(Storage);
     const Wal = App.Wal;
 

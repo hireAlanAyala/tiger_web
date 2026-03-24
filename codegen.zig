@@ -35,7 +35,6 @@ const known_structs = .{
     message.OrderSummaryList,
     message.PageLoadDashboardResult,
     message.LoginResult,
-    message.FollowupState,
     message.MessageResponse,
     // SM-internal
     state_machine.ExecuteResult,
@@ -1298,7 +1297,7 @@ fn count_anon_structs(comptime U: type) usize {
 
 /// Returns true if T is a struct in the known_structs list.
 fn is_known_struct(comptime T: type) bool {
-    comptime assert(known_structs.len == 39);
+    comptime assert(known_structs.len == 38);
     comptime {
         for (known_structs) |K| assert(@typeInfo(K) == .@"struct");
     }
@@ -1387,7 +1386,7 @@ fn assert_no_name_collisions() void {
             if (@typeInfo(field.type) == .@"struct") {
                 assert(is_known_struct(field.type));
             }
-            // Check optional children (e.g., ?FollowupState).
+            // Check optional children.
             if (@typeInfo(field.type) == .optional) {
                 const child = @typeInfo(field.type).optional.child;
                 if (@typeInfo(child) == .@"enum") assert(is_known_enum(child));
@@ -1628,7 +1627,7 @@ test "output is valid structure" {
             if (i + 11 <= output.len and std.mem.eql(u8, output[i..][0..11], "export type")) types += 1;
             if (i + 12 <= output.len and std.mem.eql(u8, output[i..][0..12], "export const")) consts += 1;
         }
-        assert(interfaces == 41); // +1 for HandlerResponse
+        assert(interfaces == 40); // +1 for HandlerResponse
         assert(types == 19);
         assert(consts == 34);
         // 33 extern structs × 2 (read + write) = 66 serde functions + 1 assert

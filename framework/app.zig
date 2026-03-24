@@ -13,16 +13,11 @@ const http = @import("http.zig");
 ///   pub const App = framework.app.AppType(.{
 ///       .handlers = @import("generated/handlers.generated.zig").handlers,
 ///       .Message = message.Message,
-///       .MessageResponse = message.MessageResponse,
 ///       .Operation = message.Operation,
 ///       .Status = message.Status,
 ///       .Identity = message.PrefetchIdentity,
-///       .FollowupState = message.FollowupState,
 ///       .StateMachineType = state_machine.StateMachineType,
 ///       .Wal = wal.WalType(message.Message, message.wal_root),
-///       // Passthrough functions until fully migrated:
-///       .encode_response = render.encode_response,
-///       .encode_followup = render.encode_followup,
 ///       .refresh_message = refresh_message,
 ///   });
 pub fn AppType(comptime config: anytype) type {
