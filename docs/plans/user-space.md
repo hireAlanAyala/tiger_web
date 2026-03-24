@@ -129,6 +129,127 @@ render handles every status exhaustively.
 
 See docs/plans/scanner-status-enum.md for the full plan.
 
+## Worker — external API calls without await
+
+The framework is single-threaded. External API calls (Stripe, Auth0,
+entitlements APIs) can't block the tick loop. The worker provides
+non-blocking external IO in prefetch and post-commit hooks in handle.
+
+**No await. No async. No promises. No callbacks.**
+
+The developer writes sequential code. The framework retries until
+the external data arrives. This is the same mechanism as storage busy —
+prefetch returns null, retry next tick.
+
+### Worker in prefetch — external data needed for queries
+
+```ts
+export function prefetchGetProfile(db, worker, msg) {
+    // worker.fetch — starts async request, returns null until response arrives
+    const externalUser = worker.fetch("https://api.auth0.com/users/" + msg.id);
+    if (!externalUser) return null; // not ready — framework retries next tick
+
+    // Only runs once externalUser is resolved
+    const profile = db.query("SELECT * FROM profiles WHERE external_id = :id", externalUser);
+    return { profile };
+}
+```
+
+What happens per tick:
+
+```
+Tick 1:  worker.fetch starts request → returns null
+         prefetch returns null → framework skips, processes other connections
+
+Tick 2:  worker.fetch checks cache → still pending, returns null
+         prefetch returns null → skip
+
+Tick N:  worker.fetch checks cache → response arrived, returns data
+         db.query runs with resolved data → returns profile
+         prefetch returns { profile } → handle runs immediately
+```
+
+The function runs multiple times. It reads like synchronous code.
+The developer checks for null and returns null — that's it. The retry
+loop is invisible. `worker.fetch` caches per-connection so the
+external request fires once, not every tick.
+
+### Worker in prefetch — multiple external sources
+
+```ts
+export function prefetchVendorRedirect(db, worker, msg) {
+    const vendor = db.query("SELECT * FROM vendors WHERE slug = :slug", msg);
+
+    // Non-blocking — starts request, returns null until ready
+    const entitlements = worker.fetch("https://api.esm.com/entitlements", {
+        headers: { Authorization: `Bearer ${msg.identity.token}` }
+    });
+    if (!entitlements) return null;
+
+    const pages = db.query_all("SELECT * FROM vendor_pages WHERE vendor = :vendor", vendor);
+    return { vendor, entitlements, pages };
+}
+```
+
+`db.query` is immediate (local database). `worker.fetch` is async
+(external API). The developer mixes them naturally. The framework
+retries until the async results are ready. Local queries re-execute
+each tick — they're fast (prepared statements, in-memory).
+
+### Worker after commit — fire-and-forget external calls
+
+```ts
+export function handleCompleteOrder(ctx, db) {
+    if (!ctx.data.order) return "not_found";
+    db.execute("UPDATE orders SET status = 'confirmed', payment_status = 'pending' WHERE id = :id",
+        ctx.data.order);
+
+    // Fires AFTER commit, non-blocking. Client gets response immediately.
+    db.after_commit(() => {
+        worker.post("https://api.stripe.com/charges", {
+            body: { order_id: ctx.data.order.id, amount: ctx.data.order.total }
+        });
+    });
+
+    return "ok";
+}
+```
+
+What happens:
+
+```
+Tick 1:  handle queues db.execute + after_commit callback
+         framework drains queue → executes SQL → commits transaction
+         framework fires after_commit → starts async Stripe call
+         render runs → client gets response IMMEDIATELY
+         Stripe call is in-flight, client already has their page
+
+Tick N:  Stripe responds → worker posts result back as new HTTP request
+         complete_payment handler commits the Stripe result
+```
+
+The client never waits for Stripe. The database tracks payment state:
+`payment_status = 'pending'` → worker succeeds → `payment_status = 'paid'`.
+If Stripe fails, the worker retries. If it keeps failing, the worker
+posts a failure → handler sets `payment_status = 'failed'`.
+
+The database is always the source of truth. External calls are
+eventually consistent. The framework doesn't undo commits — the
+worker handles its own retries.
+
+### Why await is never needed
+
+The tick model eliminates async/await:
+
+- **Storage busy** → prefetch returns null, retry next tick
+- **Worker pending** → prefetch returns null, retry next tick
+- **Post-commit side effect** → fires after client has response
+
+Same mechanism for all three. The developer writes sequential code
+with null checks. The framework retries. No async, no await, no
+callback hell, no promise chains. The single-threaded event loop
+does the scheduling.
+
 ## What dies
 
 - `Write` tagged union in state_machine.zig
@@ -141,11 +262,12 @@ See docs/plans/scanner-status-enum.md for the full plan.
 ## Summary
 
 ```
-route:     (request)           → Message
-prefetch:  (read-only db, msg) → Data
-handle:    (ctx, write-queue)  → Status
-render:    (ctx, read-only db) → HTML
+route:     (request)                    → Message
+prefetch:  (read-only db, worker, msg)  → Data (or null = retry)
+handle:    (ctx, write-queue)           → Status
+render:    (ctx, read-only db)          → HTML
 ```
 
-Four functions. Each gets exactly the db access it needs.
-The framework calls them in order, manages transactions, wraps output.
+Four functions. Each gets exactly the access it needs.
+The framework calls them in order, manages transactions, retries
+on null, wraps output. No async. No await. No callbacks.
