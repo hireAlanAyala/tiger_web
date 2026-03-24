@@ -146,7 +146,7 @@ pub fn ValidateHandler(
     {
         const info = @typeInfo(@TypeOf(handler.handle)).@"fn";
         if (info.params.len < 2) {
-            @compileError("handler for ." ++ op_name ++ ": handle must accept (ctx, writes)");
+            @compileError("handler for ." ++ op_name ++ ": handle must accept (ctx, db)");
         }
         // First param should be the Context type.
         if (info.params[0].type) |T| {
@@ -154,7 +154,7 @@ pub fn ValidateHandler(
                 @compileError("handler for ." ++ op_name ++ ": handle first param must be " ++ @typeName(Ctx));
             }
         }
-        // Second param is *WriteQueue (anytype — validated by usage, not by type check).
+        // Second param is WriteView (anytype — validated by usage, not by type check).
         const Return = info.return_type orelse
             @compileError("handler for ." ++ op_name ++ ": handle must have a return type");
         if (Return != HandleResult) {

@@ -1,5 +1,4 @@
 const std = @import("std");
-const assert = std.debug.assert;
 const t = @import("../prelude.zig");
 
 pub const Status = enum { ok, not_found, insufficient_inventory };
@@ -62,14 +61,14 @@ pub fn handle(ctx: Context, db: anytype) t.HandleResult {
     target.inventory += transfer.quantity;
     target.version += 1;
 
-    assert(db.execute(
-        "UPDATE products SET name = ?2, description = ?3, price_cents = ?4, inventory = ?5, version = ?6, active = ?7 WHERE id = ?1;",
+    db.execute(
+        t.sql.products.update,
         .{ source.id, source.name[0..source.name_len], source.description[0..source.description_len], source.price_cents, source.inventory, source.version, source.flags.active },
-    ));
-    assert(db.execute(
-        "UPDATE products SET name = ?2, description = ?3, price_cents = ?4, inventory = ?5, version = ?6, active = ?7 WHERE id = ?1;",
+    );
+    db.execute(
+        t.sql.products.update,
         .{ target.id, target.name[0..target.name_len], target.description[0..target.description_len], target.price_cents, target.inventory, target.version, target.flags.active },
-    ));
+    );
     return .{};
 }
 

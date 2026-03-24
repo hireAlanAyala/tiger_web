@@ -110,8 +110,12 @@ pub const SqliteStorage = struct {
             return .{ .storage = storage };
         }
 
-        pub fn execute(self: WriteView, comptime sql_str: [*:0]const u8, args: anytype) bool {
-            return self.storage.execute(sql_str, args);
+        /// Execute a write statement. Asserts success — if prefetch
+        /// validated the data, the write must succeed. A failure here
+        /// means the handler's precondition check was wrong.
+        pub fn execute(self: WriteView, comptime sql_str: [*:0]const u8, args: anytype) void {
+            const ok = self.storage.execute(sql_str, args);
+            assert(ok); // prefetch proved the precondition, write must succeed
         }
     };
 
@@ -1086,13 +1090,13 @@ pub const SqliteStorage = struct {
             return;
         }
 
+        // Note: []const u8 (unaligned) is handled by is_byte_slice above.
+        // Only u128, string literals, and integer/bool types reach here.
         const rc = rc: {
             if (T == u128) {
                 var buf: [16]u8 = undefined;
                 std.mem.writeInt(u128, &buf, val, .big);
                 break :rc c.sqlite3_bind_blob(stmt, col, &buf, 16, c.SQLITE_TRANSIENT);
-            } else if (T == []const u8) {
-                break :rc c.sqlite3_bind_text(stmt, col, val.ptr, @intCast(val.len), c.SQLITE_TRANSIENT);
             } else if (comptime is_string_literal(T)) {
                 const slice: []const u8 = val;
                 break :rc c.sqlite3_bind_text(stmt, col, slice.ptr, @intCast(slice.len), c.SQLITE_TRANSIENT);

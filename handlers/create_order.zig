@@ -65,10 +65,10 @@ pub fn handle(ctx: Context, db: anytype) t.HandleResult {
         var product = t.productFromRow(maybe_product.?);
         product.inventory -= item.quantity;
 
-        assert(db.execute(
-            "UPDATE products SET name = ?2, description = ?3, price_cents = ?4, inventory = ?5, version = ?6, active = ?7 WHERE id = ?1;",
+        db.execute(
+            t.sql.products.update,
             .{ product.id, product.name[0..product.name_len], product.description[0..product.description_len], product.price_cents, product.inventory, product.version, product.flags.active },
-        ));
+        );
 
         const line_total = @as(u64, product.price_cents) * @as(u64, item.quantity);
         order_result.items[i] = std.mem.zeroes(message.OrderResultItem);
@@ -81,16 +81,16 @@ pub fn handle(ctx: Context, db: anytype) t.HandleResult {
         order_result.total_cents +|= line_total;
     }
 
-    assert(db.execute(
-        "INSERT INTO orders (id, total_cents, items_len, status, timeout_at) VALUES (?1, ?2, ?3, ?4, ?5);",
+    db.execute(
+        t.sql.orders.insert,
         .{ order_result.id, order_result.total_cents, @as(u32, order_result.items_len), @intFromEnum(order_result.status), @as(u64, order_result.timeout_at) },
-    ));
+    );
 
     for (order_result.items[0..order_result.items_len]) |item| {
-        assert(db.execute(
-            "INSERT INTO order_items (order_id, product_id, name, quantity, price_cents, line_total_cents) VALUES (?1, ?2, ?3, ?4, ?5, ?6);",
+        db.execute(
+            t.sql.orders.insert_item,
             .{ order_result.id, item.product_id, item.name[0..item.name_len], item.quantity, item.price_cents, item.line_total_cents },
-        ));
+        );
     }
 
     return .{};

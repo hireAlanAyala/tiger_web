@@ -1,5 +1,4 @@
 const std = @import("std");
-const assert = std.debug.assert;
 const t = @import("../prelude.zig");
 
 pub const Status = enum { ok, not_found };
@@ -46,10 +45,10 @@ pub fn handle(ctx: Context, db: anytype) t.HandleResult {
         return .{ .status = .not_found };
     _ = ctx.prefetched.product orelse
         return .{ .status = .not_found };
-    assert(db.execute(
-        "INSERT INTO collection_members (collection_id, product_id, removed) VALUES (?1, ?2, 0) ON CONFLICT(collection_id, product_id) DO UPDATE SET removed = 0;",
+    db.execute(
+        t.sql.collection_members.upsert,
         .{ ctx.prefetched.collection_id, ctx.prefetched.product_id },
-    ));
+    );
     return .{};
 }
 

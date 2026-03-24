@@ -190,5 +190,8 @@ pub fn collectionFromRow(row: CollectionRow) ProductCollection {
 // --- State machine types (for handle phase) ---
 pub const HandleResult = sm.HandleResult;
 
+// --- SQL ---
+pub const sql = @import("sql.zig");
+
 // --- HTML helpers ---
 pub const html = @import("html.zig");
