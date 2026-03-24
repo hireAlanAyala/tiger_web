@@ -1112,6 +1112,95 @@ test "render: suffix rejects non-switch-arm dots" {
     try std.testing.expect(has_name(&ss, "ok"));
 }
 
+// --- Integration test: scanner vs real handlers ---
+//
+// Reads every handler file from disk, extracts handle statuses using the
+// scanner's patterns, and verifies they match the declared Status enum.
+// Catches pattern regressions that unit tests with synthetic content miss.
+
+test "integration: extracted handle statuses match declared Status enum" {
+    const allocator = std.testing.allocator;
+
+    // Read handler directory.
+    var dir = try std.fs.cwd().openDir("handlers", .{ .iterate = true });
+    defer dir.close();
+
+    var walker = try dir.walk(allocator);
+    defer walker.deinit();
+
+    var checked: u32 = 0;
+
+    while (try walker.next()) |entry| {
+        if (entry.kind != .file) continue;
+        if (!std.mem.endsWith(u8, entry.basename, ".zig")) continue;
+
+        const content = try dir.readFileAlloc(allocator, entry.path, 1024 * 1024);
+        defer allocator.free(content);
+
+        // Find the [handle] annotation line.
+        var handle_line: ?u32 = null;
+        var line_num: u32 = 0;
+        var lines = std.mem.splitScalar(u8, content, '\n');
+        while (lines.next()) |line| {
+            line_num += 1;
+            if (parse_annotation(line, "//")) |ann| {
+                if (ann.phase == .execute) handle_line = line_num;
+            }
+        }
+        const start_line = handle_line orelse continue;
+
+        // Extract statuses from handle body.
+        const extracted = extract_statuses_from_handle(content, start_line, zig_adapter.handle_patterns);
+
+        // Parse declared Status enum from "pub const Status = enum { ... };".
+        var declared = StatusSet{};
+        var decl_lines = std.mem.splitScalar(u8, content, '\n');
+        while (decl_lines.next()) |line| {
+            const trimmed = std.mem.trim(u8, line, " \t");
+            if (std.mem.startsWith(u8, trimmed, "pub const Status = enum {")) {
+                // Extract variants from "pub const Status = enum { ok, not_found };"
+                const start = std.mem.indexOf(u8, trimmed, "{").? + 1;
+                const end = std.mem.indexOf(u8, trimmed, "}").?;
+                var variants = std.mem.splitScalar(u8, trimmed[start..end], ',');
+                while (variants.next()) |v| {
+                    const name = std.mem.trim(u8, v, " \t");
+                    if (name.len > 0) declared.add(name);
+                }
+                break;
+            }
+        }
+
+        // declared must have at least ok.
+        assert(declared.len >= 1);
+        assert(has_name(&declared, "ok"));
+
+        // Every declared status must be in the extracted set.
+        for (declared.slice()) |status| {
+            if (!has_name(&extracted, status)) {
+                std.debug.panic(
+                    "handler {s}: declared status '{s}' not found by scanner extraction",
+                    .{ entry.basename, status },
+                );
+            }
+        }
+
+        // Every extracted status must be in the declared set.
+        for (extracted.slice()) |status| {
+            if (!has_name(&declared, status)) {
+                std.debug.panic(
+                    "handler {s}: scanner extracted '{s}' but it's not in declared Status enum",
+                    .{ entry.basename, status },
+                );
+            }
+        }
+
+        checked += 1;
+    }
+
+    // Must have checked all 24 handlers.
+    try std.testing.expectEqual(@as(u32, 24), checked);
+}
+
 test "render: Zig multi-status with other switches" {
     const content =
         \\// [render] .complete_order
