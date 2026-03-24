@@ -110,9 +110,11 @@ pub fn build(b: *std.Build) void {
     b.installArtifact(scanner_exe);
 
     const scanner_cmd = b.addRunArtifact(scanner_exe);
-    scanner_cmd.step.dependOn(b.getInstallStep());
+    // No dependency on getInstallStep() — scanner reads source text,
+    // it doesn't need the main exe or other artifacts to be built.
+    scanner_cmd.addArg("handlers/");
     if (b.args) |args| scanner_cmd.addArgs(args);
-    const scanner_step = b.step("scan", "Scan annotations for handler exhaustiveness");
+    const scanner_step = b.step("scan", "Scan handlers for annotation and status exhaustiveness");
     scanner_step.dependOn(&scanner_cmd.step);
 
     // --- Unit tests for individual modules ---

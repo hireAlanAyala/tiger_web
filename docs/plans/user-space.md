@@ -105,9 +105,27 @@ After handle returns, the framework:
   begin_batch/commit_batch. The framework controls when SQL runs.
 - **Uniform API.** Zig-native and sidecar handlers write the same code.
   `db.execute` everywhere. The framework decides when it actually runs.
-- **Testable via outcomes.** End-to-end tests (prefetch → handle → drain →
-  query result) validate behavior. Nobody unit-tests the writes array —
-  the fuzz/sim tests check "I created a product, can I get it back?"
+
+### Why db.execute over a writes array
+
+The current design returns `ExecuteResult { .response, .writes }` with
+a tagged union (`Write { .put_product, .update_product, ... }`). This
+looks inspectable but nobody inspects it — no test asserts on the writes
+array. The fuzzer and auditor check outcomes: "I created a product, can
+I get it back?" They query the database after commit.
+
+`db.execute` with SQL replaces the tagged union with the actual mutation.
+The safety comes from the same place it always did:
+
+1. Prefetch queries state → handle asserts preconditions
+2. Handle returns status → scanner verifies render handles it
+3. Framework commits → state changes
+4. Auditor queries again → asserts the outcome matches
+
+Assert outcomes, not mechanics. The writes array was mechanics.
+The database state after commit is the outcome. `db.execute` is
+simpler to read, fewer types to maintain, and the test coverage
+is identical because nobody was testing the intermediate form.
 
 ### Handle is not pure
 
@@ -145,6 +163,30 @@ Session changes are writes — `db.execute("INSERT INTO sessions ...")`.
 The framework reads session state from the database, not from handle's
 return value.
 
+### Writes are optional
+
+Read-only handlers don't call `db.execute` — they just return a status.
+The framework detects an empty write queue and skips the transaction.
+
+```ts
+// Read-only — no writes, no transaction
+export function handle(ctx) {
+    if (ctx.prefetched.product === null) return "not_found";
+    return "ok";
+}
+
+// Mutation — queues writes, framework commits
+export function handle(ctx, db) {
+    if (ctx.prefetched.product !== null) return "version_conflict";
+    db.execute("INSERT INTO products VALUES (?1, ?2, ?3)", ctx.body);
+    return "ok";
+}
+```
+
+Read-only handlers don't receive `db` at all — the framework detects
+the parameter count and skips the write queue. Same pattern as render
+receiving an optional db parameter for post-commit queries.
+
 ## render — produce HTML with post-commit db access
 
 Render sees the committed state. It can query the database (read-only)
@@ -161,180 +203,81 @@ pub fn render(ctx: Context, db: anytype) []const u8 {
 
 See decisions/render-db-access.md for the full reasoning.
 
-## prefetch — declare what you need
+## prefetch — aggregate and return
 
-Prefetch declares data requirements. It doesn't return anything.
-`db.query`, `db.query_all`, and `worker.fetch` queue requests.
-The framework resolves all of them and populates `ctx.data` before
-calling handle. The developer never sees pending state, never
-returns null, never manages retries.
-
-```ts
-// [prefetch] .get_product
-export function prefetch(db, msg) {
-    db.query("product", "SELECT * FROM products WHERE id = :id", msg);
-}
-// handle gets ctx.data.product
-
-// [prefetch] .page_load_dashboard
-export function prefetch(db, msg) {
-    db.query_all("products", "SELECT * FROM products WHERE active = 1");
-    db.query_all("collections", "SELECT * FROM collections WHERE active = 1");
-    db.query_all("orders", "SELECT * FROM orders ORDER BY id");
-}
-// handle gets ctx.data.products, ctx.data.collections, ctx.data.orders
-
-// [prefetch] .vendor_redirect
-export function prefetch(db, worker, msg) {
-    db.query("vendor", "SELECT * FROM vendors WHERE slug = :slug", msg);
-    db.query_all("pages", "SELECT * FROM vendor_pages");
-    worker.fetch("entitlements", "https://api.esm.com/entitlements");
-}
-// handle gets ctx.data.vendor, ctx.data.pages, ctx.data.entitlements
-```
+Prefetch queries the database, builds a typed struct, and returns it.
+Handle receives the struct as `ctx.prefetched`. This is the current
+pattern — it stays.
 
 ```zig
+pub const Prefetch = struct {
+    product: ?t.ProductRow,
+};
+
 // [prefetch] .get_product
-pub fn prefetch(db: anytype, msg: *const Message) void {
-    db.query("product", ProductRow,
-        "SELECT id, name, price_cents FROM products WHERE id = :id", msg);
+pub fn prefetch(storage: anytype, msg: *const t.Message) ?Prefetch {
+    return .{ .product = storage.query(t.ProductRow,
+        "SELECT id, name, price_cents FROM products WHERE id = ?1;",
+        .{msg.id}) };
 }
 ```
 
-### How the framework resolves prefetch
-
-1. Runs prefetch — all queries and worker fetches are queued
-2. Executes db queries immediately (local, fast)
-3. Starts worker fetches (non-blocking)
-4. If any worker fetch is pending → retry next tick, process other connections
-5. When everything resolves → populates `ctx.data`, calls handle
-
-The developer writes declarations. The framework handles resolution,
-retry, and aggregation. No return value, no null checks, no control flow.
-
-### Why no chaining
-
-All prefetch declarations are independent. You can't use one query's
-result in another query's params:
-
 ```ts
-// NOT SUPPORTED — result of one query as input to another
-worker.fetch("ext_user", "https://auth0.com/users/" + msg.id);
-db.query("profile", "SELECT * FROM profiles WHERE ext_id = :id", ref("ext_user"));
+// [prefetch] .get_product
+export function prefetch(db, msg) {
+    return { product: db.query("SELECT * FROM products WHERE id = ?", msg.id) };
+}
 ```
 
-If you need external data in a local query, sync the external data
-to your database via a job (a handler triggered by the worker on a
-schedule). Prefetch then queries the local cache:
+### Why keep it
 
-```ts
-// Entitlements synced to local db every 5 minutes by worker job
-db.query("entitlement", "SELECT * FROM entitlement_cache WHERE user_id = :id", msg);
-```
+- **Compiler validates field names** — misspell `product` → compile error (Zig), no runtime string matching
+- **The struct IS the documentation** — you see exactly what the handler needs at a glance
+- **No framework magic** — the handler builds its own data, the framework just passes it through
+- **Null return = storage busy** — the framework retries next tick, handler doesn't manage retries
 
-This keeps prefetch simple — declarations only, no control flow,
-no dependencies between queries.
+## Per-handler status — scanner-enforced
 
-### Same pattern as handle
+The scanner extracts status literals from handle() and verifies
+render() handles each one explicitly. No generated types — the
+scanner compares two sets from source text and errors on missing
+statuses. Same check for all languages. No catch-all handling.
 
-Prefetch queues reads. Handle queues writes. Same mechanism:
-
-| Phase    | Queues       | Framework does after       |
-|----------|--------------|----------------------------|
-| prefetch | db.query, worker.fetch | resolves all, populates ctx.data |
-| handle   | db.execute   | drains queue inside transaction |
-
-## Per-handler status — scanner-generated
-
-The scanner extracts status literals from handle() return statements
-and generates a per-handler Status enum. The compiler enforces that
-render handles every status exhaustively.
-
-See docs/plans/scanner-status-enum.md for the full plan.
+See annotation_scanner.zig module doc for the full design.
 
 ## Worker — external API calls without await
 
 The framework is single-threaded. External API calls (Stripe, Auth0,
 entitlements APIs) can't block the tick loop. The worker provides
-non-blocking external IO in prefetch and post-commit hooks in handle.
+non-blocking external IO. See docs/plans/worker.md for the full design.
 
 **No await. No async. No promises. No callbacks.**
 
-The developer queues requests in prefetch. The framework resolves
-them across ticks and calls handle when everything is ready.
+Worker data in prefetch is returned as part of the Prefetch struct,
+same as database queries. If the worker result is pending, prefetch
+returns null → framework retries next tick.
 
-### Worker in prefetch — external data alongside local queries
+### Post-commit external calls — worker polls, no callbacks
 
-```ts
-export function prefetch(db, worker, msg) {
-    db.query("vendor", "SELECT * FROM vendors WHERE slug = :slug", msg);
-    db.query_all("pages", "SELECT * FROM vendor_pages");
-    worker.fetch("entitlements", "https://api.esm.com/entitlements");
-}
-// handle gets ctx.data.vendor, ctx.data.pages, ctx.data.entitlements
-```
-
-What happens per tick:
-
-What happens per tick:
-
-```
-Tick 1:  framework runs prefetch
-         db.query("vendor") → immediate, resolved
-         db.query_all("pages") → immediate, resolved
-         worker.fetch("entitlements") → starts request, pending
-         framework sees pending → skips, processes other connections
-
-Tick 2:  worker.fetch("entitlements") → checks cache, still pending → skip
-
-Tick N:  worker.fetch("entitlements") → response arrived, resolved
-         all three resolved → populates ctx.data → handle runs
-```
-
-The developer wrote three declarations. The framework handled
-everything — resolution, retry, aggregation. No null checks,
-no control flow, no return value.
-
-### Worker after commit — fire-and-forget external calls
+External calls (Stripe, Auth0) are handled by the worker process,
+not by callbacks in handle. Handle commits state changes. The worker
+polls for pending work and posts results back as HTTP requests.
 
 ```ts
 export function handleCompleteOrder(ctx, db) {
-    if (!ctx.data.order) return "not_found";
+    if (!ctx.prefetched.order) return "not_found";
     db.execute("UPDATE orders SET status = 'confirmed', payment_status = 'pending' WHERE id = :id",
-        ctx.data.order);
-
-    // Fires AFTER commit, non-blocking. Client gets response immediately.
-    db.after_commit(() => {
-        worker.post("https://api.stripe.com/charges", {
-            body: { order_id: ctx.data.order.id, amount: ctx.data.order.total }
-        });
-    });
-
+        ctx.prefetched.order);
     return "ok";
+    // Worker picks up pending payment, calls Stripe, posts result back
 }
-```
-
-What happens:
-
-```
-Tick 1:  handle queues db.execute + after_commit callback
-         framework drains queue → executes SQL → commits transaction
-         framework fires after_commit → starts async Stripe call
-         render runs → client gets response IMMEDIATELY
-         Stripe call is in-flight, client already has their page
-
-Tick N:  Stripe responds → worker posts result back as new HTTP request
-         complete_payment handler commits the Stripe result
 ```
 
 The client never waits for Stripe. The database tracks payment state:
 `payment_status = 'pending'` → worker succeeds → `payment_status = 'paid'`.
-If Stripe fails, the worker retries. If it keeps failing, the worker
-posts a failure → handler sets `payment_status = 'failed'`.
+If Stripe fails, the worker retries. The database is the source of truth.
 
-The database is always the source of truth. External calls are
-eventually consistent. The framework doesn't undo commits — the
-worker handles its own retries.
+See docs/plans/worker.md for the worker design.
 
 ### Why await is never needed
 
@@ -342,12 +285,10 @@ The tick model eliminates async/await:
 
 - **Storage busy** → prefetch returns null, retry next tick
 - **Worker pending** → prefetch returns null, retry next tick
-- **Post-commit side effect** → fires after client has response
+- **Post-commit external calls** → worker polls, posts result as new request
 
-Same mechanism for all three. The developer queues declarations.
-The framework resolves, retries, drains. No async, no await, no
-callback hell, no promise chains. The single-threaded event loop
-does the scheduling.
+Same mechanism. No async, no await, no callback hell, no promise chains.
+The single-threaded event loop does the scheduling.
 
 ## What dies
 
@@ -357,18 +298,21 @@ does the scheduling.
 - `session_action` field on handler response
 - `HandlerResponse` struct (replaced by bare Status return)
 - `ExecuteResult` struct (replaced by Status + queue)
-- Prefetch return value (replaced by queued declarations)
-- Null-return retry pattern (framework handles retry internally)
+
+## What stays
+
+- Prefetch returns a typed struct — compiler validates field names
+- Null-return from prefetch = storage busy → framework retries
 
 ## Summary
 
 ```
 route:     (request)                    → Message
-prefetch:  (read-only db, worker, msg)  → void (queues declarations)
+prefetch:  (read-only db, msg)          → ?Prefetch (typed struct)
 handle:    (ctx, write-queue)           → Status
 render:    (ctx, read-only db)          → HTML
 ```
 
-Four functions. Each queues what it needs.
-The framework resolves prefetch, drains handle writes, wraps render
-output. No return values for data. No async. No await. No callbacks.
+Prefetch aggregates its own data. Handle queues writes and returns
+a status. Render reads post-commit state. The framework retries
+prefetch, drains handle writes, wraps render output.

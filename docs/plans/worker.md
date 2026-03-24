@@ -75,10 +75,11 @@ Both fetches start on tick 1. They resolve independently. The
 framework calls handle when all three are ready. No sequential
 waiting — both are in-flight concurrently.
 
-## Worker after commit — fire-and-forget
+## Post-commit external calls — worker polls, no callbacks
 
-When an external API needs to be called after a mutation commits
-(payment processing, notifications, webhooks), use `db.after_commit`:
+Handle commits state. The worker picks up pending work by polling
+the database and posts results back as HTTP requests. No callbacks,
+no `after_commit`, no hidden control flow in handle.
 
 ```ts
 // [handle] .complete_order
@@ -88,31 +89,40 @@ export function handle(ctx, db) {
         "UPDATE orders SET status = 'confirmed', payment_status = 'pending' WHERE id = :id",
         ctx.data.order
     );
-
-    db.after_commit(() => {
-        worker.post("https://api.stripe.com/charges", {
-            body: { order_id: ctx.data.order.id, amount: ctx.data.order.total }
-        });
-    });
-
     return "ok";
+    // Worker picks up payment_status = 'pending', calls Stripe, posts result back
 }
 ```
 
 What happens:
 
 ```
-Tick 1:  handle queues SQL + after_commit callback
-         framework drains queue → executes SQL → commits transaction
-         framework fires after_commit → starts async Stripe call
+Tick 1:  handle queues SQL
+         framework drains queue → executes SQL → commits
          render runs → CLIENT GETS RESPONSE IMMEDIATELY
-         Stripe call is in-flight, client already has their page
+         payment_status = 'pending' in database
 
-Tick N:  Stripe responds → worker posts result back as new HTTP request
-         complete_payment handler commits the result
+Worker:  polls for WHERE payment_status = 'pending'
+         finds order → calls Stripe
+         success → POST /orders/:id/payment-result {status: "paid"}
+         failure → retries, eventually POST {status: "failed"}
+
+Tick N:  payment-result handler commits payment_status = 'paid'
 ```
 
-The client never waits for Stripe.
+The client never waits for Stripe. The database is the coordination
+point between handle and worker. Handle writes intent (`pending`),
+worker fulfills it, posts result back as a new request.
+
+This covers all post-commit external IO: payments, webhooks, email,
+SMS, inventory sync. The pattern is always the same:
+1. Handle commits a pending state
+2. Worker polls for pending work
+3. Worker calls external service
+4. Worker posts result back → handler commits final state
+
+No callbacks. No coupling between handle and external IO.
+The worker handles its own retries.
 
 ## Failure handling
 
@@ -135,13 +145,13 @@ The connection times out if the external API never responds
 ### Worker fails after commit
 
 The client already has their response. The order is confirmed in the
-database. Stripe failed. The database tracks the state:
+database. Stripe failed. The worker retries:
 
 ```
 payment_status = 'pending'   → worker calls Stripe
-                             → success → 'paid'
+                             → success → posts 'paid'
                              → failure → worker retries
-                             → keeps failing → 'failed'
+                             → keeps failing → posts 'failed'
 ```
 
 The database is always the source of truth. External calls are
@@ -203,9 +213,9 @@ Prefetch stays simple — declarations only, no dependencies.
 ## Current state
 
 The worker exists as a separate process (`worker.zig`) that polls
-for pending orders via HTTP and posts completions back. It exercises
-the post-commit pattern but sits outside the framework.
+for pending orders via HTTP and posts completions back. It already
+implements the worker-polls pattern described above.
 
-The `worker.fetch` / `db.after_commit` APIs described here are the
-target design — integrating external IO into the handler pipeline
-so the developer uses the same patterns they use for database access.
+`worker.fetch` in prefetch is the remaining target — integrating
+external IO into the handler pipeline so the developer declares
+what data they need and the framework resolves it across ticks.

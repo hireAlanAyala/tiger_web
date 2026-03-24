@@ -1,11 +1,6 @@
 # Next plans to execute
 
-1. **Scanner-generated status enums** — `docs/plans/scanner-status-enum.md`
-   Scanner extracts status literals from handle(), generates per-handler
-   enum. Framework compiles, compiler enforces exhaustive render. Language
-   adapters define extraction patterns. One path for all languages.
-
-2. **User space API** — `docs/plans/user-space.md`
+1. **User space API** — `docs/plans/user-space.md`
    Prefetch as declarations (no return, framework aggregates ctx.data).
    Handle queues writes via db.execute (no writes array). Named params.
    Route pattern matching (`// match GET /products/:id`). Session as
@@ -57,11 +52,11 @@ The price_cents on the created product came back as $0.09 instead of $9.99. Sent
 Followups deleted. Render has db access for post-mutation queries.
 Handler owns the complete response. See decisions/render-db-access.md.
 
-## 6: RESOLVED — zig code uses annotations with native render
+## 6: RESOLVED — status exhaustiveness enforced by scanner
 
-Zig handlers use annotations and return []const u8 from render.
-Per-handler Status enum + exhaustive switch handles errors.
-See decisions/handler-owns-response.md.
+Scanner extracts statuses from handle(), verifies render() handles each
+one explicitly. No generated types, no catch-all. Same check for all
+languages. See annotation_scanner.zig module doc.
 
 ## 7: RESOLVED — raw SQL in prefetch
 
@@ -99,7 +94,7 @@ benefit: allows the language to have a uniform, assert, and other zig checks
 
 wal should track if request was in prod or local
 
-compiler should force error handling in render
+RESOLVED: compiler should force error handling in render — scanner enforces status exhaustiveness
 
 ci ideas
 
