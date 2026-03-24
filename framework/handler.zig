@@ -1,6 +1,5 @@
 const std = @import("std");
 const assert = std.debug.assert;
-const effects = @import("effects.zig");
 
 /// Handler interface types — comptime-generated per operation.
 ///
@@ -41,12 +40,15 @@ pub fn FrameworkCtx(comptime Identity: type) type {
 ///
 ///   const Ctx = HandlerContext(CreateProductPrefetch, Product, PrefetchIdentity);
 ///   // Ctx has: .prefetched, .body, .fw (identity, now, is_sse)
-pub fn HandlerContext(comptime Prefetch: type, comptime Body: type, comptime Identity: type) type {
+pub fn HandlerContext(comptime Prefetch: type, comptime Body: type, comptime Identity: type, comptime Status: type) type {
     if (@typeInfo(Prefetch) != .@"struct") {
         @compileError("Prefetch must be a struct, got " ++ @typeName(Prefetch));
     }
     if (@typeInfo(Identity) != .@"struct") {
         @compileError("Identity must be a struct, got " ++ @typeName(Identity));
+    }
+    if (@typeInfo(Status) != .@"enum") {
+        @compileError("Status must be an enum, got " ++ @typeName(Status));
     }
     const FwCtx = FrameworkCtx(Identity);
     return struct {
@@ -54,22 +56,19 @@ pub fn HandlerContext(comptime Prefetch: type, comptime Body: type, comptime Ide
         body: if (Body == void) void else *const Body,
         fw: FwCtx,
         render_buf: []u8,
+        /// Handler status — set by the framework after handle() returns.
+        /// Available in render(). Default .ok for handle phase (unused).
+        status: Status = .ok,
 
         pub const PrefetchType = Prefetch;
         pub const BodyType = Body;
         pub const IdentityType = Identity;
+        pub const StatusType = Status;
         pub const FwCtxType = FwCtx;
 
         /// Access body — asserts non-void at comptime.
         pub fn body_val(self: @This()) if (Body == void) @compileError("no body for void EventType") else *const Body {
             return self.body;
-        }
-
-        /// Build render effects from a tuple of effect descriptors.
-        /// Validates effect structure at comptime, writes content at runtime.
-        pub fn render(self: @This(), effects_tuple: anytype) effects.RenderResult {
-            assert(self.render_buf.len > 0);
-            return effects.process_effects(effects_tuple, self.render_buf);
         }
     };
 }
@@ -88,6 +87,7 @@ pub fn ValidateHandler(
     comptime handler: type,
     comptime operation: anytype,
     comptime Identity: type,
+    comptime Status: type,
     comptime Message: type,
     comptime ExecuteResult: type,
 ) type {
@@ -104,7 +104,7 @@ pub fn ValidateHandler(
 
     // Resolve the body type from the operation's EventType.
     const Body = operation.EventType();
-    const Ctx = HandlerContext(Prefetch, Body, Identity);
+    const Ctx = HandlerContext(Prefetch, Body, Identity, Status);
 
     // --- Validate route ---
     if (!@hasDecl(handler, "route")) {
@@ -161,24 +161,22 @@ pub fn ValidateHandler(
     }
 
     // --- Validate render ---
+    // render(ctx) or render(ctx, db) — returns []const u8 or a comptime tuple.
+    // First param must be the Context type. Second param (if present) is the
+    // read-only db handle (anytype). Return type validated in Step 4.
     if (!@hasDecl(handler, "render")) {
         @compileError("handler for ." ++ op_name ++ " must export a render function");
     }
     {
         const info = @typeInfo(@TypeOf(handler.render)).@"fn";
         if (info.params.len < 1) {
-            @compileError("handler for ." ++ op_name ++ ": render must accept (ctx, ...)");
+            @compileError("handler for ." ++ op_name ++ ": render must accept (ctx) or (ctx, db)");
         }
         // First param should be the Context type.
         if (info.params[0].type) |T| {
             if (T != Ctx) {
                 @compileError("handler for ." ++ op_name ++ ": render first param must be " ++ @typeName(Ctx));
             }
-        }
-        const Return = info.return_type orelse
-            @compileError("handler for ." ++ op_name ++ ": render must have a return type");
-        if (Return != effects.RenderResult) {
-            @compileError("handler for ." ++ op_name ++ ": render must return " ++ @typeName(effects.RenderResult));
         }
     }
 
@@ -193,10 +191,12 @@ pub fn ValidateHandler(
 // Tests
 // =====================================================================
 
+const MockStatus = enum { ok, not_found };
+
 test "HandlerContext void body" {
     const Identity = struct { user_id: u128 };
     const Prefetch = struct { product: ?u32 };
-    const Ctx = HandlerContext(Prefetch, void, Identity);
+    const Ctx = HandlerContext(Prefetch, void, Identity, MockStatus);
 
     var render_buf: [1024]u8 = undefined;
     const ctx = Ctx{
@@ -208,13 +208,14 @@ test "HandlerContext void body" {
 
     try std.testing.expectEqual(@as(?u32, 42), ctx.prefetched.product);
     try std.testing.expectEqual(@as(u128, 1), ctx.fw.identity.user_id);
+    try std.testing.expectEqual(MockStatus.ok, ctx.status);
 }
 
 test "HandlerContext typed body" {
     const Identity = struct { user_id: u128 };
     const Prefetch = struct { existing: ?u32 };
     const Body = struct { name: [8]u8, name_len: u8 };
-    const Ctx = HandlerContext(Prefetch, Body, Identity);
+    const Ctx = HandlerContext(Prefetch, Body, Identity, MockStatus);
 
     var body = Body{ .name = .{0} ** 8, .name_len = 4 };
     @memcpy(body.name[0..4], "test");
@@ -231,62 +232,32 @@ test "HandlerContext typed body" {
     try std.testing.expectEqual(@as(u8, 4), ctx.body_val().name_len);
 }
 
-test "HandlerContext ctx.render with effects" {
+test "HandlerContext status field" {
     const Identity = struct { user_id: u128 };
     const Prefetch = struct { product: ?u32 };
-    const Ctx = HandlerContext(Prefetch, void, Identity);
-
-    var render_buf: [4096]u8 = undefined;
-    const ctx = Ctx{
-        .prefetched = .{ .product = 42 },
-        .body = {},
-        .fw = .{ .identity = .{ .user_id = 1 }, .now = 0, .is_sse = false },
-        .render_buf = &render_buf,
-    };
-
-    const html = "<div>hello</div>";
-    const result = ctx.render(.{
-        .{ "patch", "#target", @as([]const u8, html), "inner" },
-        .{ "sync", "/dashboard" },
-    });
-
-    try std.testing.expectEqual(@as(u8, 2), result.len);
-    const s = result.slice();
-    try std.testing.expectEqual(effects.Verb.patch, s[0].verb);
-    try std.testing.expectEqual(effects.PatchMode.inner, s[0].mode);
-    try std.testing.expect(std.mem.eql(u8, "#target", s[0].selector_slice()));
-    try std.testing.expect(std.mem.eql(u8, html, s[0].content(&render_buf)));
-    try std.testing.expectEqual(effects.Verb.sync, s[1].verb);
-    try std.testing.expect(std.mem.eql(u8, "/dashboard", s[1].selector_slice()));
-}
-
-test "HandlerContext ctx.render empty tuple" {
-    const Identity = struct { user_id: u128 };
-    const Prefetch = struct { product: ?u32 };
-    const Ctx = HandlerContext(Prefetch, void, Identity);
+    const Ctx = HandlerContext(Prefetch, void, Identity, MockStatus);
 
     var render_buf: [1024]u8 = undefined;
     const ctx = Ctx{
-        .prefetched = .{ .product = 42 },
+        .prefetched = .{ .product = null },
         .body = {},
         .fw = .{ .identity = .{ .user_id = 1 }, .now = 0, .is_sse = false },
         .render_buf = &render_buf,
+        .status = .not_found,
     };
 
-    const result = ctx.render(.{});
-    try std.testing.expectEqual(@as(u8, 0), result.len);
-    try std.testing.expectEqual(@as(u32, 0), result.buf_used);
-    try std.testing.expectEqual(@as(usize, 0), result.slice().len);
+    try std.testing.expectEqual(MockStatus.not_found, ctx.status);
 }
 
 test "HandlerContext exposes type aliases" {
     const Identity = struct { user_id: u128 };
     const Prefetch = struct { product: ?u32 };
-    const Ctx = HandlerContext(Prefetch, void, Identity);
+    const Ctx = HandlerContext(Prefetch, void, Identity, MockStatus);
 
     try std.testing.expect(Ctx.PrefetchType == Prefetch);
     try std.testing.expect(Ctx.BodyType == void);
     try std.testing.expect(Ctx.IdentityType == Identity);
+    try std.testing.expect(Ctx.StatusType == MockStatus);
 }
 
 // --- Mock types for testing ---
@@ -318,7 +289,7 @@ const MockOp = enum(u8) {
 
 const MockReadOnlyHandler = struct {
     pub const Prefetch = struct { product: ?u32 };
-    pub const Context = HandlerContext(Prefetch, void, MockIdentity);
+    pub const Context = HandlerContext(Prefetch, void, MockIdentity, MockStatus);
     pub fn route(_: @import("http.zig").Method, _: []const u8, _: []const u8) ?MockMessage {
         return null;
     }
@@ -328,8 +299,9 @@ const MockReadOnlyHandler = struct {
     pub fn handle(_: Context) MockExecuteResult {
         return .{ .response = .{ .status = 1 }, .writes = .{0}, .writes_len = 0 };
     }
-    pub fn render(ctx: Context) effects.RenderResult {
-        return ctx.render(.{});
+    pub fn render(ctx: Context) []const u8 {
+        _ = ctx;
+        return "<div>ok</div>";
     }
 };
 
@@ -337,7 +309,7 @@ const MockReadOnlyHandler = struct {
 
 const MockMutationHandler = struct {
     pub const Prefetch = struct { existing: ?u32 };
-    const Ctx = HandlerContext(Prefetch, MockBody, MockIdentity);
+    const Ctx = HandlerContext(Prefetch, MockBody, MockIdentity, MockStatus);
     pub fn route(_: @import("http.zig").Method, _: []const u8, _: []const u8) ?MockMessage {
         return null;
     }
@@ -347,18 +319,19 @@ const MockMutationHandler = struct {
     pub fn handle(_: Ctx) MockExecuteResult {
         return .{ .response = .{ .status = 1 }, .writes = .{0}, .writes_len = 0 };
     }
-    pub fn render(ctx: Ctx) effects.RenderResult {
-        return ctx.render(.{});
+    pub fn render(ctx: Ctx) []const u8 {
+        _ = ctx;
+        return "<div>ok</div>";
     }
 };
 
 test "ValidateHandler read-only" {
-    const V = ValidateHandler(MockReadOnlyHandler, MockOp.get_thing, MockIdentity, MockMessage, MockExecuteResult);
+    const V = ValidateHandler(MockReadOnlyHandler, MockOp.get_thing, MockIdentity, MockStatus, MockMessage, MockExecuteResult);
     try std.testing.expect(V.PrefetchType == MockReadOnlyHandler.Prefetch);
     try std.testing.expect(V.BodyType == void);
 }
 
 test "ValidateHandler mutation" {
-    const V = ValidateHandler(MockMutationHandler, MockOp.create_thing, MockIdentity, MockMessage, MockExecuteResult);
+    const V = ValidateHandler(MockMutationHandler, MockOp.create_thing, MockIdentity, MockStatus, MockMessage, MockExecuteResult);
     try std.testing.expect(V.BodyType == MockBody);
 }

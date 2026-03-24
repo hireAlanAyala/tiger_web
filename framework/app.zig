@@ -1,7 +1,6 @@
 const std = @import("std");
 const assert = std.debug.assert;
 const handler_mod = @import("handler.zig");
-const effects_mod = @import("effects.zig");
 const http = @import("http.zig");
 
 /// Build an App type from a handler tuple and domain types.
@@ -39,13 +38,9 @@ pub fn AppType(comptime config: anytype) type {
     if (!@hasField(@TypeOf(config), "Operation")) @compileError("AppType config missing .Operation");
     if (!@hasField(@TypeOf(config), "Status")) @compileError("AppType config missing .Status");
     if (!@hasField(@TypeOf(config), "Identity")) @compileError("AppType config missing .Identity");
-    if (!@hasField(@TypeOf(config), "FollowupState")) @compileError("AppType config missing .FollowupState");
     if (!@hasField(@TypeOf(config), "StateMachineType")) @compileError("AppType config missing .StateMachineType");
     if (!@hasField(@TypeOf(config), "Wal")) @compileError("AppType config missing .Wal");
     if (!@hasField(@TypeOf(config), "ExecuteResult")) @compileError("AppType config missing .ExecuteResult");
-    if (!@hasField(@TypeOf(config), "encode_response")) @compileError("AppType config missing .encode_response");
-    if (!@hasField(@TypeOf(config), "encode_followup")) @compileError("AppType config missing .encode_followup");
-    if (!@hasField(@TypeOf(config), "refresh_message")) @compileError("AppType config missing .refresh_message");
 
     const handlers = config.handlers;
     const Message = config.Message;
@@ -130,6 +125,7 @@ pub fn AppType(comptime config: anytype) type {
             h.handler,
             h.operation,
             Identity,
+            config.Status,
             Message,
             config.ExecuteResult,
         );
@@ -146,8 +142,6 @@ pub fn AppType(comptime config: anytype) type {
     return struct {
         // --- Pass-through types ---
         pub const MessageType = Message;
-        pub const MessageResponseType = config.MessageResponse;
-        pub const FollowupStateType = config.FollowupState;
         pub const OperationType = Operation;
         pub const StatusType = config.Status;
         pub const IdentityType = Identity;
@@ -156,8 +150,6 @@ pub fn AppType(comptime config: anytype) type {
 
         // Re-export under names ServerType expects.
         pub const MessageT = Message;
-        pub const MessageResponse = config.MessageResponse;
-        pub const FollowupState = config.FollowupState;
         pub const Status = config.Status;
         pub const Wal = config.Wal;
         pub fn StateMachineType(comptime Storage: type) type {
@@ -180,10 +172,6 @@ pub fn AppType(comptime config: anytype) type {
             return result;
         }
 
-        // --- Passthrough functions (until render migration) ---
-        pub const encode_response = config.encode_response;
-        pub const encode_followup = config.encode_followup;
-        pub const refresh_message = config.refresh_message;
     };
 }
 
@@ -229,7 +217,7 @@ const TestExecuteResult = struct {
 };
 const GetThingHandler = struct {
     pub const Prefetch = struct { found: bool };
-    const Ctx = handler_mod.HandlerContext(Prefetch, void, TestIdentity);
+    const Ctx = handler_mod.HandlerContext(Prefetch, void, TestIdentity, TestStatus);
     pub fn route(method: http.Method, _: []const u8, _: []const u8) ?TestMessage {
         if (method == .get) return TestMessage{ .operation = .get_thing };
         return null;
@@ -237,14 +225,18 @@ const GetThingHandler = struct {
     pub fn prefetch() ?Prefetch {
         return .{ .found = true };
     }
-    pub fn render(ctx: Ctx) effects_mod.RenderResult {
-        return ctx.render(.{});
+    pub fn handle(_: Ctx) TestExecuteResult {
+        return .{ .response = .{ .status = .ok }, .writes = .{0}, .writes_len = 0 };
+    }
+    pub fn render(ctx: Ctx) []const u8 {
+        _ = ctx;
+        return "<div>ok</div>";
     }
 };
 
 const CreateThingHandler = struct {
     pub const Prefetch = struct { existing: bool };
-    const Ctx = handler_mod.HandlerContext(Prefetch, TestBody, TestIdentity);
+    const Ctx = handler_mod.HandlerContext(Prefetch, TestBody, TestIdentity, TestStatus);
     pub fn route(method: http.Method, _: []const u8, _: []const u8) ?TestMessage {
         if (method == .post) return TestMessage{ .operation = .create_thing };
         return null;
@@ -255,16 +247,12 @@ const CreateThingHandler = struct {
     pub fn handle(_: Ctx) TestExecuteResult {
         return .{ .response = .{ .status = .ok }, .writes = .{0}, .writes_len = 0 };
     }
-    pub fn render(ctx: Ctx) effects_mod.RenderResult {
-        return ctx.render(.{});
+    pub fn render(ctx: Ctx) []const u8 {
+        _ = ctx;
+        return "<div>ok</div>";
     }
 };
 
-fn dummy_encode(_: []u8, _: TestOperation, _: TestResponse, _: bool, _: *const [32]u8) void {}
-fn dummy_followup(_: []u8, _: TestResponse, _: *const TestFollowup, _: *const [32]u8) void {}
-fn dummy_refresh() TestMessage {
-    return .{ .operation = .get_thing };
-}
 fn dummy_sm(_: anytype) type {
     return struct {};
 }
@@ -275,17 +263,12 @@ const TestApp = AppType(.{
         .{ .operation = TestOperation.create_thing, .handler = CreateThingHandler },
     },
     .Message = TestMessage,
-    .MessageResponse = TestResponse,
     .Operation = TestOperation,
     .Status = TestStatus,
     .Identity = TestIdentity,
-    .FollowupState = TestFollowup,
     .StateMachineType = dummy_sm,
     .Wal = struct {},
     .ExecuteResult = TestExecuteResult,
-    .encode_response = dummy_encode,
-    .encode_followup = dummy_followup,
-    .refresh_message = dummy_refresh,
 });
 
 test "AppType translate routes GET to get_thing" {

@@ -15,9 +15,7 @@ const sm = @import("state_machine.zig");
 pub const http = fw.http;
 pub const parse = fw.parse;
 pub const stdx = fw.stdx;
-pub const effects = fw.effects;
 pub const HandlerContext = fw.handler.HandlerContext;
-pub const RenderResult = fw.effects.RenderResult;
 
 // --- Domain types ---
 pub const Message = message.Message;
