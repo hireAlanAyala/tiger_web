@@ -10,22 +10,23 @@ pub const Prefetch = struct {
 
 pub const Context = t.HandlerContext(Prefetch, t.Operation.EventType(.transfer_inventory), t.Identity, Status);
 
+pub const route_method = t.http.Method.post;
+pub const route_pattern = "/products/:id/transfer-inventory/:sub_id";
+
 // [route] .transfer_inventory
-// match POST /products/:id/transfer_inventory/:sub_id
+// match POST /products/:id/transfer-inventory/:sub_id
 pub fn route(method: t.http.Method, raw_path: []const u8, body: []const u8) ?t.Message {
-    if (method != .post) return null;
-    if (raw_path.len == 0 or raw_path[0] != '/') return null;
-    const segments = t.parse.split_path(raw_path[1..]) orelse return null;
-    if (!std.mem.eql(u8, segments.collection, "products")) return null;
-    if (!segments.has_id or segments.id == 0) return null;
-    if (!std.mem.eql(u8, segments.sub_resource, "transfer-inventory")) return null;
-    if (!segments.has_sub_id or segments.sub_id == 0) return null;
-    if (segments.id == segments.sub_id) return null;
+    _ = method;
+    const params = t.match_route(raw_path, route_pattern) orelse return null;
+    const id = t.stdx.parse_uuid(params.get("id").?) orelse return null;
+    const sub_id = t.stdx.parse_uuid(params.get("sub_id").?) orelse return null;
+    if (id == 0 or sub_id == 0) return null;
+    if (id == sub_id) return null;
     if (body.len == 0) return null;
     const quantity = t.parse.json_u32_field(body, "quantity") orelse return null;
     if (quantity == 0) return null;
-    return t.Message.init(.transfer_inventory, segments.id, 0, t.InventoryTransfer{
-        .target_id = segments.sub_id,
+    return t.Message.init(.transfer_inventory, id, 0, t.InventoryTransfer{
+        .target_id = sub_id,
         .quantity = quantity,
         .reserved = .{0} ** 12,
     });

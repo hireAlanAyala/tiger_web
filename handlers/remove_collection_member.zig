@@ -7,18 +7,17 @@ pub const Prefetch = struct { collection_id: u128, product_id: u128, collection:
 
 pub const Context = t.HandlerContext(Prefetch, t.Operation.EventType(.remove_collection_member), t.Identity, Status);
 
+pub const route_method = t.http.Method.delete;
+pub const route_pattern = "/collections/:id/products/:sub_id";
+
 // [route] .remove_collection_member
 // match DELETE /collections/:id/products/:sub_id
 pub fn route(method: t.http.Method, raw_path: []const u8, body: []const u8) ?t.Message {
-    _ = body;
-    if (method != .delete) return null;
-    if (raw_path.len == 0 or raw_path[0] != '/') return null;
-    const segments = t.parse.split_path(raw_path[1..]) orelse return null;
-    if (!std.mem.eql(u8, segments.collection, "collections")) return null;
-    if (!segments.has_id) return null;
-    if (!std.mem.eql(u8, segments.sub_resource, "products")) return null;
-    if (!segments.has_sub_id) return null;
-    return t.Message.init(.remove_collection_member, segments.id, 0, segments.sub_id);
+    _ = method; _ = body;
+    const params = t.match_route(raw_path, route_pattern) orelse return null;
+    const id = t.stdx.parse_uuid(params.get("id").?) orelse return null;
+    const sub_id = t.stdx.parse_uuid(params.get("sub_id").?) orelse return null;
+    return t.Message.init(.remove_collection_member, id, 0, sub_id);
 }
 
 // [prefetch] .remove_collection_member

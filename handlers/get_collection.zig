@@ -7,17 +7,17 @@ pub const Prefetch = struct { collection: ?t.CollectionRow };
 
 pub const Context = t.HandlerContext(Prefetch, t.Operation.EventType(.get_collection), t.Identity, Status);
 
+pub const route_method = t.http.Method.get;
+pub const route_pattern = "/collections/:id";
+
 // [route] .get_collection
 // match GET /collections/:id
 pub fn route(method: t.http.Method, raw_path: []const u8, body: []const u8) ?t.Message {
+    _ = method;
     _ = body;
-    if (method != .get) return null;
-    if (raw_path.len == 0 or raw_path[0] != '/') return null;
-    const segments = t.parse.split_path(raw_path[1..]) orelse return null;
-    if (!std.mem.eql(u8, segments.collection, "collections")) return null;
-    if (!segments.has_id) return null;
-    if (segments.sub_resource.len > 0) return null;
-    return t.Message.init(.get_collection, segments.id, 0, {});
+    const params = t.match_route(raw_path, route_pattern) orelse return null;
+    const id = t.stdx.parse_uuid(params.get("id").?) orelse return null;
+    return t.Message.init(.get_collection, id, 0, {});
 }
 
 // [prefetch] .get_collection

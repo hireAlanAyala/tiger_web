@@ -12,14 +12,14 @@ pub const Prefetch = struct {
 
 pub const Context = t.HandlerContext(Prefetch, t.Operation.EventType(.create_order), t.Identity, Status);
 
+pub const route_method = t.http.Method.post;
+pub const route_pattern = "/orders";
+
 // [route] .create_order
 // match POST /orders
 pub fn route(method: t.http.Method, raw_path: []const u8, body: []const u8) ?t.Message {
-    if (method != .post) return null;
-    if (raw_path.len == 0 or raw_path[0] != '/') return null;
-    const segments = t.parse.split_path(raw_path[1..]) orelse return null;
-    if (!std.mem.eql(u8, segments.collection, "orders")) return null;
-    if (segments.has_id) return null;
+    _ = method;
+    if (t.match_route(raw_path, route_pattern) == null) return null;
     if (body.len == 0) return null;
     const order = parse_order_json(body) orelse return null;
     return t.Message.init(.create_order, order.id, 0, order);

@@ -290,29 +290,31 @@ The tick model eliminates async/await:
 Same mechanism. No async, no await, no callback hell, no promise chains.
 The single-threaded event loop does the scheduling.
 
-## What dies
+## What was killed (done)
 
-- `Write` tagged union in state_machine.zig
-- `apply_write` dispatch
-- `writes` field on handler response
-- `session_action` field on handler response
-- `HandlerResponse` struct (replaced by bare Status return)
-- `ExecuteResult` struct (replaced by Status + queue)
+- `Write` tagged union — handlers write SQL directly via db.execute
+- `apply_write` dispatch — framework no longer interprets writes
+- `HandlerResponse` struct — handle returns bare Status via HandleResult
+- `ExecuteResult` struct — status is the return value, writes via WriteView
+- `MemoryStorage` — replaced by SqliteStorage(:memory:) for all tests
+- Manual URL parsing in routes — replaced by `// match` + `match_route`
 
 ## What stays
 
 - Prefetch returns a typed struct — compiler validates field names
 - Null-return from prefetch = storage busy → framework retries
+- `session_action` on HandleResult — only logout uses it, deferred
 
-## Summary
+## Current state
 
 ```
-route:     (request)                    → Message
+route:     (method, path, body)         → ?Message (match_route pre-filters)
 prefetch:  (read-only db, msg)          → ?Prefetch (typed struct)
-handle:    (ctx, write-queue)           → Status
+handle:    (ctx, write-only db)         → HandleResult (status + session_action)
 render:    (ctx, read-only db)          → HTML
 ```
 
-Prefetch aggregates its own data. Handle queues writes and returns
-a status. Render reads post-commit state. The framework retries
-prefetch, drains handle writes, wraps render output.
+Route declares `route_method` + `route_pattern` — framework skips the
+call on mismatch. Handle writes SQL directly via `db.execute` with
+shared constants from `sql.zig`. Scanner enforces status exhaustiveness
+across handle and render. WriteView asserts writes succeed.

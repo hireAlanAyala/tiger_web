@@ -94,16 +94,17 @@ Native commit handles storage, auth, WAL. Sidecar provides HTML.
 | `message.zig` | Types: Product, ProductCollection, flat Operation enum with EventType, Message (extern struct, WAL-writable), MessageResponse |
 | `codec.zig` | Route parsing, JSON request → typed struct translation, UUID parsing |
 | `render.zig` | HTML + SSE response renderer — always 200, body-first with Content-Length backfill (keep-alive), SSE from offset 0 (Connection: close), Set-Cookie for new visitors |
-| `state_machine.zig` | `StateMachineType(Storage)` — inline dispatch in execute, flat switch in prefetch, `MemoryStorage` |
-| `storage.zig` | `SqliteStorage` — SQLite backend with prepared statements, WAL mode |
-| `sim.zig` | `SimIO` + `MemoryStorage` with PRNG-driven fault injection |
+| `state_machine.zig` | `StateMachineType(Storage, Handlers)` — prefetch/commit pipeline, HandleResult, transaction boundaries |
+| `storage.zig` | `SqliteStorage` — SQLite backend with ReadView (prefetch) and WriteView (handle), prepared statements, WAL mode |
+| `sql.zig` | Shared SQL constants — single source of truth for write statements (INSERT/UPDATE per table) |
+| `sim.zig` | `SimIO` + `SqliteStorage(:memory:)` with PRNG-driven fault injection |
 | `fuzz_tests.zig` | Fuzz test dispatcher — single binary routing to all fuzzers, matches TB's fuzz_tests.zig |
 | `fuzz_lib.zig` | Shared fuzz utilities — `FuzzArgs` struct, `random_enum_weights`, matches TB's testing/fuzz.zig |
 | `fuzz.zig` | State machine fuzzer — bypasses HTTP, calls prefetch/commit directly |
 | `codec_fuzz.zig` | Codec fuzzer — throws random methods/paths/JSON at codec.translate |
 | `render_fuzz.zig` | Render fuzzer — random operations/results through encode_response, asserts framing and keep-alive invariants |
 | `auditor.zig` | Auditor oracle — independent reference model that validates state machine responses (TB pattern) |
-| `storage_fuzz.zig` | Storage equivalence fuzzer — runs MemoryStorage vs SqliteStorage vs Auditor, asserts agreement |
+| `storage_fuzz.zig` | Storage equivalence fuzzer — runs SqliteStorage(:memory:) vs Auditor, asserts agreement |
 | `replay.zig` | WAL replay tool — verify, inspect, query, replay operations |
 | `replay_fuzz.zig` | Replay round-trip fuzzer — WAL serialization boundary verification |
 | `state_machine_benchmark.zig` | State machine benchmark — per-operation prefetch/commit throughput, regression detector |
@@ -252,8 +253,7 @@ Use `log.mark.*` for **testable decision boundaries** — code paths the sim fuz
 | `server.zig` | `accept_callback` failed | `"accept failed"` |
 | `server.zig` | `timeout_idle` timed out | `"connection timed out"` |
 | `server.zig` | `process_inbox` SSE mutation deferred | `"SSE mutation: deferring to follow-up"` |
-| `state_machine.zig` | `MemoryStorage.fault` busy injected | `"storage: busy fault injected"` |
-| `state_machine.zig` | `MemoryStorage.fault` err injected | `"storage: err fault injected"` |
+| `app.zig` | prefetch fault injection busy | `"storage: busy fault injected"` |
 
 ### When NOT to use `log.mark.*`
 

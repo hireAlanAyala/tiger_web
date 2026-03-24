@@ -1591,6 +1591,62 @@ test "integration: extracted handle statuses match declared Status enum" {
             }
         }
 
+        // Cross-check: if handler exports route_method/route_pattern consts,
+        // verify they match the // match annotation. Pair assertion: annotation
+        // is the scanner's source of truth, const is the compiler's. They must agree.
+        var ann_match: ?struct { method: []const u8, pattern: []const u8 } = null;
+        var match_lines = std.mem.splitScalar(u8, content, '\n');
+        while (match_lines.next()) |mline| {
+            if (parse_match_directive(mline, "//")) |m| {
+                ann_match = .{ .method = @tagName(m.method), .pattern = m.pattern };
+                break;
+            }
+        }
+
+        // Check route_method const matches annotation method.
+        const has_method_const = std.mem.indexOf(u8, content, "pub const route_method") != null;
+        const has_pattern_const = std.mem.indexOf(u8, content, "pub const route_pattern") != null;
+
+        if (has_method_const != has_pattern_const) {
+            std.debug.panic(
+                "handler {s}: has route_method but not route_pattern (or vice versa)",
+                .{entry.basename},
+            );
+        }
+
+        if (has_method_const and ann_match == null) {
+            std.debug.panic(
+                "handler {s}: exports route_method/route_pattern but has no // match annotation",
+                .{entry.basename},
+            );
+        }
+
+        if (has_method_const) {
+            const ann = ann_match.?;
+            // Verify method const matches annotation.
+            // e.g. "pub const route_method = t.http.Method.get;" must match "// match GET ..."
+            const method_line_start = std.mem.indexOf(u8, content, "pub const route_method").?;
+            const method_line_end = std.mem.indexOfPos(u8, content, method_line_start, ";").?;
+            const method_line = content[method_line_start..method_line_end];
+            if (std.mem.indexOf(u8, method_line, ann.method) == null) {
+                std.debug.panic(
+                    "handler {s}: route_method const doesn't match // match annotation method '{s}'",
+                    .{ entry.basename, ann.method },
+                );
+            }
+
+            // Verify pattern const matches annotation.
+            const pattern_line_start = std.mem.indexOf(u8, content, "pub const route_pattern").?;
+            const pattern_line_end = std.mem.indexOfPos(u8, content, pattern_line_start, ";").?;
+            const pattern_line = content[pattern_line_start..pattern_line_end];
+            if (std.mem.indexOf(u8, pattern_line, ann.pattern) == null) {
+                std.debug.panic(
+                    "handler {s}: route_pattern const doesn't match // match annotation pattern '{s}'",
+                    .{ entry.basename, ann.pattern },
+                );
+            }
+        }
+
         checked += 1;
     }
 

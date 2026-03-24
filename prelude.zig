@@ -15,6 +15,8 @@ const sm = @import("state_machine.zig");
 pub const http = fw.http;
 pub const parse = fw.parse;
 pub const stdx = fw.stdx;
+pub const RouteParams = fw.parse.RouteParams;
+pub const match_route = fw.parse.match_route;
 pub const HandlerContext = fw.handler.HandlerContext;
 
 // --- Domain types ---

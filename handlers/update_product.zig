@@ -9,18 +9,19 @@ pub const Prefetch = struct {
 
 pub const Context = t.HandlerContext(Prefetch, t.Operation.EventType(.update_product), t.Identity, Status);
 
+pub const route_method = t.http.Method.put;
+pub const route_pattern = "/products/:id";
+
 // [route] .update_product
 // match PUT /products/:id
 pub fn route(method: t.http.Method, raw_path: []const u8, body: []const u8) ?t.Message {
-    if (method != .put) return null;
-    if (raw_path.len == 0 or raw_path[0] != '/') return null;
-    const segments = t.parse.split_path(raw_path[1..]) orelse return null;
-    if (!std.mem.eql(u8, segments.collection, "products")) return null;
-    if (!segments.has_id or segments.id == 0) return null;
-    if (segments.sub_resource.len > 0) return null;
+    _ = method;
+    const params = t.match_route(raw_path, route_pattern) orelse return null;
+    const id = t.stdx.parse_uuid(params.get("id").?) orelse return null;
+    if (id == 0) return null;
     if (body.len == 0) return null;
-    const product = parse_update_json(body, segments.id) orelse return null;
-    return t.Message.init(.update_product, segments.id, 0, product);
+    const product = parse_update_json(body, id) orelse return null;
+    return t.Message.init(.update_product, id, 0, product);
 }
 
 // [prefetch] .update_product

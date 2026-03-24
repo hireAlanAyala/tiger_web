@@ -1,4 +1,5 @@
 const std = @import("std");
+const assert = std.debug.assert;
 const stdx = @import("stdx.zig");
 
 // =====================================================================
@@ -167,6 +168,109 @@ pub fn split_path(path: []const u8) ?PathSegments {
 }
 
 // =====================================================================
+// Route pattern matching
+// =====================================================================
+
+/// Maximum route params (e.g. /orders/:id/items/:item_id = 2 params).
+const max_route_params = 4;
+
+/// Extracted route parameters — string slices into the original path.
+pub const RouteParams = struct {
+    keys: [max_route_params][]const u8 = .{&.{}} ** max_route_params,
+    values: [max_route_params][]const u8 = .{&.{}} ** max_route_params,
+    len: u8 = 0,
+
+    /// Get a param value by name. Returns null if not found.
+    pub fn get(self: *const RouteParams, name: []const u8) ?[]const u8 {
+        for (self.keys[0..self.len], self.values[0..self.len]) |k, v| {
+            if (std.mem.eql(u8, k, name)) return v;
+        }
+        return null;
+    }
+};
+
+/// Count :param segments in a route pattern at comptime.
+fn count_params(comptime pattern: []const u8) comptime_int {
+    var count: comptime_int = 0;
+    var i: usize = 0;
+    while (i < pattern.len) : (i += 1) {
+        if (pattern[i] == ':') count += 1;
+    }
+    return count;
+}
+
+/// Match a URL path against a route pattern. Returns extracted params
+/// or null if the path doesn't match. Pattern segments are literal
+/// strings or `:name` params. The path must have the same number of
+/// segments as the pattern.
+///
+/// Example: match_route("/products/abc123", "/products/:id")
+///   → RouteParams with id = "abc123"
+///
+/// The path must start with /. Leading slash is stripped before matching.
+pub fn match_route(path: []const u8, comptime pattern: []const u8) ?RouteParams {
+    comptime {
+        assert(pattern.len > 0 and pattern[0] == '/'); // pattern must start with /
+        assert(count_params(pattern) <= max_route_params); // pattern fits RouteParams
+    }
+    if (path.len == 0 or path[0] != '/') return null;
+
+    // Root pattern matches root path.
+    if (comptime std.mem.eql(u8, pattern, "/")) {
+        return if (path.len == 1) RouteParams{} else null;
+    }
+
+    // Strip leading slash from both — then split on /.
+    const path_rest = path[1..];
+    comptime var pat_rest: []const u8 = if (pattern.len > 0 and pattern[0] == '/') pattern[1..] else pattern;
+
+    var params = RouteParams{};
+
+    // Walk pattern segments at comptime, match against path at runtime.
+    comptime var seg_index: u32 = 0;
+    var path_pos: usize = 0;
+
+    inline while (true) {
+        // Find next pattern segment.
+        const pat_slash = comptime std.mem.indexOf(u8, pat_rest, "/");
+        const pat_seg = comptime if (pat_slash) |s| pat_rest[0..s] else pat_rest;
+        comptime {
+            pat_rest = if (pat_slash) |s| pat_rest[s + 1 ..] else "";
+        }
+
+        // Find next path segment.
+        if (path_pos > path_rest.len) return null;
+        const path_remaining = path_rest[path_pos..];
+        const path_slash = std.mem.indexOfScalar(u8, path_remaining, '/');
+        const path_seg = if (path_slash) |s| path_remaining[0..s] else path_remaining;
+
+        // Empty path segment = path is shorter than pattern.
+        if (path_seg.len == 0 and pat_seg.len > 0) return null;
+
+        if (comptime pat_seg.len > 0 and pat_seg[0] == ':') {
+            // Param segment — extract value.
+            if (path_seg.len == 0) return null;
+            params.keys[params.len] = comptime pat_seg[1..];
+            params.values[params.len] = path_seg;
+            params.len += 1;
+        } else {
+            // Literal segment — must match exactly.
+            if (!std.mem.eql(u8, path_seg, comptime pat_seg)) return null;
+        }
+
+        path_pos += path_seg.len + 1; // +1 for the slash
+        seg_index += 1;
+
+        // End of pattern?
+        if (comptime pat_rest.len == 0) {
+            // Path must also be at the end — no extra segments.
+            if (path_slash != null) return null;
+            return params;
+        }
+    }
+}
+
+// =====================================================================
 // Tests
 // =====================================================================
 
@@ -213,4 +317,69 @@ test "split_path parses REST segments" {
     try std.testing.expect(seg2.has_id);
 
     try std.testing.expect(split_path("products/invalid") == null);
+}
+
+// --- match_route tests ---
+
+test "match_route: root" {
+    const r = match_route("/", "/").?;
+    try std.testing.expectEqual(@as(u8, 0), r.len);
+}
+
+test "match_route: root rejects non-root" {
+    try std.testing.expect(match_route("/products", "/") == null);
+}
+
+test "match_route: literal path" {
+    const r = match_route("/products", "/products").?;
+    try std.testing.expectEqual(@as(u8, 0), r.len);
+}
+
+test "match_route: literal rejects wrong segment" {
+    try std.testing.expect(match_route("/orders", "/products") == null);
+}
+
+test "match_route: single param" {
+    const r = match_route("/products/abc123", "/products/:id").?;
+    try std.testing.expectEqual(@as(u8, 1), r.len);
+    try std.testing.expectEqualSlices(u8, r.get("id").?, "abc123");
+}
+
+test "match_route: two params" {
+    const r = match_route("/products/abc/transfer_inventory/def", "/products/:id/transfer_inventory/:sub_id").?;
+    try std.testing.expectEqual(@as(u8, 2), r.len);
+    try std.testing.expectEqualSlices(u8, r.get("id").?, "abc");
+    try std.testing.expectEqualSlices(u8, r.get("sub_id").?, "def");
+}
+
+test "match_route: sub-resource" {
+    const r = match_route("/orders/abc123/complete", "/orders/:id/complete").?;
+    try std.testing.expectEqualSlices(u8, r.get("id").?, "abc123");
+}
+
+test "match_route: rejects extra segments" {
+    try std.testing.expect(match_route("/products/abc/extra", "/products/:id") == null);
+}
+
+test "match_route: rejects too few segments" {
+    try std.testing.expect(match_route("/products", "/products/:id") == null);
+}
+
+test "match_route: rejects empty path" {
+    try std.testing.expect(match_route("", "/products") == null);
+}
+
+test "match_route: multi-segment literal" {
+    const r = match_route("/login/verify", "/login/verify").?;
+    try std.testing.expectEqual(@as(u8, 0), r.len);
+}
+
+test "match_route: login code" {
+    const r = match_route("/login/code", "/login/code").?;
+    try std.testing.expectEqual(@as(u8, 0), r.len);
+}
+
+test "match_route: inventory sub-resource" {
+    const r = match_route("/products/abc123/inventory", "/products/:id/inventory").?;
+    try std.testing.expectEqualSlices(u8, r.get("id").?, "abc123");
 }

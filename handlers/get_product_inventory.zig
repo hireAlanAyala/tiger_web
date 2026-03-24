@@ -7,17 +7,17 @@ pub const Prefetch = struct { product: ?t.ProductRow };
 
 pub const Context = t.HandlerContext(Prefetch, t.Operation.EventType(.get_product_inventory), t.Identity, Status);
 
+pub const route_method = t.http.Method.get;
+pub const route_pattern = "/products/:id/inventory";
+
 // [route] .get_product_inventory
 // match GET /products/:id/inventory
 pub fn route(method: t.http.Method, raw_path: []const u8, body: []const u8) ?t.Message {
+    _ = method;
     _ = body;
-    if (method != .get) return null;
-    if (raw_path.len == 0 or raw_path[0] != '/') return null;
-    const segments = t.parse.split_path(raw_path[1..]) orelse return null;
-    if (!std.mem.eql(u8, segments.collection, "products")) return null;
-    if (!segments.has_id) return null;
-    if (!std.mem.eql(u8, segments.sub_resource, "inventory")) return null;
-    return t.Message.init(.get_product_inventory, segments.id, 0, {});
+    const params = t.match_route(raw_path, route_pattern) orelse return null;
+    const id = t.stdx.parse_uuid(params.get("id").?) orelse return null;
+    return t.Message.init(.get_product_inventory, id, 0, {});
 }
 
 // [prefetch] .get_product_inventory

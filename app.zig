@@ -153,11 +153,20 @@ pub var sidecar: ?SidecarClient = null;
 pub fn translate(method: http.Method, path: []const u8, body: []const u8) ?Message {
     if (sidecar) |*client| return client.translate(method, path, body);
 
+    const parse = @import("tiger_framework").parse;
+
     var result: ?Message = null;
     inline for (handlers) |H| {
-        if (H.route(method, path, body)) |msg| {
-            assert(result == null); // duplicate route match
-            result = msg;
+        const skip = if (@hasDecl(H, "route_method") and @hasDecl(H, "route_pattern"))
+            method != H.route_method or parse.match_route(path, H.route_pattern) == null
+        else
+            false;
+
+        if (!skip) {
+            if (H.route(method, path, body)) |msg| {
+                assert(result == null); // duplicate route match
+                result = msg;
+            }
         }
     }
     return result;

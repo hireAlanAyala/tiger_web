@@ -9,21 +9,17 @@ pub const Prefetch = struct {
 
 pub const Context = t.HandlerContext(Prefetch, t.Operation.EventType(.create_product), t.Identity, Status);
 
+pub const route_method = t.http.Method.post;
+pub const route_pattern = "/products";
+
 // [route] .create_product
 // match POST /products
 pub fn route(method: t.http.Method, raw_path: []const u8, body: []const u8) ?t.Message {
-    if (method != .post) return null;
-    if (raw_path.len == 0 or raw_path[0] != '/') return null;
-    const path = raw_path[1..];
-
-    const segments = t.parse.split_path(path) orelse return null;
-    if (!std.mem.eql(u8, segments.collection, "products")) return null;
-    if (segments.has_id) return null;
-
+    _ = method;
+    if (t.match_route(raw_path, route_pattern) == null) return null;
     if (body.len == 0) return null;
     const product = parse_product_json(body) orelse return null;
     if (product.id == 0) return null;
-
     return t.Message.init(.create_product, product.id, 0, product);
 }
 

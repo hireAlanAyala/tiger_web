@@ -1,20 +1,24 @@
 # Next plans to execute
 
-1. **Worker integration** — `docs/plans/worker.md` — DEFERRED
+1. **Sidecar protocol rebuild** — 2026-03-24
+   Rewrite sidecar protocol from scratch. Current protocol built around
+   deleted types (Write union, ExecuteResult, HandlerResponse). New
+   protocol: SQL strings + params over wire, bare status + HTML back.
+   Framework pre-matches routes via // match, TS handler gets req.params.
+   db.execute sends SQL back for framework to execute in its transaction.
+   Large project — touches protocol.zig, sidecar.zig, codegen.zig,
+   TS adapter, dispatch generator, example handlers.
+
+2. **Worker integration** — `docs/plans/worker.md` — DEFERRED
    worker.fetch in prefetch (framework resolves across ticks).
    Worker polls for post-commit work (no after_commit callbacks).
    Chained queries solved by syncing external data to local db via
    worker jobs.
 
-2. **Session as writes** — DEFERRED
+3. **Session as writes** — DEFERRED
    Remove session_action from HandleResult. Session changes via
    db.execute on a sessions table. Requires auth architecture change
    (cookie-based → sessions table). Only logout uses session_action.
-
-3. **Route pattern matching** — DEFERRED
-   `// match GET /products/:id` annotation sugar. Scanner reads
-   pattern, generates routing dispatch. Current manual URL parsing
-   works. Additive — doesn't change existing handlers.
 
 ---
 
