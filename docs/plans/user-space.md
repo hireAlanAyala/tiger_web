@@ -161,19 +161,88 @@ pub fn render(ctx: Context, db: anytype) []const u8 {
 
 See decisions/render-db-access.md for the full reasoning.
 
-## prefetch — read-only db
+## prefetch — declare what you need
 
-Prefetch loads data for handle to decide on. Read-only — no writes.
+Prefetch declares data requirements. It doesn't return anything.
+`db.query`, `db.query_all`, and `worker.fetch` queue requests.
+The framework resolves all of them and populates `ctx.data` before
+calling handle. The developer never sees pending state, never
+returns null, never manages retries.
+
+```ts
+// [prefetch] .get_product
+export function prefetch(db, msg) {
+    db.query("product", "SELECT * FROM products WHERE id = :id", msg);
+}
+// handle gets ctx.data.product
+
+// [prefetch] .page_load_dashboard
+export function prefetch(db, msg) {
+    db.query_all("products", "SELECT * FROM products WHERE active = 1");
+    db.query_all("collections", "SELECT * FROM collections WHERE active = 1");
+    db.query_all("orders", "SELECT * FROM orders ORDER BY id");
+}
+// handle gets ctx.data.products, ctx.data.collections, ctx.data.orders
+
+// [prefetch] .vendor_redirect
+export function prefetch(db, worker, msg) {
+    db.query("vendor", "SELECT * FROM vendors WHERE slug = :slug", msg);
+    db.query_all("pages", "SELECT * FROM vendor_pages");
+    worker.fetch("entitlements", "https://api.esm.com/entitlements");
+}
+// handle gets ctx.data.vendor, ctx.data.pages, ctx.data.entitlements
+```
 
 ```zig
-pub fn prefetch(db: anytype, msg: *const Message) ?Prefetch {
-    return .{
-        .product = db.query(ProductRow,
-            "SELECT id, name, price_cents FROM products WHERE id = :id",
-            msg),
-    };
+// [prefetch] .get_product
+pub fn prefetch(db: anytype, msg: *const Message) void {
+    db.query("product", ProductRow,
+        "SELECT id, name, price_cents FROM products WHERE id = :id", msg);
 }
 ```
+
+### How the framework resolves prefetch
+
+1. Runs prefetch — all queries and worker fetches are queued
+2. Executes db queries immediately (local, fast)
+3. Starts worker fetches (non-blocking)
+4. If any worker fetch is pending → retry next tick, process other connections
+5. When everything resolves → populates `ctx.data`, calls handle
+
+The developer writes declarations. The framework handles resolution,
+retry, and aggregation. No return value, no null checks, no control flow.
+
+### Why no chaining
+
+All prefetch declarations are independent. You can't use one query's
+result in another query's params:
+
+```ts
+// NOT SUPPORTED — result of one query as input to another
+worker.fetch("ext_user", "https://auth0.com/users/" + msg.id);
+db.query("profile", "SELECT * FROM profiles WHERE ext_id = :id", ref("ext_user"));
+```
+
+If you need external data in a local query, sync the external data
+to your database via a job (a handler triggered by the worker on a
+schedule). Prefetch then queries the local cache:
+
+```ts
+// Entitlements synced to local db every 5 minutes by worker job
+db.query("entitlement", "SELECT * FROM entitlement_cache WHERE user_id = :id", msg);
+```
+
+This keeps prefetch simple — declarations only, no control flow,
+no dependencies between queries.
+
+### Same pattern as handle
+
+Prefetch queues reads. Handle queues writes. Same mechanism:
+
+| Phase    | Queues       | Framework does after       |
+|----------|--------------|----------------------------|
+| prefetch | db.query, worker.fetch | resolves all, populates ctx.data |
+| handle   | db.execute   | drains queue inside transaction |
 
 ## Per-handler status — scanner-generated
 
@@ -191,64 +260,40 @@ non-blocking external IO in prefetch and post-commit hooks in handle.
 
 **No await. No async. No promises. No callbacks.**
 
-The developer writes sequential code. The framework retries until
-the external data arrives. This is the same mechanism as storage busy —
-prefetch returns null, retry next tick.
+The developer queues requests in prefetch. The framework resolves
+them across ticks and calls handle when everything is ready.
 
-### Worker in prefetch — external data needed for queries
+### Worker in prefetch — external data alongside local queries
 
 ```ts
-export function prefetchGetProfile(db, worker, msg) {
-    // worker.fetch — starts async request, returns null until response arrives
-    const externalUser = worker.fetch("https://api.auth0.com/users/" + msg.id);
-    if (!externalUser) return null; // not ready — framework retries next tick
-
-    // Only runs once externalUser is resolved
-    const profile = db.query("SELECT * FROM profiles WHERE external_id = :id", externalUser);
-    return { profile };
+export function prefetch(db, worker, msg) {
+    db.query("vendor", "SELECT * FROM vendors WHERE slug = :slug", msg);
+    db.query_all("pages", "SELECT * FROM vendor_pages");
+    worker.fetch("entitlements", "https://api.esm.com/entitlements");
 }
+// handle gets ctx.data.vendor, ctx.data.pages, ctx.data.entitlements
 ```
 
 What happens per tick:
 
+What happens per tick:
+
 ```
-Tick 1:  worker.fetch starts request → returns null
-         prefetch returns null → framework skips, processes other connections
+Tick 1:  framework runs prefetch
+         db.query("vendor") → immediate, resolved
+         db.query_all("pages") → immediate, resolved
+         worker.fetch("entitlements") → starts request, pending
+         framework sees pending → skips, processes other connections
 
-Tick 2:  worker.fetch checks cache → still pending, returns null
-         prefetch returns null → skip
+Tick 2:  worker.fetch("entitlements") → checks cache, still pending → skip
 
-Tick N:  worker.fetch checks cache → response arrived, returns data
-         db.query runs with resolved data → returns profile
-         prefetch returns { profile } → handle runs immediately
-```
-
-The function runs multiple times. It reads like synchronous code.
-The developer checks for null and returns null — that's it. The retry
-loop is invisible. `worker.fetch` caches per-connection so the
-external request fires once, not every tick.
-
-### Worker in prefetch — multiple external sources
-
-```ts
-export function prefetchVendorRedirect(db, worker, msg) {
-    const vendor = db.query("SELECT * FROM vendors WHERE slug = :slug", msg);
-
-    // Non-blocking — starts request, returns null until ready
-    const entitlements = worker.fetch("https://api.esm.com/entitlements", {
-        headers: { Authorization: `Bearer ${msg.identity.token}` }
-    });
-    if (!entitlements) return null;
-
-    const pages = db.query_all("SELECT * FROM vendor_pages WHERE vendor = :vendor", vendor);
-    return { vendor, entitlements, pages };
-}
+Tick N:  worker.fetch("entitlements") → response arrived, resolved
+         all three resolved → populates ctx.data → handle runs
 ```
 
-`db.query` is immediate (local database). `worker.fetch` is async
-(external API). The developer mixes them naturally. The framework
-retries until the async results are ready. Local queries re-execute
-each tick — they're fast (prepared statements, in-memory).
+The developer wrote three declarations. The framework handled
+everything — resolution, retry, aggregation. No null checks,
+no control flow, no return value.
 
 ### Worker after commit — fire-and-forget external calls
 
@@ -299,8 +344,8 @@ The tick model eliminates async/await:
 - **Worker pending** → prefetch returns null, retry next tick
 - **Post-commit side effect** → fires after client has response
 
-Same mechanism for all three. The developer writes sequential code
-with null checks. The framework retries. No async, no await, no
+Same mechanism for all three. The developer queues declarations.
+The framework resolves, retries, drains. No async, no await, no
 callback hell, no promise chains. The single-threaded event loop
 does the scheduling.
 
@@ -312,16 +357,18 @@ does the scheduling.
 - `session_action` field on handler response
 - `HandlerResponse` struct (replaced by bare Status return)
 - `ExecuteResult` struct (replaced by Status + queue)
+- Prefetch return value (replaced by queued declarations)
+- Null-return retry pattern (framework handles retry internally)
 
 ## Summary
 
 ```
 route:     (request)                    → Message
-prefetch:  (read-only db, worker, msg)  → Data (or null = retry)
+prefetch:  (read-only db, worker, msg)  → void (queues declarations)
 handle:    (ctx, write-queue)           → Status
 render:    (ctx, read-only db)          → HTML
 ```
 
-Four functions. Each gets exactly the access it needs.
-The framework calls them in order, manages transactions, retries
-on null, wraps output. No async. No await. No callbacks.
+Four functions. Each queues what it needs.
+The framework resolves prefetch, drains handle writes, wraps render
+output. No return values for data. No async. No await. No callbacks.
