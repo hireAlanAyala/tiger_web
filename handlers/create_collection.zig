@@ -29,7 +29,7 @@ pub fn prefetch(storage: anytype, msg: *const t.Message) ?Prefetch {
 }
 
 // [handle] .create_collection
-pub fn handle(ctx: Context, writes: *t.WriteQueue) t.HandleResult {
+pub fn handle(ctx: Context, db: anytype) t.HandleResult {
     if (ctx.prefetched.existing != null)
         return .{ .status = .version_conflict };
     const event = ctx.body_val();
@@ -38,7 +38,10 @@ pub fn handle(ctx: Context, writes: *t.WriteQueue) t.HandleResult {
     @memcpy(entity.name[0..event.name_len], event.name[0..event.name_len]);
     entity.name_len = event.name_len;
     entity.flags = .{ .active = true };
-    writes.add(.{ .put_collection = entity });
+    _ = db.execute(
+        "INSERT INTO collections (id, name, active) VALUES (?1, ?2, ?3);",
+        .{ entity.id, entity.name[0..entity.name_len], entity.flags.active },
+    );
     return .{};
 }
 

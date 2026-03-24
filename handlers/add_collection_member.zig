@@ -40,12 +40,15 @@ pub fn prefetch(storage: anytype, msg: *const t.Message) ?Prefetch {
 }
 
 // [handle] .add_collection_member
-pub fn handle(ctx: Context, writes: *t.WriteQueue) t.HandleResult {
+pub fn handle(ctx: Context, db: anytype) t.HandleResult {
     _ = ctx.prefetched.collection orelse
         return .{ .status = .not_found };
     _ = ctx.prefetched.product orelse
         return .{ .status = .not_found };
-    writes.add(.{ .put_membership = .{ .collection_id = ctx.prefetched.collection_id, .product_id = ctx.prefetched.product_id } });
+    _ = db.execute(
+        "INSERT INTO collection_members (collection_id, product_id, removed) VALUES (?1, ?2, 0) ON CONFLICT(collection_id, product_id) DO UPDATE SET removed = 0;",
+        .{ ctx.prefetched.collection_id, ctx.prefetched.product_id },
+    );
     return .{};
 }
 

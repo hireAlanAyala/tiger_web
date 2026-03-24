@@ -27,9 +27,9 @@ pub fn prefetch(storage: anytype, msg: *const t.Message) ?Prefetch {
 }
 
 // [handle] .list_collections
-pub fn handle(ctx: Context, writes: *t.WriteQueue) t.HandleResult {
+pub fn handle(ctx: Context, db: anytype) t.HandleResult {
     _ = ctx;
-    _ = writes;
+    _ = db;
     return .{};
 }
 

@@ -75,7 +75,6 @@ const known_enums = .{
 /// All union types emitted as TS discriminated unions.
 const known_unions = .{
     message.Result,
-    state_machine.Write,
 };
 
 const output = blk: {
@@ -181,20 +180,13 @@ const output = blk: {
     w.raw("  body?: T;\n");
     w.raw("}\n\n");
 
-    w.raw("export interface HandlerResult {\n");
-    w.raw("  status: Status;\n");
-    w.raw("  writes: Write[];\n");
-    w.raw("}\n\n");
-
     // --- User-facing aliases ---
     // Friendly names for handler developers. Internal names stay for
     // protocol/serde code. Handlers import these — no framework jargon.
     w.raw("// User-facing type aliases.\n");
     w.raw("export type Request = TranslateRequest;\n");
     w.raw("export type Route<T = unknown> = TranslateResult<T>;\n");
-    w.raw("export type Response = HandlerResult;\n");
-    w.raw("export type Context = PrefetchCache;\n");
-    w.raw("export type Change = Write;\n\n");
+    w.raw("export type Context = PrefetchCache;\n\n");
     w.raw("export function assert(condition: boolean, msg: string): asserts condition {\n");
     w.raw("  if (!condition) throw new Error('assertion failed: ' + msg);\n");
     w.raw("}\n\n");
@@ -215,10 +207,8 @@ const output = blk: {
 
     // Union variant counts — if a variant is added, codegen must be updated.
     assert(@typeInfo(message.Result).@"union".fields.len == 10);
-    assert(@typeInfo(state_machine.Write).@"union".fields.len == 11);
 
     // Anon struct counts — ties emit_union_anon_structs to emit_union.
-    assert(count_anon_structs(state_machine.Write) == 0);
     assert(count_anon_structs(message.Result) == 0);
 
     // Every Operation.EventType references a type we handle.
@@ -1320,7 +1310,7 @@ fn is_known_enum(comptime T: type) bool {
 
 /// Returns true if T is a union in the known_unions list.
 fn is_known_union(comptime T: type) bool {
-    comptime assert(known_unions.len == 2);
+    comptime assert(known_unions.len == 1);
     comptime {
         for (known_unions) |U| assert(@typeInfo(U) == .@"union");
     }
@@ -1534,7 +1524,6 @@ test "type_leaf_name extracts last segment" {
     comptime assert(std.mem.eql(u8, type_leaf_name(message.OrderCompletion.OrderCompletionResult), "OrderCompletionResult"));
 
     // Generic instantiation — SM types have long @typeName with parens.
-    comptime assert(std.mem.eql(u8, type_leaf_name(state_machine.Write), "Write"));
     comptime assert(std.mem.eql(u8, type_leaf_name(message.LoginCodeWrite), "LoginCodeWrite"));
     comptime assert(std.mem.eql(u8, type_leaf_name(state_machine.HandleResult), "HandleResult"));
 }
@@ -1599,15 +1588,6 @@ test "is_known_struct covers all union variant types" {
         }
     }
 
-    // Every non-void Write variant is either known or anonymous (struct).
-    comptime {
-        for (@typeInfo(state_machine.Write).@"union".fields) |field| {
-            if (field.type == void) continue;
-            const info = @typeInfo(field.type);
-            if (info == .@"struct") continue;
-            assert(info == .int or info == .bool or info == .@"enum");
-        }
-    }
 }
 
 test "output is valid structure" {
@@ -1626,10 +1606,10 @@ test "output is valid structure" {
             if (i + 11 <= output.len and std.mem.eql(u8, output[i..][0..11], "export type")) types += 1;
             if (i + 12 <= output.len and std.mem.eql(u8, output[i..][0..12], "export const")) consts += 1;
         }
-        assert(interfaces == 39);
-        assert(types == 19);
+        // Counts updated after removing Write union and HandlerResponse.
+        assert(interfaces == 38);
+        assert(types == 16);
         assert(consts == 34);
-        // 33 extern structs × 2 (read + write) = 66 serde functions + 1 assert
         assert(functions == 67);
     }
 }

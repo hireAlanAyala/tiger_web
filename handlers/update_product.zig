@@ -30,7 +30,7 @@ pub fn prefetch(storage: anytype, msg: *const t.Message) ?Prefetch {
 }
 
 // [handle] .update_product
-pub fn handle(ctx: Context, writes: *t.WriteQueue) t.HandleResult {
+pub fn handle(ctx: Context, db: anytype) t.HandleResult {
     const row = ctx.prefetched.existing orelse
         return .{ .status = .not_found };
     const event = ctx.body_val();
@@ -51,7 +51,10 @@ pub fn handle(ctx: Context, writes: *t.WriteQueue) t.HandleResult {
     entity.version = row.version + 1;
     entity.flags = .{ .active = row.active };
 
-    writes.add(.{ .update_product = entity });
+    _ = db.execute(
+        "UPDATE products SET name = ?2, description = ?3, price_cents = ?4, inventory = ?5, version = ?6, active = ?7 WHERE id = ?1;",
+        .{ entity.id, entity.name[0..entity.name_len], entity.description[0..entity.description_len], entity.price_cents, entity.inventory, entity.version, entity.flags.active },
+    );
     return .{};
 }
 

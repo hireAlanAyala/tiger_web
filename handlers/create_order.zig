@@ -37,7 +37,7 @@ pub fn prefetch(storage: anytype, msg: *const t.Message) ?Prefetch {
 }
 
 // [handle] .create_order
-pub fn handle(ctx: Context, writes: *t.WriteQueue) t.HandleResult {
+pub fn handle(ctx: Context, db: anytype) t.HandleResult {
     const order = ctx.body_val();
 
     // Validate all products exist.
@@ -65,7 +65,10 @@ pub fn handle(ctx: Context, writes: *t.WriteQueue) t.HandleResult {
         var product = t.productFromRow(maybe_product.?);
         product.inventory -= item.quantity;
 
-        writes.add(.{ .update_product = product });
+        _ = db.execute(
+            "UPDATE products SET name = ?2, description = ?3, price_cents = ?4, inventory = ?5, version = ?6, active = ?7 WHERE id = ?1;",
+            .{ product.id, product.name[0..product.name_len], product.description[0..product.description_len], product.price_cents, product.inventory, product.version, product.flags.active },
+        );
 
         const line_total = @as(u64, product.price_cents) * @as(u64, item.quantity);
         order_result.items[i] = std.mem.zeroes(message.OrderResultItem);
@@ -78,7 +81,17 @@ pub fn handle(ctx: Context, writes: *t.WriteQueue) t.HandleResult {
         order_result.total_cents +|= line_total;
     }
 
-    writes.add(.{ .put_order = order_result });
+    _ = db.execute(
+        "INSERT INTO orders (id, total_cents, items_len, status, timeout_at) VALUES (?1, ?2, ?3, ?4, ?5);",
+        .{ order_result.id, order_result.total_cents, @as(u32, order_result.items_len), @intFromEnum(order_result.status), @as(u64, order_result.timeout_at) },
+    );
+
+    for (order_result.items[0..order_result.items_len]) |item| {
+        _ = db.execute(
+            "INSERT INTO order_items (order_id, product_id, name, quantity, price_cents, line_total_cents) VALUES (?1, ?2, ?3, ?4, ?5, ?6);",
+            .{ order_result.id, item.product_id, item.name[0..item.name_len], item.quantity, item.price_cents, item.line_total_cents },
+        );
+    }
 
     return .{};
 }

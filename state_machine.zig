@@ -34,29 +34,14 @@ pub const StorageResult = enum { ok, not_found, err, busy, corruption };
 /// Handlers is the App's dispatch interface — it provides:
 ///   - Cache: tagged union of all handler Prefetch types
 ///   - handler_prefetch(storage, msg) → ?Cache
-///   - handler_execute(cache, msg, identity, apply_write_fn) → MessageResponse
+///   - handler_execute(cache, msg, fw, db) → HandleResult
 ///
 /// The SM owns the pipeline (auth, transactions, tracer, invariants).
 /// Handlers own the business logic. The SM never imports App — Handlers
 /// is passed as a comptime parameter. Clean one-way dependency.
-/// Write command — describes a storage mutation returned by execute handlers.
-/// Independent of Storage and Handlers — lives at module level so both
-/// the SM and the App can reference it without circular dependencies.
-pub const Write = union(enum) {
-    put_product: message.Product,
-    update_product: message.Product,
-    put_collection: message.ProductCollection,
-    update_collection: message.ProductCollection,
-    put_membership: message.Membership,
-    update_membership: message.MembershipUpdate,
-    put_order: message.OrderResult,
-    update_order: message.OrderResult,
-    put_login_code: message.LoginCodeWrite,
-    consume_login_code: message.LoginCodeKey,
-    put_user: message.UserWrite,
-};
 
-/// Maximum writes a single execute can produce.
+/// Maximum writes a single handle can produce. Used by the sidecar
+/// protocol for the wire format buffer size.
 pub const writes_max = 1 + message.order_items_max;
 
 comptime {
@@ -69,24 +54,6 @@ comptime {
 pub const HandleResult = struct {
     status: message.Status = .ok,
     session_action: message.SessionAction = .none,
-};
-
-/// Write queue — handle fills this, the SM drains it after handle returns.
-/// Fixed-size, no allocations. The handler calls `writes.add(...)` to queue
-/// mutations. The framework applies them inside the transaction.
-pub const WriteQueue = struct {
-    entries: [writes_max]Write = undefined,
-    len: u8 = 0,
-
-    pub fn add(self: *WriteQueue, write: Write) void {
-        assert(self.len < writes_max);
-        self.entries[self.len] = write;
-        self.len += 1;
-    }
-
-    pub fn slice(self: *const WriteQueue) []const Write {
-        return self.entries[0..self.len];
-    }
 };
 
 /// Used by the fuzzer to filter random messages before calling prefetch/commit.
@@ -308,18 +275,16 @@ pub fn StateMachineType(comptime Storage: type, comptime Handlers: type) type {
                 .is_sse = false, // Set by server when render is wired.
             };
 
-            var writes = WriteQueue{};
+            // Handle writes directly to storage. The transaction is
+            // managed by begin_batch/commit_batch at the server level —
+            // all writes in a tick share one transaction.
+            var write_view = Storage.WriteView.init(self.storage);
             const handle_result = Handlers.handler_execute(
                 cache,
                 msg,
                 fw,
-                &writes,
+                &write_view,
             );
-
-            // Apply writes — handle queued them, the SM drains.
-            for (writes.slice()) |w| {
-                assert(self.apply_write(w));
-            }
 
             const identity = self.prefetch_identity orelse std.mem.zeroes(message.PrefetchIdentity);
             const is_auth = identity.is_authenticated != 0 or
@@ -338,30 +303,6 @@ pub fn StateMachineType(comptime Storage: type, comptime Handlers: type) type {
                 .response = resp,
                 .cache = cache,
                 .identity = self.prefetch_identity orelse std.mem.zeroes(message.PrefetchIdentity),
-            };
-        }
-
-        /// Apply a single write to storage. Called by commit() to drain
-        /// the WriteQueue after handle returns.
-        pub fn apply_write(self: *StateMachine, w: Write) bool {
-            return switch (w) {
-                .put_product => |p| self.storage.put(&p) == .ok,
-                .update_product => |p| self.storage.update(p.id, &p) == .ok,
-                .put_collection => |col| self.storage.put_collection(&col) == .ok,
-                .update_collection => |col| self.storage.update_collection(col.id, &col) == .ok,
-                .put_membership => |m| self.storage.add_to_collection(m.collection_id, m.product_id) == .ok,
-                .update_membership => |m| if (m.removed != 0) blk: {
-                    const r = self.storage.remove_from_collection(m.collection_id, m.product_id);
-                    break :blk r == .ok or r == .not_found;
-                } else self.storage.add_to_collection(m.collection_id, m.product_id) == .ok,
-                .put_order => |order| self.storage.put_order(&order) == .ok,
-                .update_order => |order| self.storage.update_order_completion(&order) == .ok,
-                .put_login_code => |lc| self.storage.put_login_code(lc.email[0..lc.email_len], &lc.code, lc.expires_at) == .ok,
-                .consume_login_code => |lc| blk: {
-                    _ = self.storage.consume_login_code(lc.email[0..lc.email_len]);
-                    break :blk true;
-                },
-                .put_user => |u| self.storage.put_user(u.user_id, u.email[0..u.email_len]) == .ok,
             };
         }
 

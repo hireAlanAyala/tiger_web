@@ -97,6 +97,21 @@ pub const SqliteStorage = struct {
         }
     };
 
+    /// Write-only view of SqliteStorage for the handle phase.
+    /// Exposes execute() only — no reads. Handle writes SQL, the
+    /// framework wraps handle in begin/commit.
+    pub const WriteView = struct {
+        storage: *SqliteStorage,
+
+        pub fn init(storage: *SqliteStorage) WriteView {
+            return .{ .storage = storage };
+        }
+
+        pub fn execute(self: WriteView, comptime sql_str: [*:0]const u8, args: anytype) bool {
+            return self.storage.execute(sql_str, args);
+        }
+    };
+
     db: *c.sqlite3,
     stmt_get: *c.sqlite3_stmt,
     stmt_put: *c.sqlite3_stmt,
@@ -1057,6 +1072,17 @@ pub const SqliteStorage = struct {
 
     fn bind_param(stmt: *c.sqlite3_stmt, col: c_int, val: anytype) void {
         const T = @TypeOf(val);
+
+        // Coerce aligned slices to []const u8 — extern struct fields
+        // produce slices like []align(16) const u8 which don't match
+        // []const u8. The alignment is irrelevant for SQLite binding.
+        if (comptime is_byte_slice(T)) {
+            const slice: []const u8 = val;
+            const rc = c.sqlite3_bind_text(stmt, col, slice.ptr, @intCast(slice.len), c.SQLITE_TRANSIENT);
+            assert(rc == c.SQLITE_OK);
+            return;
+        }
+
         const rc = rc: {
             if (T == u128) {
                 var buf: [16]u8 = undefined;
@@ -1090,6 +1116,16 @@ pub const SqliteStorage = struct {
         const child_info = @typeInfo(child);
         if (child_info != .array) return false;
         return child_info.array.child == u8;
+    }
+
+    /// Matches any slice of u8 regardless of alignment or constness.
+    /// Extern struct fields produce []align(N) const u8 when sliced —
+    /// these are semantically []const u8 for binding purposes.
+    fn is_byte_slice(comptime T: type) bool {
+        const info = @typeInfo(T);
+        if (info != .pointer) return false;
+        if (info.pointer.size != .slice) return false;
+        return info.pointer.child == u8;
     }
 
     // Type universe note: read_column's @compileError catch-all already

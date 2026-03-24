@@ -117,9 +117,9 @@ pub fn HandlersType(comptime StorageParam: type) type {
             cache: PrefetchCache,
             msg: Message,
             fw: FwCtx,
-            writes: *state_machine.WriteQueue,
+            db: anytype,
         ) state_machine.HandleResult {
-            return dispatch_execute(cache, msg, fw, writes);
+            return dispatch_execute(cache, msg, fw, db);
         }
     };
 }
@@ -222,42 +222,40 @@ fn prefetch_one(comptime H: type, comptime op: Operation, ro: anytype, msg: *con
     return @unionInit(PrefetchCache, @tagName(op), result);
 }
 
-/// Phase 2: dispatch to handler.handle(), apply writes.
-/// The SM calls this from commit() with the stored PrefetchCache.
-/// apply_write_fn is a bound method from the SM — handlers never
-/// touch storage directly in the execute phase.
+/// Phase 2: dispatch to handler.handle() with write-only db access.
+/// The SM calls this from commit() inside a begin/commit transaction.
 fn dispatch_execute(
     cache: PrefetchCache,
     msg: Message,
     fw: anytype,
-    writes: *state_machine.WriteQueue,
+    db: anytype,
 ) state_machine.HandleResult {
     return switch (msg.operation) {
         .root => unreachable,
-        .get_product => execute_one(@import("handlers/get_product.zig"), .get_product, cache, msg, fw, writes),
-        .create_product => execute_one(@import("handlers/create_product.zig"), .create_product, cache, msg, fw, writes),
-        .list_products => execute_one(@import("handlers/list_products.zig"), .list_products, cache, msg, fw, writes),
-        .update_product => execute_one(@import("handlers/update_product.zig"), .update_product, cache, msg, fw, writes),
-        .delete_product => execute_one(@import("handlers/delete_product.zig"), .delete_product, cache, msg, fw, writes),
-        .get_product_inventory => execute_one(@import("handlers/get_product_inventory.zig"), .get_product_inventory, cache, msg, fw, writes),
-        .search_products => execute_one(@import("handlers/search_products.zig"), .search_products, cache, msg, fw, writes),
-        .transfer_inventory => execute_one(@import("handlers/transfer_inventory.zig"), .transfer_inventory, cache, msg, fw, writes),
-        .create_collection => execute_one(@import("handlers/create_collection.zig"), .create_collection, cache, msg, fw, writes),
-        .get_collection => execute_one(@import("handlers/get_collection.zig"), .get_collection, cache, msg, fw, writes),
-        .list_collections => execute_one(@import("handlers/list_collections.zig"), .list_collections, cache, msg, fw, writes),
-        .delete_collection => execute_one(@import("handlers/delete_collection.zig"), .delete_collection, cache, msg, fw, writes),
-        .add_collection_member => execute_one(@import("handlers/add_collection_member.zig"), .add_collection_member, cache, msg, fw, writes),
-        .remove_collection_member => execute_one(@import("handlers/remove_collection_member.zig"), .remove_collection_member, cache, msg, fw, writes),
-        .create_order => execute_one(@import("handlers/create_order.zig"), .create_order, cache, msg, fw, writes),
-        .get_order => execute_one(@import("handlers/get_order.zig"), .get_order, cache, msg, fw, writes),
-        .list_orders => execute_one(@import("handlers/list_orders.zig"), .list_orders, cache, msg, fw, writes),
-        .complete_order => execute_one(@import("handlers/complete_order.zig"), .complete_order, cache, msg, fw, writes),
-        .cancel_order => execute_one(@import("handlers/cancel_order.zig"), .cancel_order, cache, msg, fw, writes),
-        .page_load_dashboard => execute_one(@import("handlers/page_load_dashboard.zig"), .page_load_dashboard, cache, msg, fw, writes),
-        .page_load_login => execute_one(@import("handlers/page_load_login.zig"), .page_load_login, cache, msg, fw, writes),
-        .request_login_code => execute_one(@import("handlers/request_login_code.zig"), .request_login_code, cache, msg, fw, writes),
-        .verify_login_code => execute_one(@import("handlers/verify_login_code.zig"), .verify_login_code, cache, msg, fw, writes),
-        .logout => execute_one(@import("handlers/logout.zig"), .logout, cache, msg, fw, writes),
+        .get_product => execute_one(@import("handlers/get_product.zig"), .get_product, cache, msg, fw, db),
+        .create_product => execute_one(@import("handlers/create_product.zig"), .create_product, cache, msg, fw, db),
+        .list_products => execute_one(@import("handlers/list_products.zig"), .list_products, cache, msg, fw, db),
+        .update_product => execute_one(@import("handlers/update_product.zig"), .update_product, cache, msg, fw, db),
+        .delete_product => execute_one(@import("handlers/delete_product.zig"), .delete_product, cache, msg, fw, db),
+        .get_product_inventory => execute_one(@import("handlers/get_product_inventory.zig"), .get_product_inventory, cache, msg, fw, db),
+        .search_products => execute_one(@import("handlers/search_products.zig"), .search_products, cache, msg, fw, db),
+        .transfer_inventory => execute_one(@import("handlers/transfer_inventory.zig"), .transfer_inventory, cache, msg, fw, db),
+        .create_collection => execute_one(@import("handlers/create_collection.zig"), .create_collection, cache, msg, fw, db),
+        .get_collection => execute_one(@import("handlers/get_collection.zig"), .get_collection, cache, msg, fw, db),
+        .list_collections => execute_one(@import("handlers/list_collections.zig"), .list_collections, cache, msg, fw, db),
+        .delete_collection => execute_one(@import("handlers/delete_collection.zig"), .delete_collection, cache, msg, fw, db),
+        .add_collection_member => execute_one(@import("handlers/add_collection_member.zig"), .add_collection_member, cache, msg, fw, db),
+        .remove_collection_member => execute_one(@import("handlers/remove_collection_member.zig"), .remove_collection_member, cache, msg, fw, db),
+        .create_order => execute_one(@import("handlers/create_order.zig"), .create_order, cache, msg, fw, db),
+        .get_order => execute_one(@import("handlers/get_order.zig"), .get_order, cache, msg, fw, db),
+        .list_orders => execute_one(@import("handlers/list_orders.zig"), .list_orders, cache, msg, fw, db),
+        .complete_order => execute_one(@import("handlers/complete_order.zig"), .complete_order, cache, msg, fw, db),
+        .cancel_order => execute_one(@import("handlers/cancel_order.zig"), .cancel_order, cache, msg, fw, db),
+        .page_load_dashboard => execute_one(@import("handlers/page_load_dashboard.zig"), .page_load_dashboard, cache, msg, fw, db),
+        .page_load_login => execute_one(@import("handlers/page_load_login.zig"), .page_load_login, cache, msg, fw, db),
+        .request_login_code => execute_one(@import("handlers/request_login_code.zig"), .request_login_code, cache, msg, fw, db),
+        .verify_login_code => execute_one(@import("handlers/verify_login_code.zig"), .verify_login_code, cache, msg, fw, db),
+        .logout => execute_one(@import("handlers/logout.zig"), .logout, cache, msg, fw, db),
     };
 }
 
@@ -267,7 +265,7 @@ fn execute_one(
     cache: PrefetchCache,
     msg: Message,
     fw: anytype,
-    writes: *state_machine.WriteQueue,
+    db: anytype,
 ) state_machine.HandleResult {
     const prefetched = @field(cache, @tagName(op));
     const ctx = H.Context{
@@ -277,7 +275,7 @@ fn execute_one(
         .render_buf = &.{}, // render not wired yet
     };
 
-    return H.handle(ctx, writes);
+    return H.handle(ctx, db);
 }
 
 /// Phase 3: dispatch to handler.render().
@@ -460,19 +458,18 @@ const TestSM = SM; // Tests use the same SM type as production
 // extract_cache tests removed — the sidecar cache protocol needs redesign
 // for the new handler-based SM. See TODO in extract_cache above.
 
-test "apply_write returns false for duplicate put" {
+test "duplicate insert returns false" {
     var storage = try Storage.init(":memory:");
     defer storage.deinit();
-    const secret = "tiger-web-test-key-0123456789ab!".*;
-    var sm = TestSM.init(&storage, false, 42, &secret);
 
-    var p = std.mem.zeroes(message.Product);
-    p.id = 0x1234;
-    p.version = 1;
-    p.flags = .{ .active = true };
-
-    // First put succeeds.
-    try std.testing.expect(sm.apply_write(.{ .put_product = p }));
-    // Duplicate put — apply_write returns false (not crash).
-    try std.testing.expect(!sm.apply_write(.{ .put_product = p }));
+    // First insert succeeds.
+    try std.testing.expect(storage.execute(
+        "INSERT INTO products (id, name, description, price_cents, inventory, version, active) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7);",
+        .{ @as(u128, 0x1234), "test", "", @as(u32, 100), @as(u32, 10), @as(u32, 1), true },
+    ));
+    // Duplicate insert fails (UNIQUE constraint).
+    try std.testing.expect(!storage.execute(
+        "INSERT INTO products (id, name, description, price_cents, inventory, version, active) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7);",
+        .{ @as(u128, 0x1234), "test", "", @as(u32, 100), @as(u32, 10), @as(u32, 1), true },
+    ));
 }

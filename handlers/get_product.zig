@@ -33,8 +33,8 @@ pub fn prefetch(storage: anytype, msg: *const t.Message) ?Prefetch {
 }
 
 // [handle] .get_product
-pub fn handle(ctx: Context, writes: *t.WriteQueue) t.HandleResult {
-    _ = writes;
+pub fn handle(ctx: Context, db: anytype) t.HandleResult {
+    _ = db;
     if (ctx.prefetched.product == null)
         return .{ .status = .not_found };
     if (!ctx.prefetched.product.?.active)

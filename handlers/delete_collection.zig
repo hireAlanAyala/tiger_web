@@ -27,14 +27,17 @@ pub fn prefetch(storage: anytype, msg: *const t.Message) ?Prefetch {
 }
 
 // [handle] .delete_collection
-pub fn handle(ctx: Context, writes: *t.WriteQueue) t.HandleResult {
+pub fn handle(ctx: Context, db: anytype) t.HandleResult {
     const row = ctx.prefetched.existing orelse
         return .{ .status = .not_found };
     if (!row.active)
         return .{ .status = .not_found };
-    var col = t.collectionFromRow(row);
-    col.flags = .{ .active = false };
-    writes.add(.{ .update_collection = col });
+    var entity = t.collectionFromRow(row);
+    entity.flags = .{ .active = false };
+    _ = db.execute(
+        "UPDATE collections SET name = ?2, active = ?3 WHERE id = ?1;",
+        .{ entity.id, entity.name[0..entity.name_len], entity.flags.active },
+    );
     return .{};
 }
 

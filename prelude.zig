@@ -189,8 +189,6 @@ pub fn collectionFromRow(row: CollectionRow) ProductCollection {
 
 // --- State machine types (for handle phase) ---
 pub const HandleResult = sm.HandleResult;
-pub const WriteQueue = sm.WriteQueue;
-pub const Write = sm.Write;
 
 // --- HTML helpers ---
 pub const html = @import("html.zig");

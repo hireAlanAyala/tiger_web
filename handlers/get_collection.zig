@@ -27,8 +27,8 @@ pub fn prefetch(storage: anytype, msg: *const t.Message) ?Prefetch {
 }
 
 // [handle] .get_collection
-pub fn handle(ctx: Context, writes: *t.WriteQueue) t.HandleResult {
-    _ = writes;
+pub fn handle(ctx: Context, db: anytype) t.HandleResult {
+    _ = db;
     const col = ctx.prefetched.collection orelse
         return .{ .status = .not_found };
     if (!col.active) return .{ .status = .not_found };

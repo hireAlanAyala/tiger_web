@@ -44,7 +44,7 @@ pub fn prefetch(storage: anytype, msg: *const t.Message) ?Prefetch {
 }
 
 // [handle] .transfer_inventory
-pub fn handle(ctx: Context, writes: *t.WriteQueue) t.HandleResult {
+pub fn handle(ctx: Context, db: anytype) t.HandleResult {
     const source_row = ctx.prefetched.source orelse
         return .{ .status = .not_found };
     const target_row = ctx.prefetched.target orelse
@@ -62,8 +62,14 @@ pub fn handle(ctx: Context, writes: *t.WriteQueue) t.HandleResult {
     target.inventory += transfer.quantity;
     target.version += 1;
 
-    writes.add(.{ .update_product = source });
-    writes.add(.{ .update_product = target });
+    _ = db.execute(
+        "UPDATE products SET name = ?2, description = ?3, price_cents = ?4, inventory = ?5, version = ?6, active = ?7 WHERE id = ?1;",
+        .{ source.id, source.name[0..source.name_len], source.description[0..source.description_len], source.price_cents, source.inventory, source.version, source.flags.active },
+    );
+    _ = db.execute(
+        "UPDATE products SET name = ?2, description = ?3, price_cents = ?4, inventory = ?5, version = ?6, active = ?7 WHERE id = ?1;",
+        .{ target.id, target.name[0..target.name_len], target.description[0..target.description_len], target.price_cents, target.inventory, target.version, target.flags.active },
+    );
     return .{};
 }
 

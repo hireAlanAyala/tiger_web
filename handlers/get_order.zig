@@ -27,8 +27,8 @@ pub fn prefetch(storage: anytype, msg: *const t.Message) ?Prefetch {
 }
 
 // [handle] .get_order
-pub fn handle(ctx: Context, writes: *t.WriteQueue) t.HandleResult {
-    _ = writes;
+pub fn handle(ctx: Context, db: anytype) t.HandleResult {
+    _ = db;
     if (ctx.prefetched.order == null)
         return .{ .status = .not_found };
     return .{};

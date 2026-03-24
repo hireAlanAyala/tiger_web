@@ -29,10 +29,10 @@ pub fn prefetch(storage: anytype, msg: *const t.Message) ?Prefetch {
 }
 
 // [handle] .complete_order
-pub fn handle(ctx: Context, writes: *t.WriteQueue) t.HandleResult {
+pub fn handle(ctx: Context, db: anytype) t.HandleResult {
     // TODO: validate order pending, check timeout, set status, restore inventory if failed
     _ = ctx;
-    _ = writes;
+    _ = db;
     return .{ .status = .not_found };
 }
 
