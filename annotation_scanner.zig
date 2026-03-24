@@ -61,6 +61,33 @@ const Phase = enum {
     render,
 };
 
+/// Parsed route match directive — `// match GET /products/:id`.
+const RouteMatch = struct {
+    method: Method,
+    pattern: []const u8,
+    line: u32,
+
+    /// HTTP methods recognized in match directives. Superset of
+    /// framework's http.Method — the scanner accepts PATCH even though
+    /// the framework parser doesn't (yet). Comptime assertion below
+    /// verifies the framework's methods are a subset.
+    const Method = enum { get, post, put, delete, patch };
+
+    /// Free the duped pattern. Single free site for the single dupe site.
+    fn deinit(self: RouteMatch, allocator: std.mem.Allocator) void {
+        allocator.free(self.pattern);
+    }
+};
+
+const http = @import("tiger_framework").http;
+comptime {
+    // Every framework HTTP method must exist in RouteMatch.Method.
+    // If the framework adds a method, the scanner must recognize it.
+    for (@typeInfo(http.Method).@"enum".fields) |f| {
+        assert(@hasField(RouteMatch.Method, f.name));
+    }
+}
+
 /// A registered annotation with its source location.
 const Annotation = struct {
     phase: Phase,
@@ -68,6 +95,7 @@ const Annotation = struct {
     file: []const u8,
     line: u32,
     has_body: bool,
+    route_match: ?RouteMatch = null,
 };
 
 /// Comment prefix by file extension.
@@ -159,6 +187,89 @@ fn is_empty(line: []const u8) bool {
         if (ch != ' ' and ch != '\t' and ch != '\r' and ch != '\n') return false;
     }
     return true;
+}
+
+/// Parse a match directive from a comment line.
+/// Format: `{prefix} match {METHOD} {/path/pattern}`
+/// Returns null if the line is not a match directive.
+fn parse_match_directive(line: []const u8, prefix: []const u8) ?struct { method: RouteMatch.Method, pattern: []const u8 } {
+    var trimmed = line;
+    while (trimmed.len > 0 and (trimmed[0] == ' ' or trimmed[0] == '\t')) {
+        trimmed = trimmed[1..];
+    }
+
+    if (!std.mem.startsWith(u8, trimmed, prefix)) return null;
+    var rest = trimmed[prefix.len..];
+
+    while (rest.len > 0 and rest[0] == ' ') rest = rest[1..];
+
+    if (!std.mem.startsWith(u8, rest, "match ")) return null;
+    rest = rest[6..];
+
+    while (rest.len > 0 and rest[0] == ' ') rest = rest[1..];
+
+    // Parse HTTP method.
+    const method_end = std.mem.indexOfScalar(u8, rest, ' ') orelse return null;
+    const method_str = rest[0..method_end];
+    const method: RouteMatch.Method =
+        if (std.ascii.eqlIgnoreCase(method_str, "GET")) .get
+        else if (std.ascii.eqlIgnoreCase(method_str, "POST")) .post
+        else if (std.ascii.eqlIgnoreCase(method_str, "PUT")) .put
+        else if (std.ascii.eqlIgnoreCase(method_str, "DELETE")) .delete
+        else if (std.ascii.eqlIgnoreCase(method_str, "PATCH")) .patch
+        else return null;
+
+    rest = rest[method_end..];
+    while (rest.len > 0 and rest[0] == ' ') rest = rest[1..];
+
+    // Parse path pattern — must start with /.
+    if (rest.len == 0 or rest[0] != '/') return null;
+
+    // Trim trailing whitespace.
+    var pattern_end = rest.len;
+    while (pattern_end > 0 and (rest[pattern_end - 1] == ' ' or rest[pattern_end - 1] == '\t' or rest[pattern_end - 1] == '\r')) {
+        pattern_end -= 1;
+    }
+    if (pattern_end == 0) return null;
+
+    return .{ .method = method, .pattern = rest[0..pattern_end] };
+}
+
+/// Validate a route pattern's structure. Returns an error message or null if valid.
+/// Rules:
+///   - Must start with /
+///   - Segments between / must be non-empty (no //)
+///   - Param names after : must be non-empty identifiers
+///   - No trailing slash (except root /)
+fn validate_route_pattern(pattern: []const u8) ?[]const u8 {
+    if (pattern.len == 0) return "empty pattern";
+    if (pattern[0] != '/') return "must start with /";
+    if (pattern.len == 1) return null; // root "/" is valid
+
+    // No trailing slash.
+    if (pattern[pattern.len - 1] == '/') return "trailing slash";
+
+    // Walk segments.
+    var pos: usize = 1; // skip leading /
+    while (pos < pattern.len) {
+        const next_slash = std.mem.indexOfScalarPos(u8, pattern, pos, '/');
+        const seg_end = next_slash orelse pattern.len;
+        const segment = pattern[pos..seg_end];
+
+        if (segment.len == 0) return "empty segment (double slash)";
+
+        // If segment starts with :, validate param name.
+        if (segment[0] == ':') {
+            if (segment.len == 1) return "empty param name after :";
+            for (segment[1..]) |ch| {
+                if (!std.ascii.isAlphanumeric(ch) and ch != '_') return "invalid character in param name";
+            }
+        }
+
+        pos = if (next_slash) |s| s + 1 else pattern.len;
+    }
+
+    return null;
 }
 
 /// Map internal phase names back to user-facing names for error messages.
@@ -426,6 +537,10 @@ fn is_terminator(ch: u8, terminators: []const u8) bool {
 
 /// Scan a single file's content for annotations. Returns the number of errors found.
 /// Extracted from main() for testability.
+///
+/// All string fields on Annotation (operation, file, route_match.pattern)
+/// are duped via the allocator. In main() this is an arena — no individual
+/// frees needed. In tests, std.testing.allocator catches leaks.
 fn scan_file_content(
     allocator: std.mem.Allocator,
     content: []const u8,
@@ -439,6 +554,7 @@ fn scan_file_content(
     var line_num: u32 = 0;
     var lines = std.mem.splitScalar(u8, content, '\n');
     var prev_annotation: ?struct { phase: Phase, operation: []const u8, line: u32 } = null;
+    var pending_match: ?RouteMatch = null;
 
     while (lines.next()) |line| {
         line_num += 1;
@@ -448,6 +564,37 @@ fn scan_file_content(
                 const next_ann = parse_annotation(line, prefix);
 
                 if (next_ann != null or is_comment(line, prefix)) {
+                    // Check for `// match` directive between [route] and function body.
+                    if (ann.phase == .translate and next_ann == null) {
+                        if (parse_match_directive(line, prefix)) |m| {
+                            if (pending_match != null) {
+                                try stderr.print("error: {s}:{d}: duplicate match directive for [route] .{s}\n", .{ path, line_num, ann.operation });
+                                errors += 1;
+                            } else if (validate_route_pattern(m.pattern)) |err| {
+                                try stderr.print("error: {s}:{d}: invalid route pattern '{s}': {s}\n", .{ path, line_num, m.pattern, err });
+                                errors += 1;
+                            } else {
+                                pending_match = .{
+                                    .method = m.method,
+                                    .pattern = try allocator.dupe(u8, m.pattern),
+                                    .line = line_num,
+                                };
+                            }
+                            continue; // Stay in prev_annotation state, wait for function body.
+                        }
+                    }
+
+                    // `// match` on non-route phases is an error.
+                    if (ann.phase != .translate and next_ann == null) {
+                        if (parse_match_directive(line, prefix) != null) {
+                            try stderr.print("error: {s}:{d}: match directive only valid after [route], not [{s}]\n", .{ path, line_num, user_phase_name(ann.phase) });
+                            errors += 1;
+                            prev_annotation = null;
+                            pending_match = null;
+                            continue;
+                        }
+                    }
+
                     // [handle] without function body = read-only, register it.
                     // Other phases without a body are warnings/errors.
                     if (ann.phase == .execute) {
@@ -472,6 +619,8 @@ fn scan_file_content(
                         errors += 1;
                     }
                     prev_annotation = null;
+                    if (pending_match) |rm| rm.deinit(allocator);
+                    pending_match = null;
 
                     if (next_ann) |na| {
                         prev_annotation = .{ .phase = na.phase, .operation = na.operation, .line = line_num };
@@ -488,9 +637,11 @@ fn scan_file_content(
                             .file = try allocator.dupe(u8, path),
                             .line = ann.line,
                             .has_body = true,
+                            .route_match = pending_match,
                         });
                     }
                     prev_annotation = null;
+                    pending_match = null;
                     continue;
                 }
             } else {
@@ -499,6 +650,10 @@ fn scan_file_content(
         } else {
             if (parse_annotation(line, prefix)) |ann| {
                 prev_annotation = .{ .phase = ann.phase, .operation = ann.operation, .line = line_num };
+            } else if (parse_match_directive(line, prefix) != null) {
+                // match directive outside any annotation.
+                try stderr.print("error: {s}:{d}: match directive without preceding [route] annotation\n", .{ path, line_num });
+                errors += 1;
             }
         }
     }
@@ -518,6 +673,9 @@ fn scan_file_content(
         } else {
             try stderr.print("warning: {s}:{d}: annotation at end of file, no code follows\n", .{ path, ann.line });
         }
+        // Free pending match if it was duped but never stored on an annotation.
+        if (pending_match) |rm| rm.deinit(allocator);
+        pending_match = null;
     }
 
     return errors;
@@ -590,6 +748,22 @@ pub fn main() !void {
             if (a.phase == b.phase and std.mem.eql(u8, a.operation, b.operation)) {
                 try stderr.print("error: duplicate handler for [{s}] .{s}\n  --> {s}:{d}\n  --> {s}:{d}\n", .{
                     user_phase_name(a.phase), a.operation, a.file, a.line, b.file, b.line,
+                });
+                errors += 1;
+            }
+        }
+    }
+
+    // Check for duplicate route patterns — two operations claiming the same URL.
+    for (annotations.items, 0..) |a, i| {
+        const a_match = a.route_match orelse continue;
+        for (annotations.items[i + 1 ..]) |b| {
+            const b_match = b.route_match orelse continue;
+            if (a_match.method == b_match.method and std.mem.eql(u8, a_match.pattern, b_match.pattern)) {
+                try stderr.print("error: duplicate route pattern {s} {s}\n  --> {s}:{d} (.{s})\n  --> {s}:{d} (.{s})\n", .{
+                    @tagName(a_match.method), a_match.pattern,
+                    a.file, a_match.line, a.operation,
+                    b.file, b_match.line, b.operation,
                 });
                 errors += 1;
             }
@@ -845,6 +1019,228 @@ test "comment_prefix by extension" {
     try std.testing.expect(comment_prefix("readme.md") == null);
 }
 
+// --- parse_match_directive tests ---
+
+test "match: valid GET" {
+    const result = parse_match_directive("// match GET /products/:id", "//");
+    try std.testing.expect(result != null);
+    try std.testing.expectEqual(result.?.method, .get);
+    try std.testing.expect(std.mem.eql(u8, result.?.pattern, "/products/:id"));
+}
+
+test "match: valid POST with sub-resource" {
+    const result = parse_match_directive("// match POST /orders/:id/complete", "//");
+    try std.testing.expect(result != null);
+    try std.testing.expectEqual(result.?.method, .post);
+    try std.testing.expect(std.mem.eql(u8, result.?.pattern, "/orders/:id/complete"));
+}
+
+test "match: valid DELETE" {
+    const result = parse_match_directive("// match DELETE /products/:id", "//");
+    try std.testing.expect(result != null);
+    try std.testing.expectEqual(result.?.method, .delete);
+}
+
+test "match: case insensitive method" {
+    const result = parse_match_directive("// match get /products", "//");
+    try std.testing.expect(result != null);
+    try std.testing.expectEqual(result.?.method, .get);
+}
+
+test "match: root path" {
+    const result = parse_match_directive("// match GET /", "//");
+    try std.testing.expect(result != null);
+    try std.testing.expect(std.mem.eql(u8, result.?.pattern, "/"));
+}
+
+test "match: python style" {
+    const result = parse_match_directive("# match GET /products/:id", "#");
+    try std.testing.expect(result != null);
+    try std.testing.expectEqual(result.?.method, .get);
+}
+
+test "match: rejects missing method" {
+    try std.testing.expect(parse_match_directive("// match /products/:id", "//") == null);
+}
+
+test "match: rejects invalid method" {
+    try std.testing.expect(parse_match_directive("// match TRACE /products", "//") == null);
+}
+
+test "match: rejects missing path" {
+    try std.testing.expect(parse_match_directive("// match GET", "//") == null);
+}
+
+test "match: rejects path without leading slash" {
+    try std.testing.expect(parse_match_directive("// match GET products/:id", "//") == null);
+}
+
+test "match: rejects non-match comment" {
+    try std.testing.expect(parse_match_directive("// some comment", "//") == null);
+}
+
+test "match: rejects plain code" {
+    try std.testing.expect(parse_match_directive("pub fn route() void {}", "//") == null);
+}
+
+test "match: leading whitespace" {
+    const result = parse_match_directive("  // match GET /products", "//");
+    try std.testing.expect(result != null);
+    try std.testing.expectEqual(result.?.method, .get);
+}
+
+// --- validate_route_pattern tests ---
+
+test "pattern: valid paths" {
+    try std.testing.expect(validate_route_pattern("/") == null);
+    try std.testing.expect(validate_route_pattern("/products") == null);
+    try std.testing.expect(validate_route_pattern("/products/:id") == null);
+    try std.testing.expect(validate_route_pattern("/orders/:id/complete") == null);
+    try std.testing.expect(validate_route_pattern("/go/:slug") == null);
+}
+
+test "pattern: rejects empty" {
+    try std.testing.expect(validate_route_pattern("") != null);
+}
+
+test "pattern: rejects no leading slash" {
+    try std.testing.expect(validate_route_pattern("products") != null);
+}
+
+test "pattern: rejects trailing slash" {
+    try std.testing.expect(validate_route_pattern("/products/") != null);
+}
+
+test "pattern: rejects double slash" {
+    try std.testing.expect(validate_route_pattern("/products//list") != null);
+}
+
+test "pattern: rejects empty param name" {
+    try std.testing.expect(validate_route_pattern("/products/:") != null);
+}
+
+test "pattern: rejects invalid param characters" {
+    try std.testing.expect(validate_route_pattern("/products/:id-name") != null);
+    try std.testing.expect(validate_route_pattern("/products/:id.format") != null);
+}
+
+test "pattern: accepts underscore in param" {
+    try std.testing.expect(validate_route_pattern("/products/:product_id") == null);
+}
+
+test "match: PUT and PATCH" {
+    const put = parse_match_directive("// match PUT /products/:id", "//");
+    try std.testing.expect(put != null);
+    try std.testing.expectEqual(put.?.method, .put);
+
+    const patch = parse_match_directive("// match PATCH /products/:id", "//");
+    try std.testing.expect(patch != null);
+    try std.testing.expectEqual(patch.?.method, .patch);
+}
+
+// --- scan_file_content tests (match integration) ---
+
+test "scan: route with match directive" {
+    var result = try test_scan(
+        \\// [route] .get_product
+        \\// match GET /products/:id
+        \\pub fn route() void {}
+    );
+    defer free_test_scan(&result.annotations);
+
+    try std.testing.expectEqual(@as(u32, 0), result.errors);
+    try std.testing.expectEqual(@as(usize, 1), result.annotations.items.len);
+    try std.testing.expectEqual(Phase.translate, result.annotations.items[0].phase);
+    try std.testing.expect(result.annotations.items[0].has_body);
+    try std.testing.expect(result.annotations.items[0].route_match != null);
+    try std.testing.expectEqual(result.annotations.items[0].route_match.?.method, .get);
+    try std.testing.expect(std.mem.eql(u8, result.annotations.items[0].route_match.?.pattern, "/products/:id"));
+}
+
+test "scan: route without match directive" {
+    var result = try test_scan(
+        \\// [route] .get_product
+        \\pub fn route() void {}
+    );
+    defer free_test_scan(&result.annotations);
+
+    try std.testing.expectEqual(@as(u32, 0), result.errors);
+    try std.testing.expectEqual(@as(usize, 1), result.annotations.items.len);
+    try std.testing.expect(result.annotations.items[0].route_match == null);
+}
+
+test "scan: match directive on non-route phase is error" {
+    var result = try test_scan(
+        \\// [handle] .get_product
+        \\// match GET /products/:id
+        \\pub fn handle() void {}
+    );
+    defer free_test_scan(&result.annotations);
+
+    try std.testing.expectEqual(@as(u32, 1), result.errors);
+}
+
+test "scan: match directive without annotation is error" {
+    var result = try test_scan(
+        \\// match GET /products/:id
+        \\pub fn route() void {}
+    );
+    defer free_test_scan(&result.annotations);
+
+    try std.testing.expectEqual(@as(u32, 1), result.errors);
+}
+
+test "scan: duplicate match directive is error" {
+    var result = try test_scan(
+        \\// [route] .get_product
+        \\// match GET /products/:id
+        \\// match POST /products
+        \\pub fn route() void {}
+    );
+    defer free_test_scan(&result.annotations);
+
+    try std.testing.expectEqual(@as(u32, 1), result.errors);
+}
+
+test "scan: invalid route pattern is error" {
+    var result = try test_scan(
+        \\// [route] .get_product
+        \\// match GET /products//list
+        \\pub fn route() void {}
+    );
+    defer free_test_scan(&result.annotations);
+
+    try std.testing.expectEqual(@as(u32, 1), result.errors);
+    // Invalid pattern — annotation registered without route_match.
+    try std.testing.expectEqual(@as(usize, 1), result.annotations.items.len);
+    try std.testing.expect(result.annotations.items[0].route_match == null);
+}
+
+test "scan: route with match followed by another annotation does not leak" {
+    var result = try test_scan(
+        \\// [route] .get_product
+        \\// match GET /products/:id
+        \\// [prefetch] .get_product
+        \\pub fn prefetch() void {}
+    );
+    defer free_test_scan(&result.annotations);
+
+    // Route had no body — error. Match pattern must be freed.
+    try std.testing.expect(result.errors > 0);
+}
+
+test "scan: route with match at EOF does not leak" {
+    var result = try test_scan(
+        \\// [route] .get_product
+        \\// match GET /products/:id
+    );
+    defer free_test_scan(&result.annotations);
+
+    // No function body follows — warning, no registration.
+    // The duped pattern must be freed (std.testing.allocator catches leaks).
+    try std.testing.expectEqual(@as(usize, 0), result.annotations.items.len);
+}
+
 // --- scan_file_content tests ---
 
 fn test_scan(content: []const u8) !struct { annotations: std.ArrayList(Annotation), errors: u32 } {
@@ -857,6 +1253,7 @@ fn free_test_scan(result: *std.ArrayList(Annotation)) void {
     for (result.items) |ann| {
         std.testing.allocator.free(ann.operation);
         std.testing.allocator.free(ann.file);
+        if (ann.route_match) |rm| rm.deinit(std.testing.allocator);
     }
     result.deinit();
 }
