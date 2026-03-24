@@ -33,13 +33,90 @@ return { status: "ok", writes: [...] };
 // Scanner extracts: { ok, not_found }
 ```
 
-The scanner looks for literal status values in return statements.
-If a status is assigned to a variable first, the scanner misses it.
-This is self-correcting: missing status → generated enum is incomplete →
-compiler/type-checker error → developer rewrites as literal return.
+The scanner doesn't hardcode patterns. Each language adapter defines
+its own status extraction rules. The scanner applies the adapter's
+rules, making it language-agnostic.
 
 Convention: **status must be a literal in the return expression.**
-This is already how every handler is written.
+This is already how every handler is written. If a status is assigned
+to a variable first, the scanner misses it. This is self-correcting:
+missing status → generated enum is incomplete → compiler error →
+developer rewrites as literal return.
+
+### Language adapters — status extraction rules
+
+Each adapter defines the text pattern(s) that identify status literals
+in that language's handle() function. The scanner matches these patterns
+against each line in the handle body and extracts the status name.
+
+The adapter provides:
+- `prefix` — the string that precedes the status name
+- `terminator` — characters that end the status name
+- Optionally `suffix` — closing delimiter (for quoted strings)
+
+**Zig adapter:**
+```
+patterns: [
+    { prefix: "HandlerResponse.", terminators: ",)}" }
+]
+matches:  t.ExecuteResult.read_only(t.HandlerResponse.not_found)
+extracts: "not_found"
+```
+
+**TypeScript adapter:**
+```
+patterns: [
+    { prefix: 'status: "', suffix: '"' }
+]
+matches:  return { status: "not_found", writes: [] };
+extracts: "not_found"
+```
+
+**Python adapter:**
+```
+patterns: [
+    { prefix: '"status": "', suffix: '"' },
+    { prefix: "status=\"", suffix: '"' }
+]
+matches:  return {"status": "not_found", "writes": []}
+extracts: "not_found"
+```
+
+**Go adapter:**
+```
+patterns: [
+    { prefix: 'Status: "', suffix: '"' }
+]
+matches:  return Response{Status: "not_found", Writes: nil}
+extracts: "not_found"
+```
+
+**Ruby adapter:**
+```
+patterns: [
+    { prefix: "status: :", terminators: ",} \n" }
+]
+matches:  { status: :not_found, writes: [] }
+extracts: "not_found"
+```
+
+**Rust adapter:**
+```
+patterns: [
+    { prefix: "Status::", terminators: ",)}" }
+]
+matches:  Response { status: Status::NotFound, writes: vec![] }
+extracts: "NotFound" (adapter normalizes to snake_case)
+```
+
+The scanner is a pattern engine. The adapter defines the patterns.
+If the language API changes (e.g. `HandlerResponse` renamed to
+`Result`), update one line in the adapter. The scanner doesn't change.
+
+For languages where text patterns are insufficient (functional
+composition, macro-heavy Lisps), the adapter can use AST analysis
+via the language's compiler API instead. The scanner architecture
+supports this — the adapter defines extraction, the scanner calls it.
 
 ### 2. Scanner outputs statuses in the manifest
 
