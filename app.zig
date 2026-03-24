@@ -7,7 +7,6 @@
 const std = @import("std");
 const assert = std.debug.assert;
 const message = @import("message.zig");
-const codec = @import("codec.zig");
 const protocol = @import("protocol.zig");
 const state_machine = @import("state_machine.zig");
 const http = @import("tiger_framework").http;
@@ -142,7 +141,7 @@ pub const SM = StateMachineType(Storage);
 pub const Wal = @import("tiger_framework").wal.WalType(Message, message.wal_root);
 
 /// Optional sidecar client — when set, translate delegates to the
-/// external process instead of the Zig-native codec.
+/// external process instead of the Zig-native handlers.
 pub var sidecar: ?SidecarClient = null;
 
 /// Translate an HTTP request into a typed Message. Returns null if the

@@ -121,7 +121,6 @@ pub fn build(b: *std.Build) void {
     // They use state_machine and message module-level types directly.
     const modules = [_][]const u8{
         "message.zig",
-        "codec.zig",
         "wal_test.zig",
         "annotation_scanner.zig",
         "codegen.zig",
