@@ -1,3 +1,23 @@
+# Next plans to execute
+
+1. **Scanner-generated status enums** — `docs/plans/scanner-status-enum.md`
+   Scanner extracts status literals from handle(), generates per-handler
+   enum. Framework compiles, compiler enforces exhaustive render. Language
+   adapters define extraction patterns. One path for all languages.
+
+2. **User space API** — `docs/plans/user-space.md`
+   Prefetch as declarations (no return, framework aggregates ctx.data).
+   Handle queues writes via db.execute (no writes array). Named params.
+   Route pattern matching (`// match GET /products/:id`). Session as
+   writes. Kills Write union, apply_write, HandlerResponse, ExecuteResult.
+
+3. **Worker integration** — `docs/plans/worker.md`
+   worker.fetch in prefetch as declaration (framework resolves across ticks).
+   db.after_commit for post-commit external calls. No await. Chained
+   queries solved by syncing external data to local db via worker jobs.
+
+---
+
 # Search improvements
 
 All inside SearchQuery.matches(), no external service:
@@ -32,20 +52,21 @@ Fix: walk the string byte-by-byte, skipping `\"` sequences when looking for the 
 
 The price_cents on the created product came back as $0.09 instead of $9.99. Sent `"price_cents":999` but the response shows `price_cents:9`. The Datastar payload serializer might be nesting the JSON differently than codec.zig expects — or the curl Content-Length was wrong and the body got truncated.
 
-## 5: Render-owned refresh() for SSE mutations
+## 5: RESOLVED — render-owned refresh for SSE mutations
 
-The SSE followup mechanism is baked into server.zig. After every SSE mutation, the server defers rendering, runs a second state machine round-trip (page_load_dashboard), and sends three list fragments. This is a specific rendering choice hard-coded in the framework.
+Followups deleted. Render has db access for post-mutation queries.
+Handler owns the complete response. See decisions/render-db-access.md.
 
-The render layer should own a refresh() primitive that re-fetches the queries used to build the current page. This replaces the server's followup deferral entirely. The server just renders the response. The render layer decides what to re-fetch, if anything.
+## 6: RESOLVED — zig code uses annotations with native render
 
-Requires: render needs access to the state machine (or a callback) to run follow-up queries. Design the boundary carefully — render should request data, not call prefetch/execute directly.
+Zig handlers use annotations and return []const u8 from render.
+Per-handler Status enum + exhaustive switch handles errors.
+See decisions/handler-owns-response.md.
 
-Interim debt: server.zig's followup condition checks `resp.cookie_action == .none and resp.result != .login` to skip followup for login mutations. This is domain logic in the framework. Once refresh is opt-in, remove this condition and the needs_dashboard_refresh field on MessageResponse.
+## 7: RESOLVED — raw SQL in prefetch
 
-# 6: zig code should use annotation bu not go through the sidecar
-right now the zig code doesnt have a way to declare error html, not sure what to do
-
-# 7. user should be able to call raw sql form prefetch
+Handlers call db.query/query_all with SQL directly. No ORM.
+See user-space.md for the declaration-based prefetch design.
 
 
 # Backlog
@@ -60,7 +81,7 @@ right now the zig code doesnt have a way to declare error html, not sure what to
 - assert prefetch cannot write data in sql
 -- asert commit + handler cannot read data in sql
 - assert the user has atleast 1 assert inside of prefetch to validate the ctx
-- does render have a primitive for launching an operation through the pipeline again for multi-step operations? (or did we not need that)
+- RESOLVED: render has db access, `then` killed, no multi-step needed
 - make sdk assert no panic in prod
 - boil all adapters+packaged addons into a plugin api
 - write vanilla html in render without a string  and the compiler turns it to datastar so theres no api to learn
