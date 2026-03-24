@@ -32,7 +32,7 @@ pub fn prefetch(storage: anytype, msg: *const t.Message) ?Prefetch {
 pub fn handle(ctx: Context) t.ExecuteResult {
     // TODO: generate login code, write to storage
     _ = ctx;
-    return t.ExecuteResult.read_only(t.HandlerResponse.ok);
+    return t.ExecuteResult.read_only(.ok);
 }
 
 // [render] .request_login_code

@@ -38,7 +38,6 @@ const known_structs = .{
     message.MessageResponse,
     // SM-internal
     state_machine.ExecuteResult,
-    message.HandlerResponse,
     // Sidecar types
     message.LoginCodeEntry,
     message.LoginCodeWrite,
@@ -1297,7 +1296,7 @@ fn count_anon_structs(comptime U: type) usize {
 
 /// Returns true if T is a struct in the known_structs list.
 fn is_known_struct(comptime T: type) bool {
-    comptime assert(known_structs.len == 38);
+    comptime assert(known_structs.len == 37);
     comptime {
         for (known_structs) |K| assert(@typeInfo(K) == .@"struct");
     }
@@ -1627,7 +1626,7 @@ test "output is valid structure" {
             if (i + 11 <= output.len and std.mem.eql(u8, output[i..][0..11], "export type")) types += 1;
             if (i + 12 <= output.len and std.mem.eql(u8, output[i..][0..12], "export const")) consts += 1;
         }
-        assert(interfaces == 40); // +1 for HandlerResponse
+        assert(interfaces == 39);
         assert(types == 19);
         assert(consts == 34);
         // 33 extern structs × 2 (read + write) = 66 serde functions + 1 assert

@@ -31,7 +31,7 @@ pub fn prefetch(storage: anytype, msg: *const t.Message) ?Prefetch {
 // [handle] .create_collection
 pub fn handle(ctx: Context) t.ExecuteResult {
     if (ctx.prefetched.existing != null)
-        return t.ExecuteResult.read_only(t.HandlerResponse.version_conflict);
+        return t.ExecuteResult.read_only(.version_conflict);
     const event = ctx.body_val();
     var entity = std.mem.zeroes(t.ProductCollection);
     entity.id = event.id;
@@ -39,7 +39,7 @@ pub fn handle(ctx: Context) t.ExecuteResult {
     entity.name_len = event.name_len;
     entity.flags = .{ .active = true };
     return t.ExecuteResult.single(
-        t.HandlerResponse.ok,
+        .ok,
         .{ .put_collection = entity },
     );
 }

@@ -29,9 +29,9 @@ pub fn prefetch(storage: anytype, msg: *const t.Message) ?Prefetch {
 // [handle] .get_collection
 pub fn handle(ctx: Context) t.ExecuteResult {
     const col = ctx.prefetched.collection orelse
-        return t.ExecuteResult.read_only(t.HandlerResponse.not_found);
-    if (!col.active) return t.ExecuteResult.read_only(t.HandlerResponse.not_found);
-    return t.ExecuteResult.read_only(t.HandlerResponse.ok);
+        return t.ExecuteResult.read_only(.not_found);
+    if (!col.active) return t.ExecuteResult.read_only(.not_found);
+    return t.ExecuteResult.read_only(.ok);
 }
 
 

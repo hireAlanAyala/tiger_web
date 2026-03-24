@@ -20,7 +20,6 @@ pub const HandlerContext = fw.handler.HandlerContext;
 // --- Domain types ---
 pub const Message = message.Message;
 pub const MessageResponse = message.MessageResponse;
-pub const HandlerResponse = message.HandlerResponse;
 pub const Operation = message.Operation;
 pub const Status = message.Status;
 pub const Identity = message.PrefetchIdentity;

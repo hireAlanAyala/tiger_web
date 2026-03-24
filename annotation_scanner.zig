@@ -258,12 +258,17 @@ const LanguageAdapter = struct {
 };
 
 /// Zig adapter.
-/// handle: `HandlerResponse.not_found` → "not_found"
-/// render: `.not_found =>` (switch arm) → "not_found"
+/// handle: `read_only(.not_found)` or `single(.ok, ...)` → extracts status name
+///   These are the only paths that produce a handler status. Manual
+///   ExecuteResult construction always uses .ok (which is always included).
+///   The `.status = .` pattern is NOT used — it matches any struct's status
+///   field (e.g. order_result.status = .pending), causing false positives.
+/// render: `.not_found =>` (switch arm) → extracts status name
 const zig_adapter = LanguageAdapter{
     .extensions = &.{".zig"},
     .handle_patterns = &.{
-        .{ .prefix = "HandlerResponse.", .terminators = ",)};: \t\n" },
+        .{ .prefix = "read_only(.", .terminators = ",)};: \t\n" },
+        .{ .prefix = "single(.", .terminators = ",)};: \t\n" },
     },
     .render_patterns = &.{
         .{ .prefix = ".", .terminators = " \t\n=>,)", .suffix = "=>" },
@@ -312,7 +317,7 @@ fn find_adapter(path: []const u8) ?LanguageAdapter {
     return null;
 }
 
-// Keep backward-compatible aliases for handle extraction tests.
+// Aliases for tests.
 const zig_status_patterns = zig_adapter.handle_patterns;
 const ts_status_patterns = ts_adapter.handle_patterns;
 
@@ -949,13 +954,13 @@ test "scan: handle with body is mutation" {
 
 // --- Status extraction tests ---
 
-test "status: extracts HandlerResponse patterns" {
+test "status: extracts read_only(.status) patterns" {
     const content =
         \\// [handle] .get_product
         \\pub fn handle(ctx: Context) ExecuteResult {
         \\    if (ctx.prefetched.product == null)
-        \\        return ExecuteResult.read_only(HandlerResponse.not_found);
-        \\    return ExecuteResult.read_only(HandlerResponse.ok);
+        \\        return ExecuteResult.read_only(.not_found);
+        \\    return ExecuteResult.read_only(.ok);
         \\}
     ;
     const ss = extract_statuses_from_handle(content, 1, zig_status_patterns);
@@ -969,10 +974,10 @@ test "status: deduplicates same status" {
         \\// [handle] .get_product
         \\pub fn handle(ctx: Context) ExecuteResult {
         \\    if (ctx.prefetched.product == null)
-        \\        return ExecuteResult.read_only(HandlerResponse.not_found);
+        \\        return ExecuteResult.read_only(.not_found);
         \\    if (!ctx.prefetched.product.?.active)
-        \\        return ExecuteResult.read_only(HandlerResponse.not_found);
-        \\    return ExecuteResult.read_only(HandlerResponse.ok);
+        \\        return ExecuteResult.read_only(.not_found);
+        \\    return ExecuteResult.read_only(.ok);
         \\}
     ;
     const ss = extract_statuses_from_handle(content, 1, zig_status_patterns);
@@ -984,7 +989,7 @@ test "status: always includes ok" {
         \\// [handle] .cancel_order
         \\pub fn handle(ctx: Context) ExecuteResult {
         \\    _ = ctx;
-        \\    return ExecuteResult.read_only(HandlerResponse.not_found);
+        \\    return ExecuteResult.read_only(.not_found);
         \\}
     ;
     const ss = extract_statuses_from_handle(content, 1, zig_status_patterns);
@@ -996,27 +1001,32 @@ test "status: multiple distinct statuses" {
     const content =
         \\// [handle] .create_order
         \\pub fn handle(ctx: Context) ExecuteResult {
-        \\    if (missing) return ExecuteResult.read_only(HandlerResponse.not_found);
-        \\    if (low) return ExecuteResult.read_only(HandlerResponse.insufficient_inventory);
-        \\    return ExecuteResult{ .response = HandlerResponse.ok, .writes = undefined, .writes_len = 0 };
+        \\    if (missing) return ExecuteResult.read_only(.not_found);
+        \\    if (low) return ExecuteResult.read_only(.insufficient_inventory);
+        \\    var exec_result = ExecuteResult{ .status = .ok, .writes = undefined, .writes_len = 0 };
+        \\    exec_result.writes[0] = .{ .put_order = order };
+        \\    return exec_result;
         \\}
     ;
     const ss = extract_statuses_from_handle(content, 1, zig_status_patterns);
+    // .ok comes from always-include, not from .status = .ok (that pattern
+    // is deliberately excluded — it matches any struct's status field).
     try std.testing.expectEqual(@as(u8, 3), ss.len);
     try std.testing.expect(has_name(&ss, "ok"));
     try std.testing.expect(has_name(&ss, "not_found"));
     try std.testing.expect(has_name(&ss, "insufficient_inventory"));
 }
 
-test "status: empty body still has ok" {
+test "status: session_action variant still extracts ok" {
     const content =
         \\// [handle] .logout
         \\pub fn handle(ctx: Context) ExecuteResult {
         \\    _ = ctx;
-        \\    return ExecuteResult.read_only(.{ .status = .ok, .session_action = .clear });
+        \\    var result = ExecuteResult.read_only(.ok);
+        \\    result.session_action = .clear;
+        \\    return result;
         \\}
     ;
-    // Anonymous struct — HandlerResponse pattern doesn't match, but ok is always added.
     const ss = extract_statuses_from_handle(content, 1, zig_status_patterns);
     try std.testing.expectEqual(@as(u8, 1), ss.len);
     try std.testing.expect(has_name(&ss, "ok"));

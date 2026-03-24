@@ -29,13 +29,13 @@ pub fn prefetch(storage: anytype, msg: *const t.Message) ?Prefetch {
 // [handle] .delete_collection
 pub fn handle(ctx: Context) t.ExecuteResult {
     const row = ctx.prefetched.existing orelse
-        return t.ExecuteResult.read_only(t.HandlerResponse.not_found);
+        return t.ExecuteResult.read_only(.not_found);
     if (!row.active)
-        return t.ExecuteResult.read_only(t.HandlerResponse.not_found);
+        return t.ExecuteResult.read_only(.not_found);
     var col = t.collectionFromRow(row);
     col.flags = .{ .active = false };
     return t.ExecuteResult.single(
-        t.HandlerResponse.ok,
+        .ok,
         .{ .update_collection = col },
     );
 }

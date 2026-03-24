@@ -63,29 +63,29 @@ comptime {
     assert(writes_max == 21);
 }
 
-/// Result of a handler's execute phase: handler decision + collected writes.
+/// Result of a handler's execute phase: status + session action + collected writes.
 ///
-/// HandlerResponse is what the handler returns — just status and session
-/// action. The handler never touches auth fields (user_id, is_authenticated).
-/// The SM adds those from the resolved credential after the handler returns.
+/// The handler returns its decision (status) and optional session action.
+/// The SM adds auth fields from the resolved credential after the handler returns.
 pub const ExecuteResult = struct {
-    response: message.HandlerResponse,
+    status: message.Status = .ok,
+    session_action: message.SessionAction = .none,
     writes: [writes_max]Write,
     writes_len: u8,
 
     /// Read-only operation — no writes.
-    pub fn read_only(response: message.HandlerResponse) ExecuteResult {
+    pub fn read_only(status: message.Status) ExecuteResult {
         return .{
-            .response = response,
+            .status = status,
             .writes = undefined,
             .writes_len = 0,
         };
     }
 
     /// Single-write operation.
-    pub fn single(response: message.HandlerResponse, write: Write) ExecuteResult {
+    pub fn single(status: message.Status, write: Write) ExecuteResult {
         var result = ExecuteResult{
-            .response = response,
+            .status = status,
             .writes = undefined,
             .writes_len = 1,
         };
@@ -324,14 +324,13 @@ pub fn StateMachineType(comptime Storage: type, comptime Handlers: type) type {
                 assert(self.apply_write(w));
             }
 
-            const handler_resp = exec_result.response;
             const identity = self.prefetch_identity orelse std.mem.zeroes(message.PrefetchIdentity);
             const is_auth = identity.is_authenticated != 0 or
-                handler_resp.session_action == .set_authenticated;
+                exec_result.session_action == .set_authenticated;
 
             const resp = PipelineResponse{
-                .status = handler_resp.status,
-                .session_action = handler_resp.session_action,
+                .status = exec_result.status,
+                .session_action = exec_result.session_action,
                 .user_id = identity.user_id,
                 .is_authenticated = is_auth,
                 .is_new_visitor = identity.is_new != 0,

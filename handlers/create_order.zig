@@ -43,14 +43,14 @@ pub fn handle(ctx: Context) t.ExecuteResult {
     // Validate all products exist.
     for (ctx.prefetched.products[0..order.items_len]) |maybe_product| {
         if (maybe_product == null)
-            return t.ExecuteResult.read_only(t.HandlerResponse.not_found);
+            return t.ExecuteResult.read_only(.not_found);
     }
 
     // Validate all have sufficient inventory.
     for (order.items_slice(), ctx.prefetched.products[0..order.items_len]) |item, maybe_product| {
         const product = maybe_product.?;
         if (product.inventory < item.quantity)
-            return t.ExecuteResult.read_only(t.HandlerResponse.insufficient_inventory);
+            return t.ExecuteResult.read_only(.insufficient_inventory);
     }
 
     // All validated — build order result and decrement inventories.
@@ -62,7 +62,7 @@ pub fn handle(ctx: Context) t.ExecuteResult {
     order_result.timeout_at = @intCast(ctx.fw.now + message.order_timeout_seconds);
 
     var exec_result = t.ExecuteResult{
-        .response = t.HandlerResponse.ok,
+        .status = .ok,
         .writes = undefined,
         .writes_len = 0,
     };

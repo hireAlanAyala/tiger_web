@@ -38,7 +38,7 @@ pub fn prefetch(storage: anytype, msg: *const t.Message) ?Prefetch {
 pub fn handle(ctx: Context) t.ExecuteResult {
     // TODO: validate code, create session
     _ = ctx;
-    return t.ExecuteResult.read_only(t.HandlerResponse.ok);
+    return t.ExecuteResult.read_only(.ok);
 }
 
 // [render] .verify_login_code

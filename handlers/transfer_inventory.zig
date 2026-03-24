@@ -46,13 +46,13 @@ pub fn prefetch(storage: anytype, msg: *const t.Message) ?Prefetch {
 // [handle] .transfer_inventory
 pub fn handle(ctx: Context) t.ExecuteResult {
     const source_row = ctx.prefetched.source orelse
-        return t.ExecuteResult.read_only(t.HandlerResponse.not_found);
+        return t.ExecuteResult.read_only(.not_found);
     const target_row = ctx.prefetched.target orelse
-        return t.ExecuteResult.read_only(t.HandlerResponse.not_found);
+        return t.ExecuteResult.read_only(.not_found);
 
     const transfer = ctx.body_val();
     if (source_row.inventory < transfer.quantity)
-        return t.ExecuteResult.read_only(t.HandlerResponse.insufficient_inventory);
+        return t.ExecuteResult.read_only(.insufficient_inventory);
 
     var source = t.productFromRow(source_row);
     source.inventory -= transfer.quantity;
@@ -63,7 +63,7 @@ pub fn handle(ctx: Context) t.ExecuteResult {
     target.version += 1;
 
     var result = t.ExecuteResult{
-        .response = t.HandlerResponse.ok,
+        .status = .ok,
         .writes = undefined,
         .writes_len = 2,
     };

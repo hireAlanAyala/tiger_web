@@ -29,7 +29,7 @@ pub fn prefetch(storage: anytype, msg: *const t.Message) ?Prefetch {
 // [handle] .list_collections
 pub fn handle(ctx: Context) t.ExecuteResult {
     _ = ctx;
-    return t.ExecuteResult.read_only(t.HandlerResponse.ok);
+    return t.ExecuteResult.read_only(.ok);
 }
 
 
