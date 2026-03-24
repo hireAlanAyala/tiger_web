@@ -122,7 +122,6 @@ pub fn build(b: *std.Build) void {
     const modules = [_][]const u8{
         "message.zig",
         "codec.zig",
-        "render.zig",
         "wal_test.zig",
         "annotation_scanner.zig",
         "codegen.zig",

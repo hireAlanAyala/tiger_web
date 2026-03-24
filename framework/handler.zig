@@ -80,7 +80,7 @@ pub fn HandlerContext(comptime Prefetch: type, comptime Body: type, comptime Ide
 /// signatures (parameter types, return types, parameter count).
 ///
 /// App-level types (Message, ExecuteResult) are passed as comptime parameters.
-/// RenderResult is framework-owned (effects.RenderResult) — not app-provided.
+/// Render returns []const u8 or a comptime tuple — validated by the framework.
 ///
 /// Returns a descriptor struct with resolved types for dispatch generation.
 pub fn ValidateHandler(

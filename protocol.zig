@@ -12,7 +12,7 @@ const assert = std.debug.assert;
 const stdx = @import("tiger_framework").stdx;
 const message = @import("message.zig");
 const state_machine = @import("state_machine.zig");
-const render = @import("render.zig");
+const http = @import("tiger_framework").http;
 
 /// Maximum URL path length in the translate request.
 pub const path_max = 256;
@@ -97,8 +97,8 @@ pub const TranslateResponse = extern struct {
 // Round trip 2: Execute + Render
 // -----------------------------------------------------------------------
 
-/// Maximum HTML render output size (from render.zig).
-pub const html_max = render.send_buf_max;
+/// Maximum HTML render output size.
+pub const html_max = http.send_buf_max;
 
 /// Prefetch cache — flat serialization of all 11 cache slots.
 /// Presence flags grouped first (u8 per nullable slot), then data.

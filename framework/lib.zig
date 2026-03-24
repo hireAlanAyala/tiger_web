@@ -10,8 +10,6 @@
 //!
 //! **Types:**
 //! - `Message` — fixed-size extern struct with `.operation`, `.set_credential()`, checksum methods
-//! - `MessageResponse` — response from commit, with `.status` and `.followup: ?FollowupState`
-//! - `FollowupState` — opaque struct stored on connection between SSE ticks
 //! - `Operation` — enum(u8) with `.is_mutation()` method
 //! - `Status` — enum(u8) with `.ok` variant
 //!
@@ -22,9 +20,7 @@
 //!
 //! **Functions:**
 //! - `translate(method, path, body) -> ?Message` — HTTP routing
-//! - `encode_response(buf, operation, resp, is_sse, key) -> Response` — render response
-//! - `encode_followup(buf, resp, followup, key) -> Response` — render SSE followup
-//! - `refresh_message() -> Message` — construct the SSE refresh message
+//! - `commit_and_encode(Storage, sm, msg, buf, is_sse, key) -> CommitResult` — commit + render
 
 pub const server = @import("server.zig");
 pub const connection = @import("connection.zig");
@@ -40,7 +36,6 @@ pub const marks = @import("marks.zig");
 pub const prng = @import("prng.zig");
 pub const flags = @import("flags.zig");
 pub const parse = @import("parse.zig");
-pub const effects = @import("effects.zig");
 pub const handler = @import("handler.zig");
 pub const app = @import("app.zig");
 pub const read_only_storage = @import("read_only_storage.zig");
