@@ -11,6 +11,60 @@ handle    → decide + queue writes (write queue db)
 render    → produce HTML (read-only db, post-commit state)
 ```
 
+## route — URL pattern matching
+
+The `[route]` annotation declares a URL pattern. The scanner reads it
+and generates the routing dispatch. The route function receives parsed
+params and maps them to a typed message.
+
+```ts
+// [route] .get_product
+// match GET /products/:id
+export function routeGetProduct(req): Route | null {
+    return { operation: "get_product", id: req.params.id };
+}
+
+// [route] .vendor_redirect
+// match GET /go/:slug
+export function routeVendorRedirect(req): Route | null {
+    return { operation: "vendor_redirect", body: { slug: req.params.slug } };
+}
+
+// [route] .list_products
+// match GET /products
+export function routeListProducts(req): Route | null {
+    return { operation: "list_products" };
+}
+
+// [route] .complete_order
+// match POST /orders/:id/complete
+export function routeCompleteOrder(req): Route | null {
+    return { operation: "complete_order", id: req.params.id };
+}
+```
+
+```zig
+// [route] .get_product
+// match GET /products/:id
+pub fn route(method: t.http.Method, raw_path: []const u8, body: []const u8) ?t.Message {
+    // Framework already matched method + path and extracted :id
+    // The function maps params to a typed message
+    return t.Message.init(.get_product, req.params.id, 0, {});
+}
+```
+
+The `// match` annotation declares:
+- HTTP method (GET, POST, PUT, DELETE)
+- URL pattern with named params (`:id`, `:slug`)
+
+The scanner reads the pattern and generates routing dispatch. The
+route function receives pre-matched params. Manual URL parsing
+(`split_path`, regex) is replaced by the pattern declaration.
+
+For handlers that need complex matching (query params, conditional
+logic), the route function can still do custom parsing — the match
+annotation is optional sugar.
+
 ## handle — decide + queue writes
 
 Handle receives a write queue disguised as `db`. Calling `db.execute`
