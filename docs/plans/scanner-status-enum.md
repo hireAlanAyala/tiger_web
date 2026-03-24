@@ -93,24 +93,26 @@ export type GetProductStatus = "ok" | "not_found";
 export type CreateProductStatus = "ok" | "version_conflict";
 ```
 
-**Dynamic languages** generate a runtime validation set:
+**Dynamic languages**: the framework generates whatever enforcement
+artifact the language's toolchain can check at compile/build time.
+The framework detects changes, reruns the scanner, regenerates, and
+recompiles. The error is always a compile error, never a runtime check.
 
-```python
-# generated/statuses.py
-GET_PRODUCT_STATUSES = frozenset({"ok", "not_found"})
-```
+### 4. Framework enforces at compile time — always
 
-### 4. Framework enforces at the boundary
+The framework is the compiler. When the developer changes handler code:
 
-**Zig**: `map_status()` in app.zig maps shared `message.Status` to the
-generated per-handler enum. `unreachable` if handle returned a status
-not in the enum — that means handle() uses a status the scanner didn't
-extract (developer used a variable, not a literal).
+1. Framework detects the change
+2. Scanner reruns → regenerates status types
+3. Framework recompiles the handler
+4. Compiler/type-checker sees non-exhaustive render → error
 
-**TS**: TypeScript compiler rejects non-exhaustive status handling.
+This is the same flow for every language. The enforcement artifact
+differs (Zig enum, TS union type, Python type annotation) but the
+mechanism is the same: **the framework compiles, the compiler enforces.**
 
-**Dynamic**: Framework runtime check — if render returns without
-handling a known status, the framework rejects the response.
+No runtime validation. No runtime errors. If the code compiles, every
+status is handled.
 
 ## Build order
 
