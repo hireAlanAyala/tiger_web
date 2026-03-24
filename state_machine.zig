@@ -16,13 +16,12 @@ const PRNG = @import("tiger_framework").prng;
 /// duplicate email, invalid state transition) are expressed in handler return
 /// values, not storage results.
 ///
-/// Both SqliteStorage and MemoryStorage return these. MemoryStorage uses
-/// PRNG-driven fault injection to exercise every branch in the framework
-/// that handles non-ok results.
+/// Both production and test builds use SqliteStorage (with :memory: for tests).
+/// Fault injection is at the prefetch dispatch level (app.zig), not storage.
 pub const StorageResult = enum { ok, not_found, err, busy, corruption };
 
 /// State machine parameterized on a Storage backend.
-/// In production, Storage is SqliteStorage. In simulation, Storage is MemoryStorage.
+/// Storage is SqliteStorage — production uses a file, tests use :memory:.
 ///
 /// Request processing is split into two phases (TigerBeetle style):
 /// - `prefetch(msg)` reads from storage into cache slots. Read-only — never mutates
@@ -30,7 +29,7 @@ pub const StorageResult = enum { ok, not_found, err, busy, corruption };
 /// - `execute(msg)` decides from cache slots, then writes mutations to storage.
 /// State machine parameterized on Storage and Handlers.
 ///
-/// Storage is the database backend (SqliteStorage or MemoryStorage).
+/// Storage is the database backend (SqliteStorage).
 /// Handlers is the App's dispatch interface — it provides:
 ///   - Cache: tagged union of all handler Prefetch types
 ///   - handler_prefetch(storage, msg) → ?Cache
@@ -374,5 +373,4 @@ pub fn StateMachineType(comptime Storage: type, comptime Handlers: type) type {
     };
 }
 
-pub const MemoryStorage = @import("memory_storage.zig").MemoryStorage;
 

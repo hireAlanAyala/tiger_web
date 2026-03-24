@@ -10,7 +10,7 @@ const WalType = @import("wal.zig").WalType;
 
 /// The server orchestrator, parameterized on the App, IO, and Storage types.
 /// In production, IO is the real epoll-based implementation and Storage is SqliteStorage.
-/// In simulation, IO is SimIO and Storage is MemoryStorage.
+/// In simulation, IO is SimIO and Storage is SqliteStorage(:memory:).
 ///
 /// App provides the domain types and functions:
 ///   Types: Message, Operation, Status

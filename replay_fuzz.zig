@@ -317,9 +317,8 @@ fn verify_orders(mem: *App.Storage, sql: *App.Storage) void {
 }
 
 fn verify_login_state(mem: *App.Storage, sql: *App.Storage) void {
-    // TODO: Login state verification needs query-based comparison now that
-    // both backends are App.Storage. The old approach iterated MemoryStorage's
-    // internal arrays. For now, skip — login ops are verified by the main
+    // TODO: Login state verification needs query-based comparison.
+    // For now, skip — login ops are verified by the main
     // product/collection/order checks exercising the full pipeline.
     _ = mem;
     _ = sql;

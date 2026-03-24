@@ -774,7 +774,7 @@ pub const LoginResult = extern struct {
     }
 };
 
-/// Login code storage entry — shared between MemoryStorage and SqliteStorage.
+/// Login code storage entry — used by SqliteStorage query results.
 /// Fields ordered to avoid padding: i64 last for 8-byte alignment.
 pub const LoginCodeEntry = extern struct {
     email: [email_max]u8,

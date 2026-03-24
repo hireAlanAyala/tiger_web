@@ -3,7 +3,7 @@
 //! Bypasses HTTP parsing — generates random Message structs and calls
 //! prefetch/commit directly. Exercises framework invariants (prefetch/
 //! execute ordering, fault handling, input validation) with PRNG-driven
-//! fault injection on MemoryStorage.
+//! fault injection at the prefetch dispatch level.
 //!
 //! Does NOT validate domain correctness — that's a user-space concern.
 //! See docs/plans/storage-boundary.md.
@@ -173,8 +173,8 @@ pub const IdTracker = struct {
     order_ids: [id_pool_capacity]u128 = undefined,
     order_id_count: u32 = 0,
 
-    // Counts for capacity gating — prevents MemoryStorage from filling
-    // up, which would cause all creates to fail and starve the fuzzer.
+    // Counts for capacity gating — prevents unbounded growth that would
+    // slow the fuzzer and exhaust ID pools.
     product_count: u32 = 0,
     collection_count: u32 = 0,
     order_count: u32 = 0,

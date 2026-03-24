@@ -402,8 +402,8 @@ pub const SqliteStorage = struct {
         bind_ok(c.sqlite3_bind_int64(stmt, 5, @intCast(params.price_max)));
 
         // Name prefix: empty string = no filter, otherwise exact prefix
-        // match via substr. No LIKE — avoids wildcard divergence (% and _
-        // are literals in MemoryStorage's startsWith but wildcards in LIKE).
+        // match via substr. No LIKE — avoids wildcard interpretation of
+        // % and _ in user-provided search terms.
         if (params.name_prefix_len > 0) {
             // Pair assertion: input_valid rejects NUL bytes at the boundary;
             // assert here at consumption — NUL in text causes SQLite's
