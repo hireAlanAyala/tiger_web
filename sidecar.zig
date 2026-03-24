@@ -159,8 +159,8 @@ pub const SidecarClient = struct {
             self.handle_disconnect();
             return false;
         };
-        if (resp_buf.writes_len > state_machine.writes_max) {
-            log.err("{s}: handler returned {d} writes (max {d}) — check your handle function's writes array", .{ @tagName(operation), resp_buf.writes_len, state_machine.writes_max });
+        if (resp_buf.writes_len > message.writes_max) {
+            log.err("{s}: handler returned {d} writes (max {d}) — check your handle function's writes array", .{ @tagName(operation), resp_buf.writes_len, message.writes_max });
             self.handle_disconnect();
             return false;
         }

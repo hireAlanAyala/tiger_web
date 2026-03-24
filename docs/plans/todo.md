@@ -1,15 +1,10 @@
 # Next plans to execute
 
-1. **User space API** — `docs/plans/user-space.md`
-   Prefetch as declarations (no return, framework aggregates ctx.data).
-   Handle queues writes via db.execute (no writes array). Named params.
-   Route pattern matching (`// match GET /products/:id`). Session as
-   writes. Kills Write union, apply_write, HandlerResponse, ExecuteResult.
-
-3. **Worker integration** — `docs/plans/worker.md`
-   worker.fetch in prefetch as declaration (framework resolves across ticks).
-   db.after_commit for post-commit external calls. No await. Chained
-   queries solved by syncing external data to local db via worker jobs.
+1. **Worker integration** — `docs/plans/worker.md` — DELEGATED
+   worker.fetch in prefetch (framework resolves across ticks).
+   Worker polls for post-commit work (no after_commit callbacks).
+   Chained queries solved by syncing external data to local db via
+   worker jobs.
 
 ---
 

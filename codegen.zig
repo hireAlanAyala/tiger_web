@@ -98,7 +98,7 @@ const output = blk: {
     w.emit_const("payment_ref_max", message.payment_ref_max);
     w.emit_const("order_timeout_seconds", message.order_timeout_seconds);
     w.emit_const("credential_max", message.Message.credential_max);
-    w.emit_const("writes_max", state_machine.writes_max);
+    w.emit_const("writes_max", message.writes_max);
     w.emit_const("path_max", protocol.path_max);
     w.emit_const("json_body_max", protocol.json_body_max);
     w.emit_const("translate_request_size", @sizeOf(protocol.TranslateRequest));
@@ -1399,7 +1399,7 @@ test "int_str decimal formatting" {
     comptime assert(std.mem.eql(u8, int_str(-60), "-60"));
     comptime assert(std.mem.eql(u8, int_str(message.body_max), "672"));
     comptime assert(std.mem.eql(u8, int_str(message.list_max), "50"));
-    comptime assert(std.mem.eql(u8, int_str(state_machine.writes_max), "21"));
+    comptime assert(std.mem.eql(u8, int_str(message.writes_max), "21"));
     comptime assert(std.mem.eql(u8, int_str(@sizeOf(message.Message)), "880"));
 }
 

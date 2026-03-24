@@ -151,7 +151,7 @@ fn fuzz_execute_render(allocator: std.mem.Allocator, prng: *PRNG, stats: *Stats)
         stats.exec_accepted += 1;
         // If accepted, validate the fields the client claims are safe.
         _ = std.meta.intToEnum(message.Status, @intFromEnum(resp_buf.status)) catch unreachable;
-        assert(resp_buf.writes_len <= state_machine.writes_max);
+        assert(resp_buf.writes_len <= message.writes_max);
         assert(resp_buf.html_len <= protocol.html_max);
     } else {
         stats.exec_rejected += 1;
@@ -338,7 +338,7 @@ fn gen_execute_render_response(prng: *PRNG, resp: *protocol.ExecuteRenderRespons
 fn gen_valid_exec_response(prng: *PRNG, resp: *protocol.ExecuteRenderResponse) void {
     resp.* = std.mem.zeroes(protocol.ExecuteRenderResponse);
     resp.status = prng.enum_uniform(message.Status);
-    resp.writes_len = prng.range_inclusive(u8, 0, state_machine.writes_max);
+    resp.writes_len = prng.range_inclusive(u8, 0, message.writes_max);
     const html_len = prng.range_inclusive(u32, 0, @intCast(@min(protocol.html_max, 4096)));
     resp.html_len = html_len;
     // Fill html with printable bytes.
@@ -367,7 +367,7 @@ fn gen_corrupt_exec_response(prng: *PRNG, resp: *protocol.ExecuteRenderResponse)
             resp_bytes[status_offset] = prng.range_inclusive(u8, status_count, 255);
         },
         .bad_writes_len => {
-            resp.writes_len = prng.range_inclusive(u8, state_machine.writes_max + 1, 255);
+            resp.writes_len = prng.range_inclusive(u8, message.writes_max + 1, 255);
         },
         .bad_html_len => {
             resp.html_len = prng.range_inclusive(u32, @intCast(protocol.html_max + 1), std.math.maxInt(u32));
@@ -375,7 +375,7 @@ fn gen_corrupt_exec_response(prng: *PRNG, resp: *protocol.ExecuteRenderResponse)
         .all_bad => {
             const status_count: u8 = @intCast(std.meta.fields(message.Status).len);
             resp_bytes[status_offset] = prng.range_inclusive(u8, status_count, 255);
-            resp.writes_len = prng.range_inclusive(u8, state_machine.writes_max + 1, 255);
+            resp.writes_len = prng.range_inclusive(u8, message.writes_max + 1, 255);
             resp.html_len = prng.range_inclusive(u32, @intCast(protocol.html_max + 1), std.math.maxInt(u32));
         },
     }

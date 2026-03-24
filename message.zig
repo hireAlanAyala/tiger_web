@@ -272,6 +272,14 @@ pub const order_timeout_seconds = 60;
 /// Maximum number of line items in a single order.
 pub const order_items_max = 20;
 
+/// Maximum writes a single handle can produce. Used by the sidecar
+/// protocol for the wire format buffer size.
+pub const writes_max = 1 + order_items_max;
+
+comptime {
+    assert(writes_max == 21);
+}
+
 /// A single line item in an order request.
 pub const OrderItem = extern struct {
     product_id: u128,

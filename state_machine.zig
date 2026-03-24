@@ -39,14 +39,6 @@ pub const StorageResult = enum { ok, not_found, err, busy, corruption };
 /// Handlers own the business logic. The SM never imports App — Handlers
 /// is passed as a comptime parameter. Clean one-way dependency.
 
-/// Maximum writes a single handle can produce. Used by the sidecar
-/// protocol for the wire format buffer size.
-pub const writes_max = 1 + message.order_items_max;
-
-comptime {
-    assert(writes_max == 21);
-}
-
 /// Handler's decision — status + optional session action.
 /// Session action moves to writes in a future phase; until then,
 /// only logout.zig sets it. All other handlers return bare status.
