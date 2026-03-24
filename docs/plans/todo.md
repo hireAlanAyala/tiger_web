@@ -73,6 +73,8 @@ pass the result to zig as binary,
 run the zig after that chunk,
 If errors show it on compiler
 benefit: allows the language to have a uniform, assert, and other zig checks
+- ensure each annotation stage only gets enough db access to work correctly, and assert others dont have side -effects
+
 
 wal should track if request was in prod or local
 
