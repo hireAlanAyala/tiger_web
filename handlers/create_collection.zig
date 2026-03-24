@@ -1,4 +1,5 @@
 const std = @import("std");
+const assert = std.debug.assert;
 const t = @import("../prelude.zig");
 
 pub const Status = enum { ok, version_conflict };
@@ -38,10 +39,10 @@ pub fn handle(ctx: Context, db: anytype) t.HandleResult {
     @memcpy(entity.name[0..event.name_len], event.name[0..event.name_len]);
     entity.name_len = event.name_len;
     entity.flags = .{ .active = true };
-    _ = db.execute(
+    assert(db.execute(
         "INSERT INTO collections (id, name, active) VALUES (?1, ?2, ?3);",
         .{ entity.id, entity.name[0..entity.name_len], entity.flags.active },
-    );
+    ));
     return .{};
 }
 

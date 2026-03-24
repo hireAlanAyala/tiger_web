@@ -1,4 +1,5 @@
 const std = @import("std");
+const assert = std.debug.assert;
 const t = @import("../prelude.zig");
 
 pub const Status = enum { ok, not_found, version_conflict };
@@ -51,10 +52,10 @@ pub fn handle(ctx: Context, db: anytype) t.HandleResult {
     entity.version = row.version + 1;
     entity.flags = .{ .active = row.active };
 
-    _ = db.execute(
+    assert(db.execute(
         "UPDATE products SET name = ?2, description = ?3, price_cents = ?4, inventory = ?5, version = ?6, active = ?7 WHERE id = ?1;",
         .{ entity.id, entity.name[0..entity.name_len], entity.description[0..entity.description_len], entity.price_cents, entity.inventory, entity.version, entity.flags.active },
-    );
+    ));
     return .{};
 }
 

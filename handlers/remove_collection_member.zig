@@ -1,4 +1,5 @@
 const std = @import("std");
+const assert = std.debug.assert;
 const t = @import("../prelude.zig");
 
 pub const Status = enum { ok, not_found };
@@ -34,10 +35,10 @@ pub fn prefetch(storage: anytype, msg: *const t.Message) ?Prefetch {
 pub fn handle(ctx: Context, db: anytype) t.HandleResult {
     _ = ctx.prefetched.collection orelse
         return .{ .status = .not_found };
-    _ = db.execute(
+    assert(db.execute(
         "UPDATE collection_members SET removed = 1 WHERE collection_id = ?1 AND product_id = ?2 AND removed = 0;",
         .{ ctx.prefetched.collection_id, ctx.prefetched.product_id },
-    );
+    ));
     return .{};
 }
 

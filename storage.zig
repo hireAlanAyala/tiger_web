@@ -99,7 +99,10 @@ pub const SqliteStorage = struct {
 
     /// Write-only view of SqliteStorage for the handle phase.
     /// Exposes execute() only — no reads. Handle writes SQL, the
-    /// framework wraps handle in begin/commit.
+    /// framework wraps handle in begin_batch/commit_batch.
+    /// The `storage` field is structurally public (Zig has no private
+    /// fields), but handlers receive this as `db: anytype` — only the
+    /// methods on WriteView are part of the contract.
     pub const WriteView = struct {
         storage: *SqliteStorage,
 

@@ -1,4 +1,5 @@
 const std = @import("std");
+const assert = std.debug.assert;
 const t = @import("../prelude.zig");
 
 pub const Status = enum { ok, not_found };
@@ -34,10 +35,10 @@ pub fn handle(ctx: Context, db: anytype) t.HandleResult {
         return .{ .status = .not_found };
     var entity = t.collectionFromRow(row);
     entity.flags = .{ .active = false };
-    _ = db.execute(
+    assert(db.execute(
         "UPDATE collections SET name = ?2, active = ?3 WHERE id = ?1;",
         .{ entity.id, entity.name[0..entity.name_len], entity.flags.active },
-    );
+    ));
     return .{};
 }
 

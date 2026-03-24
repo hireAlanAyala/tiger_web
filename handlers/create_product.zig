@@ -57,10 +57,10 @@ pub fn handle(ctx: Context, db: anytype) t.HandleResult {
     entity.version = 1;
     entity.flags = .{ .active = true };
 
-    _ = db.execute(
+    assert(db.execute(
         "INSERT INTO products (id, name, description, price_cents, inventory, version, active) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7);",
         .{ entity.id, entity.name[0..entity.name_len], entity.description[0..entity.description_len], entity.price_cents, entity.inventory, entity.version, entity.flags.active },
-    );
+    ));
     return .{};
 }
 
