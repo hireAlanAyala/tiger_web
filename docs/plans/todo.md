@@ -1,10 +1,20 @@
 # Next plans to execute
 
-1. **Worker integration** — `docs/plans/worker.md` — DELEGATED
+1. **Worker integration** — `docs/plans/worker.md` — DEFERRED
    worker.fetch in prefetch (framework resolves across ticks).
    Worker polls for post-commit work (no after_commit callbacks).
    Chained queries solved by syncing external data to local db via
    worker jobs.
+
+2. **Session as writes** — DEFERRED
+   Remove session_action from HandleResult. Session changes via
+   db.execute on a sessions table. Requires auth architecture change
+   (cookie-based → sessions table). Only logout uses session_action.
+
+3. **Route pattern matching** — DEFERRED
+   `// match GET /products/:id` annotation sugar. Scanner reads
+   pattern, generates routing dispatch. Current manual URL parsing
+   works. Additive — doesn't change existing handlers.
 
 ---
 
