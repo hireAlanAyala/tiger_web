@@ -37,6 +37,18 @@ pub fn u32_decimal(buf: []u8, val: u32) usize {
     return raw(buf, s);
 }
 
+pub fn u64_decimal(buf: []u8, val: u64) usize {
+    var tmp: [20]u8 = undefined;
+    const s = std.fmt.bufPrint(&tmp, "{d}", .{val}) catch unreachable;
+    return raw(buf, s);
+}
+
+pub fn u8_decimal(buf: []u8, val: u8) usize {
+    var tmp: [3]u8 = undefined;
+    const s = std.fmt.bufPrint(&tmp, "{d}", .{val}) catch unreachable;
+    return raw(buf, s);
+}
+
 pub fn price(buf: []u8, cents: u32) usize {
     var pos: usize = 0;
     pos += raw(buf[pos..], "$");
@@ -48,6 +60,25 @@ pub fn price(buf: []u8, cents: u32) usize {
     frac_buf[1] = '0' + @as(u8, @intCast(frac % 10));
     pos += raw(buf[pos..], &frac_buf);
     return pos;
+}
+
+pub fn price_u64(buf: []u8, cents: u64) usize {
+    var pos: usize = 0;
+    pos += raw(buf[pos..], "$");
+    pos += u64_decimal(buf[pos..], cents / 100);
+    pos += raw(buf[pos..], ".");
+    const frac: u8 = @intCast(cents % 100);
+    var frac_buf: [2]u8 = undefined;
+    frac_buf[0] = '0' + frac / 10;
+    frac_buf[1] = '0' + frac % 10;
+    pos += raw(buf[pos..], &frac_buf);
+    return pos;
+}
+
+pub fn short_uuid(buf: []u8, id: u128) usize {
+    var full: [32]u8 = undefined;
+    _ = uuid(&full, id);
+    return raw(buf, full[0..8]);
 }
 
 pub fn uuid(buf: []u8, id: u128) usize {
