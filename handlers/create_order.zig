@@ -3,12 +3,14 @@ const assert = std.debug.assert;
 const t = @import("../prelude.zig");
 const message = @import("../message.zig");
 
+pub const Status = enum { ok, not_found, insufficient_inventory };
+
 pub const Prefetch = struct {
     products: [t.order_items_max]?t.ProductRow,
     order_id: u128,
 };
 
-pub const Context = t.HandlerContext(Prefetch, t.Operation.EventType(.create_order), t.Identity, t.Status);
+pub const Context = t.HandlerContext(Prefetch, t.Operation.EventType(.create_order), t.Identity, Status);
 
 // [route] .create_order
 pub fn route(method: t.http.Method, raw_path: []const u8, body: []const u8) ?t.Message {
@@ -90,7 +92,13 @@ pub fn handle(ctx: Context) t.ExecuteResult {
 }
 
 // [render] .create_order
-pub fn render(ctx: Context) []const u8 { _ = ctx; return ""; }
+pub fn render(ctx: Context) []const u8 {
+    return switch (ctx.status) {
+        .ok => "",
+        .not_found => "<div class=\"error\">Product not found</div>",
+        .insufficient_inventory => "<div class=\"error\">Insufficient inventory</div>",
+    };
+}
 
 fn parse_order_json(body: []const u8) ?t.OrderRequest {
     var order = std.mem.zeroes(t.OrderRequest);

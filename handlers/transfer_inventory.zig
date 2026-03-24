@@ -2,12 +2,14 @@ const std = @import("std");
 const assert = std.debug.assert;
 const t = @import("../prelude.zig");
 
+pub const Status = enum { ok, not_found, insufficient_inventory };
+
 pub const Prefetch = struct {
     source: ?t.ProductRow,
     target: ?t.ProductRow,
 };
 
-pub const Context = t.HandlerContext(Prefetch, t.Operation.EventType(.transfer_inventory), t.Identity, t.Status);
+pub const Context = t.HandlerContext(Prefetch, t.Operation.EventType(.transfer_inventory), t.Identity, Status);
 
 // [route] .transfer_inventory
 pub fn route(method: t.http.Method, raw_path: []const u8, body: []const u8) ?t.Message {
@@ -71,4 +73,10 @@ pub fn handle(ctx: Context) t.ExecuteResult {
 }
 
 // [render] .transfer_inventory
-pub fn render(ctx: Context) []const u8 { _ = ctx; return ""; }
+pub fn render(ctx: Context) []const u8 {
+    return switch (ctx.status) {
+        .ok => "",
+        .not_found => "<div class=\"error\">Product not found</div>",
+        .insufficient_inventory => "<div class=\"error\">Insufficient inventory</div>",
+    };
+}

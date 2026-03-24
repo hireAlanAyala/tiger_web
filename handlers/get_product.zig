@@ -2,11 +2,13 @@ const std = @import("std");
 const assert = std.debug.assert;
 const t = @import("../prelude.zig");
 
+pub const Status = enum { ok, not_found };
+
 pub const Prefetch = struct {
     product: ?t.ProductRow,
 };
 
-pub const Context = t.HandlerContext(Prefetch, t.Operation.EventType(.get_product), t.Identity, t.Status);
+pub const Context = t.HandlerContext(Prefetch, t.Operation.EventType(.get_product), t.Identity, Status);
 
 // [route] .get_product
 pub fn route(method: t.http.Method, raw_path: []const u8, body: []const u8) ?t.Message {
@@ -41,11 +43,10 @@ pub fn handle(ctx: Context) t.ExecuteResult {
 
 // [render] .get_product
 pub fn render(ctx: Context) []const u8 {
-    const product = ctx.prefetched.product orelse
-        return "<div class=\"error\">Product not found</div>";
-    if (!product.active)
-        return "<div class=\"error\">Product not found</div>";
-    return render_product_card(ctx.render_buf, &product);
+    return switch (ctx.status) {
+        .ok => render_product_card(ctx.render_buf, &ctx.prefetched.product.?),
+        .not_found => "<div class=\"error\">Product not found</div>",
+    };
 }
 
 pub fn render_product_card(buf: []u8, p: *const t.ProductRow) []const u8 {

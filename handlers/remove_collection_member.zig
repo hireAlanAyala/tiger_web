@@ -1,9 +1,11 @@
 const std = @import("std");
 const t = @import("../prelude.zig");
 
+pub const Status = enum { ok, not_found };
+
 pub const Prefetch = struct { collection_id: u128, product_id: u128, collection: ?t.CollectionRow };
 
-pub const Context = t.HandlerContext(Prefetch, t.Operation.EventType(.remove_collection_member), t.Identity, t.Status);
+pub const Context = t.HandlerContext(Prefetch, t.Operation.EventType(.remove_collection_member), t.Identity, Status);
 
 // [route] .remove_collection_member
 pub fn route(method: t.http.Method, raw_path: []const u8, body: []const u8) ?t.Message {
@@ -44,4 +46,9 @@ pub fn handle(ctx: Context) t.ExecuteResult {
 }
 
 // [render] .remove_collection_member
-pub fn render(ctx: Context) []const u8 { _ = ctx; return ""; }
+pub fn render(ctx: Context) []const u8 {
+    return switch (ctx.status) {
+        .ok => "",
+        .not_found => "<div class=\"error\">Collection not found</div>",
+    };
+}

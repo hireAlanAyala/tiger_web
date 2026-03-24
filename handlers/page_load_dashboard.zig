@@ -2,13 +2,15 @@ const std = @import("std");
 const t = @import("../prelude.zig");
 const get_product = @import("get_product.zig");
 
+pub const Status = enum { ok };
+
 pub const Prefetch = struct {
     products: ?t.BoundedList(t.ProductRow, t.list_max),
     collections: ?t.BoundedList(t.CollectionRow, t.list_max),
     orders: ?t.BoundedList(t.OrderRow, t.list_max),
 };
 
-pub const Context = t.HandlerContext(Prefetch, t.Operation.EventType(.page_load_dashboard), t.Identity, t.Status);
+pub const Context = t.HandlerContext(Prefetch, t.Operation.EventType(.page_load_dashboard), t.Identity, Status);
 
 // [route] .page_load_dashboard
 pub fn route(method: t.http.Method, raw_path: []const u8, body: []const u8) ?t.Message {

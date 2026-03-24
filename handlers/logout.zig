@@ -1,9 +1,11 @@
 const std = @import("std");
 const t = @import("../prelude.zig");
 
+pub const Status = enum { ok };
+
 pub const Prefetch = struct {};
 
-pub const Context = t.HandlerContext(Prefetch, t.Operation.EventType(.logout), t.Identity, t.Status);
+pub const Context = t.HandlerContext(Prefetch, t.Operation.EventType(.logout), t.Identity, Status);
 
 // [route] .logout
 pub fn route(method: t.http.Method, raw_path: []const u8, body: []const u8) ?t.Message {

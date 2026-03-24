@@ -2,11 +2,13 @@ const std = @import("std");
 const assert = std.debug.assert;
 const t = @import("../prelude.zig");
 
+pub const Status = enum { ok, version_conflict };
+
 pub const Prefetch = struct {
     existing: ?t.ProductRow,
 };
 
-pub const Context = t.HandlerContext(Prefetch, t.Operation.EventType(.create_product), t.Identity, t.Status);
+pub const Context = t.HandlerContext(Prefetch, t.Operation.EventType(.create_product), t.Identity, Status);
 
 // [route] .create_product
 pub fn route(method: t.http.Method, raw_path: []const u8, body: []const u8) ?t.Message {
@@ -63,8 +65,10 @@ pub fn handle(ctx: Context) t.ExecuteResult {
 
 // [render] .create_product
 pub fn render(ctx: Context) []const u8 {
-    _ = ctx;
-    return "";
+    return switch (ctx.status) {
+        .ok => "",
+        .version_conflict => "<div class=\"error\">Product already exists</div>",
+    };
 }
 
 pub fn parse_product_json(body: []const u8) ?t.Product {

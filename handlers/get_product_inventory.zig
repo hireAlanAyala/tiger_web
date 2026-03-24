@@ -1,9 +1,11 @@
 const std = @import("std");
 const t = @import("../prelude.zig");
 
+pub const Status = enum { ok, not_found };
+
 pub const Prefetch = struct { product: ?t.ProductRow };
 
-pub const Context = t.HandlerContext(Prefetch, t.Operation.EventType(.get_product_inventory), t.Identity, t.Status);
+pub const Context = t.HandlerContext(Prefetch, t.Operation.EventType(.get_product_inventory), t.Identity, Status);
 
 // [route] .get_product_inventory
 pub fn route(method: t.http.Method, raw_path: []const u8, body: []const u8) ?t.Message {
@@ -35,8 +37,14 @@ pub fn handle(ctx: Context) t.ExecuteResult {
 
 // [render] .get_product_inventory
 pub fn render(ctx: Context) []const u8 {
-    const product = ctx.prefetched.product orelse return "Product not found";
-    if (!product.active) return "Product not found";
+    return switch (ctx.status) {
+        .not_found => "Product not found",
+        .ok => render_ok(ctx),
+    };
+}
+
+fn render_ok(ctx: Context) []const u8 {
+    const product = ctx.prefetched.product.?;
     var pos: usize = 0;
     pos += t.html.raw(ctx.render_buf[pos..], "inventory: ");
     pos += t.html.u32_decimal(ctx.render_buf[pos..], product.inventory);

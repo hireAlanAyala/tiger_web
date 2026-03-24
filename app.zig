@@ -317,6 +317,24 @@ fn dispatch_render(
     };
 }
 
+/// Map shared message.Status to a per-handler Status enum by name.
+/// If the handler's Status is message.Status (shared), this is a no-op.
+/// If it's a per-handler enum, the mapping is resolved at comptime.
+/// Asserts if the shared status has no matching variant in the handler's enum —
+/// that means handle() returned a status it didn't declare.
+fn map_status(comptime HandlerStatus: type, status: message.Status) HandlerStatus {
+    if (HandlerStatus == message.Status) return status;
+    // Per-handler enum: map by name at comptime.
+    const status_name = @tagName(status);
+    inline for (@typeInfo(HandlerStatus).@"enum".fields) |f| {
+        if (std.mem.eql(u8, f.name, status_name)) {
+            return @enumFromInt(f.value);
+        }
+    }
+    // Handle returned a status the handler didn't declare.
+    unreachable;
+}
+
 fn render_one(
     comptime H: type,
     comptime op: Operation,
@@ -327,12 +345,13 @@ fn render_one(
     storage: anytype,
 ) []const u8 {
     const prefetched = @field(cache, @tagName(op));
+    const HandlerStatus = H.Context.StatusType;
     const ctx = H.Context{
         .prefetched = prefetched,
         .body = if (H.Context.BodyType == void) {} else undefined,
         .fw = fw,
         .render_buf = render_buf,
-        .status = status,
+        .status = map_status(HandlerStatus, status),
     };
 
     // Render gets read-only db access for post-mutation queries.

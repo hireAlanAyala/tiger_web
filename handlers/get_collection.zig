@@ -1,9 +1,11 @@
 const std = @import("std");
 const t = @import("../prelude.zig");
 
+pub const Status = enum { ok, not_found };
+
 pub const Prefetch = struct { collection: ?t.CollectionRow };
 
-pub const Context = t.HandlerContext(Prefetch, t.Operation.EventType(.get_collection), t.Identity, t.Status);
+pub const Context = t.HandlerContext(Prefetch, t.Operation.EventType(.get_collection), t.Identity, Status);
 
 // [route] .get_collection
 pub fn route(method: t.http.Method, raw_path: []const u8, body: []const u8) ?t.Message {
@@ -35,8 +37,14 @@ pub fn handle(ctx: Context) t.ExecuteResult {
 
 // [render] .get_collection
 pub fn render(ctx: Context) []const u8 {
-    const col = ctx.prefetched.collection orelse return "Collection not found";
-    if (!col.active) return "Collection not found";
+    return switch (ctx.status) {
+        .not_found => "Collection not found",
+        .ok => render_ok(ctx),
+    };
+}
+
+fn render_ok(ctx: Context) []const u8 {
+    const col = ctx.prefetched.collection.?;
     var pos: usize = 0;
     pos += t.html.raw(ctx.render_buf[pos..], "<div class=\"card\"><strong>");
     pos += t.html.escaped(ctx.render_buf[pos..], std.mem.sliceTo(&col.name, 0));
@@ -45,3 +53,4 @@ pub fn render(ctx: Context) []const u8 {
     pos += t.html.raw(ctx.render_buf[pos..], "</div></div>");
     return ctx.render_buf[0..pos];
 }
+

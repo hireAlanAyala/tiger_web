@@ -2,9 +2,11 @@ const std = @import("std");
 const t = @import("../prelude.zig");
 const message = @import("../message.zig");
 
+pub const Status = enum { ok, not_found };
+
 pub const Prefetch = struct { order: ?t.OrderRow };
 
-pub const Context = t.HandlerContext(Prefetch, t.Operation.EventType(.complete_order), t.Identity, t.Status);
+pub const Context = t.HandlerContext(Prefetch, t.Operation.EventType(.complete_order), t.Identity, Status);
 
 // [route] .complete_order
 pub fn route(method: t.http.Method, raw_path: []const u8, body: []const u8) ?t.Message {
@@ -41,9 +43,7 @@ pub fn render(ctx: Context, db: anytype) []const u8 {
 
     switch (ctx.status) {
         .not_found => return "<div class=\"error\">Order not found</div>",
-        .order_not_pending => return "<div class=\"error\">Order is not pending</div>",
-        .order_expired => return "<div class=\"error\">Order has expired</div>",
-        else => {},
+        .ok => {},
     }
 
     // Query post-mutation order state — the order is now confirmed/failed.
