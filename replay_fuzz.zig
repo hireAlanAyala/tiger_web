@@ -87,7 +87,7 @@ pub fn main(_: std.mem.Allocator, args: FuzzArgs) !void {
             // No faults configured — prefetch must never return busy.
             if (!mem_sm.prefetch(msg)) @panic("prefetch returned busy with no faults");
 
-            const resp = mem_sm.commit(msg);
+            const resp = mem_sm.commit(msg).response;
             tracker.on_commit(msg, resp);
 
             // All operations reaching here are mutations (non-mutation weights

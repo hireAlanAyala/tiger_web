@@ -696,7 +696,7 @@ pub fn replay_entries(
         sm.tracer.stop(.prefetch, entry.operation);
 
         sm.tracer.start(.execute);
-        const resp = sm.commit(entry);
+        const resp = sm.commit(entry).response;
         sm.tracer.stop(.execute, entry.operation);
         sm.tracer.trace_log(entry.operation, resp.status, 0);
 
@@ -1259,7 +1259,7 @@ test "replay: full round-trip" {
             sm.set_time(timestamp);
             const ok = sm.prefetch(msg);
             try testing.expect(ok);
-            const resp = sm.commit(msg);
+            const resp = sm.commit(msg).response;
             try testing.expectEqual(resp.status, .ok);
 
             const entry = wal.prepare(msg, timestamp);
@@ -1295,7 +1295,7 @@ test "replay: full round-trip" {
         verify_sm.begin_batch();
         const ok = verify_sm.prefetch(get_msg);
         try testing.expect(ok);
-        const resp = verify_sm.commit(get_msg);
+        const resp = verify_sm.commit(get_msg).response;
         verify_sm.commit_batch();
         // Domain data no longer in response — verify status only.
         // Data correctness verified by the replay comparison.
@@ -1330,7 +1330,7 @@ test "replay: stop-at limits entries" {
 
             sm.set_time(timestamp);
             _ = sm.prefetch(msg);
-            _ = sm.commit(msg);
+            _ = sm.commit(msg).response;
 
             const entry = wal.prepare(msg, timestamp);
             wal.append(&entry);
@@ -1363,7 +1363,7 @@ test "replay: stop-at limits entries" {
         const msg = message.Message.init(.get_product, id, 0, std.mem.zeroes(message.Product));
         verify_sm.begin_batch();
         _ = verify_sm.prefetch(msg);
-        const resp = verify_sm.commit(msg);
+        const resp = verify_sm.commit(msg).response;
         verify_sm.commit_batch();
         try testing.expectEqual(resp.status, .ok);
     }
@@ -1373,7 +1373,7 @@ test "replay: stop-at limits entries" {
     const msg3 = message.Message.init(.get_product, 3, 0, std.mem.zeroes(message.Product));
     verify_sm.begin_batch();
     _ = verify_sm.prefetch(msg3);
-    const resp3 = verify_sm.commit(msg3);
+    const resp3 = verify_sm.commit(msg3).response;
     verify_sm.commit_batch();
     try testing.expectEqual(resp3.status, .not_found);
 }
@@ -1404,7 +1404,7 @@ test "replay: updates and deletes round-trip" {
             const msg = message.Message.init(.create_product, id, 42, product);
             sm.set_time(timestamp);
             try testing.expect(sm.prefetch(msg));
-            try testing.expectEqual(sm.commit(msg).status, .ok);
+            try testing.expectEqual(sm.commit(msg).response.status, .ok);
             const entry = wal.prepare(msg, timestamp);
             wal.append(&entry);
             timestamp += 1;
@@ -1417,7 +1417,7 @@ test "replay: updates and deletes round-trip" {
             const msg = message.Message.init(.update_product, 1, 42, updated);
             sm.set_time(timestamp);
             try testing.expect(sm.prefetch(msg));
-            try testing.expectEqual(sm.commit(msg).status, .ok);
+            try testing.expectEqual(sm.commit(msg).response.status, .ok);
             const entry = wal.prepare(msg, timestamp);
             wal.append(&entry);
             timestamp += 1;
@@ -1428,7 +1428,7 @@ test "replay: updates and deletes round-trip" {
             const msg = message.Message.init(.delete_product, 2, 42, {});
             sm.set_time(timestamp);
             try testing.expect(sm.prefetch(msg));
-            try testing.expectEqual(sm.commit(msg).status, .ok);
+            try testing.expectEqual(sm.commit(msg).response.status, .ok);
             const entry = wal.prepare(msg, timestamp);
             wal.append(&entry);
             timestamp += 1;
@@ -1461,7 +1461,7 @@ test "replay: updates and deletes round-trip" {
         const msg = message.Message.init(.get_product, 1, 0, std.mem.zeroes(message.Product));
         verify_sm.begin_batch();
         try testing.expect(verify_sm.prefetch(msg));
-        const resp = verify_sm.commit(msg);
+        const resp = verify_sm.commit(msg).response;
         verify_sm.commit_batch();
         // Domain data no longer in response — verify status only.
         // Data correctness verified by the replay comparison phase.
@@ -1475,7 +1475,7 @@ test "replay: updates and deletes round-trip" {
         const msg = message.Message.init(.get_product, 2, 0, std.mem.zeroes(message.Product));
         verify_sm.begin_batch();
         try testing.expect(verify_sm.prefetch(msg));
-        const resp = verify_sm.commit(msg);
+        const resp = verify_sm.commit(msg).response;
         verify_sm.commit_batch();
         try testing.expectEqual(resp.status, .not_found);
 

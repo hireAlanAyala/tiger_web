@@ -68,7 +68,7 @@ fn list_params_price(price_min: u32, price_max: u32) message.ListParams {
 fn test_execute(sm: *TestStateMachine, msg: message.Message) TestStateMachine.PipelineResponse {
     if (sm.now == 0) sm.now = 1_700_000_000;
     assert(sm.prefetch(msg));
-    return sm.commit(msg);
+    return sm.commit(msg).response;
 }
 
 test "create and get" {

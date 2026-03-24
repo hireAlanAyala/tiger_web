@@ -289,12 +289,20 @@ pub fn StateMachineType(comptime Storage: type, comptime Handlers: type) type {
             user_id: u128,
             is_authenticated: bool,
             is_new_visitor: bool,
-            followup: ?message.FollowupState,
         };
 
-        /// Phase 2: commit — returns PipelineResponse (framework envelope).
-        /// The handler's domain data is NOT here — it stays in Prefetch → render.
-        pub fn commit(self: *StateMachine, msg: message.Message) PipelineResponse {
+        /// Commit output — pipeline response + cache for render.
+        /// The SM's job ends here. Cache ownership transfers to the caller
+        /// so render can access prefetched data post-commit.
+        pub const CommitOutput = struct {
+            response: PipelineResponse,
+            cache: Handlers.Cache,
+            identity: message.PrefetchIdentity,
+        };
+
+        /// Phase 2: commit — returns CommitOutput (response + cache for render).
+        /// The handler's domain data stays in the cache for the render phase.
+        pub fn commit(self: *StateMachine, msg: message.Message) CommitOutput {
             const cache = self.prefetch_cache.?;
             defer self.prefetch_cache = null;
             defer self.prefetch_identity = null;
@@ -321,29 +329,20 @@ pub fn StateMachineType(comptime Storage: type, comptime Handlers: type) type {
             const is_auth = identity.is_authenticated != 0 or
                 handler_resp.session_action == .set_authenticated;
 
-            var resp = PipelineResponse{
+            const resp = PipelineResponse{
                 .status = handler_resp.status,
                 .session_action = handler_resp.session_action,
                 .user_id = identity.user_id,
                 .is_authenticated = is_auth,
                 .is_new_visitor = identity.is_new != 0,
-                .followup = null,
             };
 
-            // SSE followup: mutations that modify data need a dashboard refresh.
-            if (msg.operation.needs_followup()) {
-                resp.followup = .{
-                    .operation = msg.operation,
-                    .status = resp.status,
-                    .user_id = resp.user_id,
-                    .kind = if (resp.is_authenticated) .authenticated else .anonymous,
-                    .session_action = resp.session_action,
-                    .is_new_visitor = resp.is_new_visitor,
-                };
-            }
-
             self.tracer.count_status(resp.status);
-            return resp;
+            return .{
+                .response = resp,
+                .cache = cache,
+                .identity = self.prefetch_identity orelse std.mem.zeroes(message.PrefetchIdentity),
+            };
         }
 
         /// Dispatch to per-pattern handlers. Private — only called by commit().
