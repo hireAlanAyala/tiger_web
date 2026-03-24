@@ -13,9 +13,8 @@ const WalType = @import("wal.zig").WalType;
 /// In simulation, IO is SimIO and Storage is MemoryStorage.
 ///
 /// App provides the domain types and functions:
-///   Types: Message, MessageResponse, FollowupState, Operation, Status
-///   Functions: translate, encode_response, encode_followup
-///   Constants: refresh_operation
+///   Types: Message, Operation, Status
+///   Functions: translate, commit_and_encode
 ///   Type constructors: StateMachineType(Storage), Wal
 ///
 /// This is the equivalent of TigerBeetle's Replica — it owns all connections,
@@ -24,14 +23,10 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
     comptime {
         // Validate App declarations — good errors at the boundary, not inside the guts.
         assert(@hasDecl(App, "Message"));
-        assert(@hasDecl(App, "MessageResponse"));
-        assert(@hasDecl(App, "FollowupState"));
         assert(@hasDecl(App, "StateMachineType"));
         assert(@hasDecl(App, "Wal"));
         assert(@hasDecl(App, "translate"));
-        assert(@hasDecl(App, "encode_response"));
-        assert(@hasDecl(App, "encode_followup"));
-        assert(@hasDecl(App, "refresh_message"));
+        assert(@hasDecl(App, "commit_and_encode"));
 
         // Framework contracts on App types.
         // Status must have .ok — framework uses it for control flow (render vs close).
@@ -135,7 +130,6 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
             defer server.invariants();
             server.maybe_accept();
             server.process_inbox();
-            server.process_followups();
             server.log_metrics();
             server.flush_outbox();
             server.continue_receives();
@@ -207,7 +201,6 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
 
             for (server.connections) |*conn| {
                 if (conn.state != .ready) continue;
-                if (conn.followup != null) continue;
 
                 // Re-parse HTTP from recv_buf. Deterministic — same bytes, same result.
                 const parsed = switch (http.parse_request(conn.recv_buf[0..conn.recv_pos])) {
@@ -266,75 +259,8 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
                     }
                 }
 
-                // SSE mutations that need a dashboard refresh carry a followup.
-                if (conn.is_datastar_request) {
-                    if (commit_result.followup) |_| {
-                        log.mark.debug("SSE mutation: deferring to follow-up fd={d}", .{conn.fd});
-                        conn.followup = commit_result.followup;
-                        continue;
-                    }
-                }
-
                 conn.set_response(commit_result.response.offset, commit_result.response.len);
                 conn.keep_alive = commit_result.response.keep_alive;
-            }
-        }
-
-        // --- Follow-ups: refresh dashboard after SSE mutations ---
-
-        fn process_followups(server: *Server) void {
-            var any_followup = false;
-            for (server.connections) |*conn| {
-                if (conn.followup != null) {
-                    any_followup = true;
-                    break;
-                }
-            }
-            if (!any_followup) return;
-
-            server.state_machine.begin_batch();
-            defer server.state_machine.commit_batch();
-
-            for (server.connections) |*conn| {
-                const followup = conn.followup orelse continue;
-                assert(conn.state == .ready);
-                assert(conn.is_datastar_request);
-
-                const msg = App.refresh_message();
-
-                // Prefetch. Storage busy → skip, retry next tick.
-                server.state_machine.tracer.start(.prefetch);
-                if (!server.state_machine.prefetch(msg)) {
-                    server.state_machine.tracer.cancel(.prefetch);
-                    continue;
-                }
-                server.state_machine.tracer.stop(.prefetch, msg.operation);
-
-                server.state_machine.tracer.start(.execute);
-                const pipeline_resp = server.state_machine.commit(msg);
-                server.state_machine.tracer.stop(.execute, msg.operation);
-
-                // Refresh failed (storage error). The mutation already committed —
-                // just close the connection. The client sees a disconnect and
-                // can refresh the page.
-                if (pipeline_resp.status != .ok) {
-                    conn.followup = null;
-                    conn.state = .closing;
-                    continue;
-                }
-
-                // TODO: Replace with handler render. Currently bridges to
-                // legacy MessageResponse for the old encode_followup.
-                const legacy_resp = App.to_legacy_response(Storage, pipeline_resp);
-                const r = App.encode_followup(
-                    &conn.send_buf,
-                    legacy_resp,
-                    &followup,
-                    server.state_machine.secret_key,
-                );
-                conn.followup = null;
-                conn.set_response(r.offset, r.len);
-                conn.keep_alive = r.keep_alive;
             }
         }
 

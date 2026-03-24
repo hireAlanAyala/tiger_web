@@ -8,7 +8,6 @@ const std = @import("std");
 const assert = std.debug.assert;
 const message = @import("message.zig");
 const codec = @import("codec.zig");
-const render = @import("render.zig");
 const protocol = @import("protocol.zig");
 const state_machine = @import("state_machine.zig");
 const http = @import("tiger_framework").http;
@@ -280,50 +279,71 @@ fn execute_one(
     return H.handle(ctx);
 }
 
-/// Extract the prefetch cache for the sidecar protocol.
-/// TODO: Redesign for new handler-based SM. The SM now stores an opaque
-/// PrefetchCache (tagged union of handler Prefetch types), not flat fields.
-/// The sidecar protocol needs to be updated to work with the new shape.
-/// For now, returns zeroes — the sidecar path falls back to native rendering.
-pub fn extract_cache(comptime StorageParam: type, sm: *const StateMachineType(StorageParam)) protocol.PrefetchCache {
-    _ = sm;
-    return std.mem.zeroes(protocol.PrefetchCache);
-}
-
-/// Execute and encode: unified commit + render that chooses between
-/// Zig-native and sidecar paths. Returns everything the server needs
-/// to complete the response.
-///
-/// When the sidecar is active, native commit handles storage (writes, auth,
-/// WAL, followup). The sidecar provides HTML. If the sidecar fails, the
-/// framework renders natively since the native commit already ran.
-
-// Response buffer — module-level because ~200KB is too large for the stack
-// and App is a namespace (no instance). Single-threaded, no concurrency.
-// TODO: move to an App instance when App becomes a struct.
-var sidecar_resp_buf: protocol.ExecuteRenderResponse = undefined;
-
-/// Convert PipelineResponse to old MessageResponse for the legacy render.
-/// Domain data is always .empty — the old render produces status-only
-/// responses until handler render functions are wired.
-/// Bridge PipelineResponse → MessageResponse for the legacy render pipeline.
-/// Domain data is always .empty. TODO: delete when handler render is wired.
-pub fn to_legacy_response(comptime StorageParam: type, pr: StateMachineType(StorageParam).PipelineResponse) MessageResponse {
-    return .{
-        .status = pr.status,
-        .result = .{ .empty = {} },
-        .session_action = switch (pr.session_action) {
-            .none => .none,
-            .set_authenticated => .set_authenticated,
-            .clear => .clear,
-        },
-        .user_id = pr.user_id,
-        .is_authenticated = pr.is_authenticated,
-        .kind = if (pr.is_authenticated) .authenticated else .anonymous,
-        .is_new_visitor = pr.is_new_visitor,
-        .followup = pr.followup,
+/// Phase 3: dispatch to handler.render().
+/// Called after commit with the cache and pipeline response.
+/// Returns the HTML slice (into render_buf) that the framework will wrap.
+fn dispatch_render(
+    cache: PrefetchCache,
+    operation: Operation,
+    status: message.Status,
+    fw: anytype,
+    render_buf: []u8,
+) []const u8 {
+    return switch (operation) {
+        .root => unreachable,
+        .get_product => render_one(@import("handlers/get_product.zig"), .get_product, cache, status, fw, render_buf),
+        .create_product => render_one(@import("handlers/create_product.zig"), .create_product, cache, status, fw, render_buf),
+        .list_products => render_one(@import("handlers/list_products.zig"), .list_products, cache, status, fw, render_buf),
+        .update_product => render_one(@import("handlers/update_product.zig"), .update_product, cache, status, fw, render_buf),
+        .delete_product => render_one(@import("handlers/delete_product.zig"), .delete_product, cache, status, fw, render_buf),
+        .get_product_inventory => render_one(@import("handlers/get_product_inventory.zig"), .get_product_inventory, cache, status, fw, render_buf),
+        .search_products => render_one(@import("handlers/search_products.zig"), .search_products, cache, status, fw, render_buf),
+        .transfer_inventory => render_one(@import("handlers/transfer_inventory.zig"), .transfer_inventory, cache, status, fw, render_buf),
+        .create_collection => render_one(@import("handlers/create_collection.zig"), .create_collection, cache, status, fw, render_buf),
+        .get_collection => render_one(@import("handlers/get_collection.zig"), .get_collection, cache, status, fw, render_buf),
+        .list_collections => render_one(@import("handlers/list_collections.zig"), .list_collections, cache, status, fw, render_buf),
+        .delete_collection => render_one(@import("handlers/delete_collection.zig"), .delete_collection, cache, status, fw, render_buf),
+        .add_collection_member => render_one(@import("handlers/add_collection_member.zig"), .add_collection_member, cache, status, fw, render_buf),
+        .remove_collection_member => render_one(@import("handlers/remove_collection_member.zig"), .remove_collection_member, cache, status, fw, render_buf),
+        .create_order => render_one(@import("handlers/create_order.zig"), .create_order, cache, status, fw, render_buf),
+        .get_order => render_one(@import("handlers/get_order.zig"), .get_order, cache, status, fw, render_buf),
+        .list_orders => render_one(@import("handlers/list_orders.zig"), .list_orders, cache, status, fw, render_buf),
+        .complete_order => render_one(@import("handlers/complete_order.zig"), .complete_order, cache, status, fw, render_buf),
+        .cancel_order => render_one(@import("handlers/cancel_order.zig"), .cancel_order, cache, status, fw, render_buf),
+        .page_load_dashboard => render_one(@import("handlers/page_load_dashboard.zig"), .page_load_dashboard, cache, status, fw, render_buf),
+        .page_load_login => render_one(@import("handlers/page_load_login.zig"), .page_load_login, cache, status, fw, render_buf),
+        .request_login_code => render_one(@import("handlers/request_login_code.zig"), .request_login_code, cache, status, fw, render_buf),
+        .verify_login_code => render_one(@import("handlers/verify_login_code.zig"), .verify_login_code, cache, status, fw, render_buf),
+        .logout => render_one(@import("handlers/logout.zig"), .logout, cache, status, fw, render_buf),
     };
 }
+
+fn render_one(
+    comptime H: type,
+    comptime op: Operation,
+    cache: PrefetchCache,
+    status: message.Status,
+    fw: anytype,
+    render_buf: []u8,
+) []const u8 {
+    const prefetched = @field(cache, @tagName(op));
+    const ctx = H.Context{
+        .prefetched = prefetched,
+        .body = if (H.Context.BodyType == void) {} else undefined,
+        .fw = fw,
+        .render_buf = render_buf,
+        .status = status,
+    };
+    return H.render(ctx);
+}
+
+// Render scratch buffer — module-level, single-threaded. Used by the
+// full-page path to avoid aliasing between render output and send_buf.
+var render_scratch_buf: [http.send_buf_max]u8 = undefined;
+
+
+const http_response = @import("tiger_framework").http_response;
+const sse = @import("tiger_framework").sse;
 
 pub fn commit_and_encode(
     comptime StorageParam: type,
@@ -333,66 +353,69 @@ pub fn commit_and_encode(
     is_datastar_request: bool,
     secret_key: *const [auth.key_length]u8,
 ) CommitResult {
-    const pipeline_resp = sm.commit(msg);
-    // TODO: Replace with handler render functions. Currently uses legacy
-    // render which gets .result = .empty (no domain data).
-    const legacy_resp = to_legacy_response(StorageParam, pipeline_resp);
+    const commit_output = sm.commit(msg);
+    const pipeline_resp = commit_output.response;
+    const cache = commit_output.cache;
 
-    if (sidecar) |*client| {
-        const cache = extract_cache(StorageParam, sm);
+    // Format cookie header from pipeline response.
+    const cookie_hdr = http_response.format_cookie_header(
+        pipeline_resp.session_action,
+        pipeline_resp.user_id,
+        pipeline_resp.is_authenticated,
+        pipeline_resp.is_new_visitor,
+        secret_key,
+    );
+    const set_cookie: ?[]const u8 = if (cookie_hdr.len > 0) cookie_hdr.slice() else null;
 
-        if (!client.execute_render(msg.operation, msg.id, &msg.body, &cache, is_datastar_request, &sidecar_resp_buf)) {
-            log.mark.err("sidecar execute_render failed, rendering natively", .{});
-            const r = render.encode_response(send_buf, msg.operation, legacy_resp, is_datastar_request, secret_key);
-            return .{
-                .status = pipeline_resp.status,
-                .followup = pipeline_resp.followup,
-                .response = r,
-            };
+    // Build framework context for render.
+    const FwCtx = HandlersType(StorageParam).FwCtx;
+    const fw = FwCtx{
+        .identity = commit_output.identity,
+        .now = sm.now,
+        .is_sse = is_datastar_request,
+    };
+
+    // Render: handler produces HTML, framework wraps it.
+    if (is_datastar_request) {
+        // SSE: headers + events written sequentially from offset 0.
+        var pos: usize = 0;
+        pos += sse.encode_headers(send_buf[pos..], set_cookie);
+
+        // Render into a temporary region after the headers.
+        const render_buf = send_buf[pos..];
+        const html = dispatch_render(cache, msg.operation, pipeline_resp.status, fw, render_buf);
+
+        // Encode the render result as SSE events after the headers.
+        if (html.len > 0) {
+            pos += sse.encode_render_result(send_buf[pos..], html);
         }
-
-        const html_len = sidecar_resp_buf.html_len;
-        assert(render.header_reserve + html_len <= send_buf.len);
-        @memcpy(send_buf[render.header_reserve..][0..html_len], sidecar_resp_buf.html[0..html_len]);
-        const cookie_hdr = render.format_cookie_header(legacy_resp, secret_key);
-        const set_cookie: ?[]const u8 = if (cookie_hdr.len > 0) cookie_hdr.slice() else null;
-        const r = render.backfill_headers(send_buf, html_len, set_cookie);
 
         return .{
             .status = pipeline_resp.status,
-            .followup = pipeline_resp.followup,
-            .response = r,
+            .response = .{ .offset = 0, .len = @intCast(pos), .keep_alive = false },
+        };
+    } else {
+        // Full page: render into scratch, copy to body position, backfill headers.
+        // Scratch buffer avoids aliasing — render may return a string literal
+        // (rodata) or a slice of the scratch buffer. Either way, one memcpy
+        // into send_buf is correct and non-overlapping.
+        const html = dispatch_render(cache, msg.operation, pipeline_resp.status, fw, &render_scratch_buf);
+
+        if (html.len > 0) {
+            @memcpy(send_buf[http_response.header_reserve..][0..html.len], html);
+        }
+
+        return .{
+            .status = pipeline_resp.status,
+            .response = http_response.backfill_headers(send_buf, html.len, set_cookie),
         };
     }
-
-    const r = render.encode_response(send_buf, msg.operation, legacy_resp, is_datastar_request, secret_key);
-    return .{
-        .status = pipeline_resp.status,
-        .followup = pipeline_resp.followup,
-        .response = r,
-    };
 }
 
 pub const CommitResult = struct {
     status: Status,
-    followup: ?FollowupState,
-    response: render.Response,
+    response: http_response.Response,
 };
-
-/// Encode a response into the send buffer.
-pub fn encode_response(send_buf: []u8, operation: Operation, resp: MessageResponse, is_datastar_request: bool, secret_key: *const [auth.key_length]u8) render.Response {
-    return render.encode_response(send_buf, operation, resp, is_datastar_request, secret_key);
-}
-
-/// Encode an SSE followup (dashboard refresh after mutation) into the send buffer.
-pub fn encode_followup(send_buf: []u8, resp: MessageResponse, followup: *const FollowupState, secret_key: *const [auth.key_length]u8) render.Response {
-    return render.encode_followup(send_buf, &resp.result.page_load_dashboard, followup, secret_key);
-}
-
-/// Construct the message used for SSE follow-up refreshes.
-pub fn refresh_message() Message {
-    return Message.init(.page_load_dashboard, 0, 0, {});
-}
 
 // =====================================================================
 // Tests
