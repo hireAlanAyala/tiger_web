@@ -8,7 +8,7 @@ pub const Prefetch = struct {
     orders: ?t.BoundedList(t.OrderRow, t.list_max),
 };
 
-pub const Context = t.HandlerContext(Prefetch, t.Operation.EventType(.page_load_dashboard), t.Identity);
+pub const Context = t.HandlerContext(Prefetch, t.Operation.EventType(.page_load_dashboard), t.Identity, t.Status);
 
 // [route] .page_load_dashboard
 pub fn route(method: t.http.Method, raw_path: []const u8, body: []const u8) ?t.Message {
@@ -42,9 +42,8 @@ pub fn handle(ctx: Context) t.ExecuteResult {
 
 
 // [render] .page_load_dashboard
-pub fn render(ctx: Context) t.RenderResult {
+pub fn render(ctx: Context) []const u8 {
+    _ = ctx;
     // TODO: render full dashboard page with all three sections
-    return ctx.render(.{
-        .{ "patch", "#content", "<div>Dashboard</div>", "inner" },
-    });
+    return "<div id=\"content\">Dashboard</div>";
 }

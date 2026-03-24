@@ -6,7 +6,7 @@ pub const Prefetch = struct {
     product: ?t.ProductRow,
 };
 
-pub const Context = t.HandlerContext(Prefetch, t.Operation.EventType(.get_product), t.Identity);
+pub const Context = t.HandlerContext(Prefetch, t.Operation.EventType(.get_product), t.Identity, t.Status);
 
 // [route] .get_product
 pub fn route(method: t.http.Method, raw_path: []const u8, body: []const u8) ?t.Message {
@@ -40,25 +40,12 @@ pub fn handle(ctx: Context) t.ExecuteResult {
 }
 
 // [render] .get_product
-pub fn render(ctx: Context) t.RenderResult {
-    const product = ctx.prefetched.product orelse {
-        return ctx.render(.{
-            .{ "patch", "#content", "<div class=\"error\">Product not found</div>", "inner" },
-        });
-    };
-
-    if (!product.active) {
-        return ctx.render(.{
-            .{ "patch", "#content", "<div class=\"error\">Product not found</div>", "inner" },
-        });
-    }
-
-    var card_buf: [2048]u8 = undefined;
-    const card_html = render_product_card(&card_buf, &product);
-
-    return ctx.render(.{
-        .{ "patch", "#content", card_html, "inner" },
-    });
+pub fn render(ctx: Context) []const u8 {
+    const product = ctx.prefetched.product orelse
+        return "<div class=\"error\">Product not found</div>";
+    if (!product.active)
+        return "<div class=\"error\">Product not found</div>";
+    return render_product_card(ctx.render_buf, &product);
 }
 
 pub fn render_product_card(buf: []u8, p: *const t.ProductRow) []const u8 {

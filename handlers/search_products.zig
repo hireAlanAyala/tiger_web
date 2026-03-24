@@ -4,7 +4,7 @@ const get_product = @import("get_product.zig");
 
 pub const Prefetch = struct { products: ?t.BoundedList(t.ProductRow, t.list_max) };
 
-pub const Context = t.HandlerContext(Prefetch, t.Operation.EventType(.search_products), t.Identity);
+pub const Context = t.HandlerContext(Prefetch, t.Operation.EventType(.search_products), t.Identity, t.Status);
 
 // [route] .search_products
 pub fn route(method: t.http.Method, raw_path: []const u8, body: []const u8) ?t.Message {
@@ -45,16 +45,15 @@ pub fn handle(ctx: Context) t.ExecuteResult {
 
 
 // [render] .search_products
-pub fn render(ctx: Context) t.RenderResult {
+pub fn render(ctx: Context) []const u8 {
     const products_list = ctx.prefetched.products orelse
-        return ctx.render(.{ .{ "patch", "#product-list", "<div class=\"meta\">No results</div>", "inner" } });
-    var buf: [32 * 1024]u8 = undefined;
+        return "<div class=\"meta\">No results</div>";
     var pos: usize = 0;
     for (products_list.slice()) |*p| {
         if (!p.active) continue;
-        const card = get_product.render_product_card(buf[pos..], p);
+        const card = get_product.render_product_card(ctx.render_buf[pos..], p);
         pos += card.len;
     }
-    if (pos == 0) return ctx.render(.{ .{ "patch", "#product-list", "<div class=\"meta\">No results</div>", "inner" } });
-    return ctx.render(.{ .{ "patch", "#product-list", buf[0..pos], "inner" } });
+    if (pos == 0) return "<div class=\"meta\">No results</div>";
+    return ctx.render_buf[0..pos];
 }

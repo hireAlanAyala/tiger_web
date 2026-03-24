@@ -3,7 +3,7 @@ const t = @import("../prelude.zig");
 
 pub const Prefetch = struct { collections: ?t.BoundedList(t.CollectionRow, t.list_max) };
 
-pub const Context = t.HandlerContext(Prefetch, t.Operation.EventType(.list_collections), t.Identity);
+pub const Context = t.HandlerContext(Prefetch, t.Operation.EventType(.list_collections), t.Identity, t.Status);
 
 // [route] .list_collections
 pub fn route(method: t.http.Method, raw_path: []const u8, body: []const u8) ?t.Message {
@@ -32,19 +32,18 @@ pub fn handle(ctx: Context) t.ExecuteResult {
 
 
 // [render] .list_collections
-pub fn render(ctx: Context) t.RenderResult {
+pub fn render(ctx: Context) []const u8 {
     const collections = ctx.prefetched.collections orelse
-        return ctx.render(.{ .{ "patch", "#collection-list", "<div class=\"meta\">No collections</div>", "inner" } });
-    var buf: [16 * 1024]u8 = undefined;
+        return "<div class=\"meta\">No collections</div>";
     var pos: usize = 0;
     for (collections.slice()) |*col| {
         if (!col.active) continue;
-        pos += t.html.raw(buf[pos..], "<div class=\"card\"><strong>");
-        pos += t.html.escaped(buf[pos..], std.mem.sliceTo(&col.name, 0));
-        pos += t.html.raw(buf[pos..], "</strong><div class=\"meta\">");
-        pos += t.html.uuid(buf[pos..], col.id);
-        pos += t.html.raw(buf[pos..], "</div></div>");
+        pos += t.html.raw(ctx.render_buf[pos..], "<div class=\"card\"><strong>");
+        pos += t.html.escaped(ctx.render_buf[pos..], std.mem.sliceTo(&col.name, 0));
+        pos += t.html.raw(ctx.render_buf[pos..], "</strong><div class=\"meta\">");
+        pos += t.html.uuid(ctx.render_buf[pos..], col.id);
+        pos += t.html.raw(ctx.render_buf[pos..], "</div></div>");
     }
-    if (pos == 0) return ctx.render(.{ .{ "patch", "#collection-list", "<div class=\"meta\">No collections</div>", "inner" } });
-    return ctx.render(.{ .{ "patch", "#collection-list", buf[0..pos], "inner" } });
+    if (pos == 0) return "<div class=\"meta\">No collections</div>";
+    return ctx.render_buf[0..pos];
 }

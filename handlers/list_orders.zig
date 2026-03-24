@@ -3,7 +3,7 @@ const t = @import("../prelude.zig");
 
 pub const Prefetch = struct { orders: ?t.BoundedList(t.OrderRow, t.list_max) };
 
-pub const Context = t.HandlerContext(Prefetch, t.Operation.EventType(.list_orders), t.Identity);
+pub const Context = t.HandlerContext(Prefetch, t.Operation.EventType(.list_orders), t.Identity, t.Status);
 
 // [route] .list_orders
 pub fn route(method: t.http.Method, raw_path: []const u8, body: []const u8) ?t.Message {
@@ -32,10 +32,8 @@ pub fn handle(ctx: Context) t.ExecuteResult {
 
 
 // [render] .list_orders
-pub fn render(ctx: Context) t.RenderResult {
-    const orders = ctx.prefetched.orders orelse
-        return ctx.render(.{ .{ "patch", "#order-list", "<div class=\"meta\">No orders</div>", "inner" } });
-    if (orders.len == 0)
-        return ctx.render(.{ .{ "patch", "#order-list", "<div class=\"meta\">No orders</div>", "inner" } });
-    return ctx.render(.{}); // TODO: render order cards
+pub fn render(ctx: Context) []const u8 {
+    _ = ctx;
+    // TODO: render order cards
+    return "";
 }

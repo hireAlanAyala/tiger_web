@@ -8,7 +8,7 @@ pub const Prefetch = struct {
     product: ?t.ProductRow,
 };
 
-pub const Context = t.HandlerContext(Prefetch, t.Operation.EventType(.add_collection_member), t.Identity);
+pub const Context = t.HandlerContext(Prefetch, t.Operation.EventType(.add_collection_member), t.Identity, t.Status);
 
 // [route] .add_collection_member
 pub fn route(method: t.http.Method, raw_path: []const u8, body: []const u8) ?t.Message {
@@ -50,4 +50,4 @@ pub fn handle(ctx: Context) t.ExecuteResult {
 }
 
 // [render] .add_collection_member
-pub fn render(ctx: Context) t.RenderResult { return ctx.render(.{}); }
+pub fn render(ctx: Context) []const u8 { _ = ctx; return ""; }

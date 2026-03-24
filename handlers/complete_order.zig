@@ -4,7 +4,7 @@ const message = @import("../message.zig");
 
 pub const Prefetch = struct { order: ?t.OrderRow };
 
-pub const Context = t.HandlerContext(Prefetch, t.Operation.EventType(.complete_order), t.Identity);
+pub const Context = t.HandlerContext(Prefetch, t.Operation.EventType(.complete_order), t.Identity, t.Status);
 
 // [route] .complete_order
 pub fn route(method: t.http.Method, raw_path: []const u8, body: []const u8) ?t.Message {
@@ -34,7 +34,7 @@ pub fn handle(ctx: Context) t.ExecuteResult {
 }
 
 // [render] .complete_order
-pub fn render(ctx: Context) t.RenderResult { return ctx.render(.{}); }
+pub fn render(ctx: Context) []const u8 { _ = ctx; return ""; }
 
 fn parse_completion_json(body: []const u8) ?t.OrderCompletion {
     const result_str = t.parse.json_string_field(body, "result") orelse return null;

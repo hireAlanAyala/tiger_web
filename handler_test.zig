@@ -43,6 +43,7 @@ test "get_product render not found" {
         get_product.Prefetch,
         message.Operation.EventType(.get_product),
         message.PrefetchIdentity,
+        message.Status,
     );
 
     var render_buf: [4096]u8 = undefined;
@@ -66,6 +67,7 @@ test "get_product render product card" {
         get_product.Prefetch,
         message.Operation.EventType(.get_product),
         message.PrefetchIdentity,
+        message.Status,
     );
 
     var product = std.mem.zeroes(message.Product);

@@ -3,7 +3,7 @@ const t = @import("../prelude.zig");
 
 pub const Prefetch = struct { existing: ?t.CollectionRow };
 
-pub const Context = t.HandlerContext(Prefetch, t.Operation.EventType(.delete_collection), t.Identity);
+pub const Context = t.HandlerContext(Prefetch, t.Operation.EventType(.delete_collection), t.Identity, t.Status);
 
 // [route] .delete_collection
 pub fn route(method: t.http.Method, raw_path: []const u8, body: []const u8) ?t.Message {
@@ -39,4 +39,4 @@ pub fn handle(ctx: Context) t.ExecuteResult {
 }
 
 // [render] .delete_collection
-pub fn render(ctx: Context) t.RenderResult { return ctx.render(.{}); }
+pub fn render(ctx: Context) []const u8 { _ = ctx; return ""; }

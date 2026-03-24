@@ -3,7 +3,7 @@ const t = @import("../prelude.zig");
 
 pub const Prefetch = struct { product: ?t.ProductRow };
 
-pub const Context = t.HandlerContext(Prefetch, t.Operation.EventType(.get_product_inventory), t.Identity);
+pub const Context = t.HandlerContext(Prefetch, t.Operation.EventType(.get_product_inventory), t.Identity, t.Status);
 
 // [route] .get_product_inventory
 pub fn route(method: t.http.Method, raw_path: []const u8, body: []const u8) ?t.Message {
@@ -34,14 +34,11 @@ pub fn handle(ctx: Context) t.ExecuteResult {
 
 
 // [render] .get_product_inventory
-pub fn render(ctx: Context) t.RenderResult {
-    const product = ctx.prefetched.product orelse
-        return ctx.render(.{ .{ "patch", "#content", "Product not found", "inner" } });
-    if (!product.active)
-        return ctx.render(.{ .{ "patch", "#content", "Product not found", "inner" } });
-    var buf: [64]u8 = undefined;
+pub fn render(ctx: Context) []const u8 {
+    const product = ctx.prefetched.product orelse return "Product not found";
+    if (!product.active) return "Product not found";
     var pos: usize = 0;
-    pos += t.html.raw(buf[pos..], "inventory: ");
-    pos += t.html.u32_decimal(buf[pos..], product.inventory);
-    return ctx.render(.{ .{ "patch", "#inventory", buf[0..pos], "inner" } });
+    pos += t.html.raw(ctx.render_buf[pos..], "inventory: ");
+    pos += t.html.u32_decimal(ctx.render_buf[pos..], product.inventory);
+    return ctx.render_buf[0..pos];
 }

@@ -8,7 +8,7 @@ pub const Prefetch = struct {
     order_id: u128,
 };
 
-pub const Context = t.HandlerContext(Prefetch, t.Operation.EventType(.create_order), t.Identity);
+pub const Context = t.HandlerContext(Prefetch, t.Operation.EventType(.create_order), t.Identity, t.Status);
 
 // [route] .create_order
 pub fn route(method: t.http.Method, raw_path: []const u8, body: []const u8) ?t.Message {
@@ -90,7 +90,7 @@ pub fn handle(ctx: Context) t.ExecuteResult {
 }
 
 // [render] .create_order
-pub fn render(ctx: Context) t.RenderResult { return ctx.render(.{}); }
+pub fn render(ctx: Context) []const u8 { _ = ctx; return ""; }
 
 fn parse_order_json(body: []const u8) ?t.OrderRequest {
     var order = std.mem.zeroes(t.OrderRequest);

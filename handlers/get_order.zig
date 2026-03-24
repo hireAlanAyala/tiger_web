@@ -3,7 +3,7 @@ const t = @import("../prelude.zig");
 
 pub const Prefetch = struct { order: ?t.OrderRow };
 
-pub const Context = t.HandlerContext(Prefetch, t.Operation.EventType(.get_order), t.Identity);
+pub const Context = t.HandlerContext(Prefetch, t.Operation.EventType(.get_order), t.Identity, t.Status);
 
 // [route] .get_order
 pub fn route(method: t.http.Method, raw_path: []const u8, body: []const u8) ?t.Message {
@@ -33,8 +33,7 @@ pub fn handle(ctx: Context) t.ExecuteResult {
 
 
 // [render] .get_order
-pub fn render(ctx: Context) t.RenderResult {
-    _ = ctx.prefetched.order orelse
-        return ctx.render(.{ .{ "patch", "#content", "Order not found", "inner" } });
-    return ctx.render(.{}); // TODO: render order detail
+pub fn render(ctx: Context) []const u8 {
+    _ = ctx.prefetched.order orelse return "<div class=\"error\">Order not found</div>";
+    return ""; // TODO: render order detail
 }

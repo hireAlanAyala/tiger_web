@@ -7,7 +7,7 @@ pub const Prefetch = struct {
     target: ?t.ProductRow,
 };
 
-pub const Context = t.HandlerContext(Prefetch, t.Operation.EventType(.transfer_inventory), t.Identity);
+pub const Context = t.HandlerContext(Prefetch, t.Operation.EventType(.transfer_inventory), t.Identity, t.Status);
 
 // [route] .transfer_inventory
 pub fn route(method: t.http.Method, raw_path: []const u8, body: []const u8) ?t.Message {
@@ -71,4 +71,4 @@ pub fn handle(ctx: Context) t.ExecuteResult {
 }
 
 // [render] .transfer_inventory
-pub fn render(ctx: Context) t.RenderResult { return ctx.render(.{}); }
+pub fn render(ctx: Context) []const u8 { _ = ctx; return ""; }

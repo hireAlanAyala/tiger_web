@@ -5,7 +5,7 @@ pub const Prefetch = struct {
     existing: ?t.ProductRow,
 };
 
-pub const Context = t.HandlerContext(Prefetch, t.Operation.EventType(.update_product), t.Identity);
+pub const Context = t.HandlerContext(Prefetch, t.Operation.EventType(.update_product), t.Identity, t.Status);
 
 // [route] .update_product
 pub fn route(method: t.http.Method, raw_path: []const u8, body: []const u8) ?t.Message {
@@ -56,7 +56,7 @@ pub fn handle(ctx: Context) t.ExecuteResult {
 }
 
 // [render] .update_product
-pub fn render(ctx: Context) t.RenderResult { return ctx.render(.{}); }
+pub fn render(ctx: Context) []const u8 { _ = ctx; return ""; }
 
 fn parse_update_json(body: []const u8, path_id: u128) ?t.Product {
     var p = std.mem.zeroes(t.Product);

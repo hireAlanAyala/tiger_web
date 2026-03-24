@@ -4,7 +4,7 @@ const message = @import("../message.zig");
 
 pub const Prefetch = struct {};
 
-pub const Context = t.HandlerContext(Prefetch, t.Operation.EventType(.verify_login_code), t.Identity);
+pub const Context = t.HandlerContext(Prefetch, t.Operation.EventType(.verify_login_code), t.Identity, t.Status);
 
 // [route] .verify_login_code
 pub fn route(method: t.http.Method, raw_path: []const u8, body: []const u8) ?t.Message {
@@ -40,8 +40,7 @@ pub fn handle(ctx: Context) t.ExecuteResult {
 }
 
 // [render] .verify_login_code
-pub fn render(ctx: Context) t.RenderResult {
-    return ctx.render(.{
-        .{ "script", "window.location.href='/'" },
-    });
+pub fn render(ctx: Context) []const u8 {
+    _ = ctx;
+    return "<script>window.location.href='/'</script>";
 }

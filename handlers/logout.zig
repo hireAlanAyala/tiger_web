@@ -3,7 +3,7 @@ const t = @import("../prelude.zig");
 
 pub const Prefetch = struct {};
 
-pub const Context = t.HandlerContext(Prefetch, t.Operation.EventType(.logout), t.Identity);
+pub const Context = t.HandlerContext(Prefetch, t.Operation.EventType(.logout), t.Identity, t.Status);
 
 // [route] .logout
 pub fn route(method: t.http.Method, raw_path: []const u8, body: []const u8) ?t.Message {
@@ -28,8 +28,7 @@ pub fn handle(ctx: Context) t.ExecuteResult {
 
 
 // [render] .logout
-pub fn render(ctx: Context) t.RenderResult {
-    return ctx.render(.{
-        .{ "script", "window.location.href='/login'" },
-    });
+pub fn render(ctx: Context) []const u8 {
+    _ = ctx;
+    return "<script>window.location.href='/login'</script>";
 }

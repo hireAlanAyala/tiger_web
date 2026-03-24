@@ -3,7 +3,7 @@ const t = @import("../prelude.zig");
 
 pub const Prefetch = struct {};
 
-pub const Context = t.HandlerContext(Prefetch, t.Operation.EventType(.page_load_login), t.Identity);
+pub const Context = t.HandlerContext(Prefetch, t.Operation.EventType(.page_load_login), t.Identity, t.Status);
 
 // [route] .page_load_login
 pub fn route(method: t.http.Method, raw_path: []const u8, body: []const u8) ?t.Message {
@@ -28,8 +28,7 @@ pub fn handle(ctx: Context) t.ExecuteResult {
 
 
 // [render] .page_load_login
-pub fn render(ctx: Context) t.RenderResult {
-    return ctx.render(.{
-        .{ "patch", "#content", "<form><input name=\"email\" placeholder=\"Email\"/><button>Send Login Code</button></form>", "inner" },
-    });
+pub fn render(ctx: Context) []const u8 {
+    _ = ctx;
+    return "<form id=\"login-box\"><input name=\"email\" placeholder=\"Email\"/><button>Send Login Code</button></form>";
 }
