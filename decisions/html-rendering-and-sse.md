@@ -1,5 +1,11 @@
 # Design 001: HTML Rendering and SSE
 
+> **Partially superseded** by Design 009 (handler-owns-response.md).
+> The decision to render HTML server-side and use Datastar SSE still holds.
+> The render implementation changed: the framework's `render.zig` was replaced
+> by handler-owned render functions that return `[]const u8`.
+> See also Design 008 (render-db-access.md) for post-mutation queries in render.
+
 ## Problem
 
 Tiger_web is an ecommerce server that must serve customers and be admin-manageable.

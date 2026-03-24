@@ -336,7 +336,10 @@ fn render_one(
         .status = status,
     };
 
-    // Detect at comptime whether the handler's render takes (ctx, db) or just (ctx).
+    // Render gets read-only db access for post-mutation queries.
+    // Most handlers use render(ctx) — only handlers with side-effect data
+    // (e.g. complete_order needing post-commit inventory) use render(ctx, db).
+    // See decisions/render-db-access.md for the full reasoning.
     const render_fn_info = @typeInfo(@TypeOf(H.render)).@"fn";
     if (render_fn_info.params.len >= 2) {
         return H.render(ctx, storage);

@@ -29,17 +29,18 @@ pub fn FrameworkCtx(comptime Identity: type) type {
 
 /// Generate a per-operation context type.
 ///
-/// Handlers receive this as their single parameter in handle and render.
-/// The framework assembles it from prefetched data, the typed request body,
-/// and the framework context (identity, timestamp, request metadata).
+/// Handlers receive this in handle and render. The framework assembles it
+/// from prefetched data, the typed request body, status, and framework
+/// context (identity, timestamp, request metadata).
 ///
-/// Usage (inside App comptime):
-///   const Ctx = HandlerContext(GetProductPrefetch, void, PrefetchIdentity);
-///   // Ctx has: .prefetched, .fw (identity, now, is_sse)
-///   // .body is omitted when EventType is void (read-only operations)
+/// Render may also receive a read-only db handle as a second parameter
+/// for post-mutation queries. See decisions/render-db-access.md.
 ///
-///   const Ctx = HandlerContext(CreateProductPrefetch, Product, PrefetchIdentity);
-///   // Ctx has: .prefetched, .body, .fw (identity, now, is_sse)
+/// Usage (in handler):
+///   pub const Context = HandlerContext(Prefetch, Body, Identity, Status);
+///   pub fn handle(ctx: Context) ExecuteResult { ... }
+///   pub fn render(ctx: Context) []const u8 { ... }
+///   pub fn render(ctx: Context, db: anytype) []const u8 { ... }  // with db
 pub fn HandlerContext(comptime Prefetch: type, comptime Body: type, comptime Identity: type, comptime Status: type) type {
     if (@typeInfo(Prefetch) != .@"struct") {
         @compileError("Prefetch must be a struct, got " ++ @typeName(Prefetch));
@@ -163,7 +164,7 @@ pub fn ValidateHandler(
     // --- Validate render ---
     // render(ctx) or render(ctx, db) — returns []const u8 or a comptime tuple.
     // First param must be the Context type. Second param (if present) is the
-    // read-only db handle (anytype). Return type validated in Step 4.
+    // read-only db handle (anytype). See decisions/handler-owns-response.md.
     if (!@hasDecl(handler, "render")) {
         @compileError("handler for ." ++ op_name ++ " must export a render function");
     }
