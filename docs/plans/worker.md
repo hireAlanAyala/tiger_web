@@ -9,106 +9,86 @@ pipeline without async, await, promises, or callbacks.
 
 **The tick model eliminates async/await.**
 
-Three sources of "not ready yet" in the framework:
+The developer queues declarations. The framework resolves them across
+ticks and calls the next phase when everything is ready. The developer
+never sees pending state, never returns null, never manages retries.
 
-- Storage busy → prefetch returns null, retry next tick
-- Worker pending → prefetch returns null, retry next tick
-- Post-commit side effect → fires after client has response
+## Worker in prefetch — declare what you need
 
-Same mechanism for all three. The developer writes sequential code
-with null checks. The framework retries. The single-threaded event
-loop does the scheduling.
-
-## Worker in prefetch — external data needed before handle
-
-The most common case: prefetch needs data from an external API
-before handle can make a decision.
+`worker.fetch` is the same pattern as `db.query` — a queued declaration.
+The framework resolves all of them before calling handle.
 
 ```ts
-export function prefetchGetProfile(db, worker, msg) {
-    // worker.fetch — starts async request, returns null until response arrives
-    const externalUser = worker.fetch("https://api.auth0.com/users/" + msg.id);
-    if (!externalUser) return null; // not ready — framework retries next tick
-
-    // Only runs once externalUser is resolved
-    const profile = db.query("SELECT * FROM profiles WHERE external_id = :id", externalUser);
-    return { profile };
+// [prefetch] .get_profile
+export function prefetch(db, worker, msg) {
+    db.query("local_user", "SELECT * FROM users WHERE id = :id", msg);
+    worker.fetch("auth_profile", "https://api.auth0.com/users/" + msg.id);
 }
+// handle gets ctx.data.local_user and ctx.data.auth_profile
 ```
 
 What happens per tick:
 
 ```
-Tick 1:  worker.fetch starts request → returns null
-         prefetch returns null → framework skips, processes other connections
+Tick 1:  framework runs prefetch
+         db.query("local_user") → immediate, resolved
+         worker.fetch("auth_profile") → starts request, pending
+         framework sees pending → skips, processes other connections
 
-Tick 2:  worker.fetch checks cache → still pending, returns null
-         prefetch returns null → skip
+Tick 2:  worker.fetch("auth_profile") → checks cache, still pending → skip
 
-Tick N:  worker.fetch checks cache → response arrived, returns data
-         db.query runs with resolved data → returns profile
-         prefetch returns { profile } → handle runs immediately
+Tick N:  worker.fetch("auth_profile") → response arrived, resolved
+         all resolved → populates ctx.data → handle runs
 ```
 
-The function runs multiple times. It reads like synchronous code.
-`worker.fetch` caches per-connection — the external request fires once,
-not every tick. Local db queries re-execute each tick (fast — prepared
-statements, in-memory).
+The developer wrote two declarations. The framework handled resolution,
+retry, and aggregation. No null checks. No return value.
 
-## Worker in prefetch — mixing local and external sources
+## Mixing local and external sources
 
 ```ts
-export function prefetchVendorRedirect(db, worker, msg) {
-    // Immediate — local database
-    const vendor = db.query("SELECT * FROM vendors WHERE slug = :slug", msg);
+// [prefetch] .vendor_redirect
+export function prefetch(db, worker, msg) {
+    db.query("vendor", "SELECT * FROM vendors WHERE slug = :slug", msg);
+    db.query_all("pages", "SELECT * FROM vendor_pages");
+    worker.fetch("entitlements", "https://api.esm.com/entitlements");
+}
+// handle gets ctx.data.vendor, ctx.data.pages, ctx.data.entitlements
+```
 
-    // Non-blocking — external API, returns null until ready
-    const entitlements = worker.fetch("https://api.esm.com/entitlements", {
-        headers: { Authorization: `Bearer ${msg.identity.token}` }
-    });
-    if (!entitlements) return null;
+`db.query` is immediate (local database). `worker.fetch` is async
+(external API). The developer doesn't distinguish between them.
+The framework resolves everything before calling handle.
 
-    // Immediate — local database, only runs after entitlements resolve
-    const pages = db.query_all("SELECT * FROM vendor_pages WHERE vendor = :vendor", vendor);
-    return { vendor, entitlements, pages };
+## Multiple external calls
+
+```ts
+// [prefetch] .dashboard
+export function prefetch(db, worker, msg) {
+    db.query_all("products", "SELECT * FROM products WHERE active = 1");
+    worker.fetch("weather", "https://api.weather.com/current");
+    worker.fetch("exchange", "https://api.forex.com/rates/usd");
 }
 ```
 
-Local and external sources mix naturally. The developer doesn't
-distinguish between them except for the null check. The framework
-handles the retry.
+Both fetches start on tick 1. They resolve independently. The
+framework calls handle when all three are ready. No sequential
+waiting — both are in-flight concurrently.
 
-## Worker in prefetch — multiple external calls
-
-```ts
-export function prefetchDashboard(db, worker, msg) {
-    const weather = worker.fetch("https://api.weather.com/current");
-    const exchange = worker.fetch("https://api.forex.com/rates/usd");
-    if (!weather || !exchange) return null; // both must resolve
-
-    const products = db.query_all("SELECT * FROM products WHERE active = 1");
-    return { weather, exchange, products };
-}
-```
-
-Both fetches start on tick 1. They resolve independently. Prefetch
-retries until both are cached. No sequential waiting — both are
-in-flight concurrently.
-
-## Worker after commit — fire-and-forget external calls
+## Worker after commit — fire-and-forget
 
 When an external API needs to be called after a mutation commits
 (payment processing, notifications, webhooks), use `db.after_commit`:
 
 ```ts
-export function handleCompleteOrder(ctx, db) {
+// [handle] .complete_order
+export function handle(ctx, db) {
     if (!ctx.data.order) return "not_found";
     db.execute(
         "UPDATE orders SET status = 'confirmed', payment_status = 'pending' WHERE id = :id",
         ctx.data.order
     );
 
-    // Fires AFTER commit, non-blocking. Client gets response immediately.
     db.after_commit(() => {
         worker.post("https://api.stripe.com/charges", {
             body: { order_id: ctx.data.order.id, amount: ctx.data.order.total }
@@ -138,18 +118,19 @@ The client never waits for Stripe.
 
 ### Worker fails in prefetch
 
-`worker.fetch` returns null until the response arrives. If the
-external API times out or errors, `worker.fetch` returns an error
-value (not null). The developer handles it:
+If the external API times out or errors, the framework populates
+`ctx.data` with an error value for that key. Handle decides what
+to do:
 
 ```ts
-const externalUser = worker.fetch("https://api.auth0.com/users/" + msg.id);
-if (!externalUser) return null;           // still pending — retry
-if (externalUser.error) return { ... };   // failed — handle can decide
+export function handle(ctx, db) {
+    if (ctx.data.auth_profile.error) return "service_unavailable";
+    // ... normal logic ...
+}
 ```
 
-Prefetch doesn't hang. The connection times out if the external API
-never responds (same as any connection timeout).
+The connection times out if the external API never responds
+(same as any connection timeout in the framework).
 
 ### Worker fails after commit
 
@@ -172,19 +153,52 @@ worker handles its own retries.
 Await blocks the current execution context until the promise resolves.
 In a single-threaded server, that blocks everything.
 
-The tick model replaces await with retry:
+The declaration model replaces await entirely:
 
-| Traditional            | Tick model                    |
-|------------------------|-------------------------------|
-| `await fetch(...)`     | `worker.fetch(...)` + null check |
-| Promise.all([a, b])    | Multiple fetches + `if (!a \|\| !b) return null` |
-| try/catch on await     | Check `.error` on resolved value |
-| async/await chains     | Sequential code, null returns |
+| Traditional            | Declaration model                    |
+|------------------------|--------------------------------------|
+| `await fetch(...)`     | `worker.fetch("key", url)`           |
+| Promise.all([a, b])    | Two `worker.fetch` declarations      |
+| try/catch on await     | Check `ctx.data.key.error` in handle |
+| async/await chains     | Declarations, framework resolves     |
+| return null + retry    | Not needed — framework handles retry |
 
-The developer writes the same logic. The scheduling is different.
-Instead of suspending one request, the framework processes other
-requests and comes back. No coroutines, no event emitters, no
-promise chains.
+The developer declares what data they need. The framework fetches it.
+No scheduling logic in user code.
+
+## No chaining in prefetch
+
+All prefetch declarations are independent. You can't use one result
+as input to another query. If external data is needed for a local
+query (e.g. external user ID → local profile lookup), sync the
+external data to your database via a worker job:
+
+```ts
+// Worker job syncs auth0 profiles to local db every 5 minutes
+// [prefetch] .sync_auth_profiles
+export function prefetch(db, worker, msg) {
+    worker.fetch("users", "https://api.auth0.com/users");
+}
+
+// [handle] .sync_auth_profiles
+export function handle(ctx, db) {
+    for (const user of ctx.data.users) {
+        db.execute("INSERT OR REPLACE INTO user_cache VALUES (:id, :ext_id)", user);
+    }
+    return "ok";
+}
+```
+
+Then other handlers query the local cache:
+
+```ts
+// [prefetch] .get_profile
+export function prefetch(db, msg) {
+    db.query("user", "SELECT * FROM user_cache WHERE id = :id", msg);
+}
+```
+
+Prefetch stays simple — declarations only, no dependencies.
 
 ## Current state
 
