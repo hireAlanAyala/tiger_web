@@ -57,13 +57,12 @@ The `// match` annotation declares:
 - HTTP method (GET, POST, PUT, DELETE)
 - URL pattern with named params (`:id`, `:slug`)
 
-The scanner reads the pattern and generates routing dispatch. The
-route function receives pre-matched params. Manual URL parsing
-(`split_path`, regex) is replaced by the pattern declaration.
+The scanner reads the pattern and validates routes. `translate()`
+uses route_method/route_pattern (comptime-asserted on every handler)
+to fast-skip non-matching handlers before calling route().
 
 For handlers that need complex matching (query params, conditional
-logic), the route function can still do custom parsing — the match
-annotation is optional sugar.
+logic), the route function adds extra checks after `match_route()`.
 
 ## handle — decide + queue writes
 

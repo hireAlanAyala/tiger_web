@@ -125,49 +125,6 @@ pub fn parse_query_u32(s: []const u8) u32 {
 }
 
 // =====================================================================
-// REST path parsing
-// =====================================================================
-
-pub const PathSegments = struct {
-    collection: []const u8,
-    id: u128,
-    has_id: bool,
-    sub_resource: []const u8,
-    sub_id: u128,
-    has_sub_id: bool,
-};
-
-/// Split a REST path into up to 4 segments: /resource/:id/sub/:sub_id
-/// Returns null if any UUID segment is present but fails to parse.
-pub fn split_path(path: []const u8) ?PathSegments {
-    const s1 = std.mem.indexOf(u8, path, "/");
-    const collection = if (s1) |s| path[0..s] else path;
-    const rest1 = if (s1) |s| path[s + 1 ..] else "";
-
-    const s2 = if (rest1.len > 0) std.mem.indexOf(u8, rest1, "/") else null;
-    const id_str = if (s2) |s| rest1[0..s] else rest1;
-    const rest2 = if (s2) |s| rest1[s + 1 ..] else "";
-
-    const s3 = if (rest2.len > 0) std.mem.indexOf(u8, rest2, "/") else null;
-    const sub_resource = if (s3) |s| rest2[0..s] else rest2;
-    const rest3 = if (s3) |s| rest2[s + 1 ..] else "";
-
-    const sub_id_str = rest3;
-
-    const id: u128 = if (id_str.len > 0) stdx.parse_uuid(id_str) orelse return null else 0;
-    const sub_id: u128 = if (sub_id_str.len > 0) stdx.parse_uuid(sub_id_str) orelse return null else 0;
-
-    return .{
-        .collection = collection,
-        .id = id,
-        .has_id = id_str.len > 0,
-        .sub_resource = sub_resource,
-        .sub_id = sub_id,
-        .has_sub_id = sub_id_str.len > 0,
-    };
-}
-
-// =====================================================================
 // Route pattern matching
 // =====================================================================
 
@@ -305,18 +262,6 @@ test "query_param extracts values" {
     try std.testing.expectEqualSlices(u8, query_param("foo=bar&baz=qux", "foo").?, "bar");
     try std.testing.expectEqualSlices(u8, query_param("foo=bar&baz=qux", "baz").?, "qux");
     try std.testing.expect(query_param("foo=bar", "missing") == null);
-}
-
-test "split_path parses REST segments" {
-    const seg = split_path("products").?;
-    try std.testing.expectEqualSlices(u8, seg.collection, "products");
-    try std.testing.expect(!seg.has_id);
-
-    const seg2 = split_path("products/00000000000000000000000000000001").?;
-    try std.testing.expectEqual(seg2.id, 1);
-    try std.testing.expect(seg2.has_id);
-
-    try std.testing.expect(split_path("products/invalid") == null);
 }
 
 // --- match_route tests ---
