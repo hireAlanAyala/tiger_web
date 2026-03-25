@@ -1,5 +1,5 @@
 import type { RouteRequest, RouteResult, PrefetchMessage, PrefetchQuery, HandleContext, WriteDb, RenderContext } from "tiger-web";
-import { esc } from "tiger-web";
+// No imports needed from tiger-web beyond types.
 
 // [route] .cancel_order
 // match POST /orders/:id/cancel
@@ -32,6 +32,5 @@ export function render(ctx: RenderContext): string {
     case "ok": return "<div>Cancelled</div>";
     case "not_found": return '<div class="error">Order not found</div>';
     case "order_not_pending": return '<div class="error">Order is not pending</div>';
-    default: return `<div class="error">${esc(ctx.status)}</div>`;
   }
 }

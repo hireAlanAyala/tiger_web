@@ -157,111 +157,10 @@ pub const SidecarClient = struct {
         return msg;
     }
 
-    /// Execute via the sidecar: prefetch SQL → handle → render.
-    /// Called after Zig-native prefetch. Sends the execute request,
-    /// receives prefetch queries, executes them against storage,
-    /// sends results back, receives status + writes + html.
-    ///
-    /// Returns the status, writes array, and HTML slice.
-    pub fn execute_render(
-        self: *SidecarClient,
-        operation: message.Operation,
-        id: u128,
-        body: *const [message.body_max]u8,
-        storage: anytype,
-        is_sse: bool,
-        result: *ExecuteRenderResult,
-    ) bool {
-        if (self.fd == -1) self.try_reconnect();
-        if (self.fd == -1) return false;
-
-        // Send execute request.
-        var fbs = std.io.fixedBufferStream(self.send_slice());
-        const w = fbs.writer();
-        w.print("{{\"tag\":\"execute\",\"operation\":\"{s}\",\"id\":\"{x:0>32}\",\"body\":", .{ @tagName(operation), id }) catch return false;
-        // Write body as JSON object from the raw bytes (which contain JSON from route).
-        const body_len = std.mem.indexOf(u8, body, &[_]u8{0}) orelse message.body_max;
-        if (body_len > 0 and body[0] == '{') {
-            w.writeAll(body[0..body_len]) catch return false;
-        } else {
-            w.writeAll("{}") catch return false;
-        }
-        w.print(",\"is_sse\":{}}}", .{is_sse}) catch return false;
-
-        if (!protocol.write_frame(self.fd, fbs.getWritten())) {
-            self.handle_disconnect();
-            return false;
-        }
-
-        // Receive prefetch queries from sidecar.
-        const queries_json = protocol.read_frame(self.fd, self.recv_slice()) orelse {
-            self.handle_disconnect();
-            return false;
-        };
-
-        // Execute prefetch queries against storage and build results JSON.
-        var rfbs = std.io.fixedBufferStream(self.send_slice());
-        const rw = rfbs.writer();
-        rw.writeAll("{\"tag\":\"prefetch_results\",\"results\":{") catch return false;
-
-        // Parse and execute each query from the prefetch_queries response.
-        // The queries are in: {"tag":"prefetch_queries","queries":{...}}
-        if (extractJsonValue(queries_json, "queries")) |queries_obj| {
-            var first = true;
-            var iter = JsonObjectIterator.init(queries_obj);
-            while (iter.next()) |entry| {
-                if (!first) rw.writeAll(",") catch return false;
-                first = false;
-                rw.writeAll("\"") catch return false;
-                rw.writeAll(entry.key) catch return false;
-                rw.writeAll("\":") catch return false;
-
-                // Execute the SQL query against storage.
-                const sql = extractJsonString(entry.value, "sql") orelse continue;
-                const mode = extractJsonString(entry.value, "mode") orelse "one";
-                const params_json = extractJsonValue(entry.value, "params") orelse "[]";
-
-                if (std.mem.eql(u8, mode, "all")) {
-                    // query_all → JSON array of row objects.
-                    const rows_json = storage.query_json_all(sql, params_json);
-                    rw.writeAll(rows_json) catch return false;
-                } else {
-                    // query → single row object or null.
-                    const row_json = storage.query_json(sql, params_json);
-                    rw.writeAll(row_json) catch return false;
-                }
-            }
-        }
-        rw.writeAll("}}") catch return false;
-
-        // Send prefetch results.
-        if (!protocol.write_frame(self.fd, rfbs.getWritten())) {
-            self.handle_disconnect();
-            return false;
-        }
-
-        // Receive handle+render result.
-        const result_json = protocol.read_frame(self.fd, self.recv_slice()) orelse {
-            self.handle_disconnect();
-            return false;
-        };
-
-        // Parse result: {tag:"result", status:"ok", writes:[...], html:"..."}
-        // Validate at the boundary — sidecar is untrusted.
-        const status_str = extractJsonString(result_json, "status") orelse {
-            log.err("{s}: handle returned no status field", .{@tagName(operation)});
-            self.handle_disconnect();
-            return false;
-        };
-        result.status = message.Status.from_string(status_str) orelse {
-            log.err("{s}: handle returned unknown status '{s}'", .{ @tagName(operation), status_str });
-            self.handle_disconnect();
-            return false;
-        };
-        result.html = extractJsonString(result_json, "html") orelse "";
-        result.writes_json = extractJsonValue(result_json, "writes") orelse "[]";
-
-        return true;
+    /// Execute via the sidecar: prefetch → handle → render.
+    /// Pending binary protocol rebuild — see docs/plans/sidecar-protocol.md.
+    pub fn execute_render() void {
+        @compileError("sidecar execute_render pending binary protocol rebuild");
     }
 
     fn handle_disconnect(self: *SidecarClient) void {
@@ -279,14 +178,8 @@ pub const SidecarClient = struct {
     }
 };
 
-/// Result of an execute_render call.
-/// Status is validated at the boundary (parsed from JSON string to enum).
-/// html and writes_json alias recv_buf — consume before next read_frame call.
-pub const ExecuteRenderResult = struct {
-    status: message.Status = .ok,
-    html: []const u8 = "",
-    writes_json: []const u8 = "[]",
-};
+// ExecuteRenderResult removed — pending binary protocol rebuild.
+// See docs/plans/sidecar-protocol.md.
 
 // =====================================================================
 // JSON helpers — minimal, no allocator. Parse from recv_buf slices.
@@ -397,89 +290,7 @@ fn findMatchingBrace(s: []const u8, open: u8, close_char: u8) ?[]const u8 {
     return null;
 }
 
-/// Simple iterator over top-level keys of a JSON object.
-const JsonObjectIterator = struct {
-    json: []const u8,
-    pos: usize,
-
-    const Entry = struct {
-        key: []const u8,
-        value: []const u8,
-    };
-
-    fn init(json: []const u8) JsonObjectIterator {
-        // Skip opening brace.
-        var pos: usize = 0;
-        while (pos < json.len and json[pos] != '{') pos += 1;
-        if (pos < json.len) pos += 1;
-        return .{ .json = json, .pos = pos };
-    }
-
-    fn next(self: *JsonObjectIterator) ?Entry {
-        // Skip whitespace and commas.
-        while (self.pos < self.json.len and
-            (self.json[self.pos] == ' ' or self.json[self.pos] == ',' or
-            self.json[self.pos] == '\n' or self.json[self.pos] == '\t'))
-        {
-            self.pos += 1;
-        }
-
-        if (self.pos >= self.json.len or self.json[self.pos] == '}') return null;
-
-        // Expect a quoted key (skip escaped quotes).
-        if (self.json[self.pos] != '"') return null;
-        self.pos += 1;
-        const key_start = self.pos;
-        while (self.pos < self.json.len) : (self.pos += 1) {
-            if (self.json[self.pos] == '\\') {
-                self.pos += 1; // skip escaped char
-                continue;
-            }
-            if (self.json[self.pos] == '"') break;
-        }
-        const key = self.json[key_start..self.pos];
-        self.pos += 1; // closing quote
-
-        // Skip colon.
-        while (self.pos < self.json.len and self.json[self.pos] != ':') self.pos += 1;
-        self.pos += 1;
-
-        // Skip whitespace.
-        while (self.pos < self.json.len and self.json[self.pos] == ' ') self.pos += 1;
-
-        // Extract value.
-        const c = self.json[self.pos];
-        if (c == '{') {
-            const obj = findMatchingBrace(self.json[self.pos..], '{', '}') orelse return null;
-            self.pos += obj.len;
-            return .{ .key = key, .value = obj };
-        } else if (c == '[') {
-            const arr = findMatchingBrace(self.json[self.pos..], '[', ']') orelse return null;
-            self.pos += arr.len;
-            return .{ .key = key, .value = arr };
-        } else if (c == '"') {
-            // String value — include quotes.
-            const start = self.pos;
-            self.pos += 1;
-            while (self.pos < self.json.len) : (self.pos += 1) {
-                if (self.json[self.pos] == '\\') {
-                    self.pos += 1;
-                    continue;
-                }
-                if (self.json[self.pos] == '"') {
-                    self.pos += 1;
-                    return .{ .key = key, .value = self.json[start..self.pos] };
-                }
-            }
-            return null;
-        } else {
-            // Number, bool, null.
-            const start = self.pos;
-            while (self.pos < self.json.len and self.json[self.pos] != ',' and self.json[self.pos] != '}') self.pos += 1;
-            return .{ .key = key, .value = self.json[start..self.pos] };
-        }
-    }
-};
+// JsonObjectIterator removed — was only used by deleted execute_render.
 
 fn parseHexUuid(s: []const u8) ?u128 {
     if (s.len != 32) return null;
@@ -513,20 +324,6 @@ test "extractJsonValue" {
     try std.testing.expectEqualStrings("42", extractJsonValue(json, "count").?);
     try std.testing.expectEqualStrings("[1,2,3]", extractJsonValue(json, "items").?);
     try std.testing.expectEqualStrings("{\"a\":1}", extractJsonValue(json, "obj").?);
-}
-
-test "JsonObjectIterator" {
-    const json = "{\"product\":{\"sql\":\"SELECT\",\"mode\":\"one\"},\"order\":{\"sql\":\"SELECT2\"}}";
-    var iter = JsonObjectIterator.init(json);
-
-    const e1 = iter.next().?;
-    try std.testing.expectEqualStrings("product", e1.key);
-    try std.testing.expect(std.mem.indexOf(u8, e1.value, "SELECT") != null);
-
-    const e2 = iter.next().?;
-    try std.testing.expectEqualStrings("order", e2.key);
-
-    try std.testing.expect(iter.next() == null);
 }
 
 test "parseHexUuid" {
@@ -576,12 +373,4 @@ test "extractJsonValue nested key collision" {
     try std.testing.expectEqualStrings("2", b_val.?);
 }
 
-test "JsonObjectIterator with commas in string values" {
-    const json = "{\"k\":\"a,b}\"}";
-    var iter = JsonObjectIterator.init(json);
-    const e = iter.next();
-    try std.testing.expect(e != null);
-    try std.testing.expectEqualStrings("k", e.?.key);
-    try std.testing.expectEqualStrings("\"a,b}\"", e.?.value);
-    try std.testing.expect(iter.next() == null);
-}
+// JsonObjectIterator tests removed — iterator deleted.

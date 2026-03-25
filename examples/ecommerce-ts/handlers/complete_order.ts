@@ -46,6 +46,5 @@ export function render(ctx: RenderContext): string {
     }
     case "not_found": return '<div class="error">Order not found</div>';
     case "order_not_pending": return '<div class="error">Order is not pending</div>';
-    default: return `<div class="error">${esc(ctx.status)}</div>`;
   }
 }

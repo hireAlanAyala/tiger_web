@@ -71,6 +71,5 @@ export function render(ctx: RenderContext): string {
     case "ok": return "<div>Order created</div>";
     case "not_found": return '<div class="error">Product not found</div>';
     case "insufficient_inventory": return '<div class="error">Insufficient inventory</div>';
-    default: return `<div class="error">${ctx.status}</div>`;
   }
 }

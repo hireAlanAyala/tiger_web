@@ -32,6 +32,5 @@ export function render(ctx: RenderContext): string {
       return `<div>Order ${esc(o.id)} &mdash; ${o.status} &mdash; ${price(o.total_cents)}</div>`;
     }
     case "not_found": return '<div class="error">Order not found</div>';
-    default: return `<div class="error">${esc(ctx.status)}</div>`;
   }
 }

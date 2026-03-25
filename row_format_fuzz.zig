@@ -80,10 +80,14 @@ fn fuzz_valid_row_set(prng: *PRNG, stats: *Stats) void {
 
     const col_count = prng.range_inclusive(u16, 1, 8);
     var columns: [protocol.columns_max]protocol.Column = undefined;
-    var col_names: [protocol.columns_max][16]u8 = undefined;
+    var col_names: [protocol.columns_max][protocol.column_name_max]u8 = undefined;
 
     for (0..col_count) |i| {
-        const name_len = prng.range_inclusive(usize, 1, 15);
+        // Occasionally test max-length names.
+        const name_len = if (prng.chance(.{ .numerator = 1, .denominator = 20 }))
+            protocol.column_name_max
+        else
+            prng.range_inclusive(usize, 1, @min(31, protocol.column_name_max));
         for (0..name_len) |j| {
             col_names[i][j] = prng.range_inclusive(u8, 'a', 'z');
         }
@@ -96,14 +100,18 @@ fn fuzz_valid_row_set(prng: *PRNG, stats: *Stats) void {
     const row_count = prng.range_inclusive(u32, 0, 10);
 
     // Generate random values for each cell.
-    const max_cells = 10 * protocol.columns_max;
+    // Max 10 rows x 8 columns = 80 cells. Backing uses 256 bytes per cell
+    // (not cell_value_max) to keep stack reasonable. Max-size values are
+    // tested by fuzz_single_value instead.
+    const max_cells = 10 * 8;
+    const cell_backing = 256;
     var values: [max_cells]protocol.Value = undefined;
-    var value_backing: [max_cells][64]u8 = undefined;
+    var value_backing: [max_cells][cell_backing]u8 = undefined;
 
     for (0..row_count) |r| {
         for (0..col_count) |c| {
             const idx = r * col_count + c;
-            values[idx] = random_value(prng, columns[c].type_tag, &value_backing[idx]);
+            values[idx] = random_value_bounded(prng, columns[c].type_tag, &value_backing[idx]);
         }
     }
 
@@ -174,10 +182,11 @@ fn fuzz_single_value(prng: *PRNG, stats: *Stats) void {
     stats.single_values += 1;
 
     const tag = random_type_tag(prng);
-    var backing: [64]u8 = undefined;
-    const value = random_value(prng, tag, &backing);
+    var backing: [protocol.cell_value_max]u8 = undefined;
+    const value = random_value_bounded(prng, tag, &backing);
 
-    var buf: [4096]u8 = undefined;
+    // Worst case: cell_value_max text/blob + 2 byte length prefix.
+    var buf: [protocol.cell_value_max + 8]u8 = undefined;
     const pos = protocol.write_value(&buf, 0, value) orelse unreachable;
     const result = protocol.read_value(&buf, 0, tag) orelse unreachable;
     assert(result.pos == pos);
@@ -219,18 +228,22 @@ fn fuzz_max_columns(prng: *PRNG, stats: *Stats) void {
 fn fuzz_corrupt_read(prng: *PRNG, stats: *Stats) void {
     stats.corrupt_reads += 1;
 
-    var buf: [256]u8 = undefined;
-    prng.fill(&buf);
+    // Occasionally use a larger buffer to exercise max-boundary checks.
+    var small_buf: [256]u8 = undefined;
+    var large_buf: [8192]u8 = undefined;
+    const use_large = prng.chance(.{ .numerator = 1, .denominator = 5 });
+    const buf: []u8 = if (use_large) &large_buf else &small_buf;
+    prng.fill(buf);
 
     // Try to read as header — must return null or a valid result, never crash.
-    if (protocol.read_row_set_header(&buf, 0)) |hdr| {
+    if (protocol.read_row_set_header(buf, 0)) |hdr| {
         // If it parsed, try reading values with the claimed column types.
-        if (protocol.read_row_count(&buf, hdr.pos)) |rc| {
+        if (protocol.read_row_count(buf, hdr.pos)) |rc| {
             var rpos = rc.pos;
             var valid = true;
             for (0..@min(rc.count, 3)) |_| {
                 for (0..hdr.count) |c| {
-                    if (protocol.read_value(&buf, rpos, hdr.columns[c].type_tag)) |result| {
+                    if (protocol.read_value(buf, rpos, hdr.columns[c].type_tag)) |result| {
                         rpos = result.pos;
                     } else {
                         valid = false;
@@ -247,7 +260,7 @@ fn fuzz_corrupt_read(prng: *PRNG, stats: *Stats) void {
     // Also try reading random type tags.
     const tag_byte = prng.range_inclusive(u8, 0, 0xFF);
     if (std.meta.intToEnum(protocol.TypeTag, tag_byte)) |tag| {
-        _ = protocol.read_value(&buf, 0, tag);
+        _ = protocol.read_value(buf, 0, tag);
     } else |_| {
         stats.corrupt_rejected += 1;
     }
@@ -261,22 +274,25 @@ fn random_type_tag(prng: *PRNG) protocol.TypeTag {
     return prng.enum_uniform(protocol.TypeTag);
 }
 
-fn random_value(prng: *PRNG, tag: protocol.TypeTag, backing: *[64]u8) protocol.Value {
+fn random_value_bounded(prng: *PRNG, tag: protocol.TypeTag, backing: []u8) protocol.Value {
+    const max = @min(backing.len, protocol.cell_value_max);
     return switch (tag) {
         .integer => .{ .integer = @bitCast(prng.int(u64)) },
-        .float => blk: {
-            const raw = prng.int(u32);
-            const signed: i32 = @bitCast(raw);
-            const clamped = @mod(signed, 10000);
-            break :blk .{ .float = @as(f64, @floatFromInt(clamped)) / 100.0 };
-        },
+        .float => .{ .float = @bitCast(prng.int(u64)) },
         .text => blk: {
-            const len = prng.range_inclusive(usize, 0, @min(63, protocol.cell_value_max));
+            // Occasionally test near-max values.
+            const len = if (max > 64 and prng.chance(.{ .numerator = 1, .denominator = 20 }))
+                max
+            else
+                prng.range_inclusive(usize, 0, @min(255, max));
             for (0..len) |i| backing[i] = prng.range_inclusive(u8, 0x20, 0x7e);
             break :blk .{ .text = backing[0..len] };
         },
         .blob => blk: {
-            const len = prng.range_inclusive(usize, 0, @min(63, protocol.cell_value_max));
+            const len = if (max > 64 and prng.chance(.{ .numerator = 1, .denominator = 20 }))
+                max
+            else
+                prng.range_inclusive(usize, 0, @min(255, max));
             prng.fill(backing[0..len]);
             break :blk .{ .blob = backing[0..len] };
         },

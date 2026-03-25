@@ -155,7 +155,7 @@ pub fn write_value(buf: []u8, pos_in: usize, value: Value) ?usize {
         },
         .float => |v| {
             if (pos + 8 > buf.len) return null;
-            @as(*align(1) f64, @ptrCast(buf[pos..][0..8])).*= v;
+            std.mem.writeInt(u64, buf[pos..][0..8], @bitCast(v), .little);
             pos += 8;
         },
         .text => |v| {
@@ -225,7 +225,7 @@ pub fn read_value(buf: []const u8, pos_in: usize, type_tag: TypeTag) ?struct { v
         },
         .float => {
             if (pos + 8 > buf.len) return null;
-            const v = @as(*align(1) const f64, @ptrCast(buf[pos..][0..8])).*;
+            const v: f64 = @bitCast(std.mem.readInt(u64, buf[pos..][0..8], .little));
             pos += 8;
             return .{ .value = .{ .float = v }, .pos = pos };
         },
