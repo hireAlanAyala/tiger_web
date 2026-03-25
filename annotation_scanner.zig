@@ -869,10 +869,15 @@ pub fn main() !void {
         const adapter = find_adapter(ann.file) orelse continue;
         const quote = adapter.sql_quote;
 
+        // Get function body for non-literal SQL detection.
+        const body = SqlStringIterator.init(content, ann.line, quote).body;
+
         switch (ann.phase) {
             .prefetch => {
                 var sql_iter = SqlStringIterator.init(content, ann.line, quote);
+                var found_sql = false;
                 while (sql_iter.next()) |sql| {
+                    found_sql = true;
                     if (!sql_starts_with_select(sql)) {
                         try stderr.print("error: {s}:{d}: [prefetch] .{s} SQL must be SELECT: \"{s}...\"\n", .{
                             ann.file, ann.line, ann.operation, sql_preview(sql),
@@ -880,10 +885,17 @@ pub fn main() !void {
                         errors += 1;
                     }
                 }
+                if (!found_sql and body_references_sql(body, .prefetch)) {
+                    try stderr.print("warning: {s}:{d}: [prefetch] .{s} has SQL reference but no string literal — cannot validate\n", .{
+                        ann.file, ann.line, ann.operation,
+                    });
+                }
             },
             .execute => {
                 var sql_iter = SqlStringIterator.init(content, ann.line, quote);
+                var found_sql = false;
                 while (sql_iter.next()) |sql| {
+                    found_sql = true;
                     if (!sql_starts_with_write(sql)) {
                         try stderr.print("error: {s}:{d}: [handle] .{s} SQL must be INSERT/UPDATE/DELETE: \"{s}...\"\n", .{
                             ann.file, ann.line, ann.operation, sql_preview(sql),
@@ -891,16 +903,28 @@ pub fn main() !void {
                         errors += 1;
                     }
                 }
+                if (!found_sql and body_references_sql(body, .execute)) {
+                    try stderr.print("warning: {s}:{d}: [handle] .{s} has execute() call but no SQL string literal — cannot validate\n", .{
+                        ann.file, ann.line, ann.operation,
+                    });
+                }
             },
             .render => {
                 var sql_iter = SqlStringIterator.init(content, ann.line, quote);
+                var found_sql = false;
                 while (sql_iter.next()) |sql| {
+                    found_sql = true;
                     if (!sql_starts_with_select(sql)) {
                         try stderr.print("error: {s}:{d}: [render] .{s} SQL must be SELECT: \"{s}...\"\n", .{
                             ann.file, ann.line, ann.operation, sql_preview(sql),
                         });
                         errors += 1;
                     }
+                }
+                if (!found_sql and body_references_sql(body, .render)) {
+                    try stderr.print("warning: {s}:{d}: [render] .{s} has SQL reference but no string literal — cannot validate\n", .{
+                        ann.file, ann.line, ann.operation,
+                    });
                 }
             },
             .translate => {}, // Route has no SQL.
@@ -1017,6 +1041,23 @@ fn sql_starts_with_write(sql: []const u8) bool {
     return std.ascii.eqlIgnoreCase(kw, "INSERT") or
         std.ascii.eqlIgnoreCase(kw, "UPDATE") or
         std.ascii.eqlIgnoreCase(kw, "DELETE");
+}
+
+/// Check if a function body references SQL execution without a string literal.
+/// Used to warn when SQL is constructed dynamically (scanner can't validate).
+fn body_references_sql(body: []const u8, phase: Phase) bool {
+    return switch (phase) {
+        .execute => std.mem.indexOf(u8, body, ".execute(") != null or
+            std.mem.indexOf(u8, body, "db.execute(") != null,
+        .prefetch => std.mem.indexOf(u8, body, "sql:") != null or
+            std.mem.indexOf(u8, body, "sql =") != null or
+            std.mem.indexOf(u8, body, "query(") != null or
+            std.mem.indexOf(u8, body, "query_raw(") != null,
+        .render => std.mem.indexOf(u8, body, "sql:") != null or
+            std.mem.indexOf(u8, body, "query(") != null or
+            std.mem.indexOf(u8, body, "query_raw(") != null,
+        .translate => false,
+    };
 }
 
 fn sql_preview(sql: []const u8) []const u8 {
