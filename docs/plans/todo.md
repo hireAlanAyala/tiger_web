@@ -12,7 +12,16 @@
    Chained queries solved by syncing external data to local db via
    worker jobs.
 
-3. **Session as writes** — DEFERRED
+3. **Sim test update** — sim.zig compiles but tests fail due to
+   handler/route refactors. Each test needs assertions updated for
+   the new handler architecture (SQL writes, match_route, etc.).
+
+4. **Codegen rewrite** — codegen.zig generates old binary serde that's
+   no longer used. Running `zig build codegen` overwrites the hand-written
+   SDK (types.generated.ts). Needs rewrite to generate only constants +
+   enum mappings, or delete entirely.
+
+5. **Session as writes** — DEFERRED
    Remove session_action from HandleResult. Session changes via
    db.execute on a sessions table. Requires auth architecture change
    (cookie-based → sessions table). Only logout uses session_action.
