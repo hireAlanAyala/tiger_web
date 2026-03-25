@@ -1171,7 +1171,7 @@ test "interleaved writes — update and delete same entity across connections" {
     // Partial delivery byte counts determine which completes first — the test
     // must accept either ordering and assert the invariant holds regardless.
     sim_io.inject_put(0, "/products/" ++ test_uuid1,
-        "{\"name\":\"Updated\"}"
+        "{\"name\":\"Updated\",\"version\":1}"
     );
     sim_io.inject_delete(1, "/products/" ++ test_uuid1);
 

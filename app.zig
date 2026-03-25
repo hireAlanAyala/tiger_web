@@ -105,7 +105,10 @@ pub fn HandlersType(comptime StorageParam: type) type {
             // Fault injection: return null (busy) based on PRNG.
             // The handler never sees the fault. The SM sees null → retry.
             if (fault_prng) |prng| {
-                if (prng.chance(fault_busy_ratio)) return null;
+                if (prng.chance(fault_busy_ratio)) {
+                    log.mark.debug("storage: busy fault injected", .{});
+                    return null;
+                }
             }
             const ro = StorageParam.ReadView.init(storage);
             return dispatch_prefetch(ro, msg);
