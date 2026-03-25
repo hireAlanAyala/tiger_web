@@ -1,13 +1,10 @@
 # Next plans to execute
 
-1. **Sidecar protocol rebuild** — 2026-03-24
-   Rewrite sidecar protocol from scratch. Current protocol built around
-   deleted types (Write union, ExecuteResult, HandlerResponse). New
-   protocol: SQL strings + params over wire, bare status + HTML back.
-   Framework pre-matches routes via // match, TS handler gets req.params.
-   db.execute sends SQL back for framework to execute in its transaction.
-   Large project — touches protocol.zig, sidecar.zig, codegen.zig,
-   TS adapter, dispatch generator, example handlers.
+1. ~~**Sidecar protocol rebuild**~~ — DONE 2026-03-25
+   Self-describing binary rows, two pipelines (native SM + sidecar),
+   SQL-write WAL, 24 TS handler files, binary dispatch, fuzzed,
+   cross-language verified. See `docs/plans/sidecar-protocol.md`.
+   Follow-up: replay.zig rewrite for SQL-write WAL.
 
 2. **Worker integration** — `docs/plans/worker.md` — DEFERRED
    worker.fetch in prefetch (framework resolves across ticks).
