@@ -28,6 +28,13 @@ const http = @import("tiger_framework").http;
 const log = std.log.scoped(.sidecar);
 
 pub const SidecarClient = struct {
+    // Sized to 3 × frame_max: each round trip copies at most one
+    // frame's worth of data. Three round trips = 3 × frame_max.
+    //   RT1: prefetch_decl ≤ frame_max
+    //   RT2: handle_writes + render_decl ≤ frame_max
+    //   RT3: html ≤ frame_max
+    const state_buf_max = 3 * protocol.frame_max;
+
     fd: std.posix.fd_t = -1,
     path: []const u8,
 
@@ -38,7 +45,7 @@ pub const SidecarClient = struct {
     // Per-request state — copied into owned memory, not aliased.
     // Each phase writes to state_buf via copy_state(). The slices
     // point into state_buf, not recv_buf. Immune to call reordering.
-    state_buf: *[protocol.frame_max]u8,
+    state_buf: *[state_buf_max]u8,
     state_pos: usize = 0,
     prefetch_decl: []const u8 = "",
     render_decl: []const u8 = "",
@@ -48,8 +55,9 @@ pub const SidecarClient = struct {
     html: []const u8 = "",
 
     comptime {
-        // Memory budget: three frame buffers allocated once at startup.
-        assert(3 * (protocol.frame_max + 4) < 1024 * 1024);
+        // Memory budget: send + recv + state allocated once at startup.
+        // send(256K) + recv(256K) + state(768K) ≈ 1.25MB.
+        assert(protocol.frame_max + (protocol.frame_max + 4) + state_buf_max < 2 * 1024 * 1024);
         assert(@sizeOf(SidecarClient) <= 128);
     }
 
@@ -58,7 +66,7 @@ pub const SidecarClient = struct {
             @panic("sidecar: failed to allocate send buffer");
         const recv = std.heap.page_allocator.create([protocol.frame_max + 4]u8) catch
             @panic("sidecar: failed to allocate recv buffer");
-        const state = std.heap.page_allocator.create([protocol.frame_max]u8) catch
+        const state = std.heap.page_allocator.create([state_buf_max]u8) catch
             @panic("sidecar: failed to allocate state buffer");
         return .{
             .path = path,
