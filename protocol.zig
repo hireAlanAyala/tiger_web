@@ -65,6 +65,17 @@ comptime {
     assert(frame_max >= 3 * message.list_max * 1024);
     assert(frame_max <= 1024 * 1024); // stay under 1MB
 
+    // Route request worst case: tag(1) + method(1) + path(2+64K) + body(2+64K) < 131KB.
+    assert(frame_max >= 1 + 1 + 2 + 0xFFFF + 2 + 0xFFFF);
+
+    // Handle response worst case: tag(1) + status(1) + write_count(1) +
+    // writes(writes_max × (sql_max + 1 + max_params_size)) + render_decls.
+    // writes_max(21) × (2 + sql_max(4096) + 1 + 16 × 9) ≈ 21 × 4243 ≈ 89KB.
+    const max_param_size = 1 + 8; // type_tag + i64 (largest fixed-size param)
+    const max_write_entry = 2 + sql_max + 1 + 16 * max_param_size;
+    const max_handle_response = 1 + 1 + 1 + writes_max * max_write_entry + 1 + queries_max * (1 + sql_max + 1 + 1);
+    assert(frame_max >= max_handle_response);
+
     // cell_value_max must hold every domain string field.
     assert(cell_value_max >= message.product_description_max);
     assert(cell_value_max >= message.product_name_max);
