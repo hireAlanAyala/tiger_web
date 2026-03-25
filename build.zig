@@ -112,8 +112,13 @@ pub fn build(b: *std.Build) void {
     const scanner_cmd = b.addRunArtifact(scanner_exe);
     // No dependency on getInstallStep() — scanner reads source text,
     // it doesn't need the main exe or other artifacts to be built.
-    scanner_cmd.addArg("handlers/");
-    if (b.args) |args| scanner_cmd.addArgs(args);
+    // Scan directory passed via `zig build scan -- <dir>`.
+    // Defaults to handlers/ (Zig-native) if no args given.
+    if (b.args) |args| {
+        scanner_cmd.addArgs(args);
+    } else {
+        scanner_cmd.addArg("handlers/");
+    }
     const scanner_step = b.step("scan", "Scan handlers for annotation and status exhaustiveness");
     scanner_step.dependOn(&scanner_cmd.step);
 

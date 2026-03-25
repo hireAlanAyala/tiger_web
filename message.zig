@@ -20,6 +20,17 @@ pub const Status = enum(u8) {
     order_not_pending = 13,
     invalid_code = 14,
     code_expired = 15,
+
+    /// Parse a status name string to the enum value.
+    /// Used by the sidecar JSON protocol — status names travel as strings.
+    pub fn from_string(name: []const u8) ?Status {
+        inline for (@typeInfo(Status).@"enum".fields) |f| {
+            if (std.mem.eql(u8, f.name, name)) {
+                return @enumFromInt(f.value);
+            }
+        }
+        return null;
+    }
 };
 
 /// Session action — set by handle (verify_login_code, logout).
@@ -102,10 +113,17 @@ pub const Operation = enum(u8) {
         };
     }
 
-    /// Runtime equivalent of EventType — returns the expected EventTag
-    /// for this operation. Derived from EventType via inline else so the
-    /// mapping is never duplicated. Used by body_as pair assertions to
-    /// validate operation-to-body-type pairing at the consumption boundary.
+    /// Parse an operation name string to the enum value.
+    /// Used by the sidecar JSON protocol — operation names travel as strings.
+    pub fn from_string(name: []const u8) ?Operation {
+        inline for (@typeInfo(Operation).@"enum".fields) |f| {
+            if (std.mem.eql(u8, f.name, name)) {
+                return @enumFromInt(f.value);
+            }
+        }
+        return null;
+    }
+
     /// Whether this operation mutates state. Read-only operations and
     /// the root sentinel return false. Used by the server to decide
     /// what enters the WAL, and by the replay tool to validate entries.
@@ -1053,6 +1071,27 @@ test "Operation is_mutation pinned classification" {
 
     // Every operation is accounted for.
     try std.testing.expectEqual(mutations.len + reads.len, std.enums.values(Operation).len);
+}
+
+test "Operation.from_string round-trip every variant" {
+    inline for (@typeInfo(Operation).@"enum".fields) |f| {
+        const op: Operation = @enumFromInt(f.value);
+        const parsed = Operation.from_string(@tagName(op));
+        try std.testing.expect(parsed != null);
+        try std.testing.expectEqual(op, parsed.?);
+    }
+    try std.testing.expect(Operation.from_string("nonexistent") == null);
+    try std.testing.expect(Operation.from_string("") == null);
+}
+
+test "Status.from_string round-trip every variant" {
+    inline for (@typeInfo(Status).@"enum".fields) |f| {
+        const s: Status = @enumFromInt(f.value);
+        const parsed = Status.from_string(@tagName(s));
+        try std.testing.expect(parsed != null);
+        try std.testing.expectEqual(s, parsed.?);
+    }
+    try std.testing.expect(Status.from_string("bogus") == null);
 }
 
 test "Message extern struct layout" {

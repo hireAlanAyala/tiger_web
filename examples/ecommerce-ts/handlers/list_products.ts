@@ -1,0 +1,38 @@
+import type { RouteRequest, RouteResult, PrefetchMessage, PrefetchQuery, HandleContext, RenderContext } from "tiger-web";
+import { esc, price } from "tiger-web";
+
+// [route] .list_products
+// match GET /products
+export function route(req: RouteRequest): RouteResult | null {
+  // Reject if query string contains ?q= (handled by search_products).
+  if (req.path.includes("?q=")) return null;
+  return { operation: "list_products", id: "0".repeat(32) };
+}
+
+// [prefetch] .list_products
+export function prefetch(_msg: PrefetchMessage): Record<string, PrefetchQuery> {
+  return {
+    products: {
+      sql: "SELECT id, name, description, price_cents, inventory, version, active FROM products ORDER BY id LIMIT ?1",
+      params: [50],
+      mode: "all",
+    },
+  };
+}
+
+// [handle] .list_products
+export function handle(_ctx: HandleContext): string {
+  return "ok";
+}
+
+// [render] .list_products
+export function render(ctx: RenderContext): string {
+  const products = ctx.prefetched.products as unknown[] | null;
+  if (!products || products.length === 0) return '<div class="meta">No products</div>';
+  return products
+    .filter((p: any) => p.active)
+    .map((p: any) =>
+      `<div class="card"><strong>${esc(p.name)}</strong> &mdash; ${price(p.price_cents)}` +
+      ` &mdash; inv: ${p.inventory} &mdash; v${p.version}</div>`)
+    .join("");
+}

@@ -3,7 +3,7 @@ const assert = std.debug.assert;
 const stdx = @import("tiger_framework").stdx;
 const message = @import("message.zig");
 const state_machine = @import("state_machine.zig");
-const protocol = @import("protocol.zig");
+// protocol.zig no longer exports binary types — new protocol is JSON.
 
 
 /// Single source of truth for all struct types emitted as TS interfaces.
@@ -46,13 +46,6 @@ const known_structs = .{
     message.MembershipUpdate,
     message.UserWrite,
     message.PrefetchIdentity,
-    // Protocol
-    protocol.TranslateRequest,
-    protocol.TranslateResponse,
-    protocol.PrefetchCache,
-    protocol.WriteSlot,
-    protocol.ExecuteRenderRequest,
-    protocol.ExecuteRenderResponse,
 };
 
 /// All enum types emitted as TS string literal unions.
@@ -66,10 +59,6 @@ const known_enums = .{
     state_machine.StorageResult,
     message.MessageResponse.SessionKind,
     message.SessionAction,
-    // Protocol
-    protocol.Tag,
-    protocol.Method,
-    protocol.WriteTag,
 };
 
 /// All union types emitted as TS discriminated unions.
@@ -99,12 +88,6 @@ const output = blk: {
     w.emit_const("order_timeout_seconds", message.order_timeout_seconds);
     w.emit_const("credential_max", message.Message.credential_max);
     w.emit_const("writes_max", message.writes_max);
-    w.emit_const("path_max", protocol.path_max);
-    w.emit_const("json_body_max", protocol.json_body_max);
-    w.emit_const("translate_request_size", @sizeOf(protocol.TranslateRequest));
-    w.emit_const("translate_response_size", @sizeOf(protocol.TranslateResponse));
-    w.emit_const("execute_render_request_size", @sizeOf(protocol.ExecuteRenderRequest));
-    w.emit_const("execute_render_response_size", @sizeOf(protocol.ExecuteRenderResponse));
     w.raw("\n");
 
     // --- Operation → body serializer mapping ---
@@ -1286,7 +1269,7 @@ fn count_anon_structs(comptime U: type) usize {
 
 /// Returns true if T is a struct in the known_structs list.
 fn is_known_struct(comptime T: type) bool {
-    comptime assert(known_structs.len == 37);
+    comptime assert(known_structs.len == 31);
     comptime {
         for (known_structs) |K| assert(@typeInfo(K) == .@"struct");
     }
@@ -1298,7 +1281,7 @@ fn is_known_struct(comptime T: type) bool {
 
 /// Returns true if T is an enum in the known_enums list.
 fn is_known_enum(comptime T: type) bool {
-    comptime assert(known_enums.len == 12);
+    comptime assert(known_enums.len == 9);
     comptime {
         for (known_enums) |E| assert(@typeInfo(E) == .@"enum");
     }
@@ -1462,53 +1445,15 @@ test "has_len_companion detection" {
 }
 
 test "has_presence_companion detection" {
-    // Nullable fields with has_X companion.
-    comptime assert(has_presence_companion(protocol.PrefetchCache, "product"));
-    comptime assert(has_presence_companion(protocol.PrefetchCache, "collection"));
-    comptime assert(has_presence_companion(protocol.PrefetchCache, "order"));
-    comptime assert(has_presence_companion(protocol.PrefetchCache, "login_code"));
-    comptime assert(has_presence_companion(protocol.PrefetchCache, "user_by_email"));
-    comptime assert(has_presence_companion(protocol.PrefetchCache, "result"));
-    comptime assert(has_presence_companion(protocol.PrefetchCache, "identity"));
-
-    // Non-nullable fields — no has_X companion.
-    comptime assert(!has_presence_companion(protocol.PrefetchCache, "product_list"));
-    comptime assert(!has_presence_companion(protocol.PrefetchCache, "collection_list"));
-    comptime assert(!has_presence_companion(protocol.PrefetchCache, "order_list"));
-    comptime assert(!has_presence_companion(protocol.PrefetchCache, "products"));
-
     // Non-cache types have no presence companions.
     comptime assert(!has_presence_companion(message.Product, "id"));
     comptime assert(!has_presence_companion(message.Product, "name"));
 }
 
 test "has_array_presence_companion detection" {
-    // products has products_presence companion.
-    comptime assert(has_array_presence_companion(protocol.PrefetchCache, "products"));
-
-    // Other arrays don't have presence companions.
+    // Arrays don't have presence companions.
     comptime assert(!has_array_presence_companion(message.OrderRequest, "items"));
     comptime assert(!has_array_presence_companion(message.Product, "name"));
-}
-
-test "should_skip presence companions" {
-    // has_X companions are skipped.
-    comptime assert(should_skip(protocol.PrefetchCache, "has_product"));
-    comptime assert(should_skip(protocol.PrefetchCache, "has_identity"));
-
-    // X_presence companions are skipped.
-    comptime assert(should_skip(protocol.PrefetchCache, "products_presence"));
-
-    // Reserved fields in protocol types are skipped.
-    comptime assert(should_skip(protocol.PrefetchCache, "reserved_flags"));
-    comptime assert(should_skip(protocol.PrefetchCache, "reserved_presence"));
-    comptime assert(should_skip(protocol.PrefetchCache, "reserved_data"));
-
-    // Data fields are not skipped.
-    comptime assert(!should_skip(protocol.PrefetchCache, "product"));
-    comptime assert(!should_skip(protocol.PrefetchCache, "product_list"));
-    comptime assert(!should_skip(protocol.PrefetchCache, "products"));
-    comptime assert(!should_skip(protocol.PrefetchCache, "identity"));
 }
 
 test "type_leaf_name extracts last segment" {
@@ -1606,10 +1551,13 @@ test "output is valid structure" {
             if (i + 11 <= output.len and std.mem.eql(u8, output[i..][0..11], "export type")) types += 1;
             if (i + 12 <= output.len and std.mem.eql(u8, output[i..][0..12], "export const")) consts += 1;
         }
-        // Counts updated after removing Write union and HandlerResponse.
-        assert(interfaces == 38);
-        assert(types == 16);
-        assert(consts == 34);
-        assert(functions == 67);
+        // Counts updated after removing protocol binary types (JSON protocol).
+        // Protocol types removed: TranslateRequest, TranslateResponse, PrefetchCache,
+        // WriteSlot, ExecuteRenderRequest, ExecuteRenderResponse, Tag, Method, WriteTag.
+        // These counts are verified against the actual output to catch accidental changes.
+        assert(interfaces == 32);
+        assert(types == 13);
+        assert(consts == 25);
+        assert(functions == 55);
     }
 }

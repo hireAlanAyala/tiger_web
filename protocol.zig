@@ -1,220 +1,143 @@
-//! Sidecar wire protocol — fixed-size binary messages between the Zig
+//! Sidecar wire protocol — JSON length-prefixed messages between the Zig
 //! framework and the TypeScript sidecar over a unix socket.
 //!
-//! Two round trips per HTTP request:
-//!   1. Translate: method + path + body → operation + id + typed event
-//!   2. Execute + Render: operation + cache → status + writes + HTML
+//! Wire format: [4-byte big-endian length][JSON payload]
 //!
-//! Both round trips defined here as extern structs with no padding.
+//! Three message exchanges per HTTP request:
+//!   1. Route:     framework sends route_request → sidecar sends route_response
+//!   2. Execute:   framework sends execute_request
+//!      → sidecar sends prefetch_queries
+//!      → framework executes SQL, sends prefetch_results
+//!      → sidecar sends handle_render_result (status + writes + html)
+//!
+//! All data is JSON — no binary serde, no extern structs, no padding.
+//! PrefetchCache, WriteTag, WriteSlot are dead. SQL strings travel the wire.
 
 const std = @import("std");
 const assert = std.debug.assert;
-const stdx = @import("tiger_framework").stdx;
+
+/// Maximum frame payload size (JSON bytes). 1 MB should handle any response.
+pub const frame_max = 1024 * 1024;
+
 const message = @import("message.zig");
-const http = @import("tiger_framework").http;
 
-/// Maximum URL path length in the translate request.
-pub const path_max = 256;
+/// Maximum number of write SQL statements from a single handle() call.
+/// Derived from the domain constant — sidecar cannot exceed what the SM accepts.
+pub const writes_max = message.writes_max;
 
-/// Maximum raw HTTP body (JSON text) in the translate request.
-pub const json_body_max = 4096;
-
-/// Protocol message tag — identifies the round trip type.
-pub const Tag = enum(u8) {
-    translate = 0x01,
-    execute_render = 0x02,
-};
-
-/// HTTP method — subset relevant to the application.
-pub const Method = enum(u8) {
-    get = 1,
-    post = 2,
-    put = 3,
-    delete = 4,
-};
-
-/// Translate request: Zig → sidecar.
-/// Carries the raw HTTP request for the sidecar to route and parse.
-/// Fields ordered to avoid padding: small fields first, then arrays.
-pub const TranslateRequest = extern struct {
-    tag: Tag,
-    method: Method,
-    path_len: u16,
-    body_len: u16,
-    reserved: [2]u8,
-    path: [path_max]u8,
-    body: [json_body_max]u8,
-
-    comptime {
-        assert(stdx.no_padding(TranslateRequest));
-        // tag(1) + method(1) + path_len(2) + body_len(2) + reserved(2)
-        // + path(256) + body(4096) = 4360
-        assert(@sizeOf(TranslateRequest) == 4360);
-        assert(path_max > 0);
-        assert(path_max <= std.math.maxInt(u16));
-        assert(json_body_max > 0);
-        assert(json_body_max <= std.math.maxInt(u16));
-    }
-
-    pub fn path_slice(self: *const TranslateRequest) []const u8 {
-        assert(self.path_len <= path_max);
-        return self.path[0..self.path_len];
-    }
-
-    pub fn body_slice(self: *const TranslateRequest) []const u8 {
-        assert(self.body_len <= json_body_max);
-        return self.body[0..self.body_len];
-    }
-};
-
-/// Translate response: sidecar → Zig.
-/// Carries the routed operation and typed event body.
-/// Fields ordered largest-alignment first to avoid padding.
-pub const TranslateResponse = extern struct {
-    id: u128,
-    body: [message.body_max]u8,
-    found: u8,
-    operation: message.Operation,
-    reserved: [14]u8,
-
-    comptime {
-        assert(stdx.no_padding(TranslateResponse));
-        // id(16) + body(672) + found(1) + operation(1) + reserved(14) = 704
-        assert(@sizeOf(TranslateResponse) == 704);
-        // Size must be aligned to u128 alignment (16 bytes).
-        assert(@sizeOf(TranslateResponse) % @alignOf(u128) == 0);
-    }
-
-    /// Returns true if the sidecar found a matching route.
-    pub fn is_found(self: *const TranslateResponse) bool {
-        assert(self.found == 0 or self.found == 1);
-        return self.found == 1;
-    }
-};
-
-// -----------------------------------------------------------------------
-// Round trip 2: Execute + Render
-// -----------------------------------------------------------------------
-
-/// Maximum HTML render output size.
-pub const html_max = http.send_buf_max;
-
-/// Prefetch cache — flat serialization of all 11 cache slots.
-/// Presence flags grouped first (u8 per nullable slot), then data.
-/// Nullable slots: 0 = absent, 1 = present. Lists are always present
-/// (len field indicates how many items are populated).
-pub const PrefetchCache = extern struct {
-    // --- Presence flags (28 bytes + 4 reserved = 32) ---
-    has_product: u8,
-    has_collection: u8,
-    has_order: u8,
-    has_login_code: u8,
-    has_user_by_email: u8,
-    has_result: u8,
-    has_identity: u8,
-    reserved_flags: u8,
-    products_presence: [message.order_items_max]u8,
-    reserved_presence: [4]u8,
-
-    // --- Data (largest alignment first) ---
-    identity: message.PrefetchIdentity,
-    product: message.Product,
-    collection: message.ProductCollection,
-    order: message.OrderResult,
-    user_by_email: u128,
-    product_list: message.ProductList,
-    collection_list: message.CollectionList,
-    order_list: message.OrderSummaryList,
-    products: [message.order_items_max]message.Product,
-    login_code: message.LoginCodeEntry,
-    result: u8,
-    reserved_data: [15]u8,
-
-    comptime {
-        assert(stdx.no_padding(PrefetchCache));
-        // Struct alignment is 16 (from u128 fields in Product, etc.)
-        assert(@sizeOf(PrefetchCache) % 16 == 0);
-    }
-};
-
-/// Write variant tag — matches the Write union field order.
-/// Used in WriteSlot to identify the payload type.
-pub const WriteTag = enum(u8) {
-    put_product = 0,
-    update_product = 1,
-    put_collection = 2,
-    update_collection = 3,
-    put_membership = 4,
-    update_membership = 5,
-    put_order = 6,
-    update_order = 7,
-    put_login_code = 8,
-    consume_login_code = 9,
-    put_user = 10,
-
-    comptime {
-        // Must match the number of Write union variants.
-        assert(std.meta.fields(WriteTag).len == 11);
-    }
-};
-
-/// Single write slot — tag identifies the Write union variant,
-/// data is padded to the largest variant size (OrderResult).
-pub const WriteSlot = extern struct {
-    tag: u8,
-    reserved_tag: [15]u8,
-    data: [@sizeOf(message.OrderResult)]u8,
-
-    comptime {
-        assert(stdx.no_padding(WriteSlot));
-        assert(@sizeOf(WriteSlot) == 16 + @sizeOf(message.OrderResult));
-        assert(@offsetOf(WriteSlot, "data") == 16);
-    }
-};
-
-/// Execute+render request: Zig → sidecar.
-pub const ExecuteRenderRequest = extern struct {
-    tag: Tag,
-    operation: message.Operation,
-    is_sse: u8,
-    reserved: [13]u8,
-    id: u128,
-    body: [message.body_max]u8,
-    cache: PrefetchCache,
-
-    comptime {
-        assert(stdx.no_padding(ExecuteRenderRequest));
-        assert(@sizeOf(ExecuteRenderRequest) % 16 == 0);
-    }
-};
-
-/// Execute+render response: sidecar → Zig.
-pub const ExecuteRenderResponse = extern struct {
-    status: message.Status,
-    writes_len: u8,
-    result_tag: u8,
-    reserved: [13]u8,
-    result: [@sizeOf(message.PageLoadDashboardResult)]u8,
-    writes: [message.writes_max]WriteSlot,
-    html_len: u32,
-    html: [html_max]u8,
-    // Tail padding: struct alignment is 4 (from html_len u32).
-    reserved_tail: [tail_pad]u8,
-
-    // Pre-html fields are all 4-aligned (16-byte header + result + writes + html_len).
-    // Tail padding depends only on html_max.
-    const tail_pad = (4 - (@as(usize, html_max) % 4)) % 4;
-
-    comptime {
-        assert(stdx.no_padding(ExecuteRenderResponse));
-        assert(@sizeOf(ExecuteRenderResponse) % 4 == 0);
-        assert(message.writes_max == 21);
-    }
-};
-
-// Memory budget assertion — both buffers allocated once at startup.
-// Single connection, single-threaded server.
 comptime {
-    const total = @sizeOf(ExecuteRenderRequest) + @sizeOf(ExecuteRenderResponse);
-    assert(total < 300 * 1024);
+    assert(writes_max > 0);
+}
+
+/// Maximum SQL string length in a single query/write.
+pub const sql_max = 4096;
+
+/// Maximum number of prefetch queries from a single prefetch() call.
+pub const prefetch_queries_max = 32;
+
+/// Read a length-prefixed JSON frame from fd into buf.
+/// Returns the JSON slice, or null on EOF/error.
+/// buf must be at least frame_max + 4 bytes.
+pub fn read_frame(fd: std.posix.fd_t, buf: []u8) ?[]const u8 {
+    assert(buf.len >= frame_max + 4);
+
+    // Read 4-byte big-endian length.
+    var header: [4]u8 = undefined;
+    if (!recv_exact(fd, &header)) return null;
+
+    const len = std.mem.readInt(u32, &header, .big);
+    if (len == 0) return "";
+    if (len > frame_max) return null;
+
+    // Read payload.
+    if (!recv_exact(fd, buf[0..len])) return null;
+    return buf[0..len];
+}
+
+/// Write a length-prefixed JSON frame to fd.
+/// Returns false on error.
+pub fn write_frame(fd: std.posix.fd_t, json: []const u8) bool {
+    assert(json.len <= frame_max);
+
+    var header: [4]u8 = undefined;
+    std.mem.writeInt(u32, &header, @intCast(json.len), .big);
+
+    if (!send_exact(fd, &header)) return false;
+    if (json.len > 0) {
+        if (!send_exact(fd, json)) return false;
+    }
+    return true;
+}
+
+// --- IO helpers ---
+
+fn recv_exact(fd: std.posix.fd_t, buf: []u8) bool {
+    var recvd: usize = 0;
+    while (recvd < buf.len) {
+        const n = std.posix.recv(fd, buf[recvd..], 0) catch return false;
+        if (n == 0) return false; // peer closed
+        recvd += n;
+    }
+    return true;
+}
+
+fn send_exact(fd: std.posix.fd_t, bytes: []const u8) bool {
+    var sent: usize = 0;
+    while (sent < bytes.len) {
+        const n = std.posix.send(fd, bytes[sent..], std.posix.MSG.NOSIGNAL) catch return false;
+        if (n == 0) return false;
+        sent += n;
+    }
+    return true;
+}
+
+// =====================================================================
+// Tests
+// =====================================================================
+
+test "frame round trip" {
+    const pair = test_socketpair();
+    defer std.posix.close(pair[1]);
+
+    const json = "{\"tag\":\"route\",\"method\":\"GET\",\"path\":\"/products\"}";
+
+    // Write frame.
+    try std.testing.expect(write_frame(pair[0], json));
+
+    // Read frame.
+    var buf: [frame_max + 4]u8 = undefined;
+    const result = read_frame(pair[1], &buf);
+    try std.testing.expect(result != null);
+    try std.testing.expectEqualStrings(json, result.?);
+    std.posix.close(pair[0]);
+}
+
+test "empty frame" {
+    const pair = test_socketpair();
+    defer std.posix.close(pair[1]);
+
+    try std.testing.expect(write_frame(pair[0], ""));
+
+    var buf: [frame_max + 4]u8 = undefined;
+    const result = read_frame(pair[1], &buf);
+    try std.testing.expect(result != null);
+    try std.testing.expectEqualStrings("", result.?);
+    std.posix.close(pair[0]);
+}
+
+test "peer closed returns null" {
+    const pair = test_socketpair();
+    std.posix.close(pair[0]);
+
+    var buf: [frame_max + 4]u8 = undefined;
+    const result = read_frame(pair[1], &buf);
+    try std.testing.expect(result == null);
+    std.posix.close(pair[1]);
+}
+
+fn test_socketpair() [2]std.posix.fd_t {
+    var fds: [2]std.posix.fd_t = undefined;
+    const rc = std.c.socketpair(std.posix.AF.UNIX, std.posix.SOCK.STREAM, 0, &fds);
+    assert(rc == 0);
+    return fds;
 }

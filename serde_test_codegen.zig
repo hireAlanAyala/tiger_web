@@ -2,7 +2,7 @@ const std = @import("std");
 const assert = std.debug.assert;
 const message = @import("message.zig");
 const state_machine = @import("state_machine.zig");
-const protocol = @import("protocol.zig");
+// protocol.zig no longer exports binary types — new protocol is JSON.
 
 
 const output = blk: {
@@ -126,8 +126,6 @@ const output = blk: {
     w.emit_test_vector("Message", message.Message, test_message());
     w.emit_test_vector("LoginCodeEntry", message.LoginCodeEntry, test_login_code_entry());
     w.emit_test_vector("PrefetchIdentity", message.PrefetchIdentity, test_prefetch_identity());
-    w.emit_test_vector("TranslateRequest", protocol.TranslateRequest, test_translate_request());
-    w.emit_test_vector("TranslateResponse", protocol.TranslateResponse, test_translate_response());
 
     // --- Random round-trip tests ---
     w.raw("// --- Random round-trip tests ---\n\n");
@@ -150,52 +148,8 @@ const output = blk: {
     w.emit_random_roundtrip("Message", message.Message);
     w.emit_random_roundtrip("LoginCodeEntry", message.LoginCodeEntry);
     w.emit_random_roundtrip("PrefetchIdentity", message.PrefetchIdentity);
-    w.emit_random_roundtrip("TranslateRequest", protocol.TranslateRequest);
-    w.emit_random_roundtrip("TranslateResponse", protocol.TranslateResponse);
 
-    // --- Null path tests ---
-    // Verify nullable fields round-trip through null correctly.
-    w.raw("// --- Null path tests ---\n\n");
-    w.raw(
-        \\{
-        \\  const cache: PrefetchCache = {
-        \\    product: null, collection: null, order: null,
-        \\    login_code: null, user_by_email: null, result: null, identity: null,
-        \\    product_list: { items: [], len: 0, reserved: new Uint8Array(12) },
-        \\    collection_list: { items: [], len: 0, reserved: new Uint8Array(12) },
-        \\    order_list: { items: [], len: 0, reserved: new Uint8Array(12) },
-        \\    products: Array.from({ length: 20 }, () => null),
-        \\  };
-        \\  const buf = new Uint8Array(
-    );
-    w.int(@sizeOf(protocol.PrefetchCache));
-    w.raw(
-        \\);
-        \\  writePrefetchCache(buf, 0, cache);
-        \\  const decoded = readPrefetchCache(buf, 0);
-        \\  if (decoded.product !== null) throw new Error('product should be null');
-        \\  if (decoded.collection !== null) throw new Error('collection should be null');
-        \\  if (decoded.order !== null) throw new Error('order should be null');
-        \\  if (decoded.login_code !== null) throw new Error('login_code should be null');
-        \\  if (decoded.user_by_email !== null) throw new Error('user_by_email should be null');
-        \\  if (decoded.result !== null) throw new Error('result should be null');
-        \\  if (decoded.identity !== null) throw new Error('identity should be null');
-        \\  for (let i = 0; i < 20; i++) {
-        \\    if (decoded.products[i] !== null) throw new Error('products[' + i + '] should be null');
-        \\  }
-        \\  // Round-trip: all-null → write → read → write → compare bytes
-        \\  const buf2 = new Uint8Array(
-    );
-    w.int(@sizeOf(protocol.PrefetchCache));
-    w.raw(
-        \\);
-        \\  writePrefetchCache(buf2, 0, decoded);
-        \\  assertBytesEqual(buf, buf2, 'PrefetchCache all-null round-trip');
-        \\  passed++;
-        \\}
-        \\
-        \\
-    );
+    // PrefetchCache null path tests removed — new protocol is JSON, no binary serde.
 
     w.raw("console.log(`${passed} serde round-trip tests passed (seed: ${seed})`);\n");
 
@@ -762,30 +716,7 @@ fn test_prefetch_identity() message.PrefetchIdentity {
     };
 }
 
-fn test_translate_request() protocol.TranslateRequest {
-    var r = std.mem.zeroes(protocol.TranslateRequest);
-    r.tag = .translate;
-    r.method = .post;
-    set_str(&r.path, "/products");
-    r.path_len = 9;
-    const json = "{\"name\":\"Tiger Shirt\"}";
-    set_str(&r.body, json);
-    r.body_len = json.len;
-    assert_str_len(&r.path, r.path_len);
-    assert_str_len(&r.body, r.body_len);
-    return r;
-}
-
-fn test_translate_response() protocol.TranslateResponse {
-    var r = std.mem.zeroes(protocol.TranslateResponse);
-    r.found = 1;
-    r.operation = .create_product;
-    r.id = 0x0102030405060708090a0b0c0d0e0f10;
-    // Body: embed a test product
-    const p = test_product();
-    @memcpy(r.body[0..@sizeOf(message.Product)], std.mem.asBytes(&p));
-    return r;
-}
+// TranslateRequest/TranslateResponse test vectors removed — new protocol is JSON.
 
 // =====================================================================
 // Tests
