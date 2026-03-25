@@ -8,20 +8,18 @@ pub const Prefetch = struct { products: ?t.BoundedList(t.ProductRow, t.list_max)
 
 pub const Context = t.HandlerContext(Prefetch, t.Operation.EventType(.search_products), t.Identity, Status);
 
+pub const route_method = t.http.Method.get;
+pub const route_pattern = "/products";
+
 // [route] .search_products
+// match GET /products
 pub fn route(method: t.http.Method, raw_path: []const u8, body: []const u8) ?t.Message {
-    _ = body;
-    if (method != .get) return null;
-    if (raw_path.len == 0 or raw_path[0] != '/') return null;
-    const path = raw_path[1..];
-    const query_sep = std.mem.indexOf(u8, path, "?");
-    const path_clean = if (query_sep) |q| path[0..q] else path;
-    const query_string = if (query_sep) |q| path[q + 1 ..] else "";
+    _ = method; _ = body;
+    if (t.match_route(raw_path, route_pattern) == null) return null;
 
-    const segments = t.parse.split_path(path_clean) orelse return null;
-    if (!std.mem.eql(u8, segments.collection, "products")) return null;
-    if (segments.has_id) return null;
-
+    // Require ?q= query param (without it, list_products handles this path).
+    const query_sep = std.mem.indexOf(u8, raw_path, "?");
+    const query_string = if (query_sep) |q| raw_path[q + 1 ..] else "";
     const q = t.parse.query_param(query_string, "q") orelse return null;
     if (q.len == 0 or q.len > @import("../message.zig").search_query_max) return null;
 

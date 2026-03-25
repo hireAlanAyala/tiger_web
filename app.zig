@@ -151,15 +151,10 @@ pub var sidecar: ?SidecarClient = null;
 /// Translate an HTTP request into a typed Message. Returns null if the
 /// request doesn't map to a valid operation.
 ///
-/// Tries all handler route functions. Asserts at most one matches
-/// (duplicate route detection — always, not just in debug).
-///
-/// This is a runtime assert, not comptime, because not all handlers
-/// declare route_method/route_pattern. Handlers without the `// match`
-/// directive are only discoverable at runtime via their route() function.
-/// Comptime checking would only cover handlers with match directives,
-/// creating a partial guarantee. The runtime assert is the universal
-/// catch — it fires on the first request that triggers a duplicate.
+/// Tries all handler route functions. Fast-skips via route_method/route_pattern
+/// (comptime-asserted on every handler), then calls route() for the full match.
+/// Runtime assert catches duplicate matches — pair assertion with the scanner's
+/// duplicate route pattern check.
 pub fn translate(method: http.Method, path: []const u8, body: []const u8) ?Message {
     if (sidecar) |*client| return client.translate(method, path, body);
 
@@ -167,10 +162,12 @@ pub fn translate(method: http.Method, path: []const u8, body: []const u8) ?Messa
 
     var result: ?Message = null;
     inline for (handlers) |H| {
-        const skip = if (@hasDecl(H, "route_method") and @hasDecl(H, "route_pattern"))
-            method != H.route_method or parse.match_route(path, H.route_pattern) == null
-        else
-            false;
+        comptime {
+            assert(@hasDecl(H, "route_method"));
+            assert(@hasDecl(H, "route_pattern"));
+        }
+
+        const skip = method != H.route_method or parse.match_route(path, H.route_pattern) == null;
 
         if (!skip) {
             if (H.route(method, path, body)) |msg| {
