@@ -140,10 +140,25 @@ Already designed in test-output.md:
 
 CI scripts use exit codes to classify failures in dashboards.
 
+## TB utilities not yet ported
+
+These exist in TigerBeetle's testing toolkit but are not in Tiger Web.
+Each has a specific trigger for when to add it — don't add speculatively.
+
+| Utility | TB location | What it does | When to add |
+|---|---|---|---|
+| `parse_seed` | `testing/fuzz.zig:90` | Accepts 40-char git commit hash as seed (truncates u160 → u64). CI passes commit hash so failures reproduce from the commit alone. | When CI exists (delivery step 1-2) |
+| `random_int_exponential` | `testing/fuzz.zig:16` | Exponential distribution — values cluster around an average with a long tail. TB uses it for storage/network latency and workload intensity. | When `Simulation.run` needs realistic distributions (simulation-testing.md) |
+| `random_id` | `testing/fuzz.zig:62` | Hot/cold ID generation — coin flip between small set (high collision) and large set (low collision). Simulates realistic cache access patterns. | When fuzz tests need to stress cache behavior or ID collision paths |
+| `error_uniform` | `stdx/prng.zig:441` | Returns random variant from an error set type. ~6 lines. | When fuzz tests need to generate random error values |
+| `DeclEnumExcludingType` | `testing/fuzz.zig:112` | Builds an enum type excluding specific variants — for swarm testing internal APIs while hiding internal-only operations. | When we need to fuzz a subset of operations excluding framework internals |
+| `exhaustigen` | `testing/exhaustigen.zig` | Exhaustive permutation/combination generator without storing all in memory. For small state spaces where PRNG might miss corners. | When a module has a small enough state space for exhaustive testing |
+| `snaptest` | `stdx/testing/snaptest.zig` | Snapshot testing with `SNAP_UPDATE=1` auto-update. Compares formatted output against source-embedded expected strings. | When render output or wire format tests need easy update-on-refactor |
+
 ## Delivery order
 
-1. Add `parse_seed` to `fuzz_lib.zig` (accept git hash as seed)
-2. Basic CI workflow (unit-test + test + fuzz smoke + scan)
+1. Basic CI workflow (unit-test + test + fuzz smoke + scan)
+2. Add `parse_seed` to `fuzz_lib.zig` — needed for commit-seeded CI
 3. Commit-seeded fuzzing in CI
 4. Port `snaptest.zig` to framework
 5. Add snapshot tests for render output + SSE framing
