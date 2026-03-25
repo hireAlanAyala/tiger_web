@@ -366,6 +366,7 @@ const LanguageAdapter = struct {
     extensions: []const []const u8,
     handle_patterns: []const StatusPattern,
     render_patterns: []const StatusPattern,
+    sql_quote: u8 = '"', // quote character for SQL string literals
 };
 
 /// Zig adapter.
@@ -852,6 +853,60 @@ pub fn main() !void {
         }
     }
 
+    // --- SQL validation ---
+    //
+    // Extract SQL string literals from prefetch/handle/render bodies.
+    // Prefetch and render must be SELECT. Handle must be INSERT/UPDATE/DELETE.
+    // Build-time enforcement of read/write separation — same guarantee as
+    // Zig-native ReadView/WriteView but via source text scanning.
+    for (annotations.items) |ann| {
+        if (!ann.has_body) continue;
+
+        const content = for (files.items) |f| {
+            if (std.mem.eql(u8, f.path, ann.file)) break f.content;
+        } else continue;
+
+        const adapter = find_adapter(ann.file) orelse continue;
+        const quote = adapter.sql_quote;
+
+        switch (ann.phase) {
+            .prefetch => {
+                var sql_iter = SqlStringIterator.init(content, ann.line, quote);
+                while (sql_iter.next()) |sql| {
+                    if (!sql_starts_with_select(sql)) {
+                        try stderr.print("error: {s}:{d}: [prefetch] .{s} SQL must be SELECT: \"{s}...\"\n", .{
+                            ann.file, ann.line, ann.operation, sql_preview(sql),
+                        });
+                        errors += 1;
+                    }
+                }
+            },
+            .execute => {
+                var sql_iter = SqlStringIterator.init(content, ann.line, quote);
+                while (sql_iter.next()) |sql| {
+                    if (!sql_starts_with_write(sql)) {
+                        try stderr.print("error: {s}:{d}: [handle] .{s} SQL must be INSERT/UPDATE/DELETE: \"{s}...\"\n", .{
+                            ann.file, ann.line, ann.operation, sql_preview(sql),
+                        });
+                        errors += 1;
+                    }
+                }
+            },
+            .render => {
+                var sql_iter = SqlStringIterator.init(content, ann.line, quote);
+                while (sql_iter.next()) |sql| {
+                    if (!sql_starts_with_select(sql)) {
+                        try stderr.print("error: {s}:{d}: [render] .{s} SQL must be SELECT: \"{s}...\"\n", .{
+                            ann.file, ann.line, ann.operation, sql_preview(sql),
+                        });
+                        errors += 1;
+                    }
+                }
+            },
+            .translate => {}, // Route has no SQL.
+        }
+    }
+
     // Summary.
     const stdout = std.io.getStdOut().writer();
     if (errors > 0) {
@@ -866,6 +921,106 @@ pub fn main() !void {
         try emit_manifest(allocator, out_path, annotations.items, op_statuses.items);
         try stdout.print("Manifest: {s}\n", .{out_path});
     }
+}
+
+// =====================================================================
+// SQL string validation — extract SQL literals, check first keyword
+// =====================================================================
+
+/// Iterator over SQL string literals in a function body.
+/// Scans for quoted strings that look like SQL — first keyword is
+/// a SQL verb (SELECT, INSERT, etc.). Skips status names, HTML, etc.
+/// Scoped to the function body (opening `{` to matching `}`).
+const SqlStringIterator = struct {
+    body: []const u8,
+    pos: usize,
+    quote: u8,
+
+    fn init(content: []const u8, start_line: u32, quote: u8) SqlStringIterator {
+        // Advance to start_line.
+        var pos: usize = 0;
+        var line: u32 = 1;
+        while (pos < content.len and line < start_line) : (pos += 1) {
+            if (content[pos] == '\n') line += 1;
+        }
+        // Find opening brace and extract body by depth.
+        const brace_start = std.mem.indexOfScalar(u8, content[pos..], '{') orelse
+            return .{ .body = "", .pos = 0, .quote = quote };
+        const body_start = pos + brace_start + 1;
+        var depth: u32 = 1;
+        var bpos = body_start;
+        while (bpos < content.len and depth > 0) : (bpos += 1) {
+            if (content[bpos] == '{') depth += 1;
+            if (content[bpos] == '}') depth -= 1;
+        }
+        return .{ .body = content[body_start..bpos], .pos = 0, .quote = quote };
+    }
+
+    fn next(self: *SqlStringIterator) ?[]const u8 {
+        while (self.pos < self.body.len) {
+            // Find next quote.
+            const start = std.mem.indexOfScalarPos(u8, self.body, self.pos, self.quote) orelse return null;
+            self.pos = start + 1;
+
+            // Find closing quote (skip escaped quotes).
+            var end = self.pos;
+            while (end < self.body.len) : (end += 1) {
+                if (self.body[end] == '\\') {
+                    end += 1;
+                    continue;
+                }
+                if (self.body[end] == self.quote) break;
+            }
+            if (end >= self.body.len) return null;
+
+            const str = self.body[self.pos..end];
+            self.pos = end + 1;
+
+            // Only return strings that look like SQL — start with a letter
+            // and first word is a SQL keyword. Skip status names, HTML, etc.
+            const first_word = sql_first_keyword(str) orelse continue;
+            if (is_sql_keyword(first_word)) return str;
+        }
+        return null;
+    }
+};
+
+/// Extract the first whitespace-delimited word from a SQL string.
+fn sql_first_keyword(sql: []const u8) ?[]const u8 {
+    // Skip leading whitespace.
+    var start: usize = 0;
+    while (start < sql.len and (sql[start] == ' ' or sql[start] == '\t' or sql[start] == '\n')) start += 1;
+    if (start >= sql.len) return null;
+
+    // Find end of first word.
+    var end = start;
+    while (end < sql.len and sql[end] != ' ' and sql[end] != '\t' and sql[end] != '\n') end += 1;
+    return sql[start..end];
+}
+
+/// Check if a word is a known SQL keyword (case-insensitive).
+fn is_sql_keyword(word: []const u8) bool {
+    const keywords = [_][]const u8{ "SELECT", "INSERT", "UPDATE", "DELETE", "select", "insert", "update", "delete" };
+    for (keywords) |kw| {
+        if (std.ascii.eqlIgnoreCase(word, kw)) return true;
+    }
+    return false;
+}
+
+fn sql_starts_with_select(sql: []const u8) bool {
+    const kw = sql_first_keyword(sql) orelse return false;
+    return std.ascii.eqlIgnoreCase(kw, "SELECT");
+}
+
+fn sql_starts_with_write(sql: []const u8) bool {
+    const kw = sql_first_keyword(sql) orelse return false;
+    return std.ascii.eqlIgnoreCase(kw, "INSERT") or
+        std.ascii.eqlIgnoreCase(kw, "UPDATE") or
+        std.ascii.eqlIgnoreCase(kw, "DELETE");
+}
+
+fn sql_preview(sql: []const u8) []const u8 {
+    return sql[0..@min(sql.len, 40)];
 }
 
 fn has_name(ss: *const StatusSet, name: []const u8) bool {
