@@ -10,263 +10,192 @@ parse which test failed and why. `grep` for "failed" matched
 `[server] (warn): accept failed`. When all tests pass, there's no
 summary line — just silence after pages of warnings.
 
-Today's output on failure:
+## What was tried and why we reverted
 
-```
-[server] (warn): accept failed: result=-1
-[server] (warn): accept failed: result=-1
-[server] (warn): accept failed: result=-1
-... (50 more lines)
-[connection] (warn): invalid HTTP request fd=100
-[server] (warn): unmapped request: get /unknown fd=100
-[server] (warn): accept failed: result=-1
-... (20 more lines)
-/home/walker/.../sim.zig:1176:16: in test.interleaved writes
-    200 => try std.testing.expect(body_contains(get_resp.body, "Updated")),
-               ^
-```
+### Attempt 1: std_options in sim.zig with per-scope log_scope_levels
 
-## What the developer should see
+Set `pub const std_options` in `sim.zig` with `log_scope_levels` to
+silence `.server`, `.connection`, `.storage` etc. at `.err`.
 
-On failure:
+**Failed.** The framework was a separate Zig module (`b.dependency`).
+Each module resolves `std_options` from its own root. The framework's
+root was `framework/lib.zig`, not `sim.zig`. Per-scope filtering in
+`sim.zig` had no effect on framework code.
 
-```
-SEED=0xd021
-events=10000, limits={product:20, order:50}
-fault_busy_ratio=15/100, swarm_weights={create:42, update:7, delete:0, ...}
+### Attempt 2: std_options in framework/lib.zig
 
-FAIL  interleaved writes — update and delete same entity across connections
-      sim.zig:1176 — expected body to contain "Updated"
+Added `std_options` to `framework/lib.zig` with test-only scope levels
+(`if (builtin.is_test)`).
 
-      model state:
-        product aabbccdd...: inventory=50, active=true, version=2
-      db state:
-        product aabbccdd...: inventory=45, active=false, version=3
+**Failed.** Same root problem — the framework module's `std_options`
+only applies to framework code, but `std_options` in the framework
+can't reference the application's configuration. It's a one-way
+boundary.
 
-      full log: .zig-cache/test-logs/0xd021.log
-      reproduce: ./zig/zig build test -- --seed=0xd021
-```
+### Attempt 3: Eliminate the module boundary
 
-On success:
+Changed from `b.dependency("tiger_framework")` to direct file path
+imports: `@import("framework/lib.zig")`. Removed `framework/build.zig`
+and `framework/build.zig.zon`. All 23 files updated.
 
-```
-85/85 passed (seed=0xa3f1)
-```
+**One compilation unit now.** Matches TigerBeetle's structure. But
+`std_options` in `sim.zig` still didn't work because...
 
-## Design
+### Attempt 4: Discovery — test runner owns the root
 
-### 1. Print simulation config at start
+Zig's test runner (`test_runner.zig`) is the actual root of test
+binaries. It has its own `std_options` with `logFn = log`. The user's
+`std_options` in `sim.zig` is NOT the root — it's ignored. The test
+runner's `logFn` filters by `std.testing.log_level` (default `.warn`).
 
-Following TB's VOPR pattern: print the full simulation config before
-the run starts. When a failure is reported later, the developer already
-knows the exact conditions without having to guess.
+This is why per-scope filtering never worked — the test runner doesn't
+use `log_scope_levels` at all. It uses a single global level.
+
+### Attempt 5: Convert sim.zig to addExecutable
+
+Made sim.zig an executable with `pub fn main()`. Now sim.zig IS the
+root — full control over `std_options`, `logFn`, per-scope filtering.
+Converted all 27 test blocks to named functions. Added custom panic
+handler, `--log-debug` flag, test name filter, `--seed` flag, address
+space limit.
+
+**Worked.** Clean output: one line on success, test name + stack trace
+on failure. Per-scope filtering silenced framework noise. All the
+debugging UX goals were met.
+
+### Attempt 6: Discovery — we built the wrong thing
+
+Comparing against TigerBeetle's actual implementation revealed:
+
+- TB's seeded unit tests use `addTest`, not `addExecutable`
+- TB's fuzz tests in unit test form use `PRNG.from_seed_testing()`
+  which reads `std.testing.random_seed` — set by the test runner
+- TB only uses `addExecutable` for the VOPR (hours-long cluster
+  simulation) and fuzz dispatchers — not for unit-level tests
+- Our 27 scenario tests run in milliseconds. They're unit tests, not
+  simulations. We built VOPR-level infrastructure for unit-test work.
+
+The test runner's `std.testing.log_level` is the correct mechanism for
+log control. Setting it to `.err` in a test init block works because
+the test runner runs tests sequentially in declaration order. TB relies
+on the same property with `from_seed_testing()` reading a global.
+
+## Conclusion: revert to addTest
+
+The correct architecture, matching TigerBeetle 1:1:
+
+### Sim tests: addTest (not addExecutable)
 
 ```zig
-log.info(
-    \\
-    \\  SEED={}
-    \\  events={}
-    \\  fault_busy_ratio={}
-    \\  swarm_weights=...
-, .{ seed, events_max, fault_busy_ratio });
+// sim.zig — root is test_runner.zig, not us
+test {
+    // Silence framework noise. Runs first (declaration order).
+    std.testing.log_level = .err;
+}
+
+test "cancel order — client cancels, worker completion rejected" {
+    var prng = PRNG.from_seed_testing();
+    var sim_io = SimIO.init(prng.int(u64));
+    // ... test body ...
+}
 ```
 
-This goes to both stderr and the log file. It's always visible.
+- `std.testing.log_level = .err` silences framework scopes globally
+- `PRNG.from_seed_testing()` gives each test the same deterministic
+  seed, varying per CI run via `--seed`
+- Zig's test runner handles `--test-filter` for running specific tests
+- No custom main, no custom panic handler, no CLI parsing
 
-### 2. Per-scope log level filtering
+### Future simulation harness: addExecutable
 
-Following TB's `fuzz_tests.zig` pattern: the test binary sets
-`log_level = .info` globally, then silences noisy framework scopes
-individually:
+The custom main/panic/logFn/CLI infrastructure we built belongs in the
+future `Simulation.run` implementation — the PRNG-driven reference
+model harness from `simulation-testing.md`. That runs for thousands of
+events, needs per-scope filtering, custom failure output, and seed-
+based reproduction. It IS a simulation, not a unit test.
 
-```zig
-pub const std_options: std.Options = .{
-    .log_level = .info,
-    .log_scope_levels = &[_]std.log.ScopeLevel{
-        .{ .scope = .server, .level = .err },
-        .{ .scope = .connection, .level = .err },
-        .{ .scope = .storage, .level = .err },
-        .{ .scope = .wal, .level = .err },
-        .{ .scope = .io, .level = .err },
-    },
-};
-```
+### What stays from the current work
 
-Only `.err` level from framework scopes gets through. The test harness
-scope (`.sim`, `.fuzz`) stays at `.info`. Accept failures, recv peer
-closed, WAL truncation warnings — all gone from stderr. Actual errors
-(storage corruption, unrecoverable failures) still print.
+These changes are correct and should be kept:
 
-This matches TB's approach: the noise doesn't exist in the first place.
-No buffering, no discard-on-success complexity.
+1. **Framework module boundary eliminated** — `@import("framework/lib.zig")`
+   everywhere, one compilation unit. Matches TB. Required for
+   `from_seed_testing()` to resolve from the correct root.
 
-### 3. Redirect verbose logs to file, not discard
+2. **`framework/build.zig` and `framework/build.zig.zon` deleted** —
+   the framework is not a separate package.
 
-TB critique: don't silence — redirect. Silencing means when a test
-crashes (signal, assertion) rather than fails (returns error), you have
-no trail.
+3. **`PRNG.from_seed_testing()` updated** — works in both test binaries
+   (reads `std.testing.random_seed`) and executables (reads
+   `root.testing_seed`). Needed for future simulation executable.
 
-The log override writes verbose output to a per-seed log file:
-`.zig-cache/test-logs/<seed>.log`. Stderr gets only summary-level
-output. On failure, the path to the log file is printed. On crash,
-the file is already on disk.
+4. **`marks.zig` `enabled` flag** — supports both `builtin.is_test`
+   and explicit `enable_marks` opt-in. Needed for future simulation
+   executable.
 
-This preserves the full trace without polluting stderr. The developer
-only opens the log file when they need to drill into framework internals.
+5. **`limit_address_space()`** — 4GB cap, stays in sim.zig as a helper.
 
-Implementation: custom `logFn` that:
-- Writes all levels to the log file (buffered writer, flush after each)
-- Writes only `.err` from framework scopes to stderr
-- Writes all levels from test scopes (`.sim`, `.fuzz`) to stderr
+6. **`fuzz_tests.zig` per-scope logFn** — it's an executable
+   (`addExecutable`), its `std_options` IS the root. Correct.
 
-### 4. Seed as reproduction command
+### What gets reverted
 
-TB's output always leads with the seed because the seed is all you need
-to reproduce. The reproduction line uses `.err` level so it's never
-filtered out — following TB's `log.err("you can reproduce this failure
-with seed={}")` pattern.
+1. **sim.zig back to `addTest`** — test blocks, `std.testing.allocator`,
+   `std.testing.expect`/`expectEqual`
+2. **Custom `main()`, panic handler, CLI parsing** — deleted
+3. **Custom `logFn` in sim.zig** — replaced by `std.testing.log_level = .err`
+4. **`build.zig` sim step** — back to `b.addTest` from `b.addExecutable`
 
-```
-reproduce: ./zig/zig build test -- --seed=0xd021
-```
+### Why the addExecutable attempt was wrong
 
-One copy-paste. No guessing about which binary, which flags, which seed
-format.
+TB's split is clear:
 
-For sim tests with hardcoded seeds, the reproduce command uses the test
-name filter:
+| Test type | Zig primitive | TB example | Our equivalent |
+|---|---|---|---|
+| Seeded unit tests | `addTest` | `test "Queue: fuzz"` | sim.zig scenario tests |
+| Fuzz dispatchers | `addExecutable` | `fuzz_tests.zig` | `fuzz_tests.zig` (already correct) |
+| Long-running simulation | `addExecutable` | VOPR | future `Simulation.run` |
 
-```
-reproduce: ./zig/zig build test -- --test-filter="interleaved writes"
-```
+We confused category 1 with category 3. Our scenario tests are seeded
+unit tests, not simulations. The seed controls IO interleavings (partial
+delivery, fault timing), not a reference model exploration. They belong
+in `addTest`.
 
-### 5. Dump state on failure
-
-Following TB's `simulator.cluster.log_cluster()` pattern: on
-verification failure, print the model state and DB state side by side
-for the entity that diverged. Not just "assertion failed at line X"
-but "here's what the world looked like."
-
-```
-model state:
-  product aabbccdd...: inventory=50, active=true, version=2
-db state:
-  product aabbccdd...: inventory=45, active=false, version=3
-```
-
-This goes to stderr (always visible on failure) and the log file.
-
-### 6. Distinct exit codes
-
-Following TB's `Failure` enum: different exit codes for different
-failure classes.
-
-| Exit code | Meaning |
-|---|---|
-| 0 | All tests passed |
-| 1 | Test assertion failed (correctness) |
-| 2 | Test timed out (liveness) |
-| 127 | Crash (panic, signal) |
-
-CI scripts can distinguish "test found a bug" from "test infrastructure
-hung" from "test panicked." Different failures need different responses.
-
-### 7. Unimplemented escape hatch
-
-Following TB's `unimplemented()` pattern: operations without full
-test coverage exit 0 instead of failing. This lets the developer run
-the simulation in a loop during development — only real failures stop
-the loop. Paths that aren't done yet produce a log line but not a
-failure.
-
-### 8. Summary line
-
-Always print a summary, pass or fail:
-
-```
-85/85 passed (seed=0xa3f1)
-```
-
-```
-84/85 passed, 1 failed (seed=0xa3f1)
-```
-
-Zig's test runner already does this, but the output is buried in log
-noise. With scopes silenced on stderr, the summary becomes visible.
-The seed is included so the developer can always reproduce the exact
-run.
-
-## TigerBeetle patterns adopted
-
-| TB pattern | Our implementation |
-|---|---|
-| VOPR prints full config at start | Print seed, events, fault ratios, swarm weights |
-| Per-scope log levels in `fuzz_tests.zig` | Same — silence `server`, `connection`, `storage`, `wal`, `io` in test binary |
-| VOPR `log_override` with short/full modes | Log file for full, stderr for summary |
-| VOPR buffered writer (4KB, flush after each) | Same — buffered file writer for log output |
-| Seed-first failure output | Print `reproduce:` command with seed at `.err` level |
-| `log_cluster()` state dump on failure | Print model vs DB state for diverged entities |
-| `Failure` enum with distinct exit codes | Same — correctness, liveness, crash |
-| `unimplemented()` exits 0 | Same — incomplete test paths don't block the loop |
-| `--vopr-log=full` opt-in to noise | `--log-debug` on test binary enables verbose stderr |
-
-## What this does NOT change
-
-- Production log output — unchanged, controlled by `main.zig`
-- Framework log sites — no marks or log calls added or removed
-- Log scopes — existing scopes stay as they are
-- Coverage marks — still work, marks use their own mechanism
-
-## Decisions
-
-### Why filter at scope level, not buffer-and-discard per test?
-
-Buffer-and-discard means: capture all log output per test, discard on
-pass, print on failure. This has a fatal flaw — if a test crashes
-(SIGABRT from assertion, @memcpy alias panic) rather than returning an
-error, the buffer is lost. The crash handler would need to flush the
-buffer, adding complexity to a code path that should be minimal.
-
-TB's approach is simpler: the noise never reaches stderr. The full
-trace goes to a file unconditionally. No buffer management, no crash
-handler complexity, no lost logs.
-
-### Why a log file instead of just silencing?
-
-Pure silencing loses information. When debugging a framework-level issue
-(like the actual SimIO bug we initially suspected), the developer needs
-the full trace. Redirecting to a file preserves it without cluttering
-the happy path. The developer opts in by opening the file.
-
-### Why not structured JSON log output?
-
-Overhead for human-read logs. The logs are for debugging by a developer
-reading a terminal, not for machine processing. Plain text with the
-existing `[scope] (level): message` format is correct for this use case.
-
-### Why print config at start, not just on failure?
-
-The config is short (~10 lines) and always useful. If the test passes,
-you can see what was tested. If it fails, you don't have to scroll up
-or re-run to find the conditions. TB prints it unconditionally. The
-cost is negligible — a few lines of output before the run.
-
-### Why state dump on failure instead of just the assertion line?
-
-An assertion line says "line 1176 failed." A state dump says "the model
-thinks inventory is 50 but the DB has 45." The second tells you what
-went wrong. The first tells you where the code noticed. The developer
-needs both, but they need the "what" first.
+The VOPR-level infrastructure (custom main, panic handler, per-scope
+logFn, `--log-debug`, test name filter, `--seed` CLI flag, address
+space limit) belongs in the simulation harness we haven't built yet.
 
 ## Delivery order
 
-1. Add `std_options` with per-scope log levels to `sim.zig` and `fuzz_tests.zig`
-2. Add custom `logFn` that splits output between stderr and log file
-3. Create `.zig-cache/test-logs/` directory on test init
-4. Print simulation config at start of each test run
-5. Print `reproduce:` command on test failure (at `.err` level)
-6. Add state dump helper — prints model vs DB for diverged entities
-7. Add distinct exit codes for correctness, liveness, crash
-8. Add `--log-debug` flag to test binary for full stderr output
-9. Verify summary line is visible with scopes silenced
-10. Document the log file location and reproduce workflow in CLAUDE.md
+1. Revert sim.zig to `addTest` with `test "name" {}` blocks
+2. Add `test { std.testing.log_level = .err; }` init block
+3. Change all `SimIO.init(hardcoded)` to use `from_seed_testing()`
+4. Revert build.zig sim step to `b.addTest`
+5. Remove custom main, panic handler, CLI infrastructure from sim.zig
+6. Keep: module boundary elimination, marks.zig, fuzz_tests.zig logFn
+7. Verify: `zig build test` output is clean, seeded, deterministic
+8. Save executable infrastructure for simulation-testing.md plan
+
+## Infrastructure to relocate to simulation-testing.md
+
+The following pieces from the current sim.zig executable should be
+preserved as reference for the future simulation harness (`Simulation.run`).
+They're the correct architecture for a long-running PRNG-driven
+simulation — just not for unit tests.
+
+| Piece | Current location | Future home |
+|---|---|---|
+| Custom `pub fn main()` with test loop | sim.zig | simulation harness executable |
+| Custom `logFn` with per-scope runtime filtering | sim.zig `sim_log` | simulation harness |
+| `--log-debug` CLI flag for verbose output | sim.zig main | simulation harness CLI |
+| `--seed=N` CLI flag for reproduction | sim.zig main | simulation harness CLI |
+| Test name filter (`-- cancel`) | sim.zig main | simulation harness `--filter` |
+| Custom panic handler with test name + `reproduce:` | sim.zig `panic` | simulation harness |
+| `limit_address_space()` (4GB cap) | sim.zig | simulation harness + keep in sim.zig |
+| `pub var testing_seed` for `from_seed_testing()` | sim.zig | simulation harness |
+| `pub const enable_marks = true` | sim.zig | simulation harness |
+| `pub const std_options` with `logFn` | sim.zig | simulation harness |
+
+The commit that contains these is the reference: current HEAD before
+the revert. The simulation-testing.md plan's delivery step 1
+(`Simulation.run` loop) should start from this infrastructure.
