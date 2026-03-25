@@ -12,8 +12,8 @@
 //! Methods must be called in order:
 //!   translate → execute_prefetch → send_prefetch_recv_handle →
 //!   execute_writes → execute_render
-//! Per-request slices alias recv_buf — each phase consumes the previous
-//! phase's data before the buffer is overwritten.
+//! Per-request state is copied into state_buf (owned memory). Slices
+//! do not alias recv_buf — immune to call reordering.
 //!
 //! Sidecar failure at any point: close connection, return error to HTTP
 //! client, reconnect lazily on next request. No mid-exchange retry.
@@ -35,18 +35,21 @@ pub const SidecarClient = struct {
     send_buf: *[protocol.frame_max]u8,
     recv_buf: *[protocol.frame_max + 4]u8,
 
-    // Per-request state — set by one phase, consumed by the next.
-    // Slices alias recv_buf. Each phase consumes previous data before
-    // recv_buf is overwritten. Call methods in documented order.
-    prefetch_decl: []const u8 = "", // from RT1 response, consumed by execute_prefetch
-    render_decl: []const u8 = "", // from RT2 response, consumed by execute_render
+    // Per-request state — copied into owned memory, not aliased.
+    // Each phase writes to state_buf via copy_state(). The slices
+    // point into state_buf, not recv_buf. Immune to call reordering.
+    state_buf: *[protocol.frame_max]u8,
+    state_pos: usize = 0,
+    prefetch_decl: []const u8 = "",
+    render_decl: []const u8 = "",
     handle_status: message.Status = .ok,
-    handle_writes: []const u8 = "", // from RT2 response, consumed by execute_writes
+    handle_writes: []const u8 = "",
     handle_write_count: u8 = 0,
     html: []const u8 = "",
 
     comptime {
-        assert(2 * (protocol.frame_max + 4) < 1024 * 1024);
+        // Memory budget: three frame buffers allocated once at startup.
+        assert(3 * (protocol.frame_max + 4) < 1024 * 1024);
         assert(@sizeOf(SidecarClient) <= 128);
     }
 
@@ -55,11 +58,25 @@ pub const SidecarClient = struct {
             @panic("sidecar: failed to allocate send buffer");
         const recv = std.heap.page_allocator.create([protocol.frame_max + 4]u8) catch
             @panic("sidecar: failed to allocate recv buffer");
+        const state = std.heap.page_allocator.create([protocol.frame_max]u8) catch
+            @panic("sidecar: failed to allocate state buffer");
         return .{
             .path = path,
             .send_buf = send,
             .recv_buf = recv,
+            .state_buf = state,
         };
+    }
+
+    /// Copy data from recv_buf into state_buf. Returns a slice into
+    /// state_buf that owns the data. Immune to recv_buf overwrites.
+    fn copy_state(self: *SidecarClient, data: []const u8) []const u8 {
+        if (data.len == 0) return "";
+        const start = self.state_pos;
+        assert(start + data.len <= self.state_buf.len);
+        @memcpy(self.state_buf[start..][0..data.len], data);
+        self.state_pos += data.len;
+        return self.state_buf[start..][0..data.len];
     }
 
     // =================================================================
@@ -126,6 +143,7 @@ pub const SidecarClient = struct {
     }
 
     fn reset_request_state(self: *SidecarClient) void {
+        self.state_pos = 0;
         self.prefetch_decl = "";
         self.render_decl = "";
         self.handle_status = .ok;
@@ -196,7 +214,7 @@ pub const SidecarClient = struct {
 
         if (resp.len < 19) { self.handle_disconnect(); return null; }
         const id = std.mem.readInt(u128, resp[3..19], .big);
-        self.prefetch_decl = resp[19..];
+        self.prefetch_decl = self.copy_state(resp[19..]);
 
         var msg = std.mem.zeroes(message.Message);
         msg.operation = operation;
@@ -289,8 +307,8 @@ pub const SidecarClient = struct {
             };
         }
 
-        self.handle_writes = resp[writes_start..dpos];
-        self.render_decl = resp[dpos..];
+        self.handle_writes = self.copy_state(resp[writes_start..dpos]);
+        self.render_decl = self.copy_state(resp[dpos..]);
         return status;
     }
 
@@ -380,7 +398,7 @@ pub const SidecarClient = struct {
             return null;
         }
 
-        self.html = resp[1..];
+        self.html = self.copy_state(resp[1..]);
         return self.html;
     }
 
