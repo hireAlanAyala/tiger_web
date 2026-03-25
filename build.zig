@@ -131,8 +131,6 @@ pub fn build(b: *std.Build) void {
         "message.zig",
         "wal_test.zig",
         "annotation_scanner.zig",
-        "codegen.zig",
-        "serde_test_codegen.zig",
     };
     const unit_test_step = b.step("unit-test", "Run unit tests");
     for (modules) |mod| {
@@ -193,39 +191,11 @@ pub fn build(b: *std.Build) void {
         unit_test_step.dependOn(&b.addRunArtifact(unit_test).step);
     }
 
-    // --- Codegen ---
-    const codegen_exe = b.addExecutable(.{
-        .name = "tiger-codegen",
-        .root_source_file = b.path("codegen.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-    addFramework(codegen_exe.root_module, framework);
-
-    const codegen_cmd = b.addRunArtifact(codegen_exe);
-    const codegen_output = codegen_cmd.captureStdOut();
-    const wf = b.addUpdateSourceFiles();
-    wf.addCopyFileToSource(codegen_output, "generated/types.generated.ts");
-
-    // Serde test codegen — generates round-trip test file.
-    const serde_test_exe = b.addExecutable(.{
-        .name = "tiger-serde-test-codegen",
-        .root_source_file = b.path("serde_test_codegen.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-    addFramework(serde_test_exe.root_module, framework);
-
-    const serde_test_cmd = b.addRunArtifact(serde_test_exe);
-    const serde_test_output = serde_test_cmd.captureStdOut();
-    wf.addCopyFileToSource(serde_test_output, "generated/serde_test.generated.ts");
-
-    const codegen_step = b.step("codegen", "Generate TypeScript type definitions");
-    codegen_step.dependOn(&wf.step);
+    // Codegen deleted — types.generated.ts and serde.ts are hand-written SDK.
+    // Cross-language tests verify enum mappings + constants between Zig and TS.
 
     // --- Adapter test (opt-in, requires npx tsx) ---
     const adapter_test_cmd = b.addSystemCommand(&.{ "npx", "-y", "tsx", "adapters/typescript_test.ts" });
-    adapter_test_cmd.step.dependOn(codegen_step);
     const adapter_test_step = b.step("test-adapter", "Run TypeScript adapter test");
     adapter_test_step.dependOn(&adapter_test_cmd.step);
 
