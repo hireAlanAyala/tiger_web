@@ -140,7 +140,11 @@ pub fn WalType(comptime Operation: type) type {
                 // Read each full entry and verify checksum + parent chain.
                 // Cost: reads the entire WAL file once at startup. Acceptable
                 // for a diagnostic WAL — recovery runs once, not per request.
-                var entry_buf: [entry_max]u8 align(@alignOf(EntryHeader)) = undefined;
+                // Heap-allocated: entry_max (256KB) is too large for the stack.
+                const entry_buf = std.heap.page_allocator.alignedAlloc(
+                    u8, @alignOf(EntryHeader), entry_max,
+                ) catch @panic("wal: failed to allocate recovery buffer");
+                defer std.heap.page_allocator.free(entry_buf);
                 var scan_offset: u64 = 0;
                 var last_valid_checksum: u128 = expected.checksum;
                 var last_valid_op: u64 = 0;
@@ -152,7 +156,7 @@ pub fn WalType(comptime Operation: type) type {
                     const n = std.posix.pread(read_fd, entry_buf[0..@sizeOf(EntryHeader)], scan_offset) catch break;
                     if (n < @sizeOf(EntryHeader)) break;
 
-                    const hdr: *const EntryHeader = @ptrCast(@alignCast(&entry_buf));
+                    const hdr: *const EntryHeader = @ptrCast(@alignCast(entry_buf.ptr));
                     if (hdr.entry_len < @sizeOf(EntryHeader) or hdr.entry_len > entry_max) break;
                     if (scan_offset + hdr.entry_len > file_size) break;
 
