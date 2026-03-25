@@ -74,6 +74,11 @@ See user-space.md for the declaration-based prefetch design.
 
 
 # Backlog
+- TS sidecar render should return effects array, not single string. Same spec as Zig tuples:
+  `return [["patch", "#toast", html, "append"], ["sync", "/dashboard"]]`
+  Requires: TS adapter generates effects return type, dispatch sends effects over wire,
+  framework delivers as multiple SSE events. Currently TS render returns `string`.
+- address todos scattered within the code
 - Domain logic should assert inputs and outputs to preserve business logic (progress: might be too to demo to new users)
 - Ensure the framework works on all operating systems (currently Linux only)
 - CI should run test-adapter
