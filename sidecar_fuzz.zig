@@ -17,6 +17,8 @@ const sidecar = @import("sidecar.zig");
 const FuzzArgs = @import("fuzz_lib.zig").FuzzArgs;
 const PRNG = @import("tiger_framework").prng;
 
+const Storage = @import("storage.zig").SqliteStorage;
+
 const log = std.log.scoped(.fuzz);
 
 pub fn main(allocator: std.mem.Allocator, args: FuzzArgs) !void {
@@ -24,6 +26,10 @@ pub fn main(allocator: std.mem.Allocator, args: FuzzArgs) !void {
     const seed = args.seed;
     const events_max = args.events_max orelse 10_000;
     var prng = PRNG.from_seed(seed);
+
+    // In-memory storage for execute_prefetch fuzzing.
+    var storage = try Storage.init(":memory:");
+    defer storage.deinit();
 
     var stats = Stats{};
 
@@ -34,7 +40,8 @@ pub fn main(allocator: std.mem.Allocator, args: FuzzArgs) !void {
             .translate_disconnect = 2,
             .handle_corrupt = 4,
             .render_corrupt = 3,
-            .decl_iterator = 4,
+            .decl_iterator = 3,
+            .prefetch_with_storage = 3,
         });
 
         switch (event) {
@@ -44,6 +51,7 @@ pub fn main(allocator: std.mem.Allocator, args: FuzzArgs) !void {
             .handle_corrupt => fuzz_handle_corrupt(&prng, &stats),
             .render_corrupt => fuzz_render_corrupt(&prng, &stats),
             .decl_iterator => fuzz_decl_iterator(&prng, &stats),
+            .prefetch_with_storage => fuzz_prefetch_with_storage(&prng, &stats, &storage),
         }
     }
 
@@ -53,6 +61,7 @@ pub fn main(allocator: std.mem.Allocator, args: FuzzArgs) !void {
         \\  translate: valid={} corrupt={} disconnect={}
         \\  handle_corrupt={} render_corrupt={}
         \\  decl_iterator={} decl_rejected={}
+        \\  prefetch_with_storage={} prefetch_rejected={}
     , .{
         events_max,
         stats.translate_valid,
@@ -62,12 +71,15 @@ pub fn main(allocator: std.mem.Allocator, args: FuzzArgs) !void {
         stats.render_corrupt,
         stats.decl_iterator,
         stats.decl_rejected,
+        stats.prefetch_with_storage,
+        stats.prefetch_rejected,
     });
 
     assert(stats.translate_valid > 0);
     assert(stats.translate_corrupt > 0);
     assert(stats.handle_corrupt > 0);
     assert(stats.decl_iterator > 0);
+    assert(stats.prefetch_with_storage > 0);
 }
 
 const Stats = struct {
@@ -78,6 +90,8 @@ const Stats = struct {
     render_corrupt: u64 = 0,
     decl_iterator: u64 = 0,
     decl_rejected: u64 = 0,
+    prefetch_with_storage: u64 = 0,
+    prefetch_rejected: u64 = 0,
 };
 
 // =====================================================================
@@ -242,6 +256,87 @@ fn fuzz_decl_iterator(prng: *PRNG, stats: *Stats) void {
     if (len > 1) {
         const param_count = data[0];
         _ = sidecar.SidecarClient.skip_params(data, 1, param_count);
+    }
+}
+
+// =====================================================================
+// Prefetch with real storage — random declarations → parse → SQL → row set
+// =====================================================================
+
+fn fuzz_prefetch_with_storage(prng: *PRNG, stats: *Stats, storage: *Storage) void {
+    stats.prefetch_with_storage += 1;
+
+    // Build random prefetch declarations.
+    var decl_buf: [512]u8 = undefined;
+    var dpos: usize = 0;
+
+    const strategy = prng.chances(.{
+        .random_bytes = 3,
+        .valid_sql = 3,
+        .bad_sql = 2,
+    });
+
+    switch (strategy) {
+        .random_bytes => {
+            // Fully random — exercises parsing rejection.
+            const len = prng.range_inclusive(usize, 0, decl_buf.len);
+            prng.fill(decl_buf[0..len]);
+            dpos = len;
+        },
+        .valid_sql => {
+            // Structurally valid declaration with real SQL.
+            decl_buf[dpos] = 1; // 1 query
+            dpos += 1;
+            const key = "test";
+            decl_buf[dpos] = key.len;
+            dpos += 1;
+            @memcpy(decl_buf[dpos..][0..key.len], key);
+            dpos += key.len;
+            // SQL that works against any SQLite db.
+            const sql = "SELECT 1 AS val";
+            std.mem.writeInt(u16, decl_buf[dpos..][0..2], sql.len, .big);
+            dpos += 2;
+            @memcpy(decl_buf[dpos..][0..sql.len], sql);
+            dpos += sql.len;
+            decl_buf[dpos] = @intFromEnum(protocol.QueryMode.one);
+            dpos += 1;
+            decl_buf[dpos] = 0; // 0 params
+            dpos += 1;
+        },
+        .bad_sql => {
+            // Structurally valid declaration but SQL is garbage.
+            decl_buf[dpos] = 1;
+            dpos += 1;
+            const key = "x";
+            decl_buf[dpos] = key.len;
+            dpos += 1;
+            decl_buf[dpos] = 'x';
+            dpos += 1;
+            const sql = "NOT VALID SQL AT ALL";
+            std.mem.writeInt(u16, decl_buf[dpos..][0..2], sql.len, .big);
+            dpos += 2;
+            @memcpy(decl_buf[dpos..][0..sql.len], sql);
+            dpos += sql.len;
+            decl_buf[dpos] = @intFromEnum(protocol.QueryMode.one);
+            dpos += 1;
+            decl_buf[dpos] = 0;
+            dpos += 1;
+        },
+    }
+
+    // Create a client with the random declarations as prefetch_decl.
+    var client = sidecar.SidecarClient.init("/unused");
+    // Don't connect — we're only testing execute_prefetch, not socket IO.
+    // Set prefetch_decl directly. The data is in a stack buffer (not
+    // recv_buf), so aliasing is not a concern for the fuzz test.
+    client.prefetch_decl = decl_buf[0..dpos];
+
+    // Execute prefetch with real storage. Must not crash.
+    const ro = Storage.ReadView.init(storage);
+    const result = client.execute_prefetch(ro);
+
+    if (result == null) {
+        stats.prefetch_rejected += 1;
     }
 }
 
