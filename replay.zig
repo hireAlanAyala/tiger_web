@@ -82,6 +82,7 @@ const ReplayArgs = struct {
 };
 
 const QueryArgs = struct {
+    @"stop-at": ?u64 = null,
     @"--": void,
     path: []const u8,
     db: []const u8,
@@ -364,7 +365,7 @@ fn query(args: QueryArgs) void {
     };
     defer storage.deinit();
 
-    // Replay all entries.
+    // Replay entries (optionally up to --stop-at).
     var offset: u64 = 0;
     {
         const root = read_header(fd, 0) orelse fatal_ret("cannot read root");
@@ -374,6 +375,9 @@ fn query(args: QueryArgs) void {
         const hdr = read_header(fd, offset) orelse break;
         if (hdr.entry_len < @sizeOf(EntryHeader) or hdr.entry_len > wal_mod.entry_max) break;
         if (offset + hdr.entry_len > file_size) break;
+        if (args.@"stop-at") |stop| {
+            if (hdr.op > stop) break;
+        }
 
         if (hdr.write_count > 0 and hdr.entry_len > @sizeOf(EntryHeader)) {
             const n = std.posix.pread(fd, buf[0..hdr.entry_len], offset) catch break;
@@ -490,21 +494,12 @@ fn free_entry_buf(buf: []align(@alignOf(EntryHeader)) u8) void {
     std.heap.page_allocator.free(buf);
 }
 
-/// Convert a []const u8 to [:0]const u8 using a thread-local buffer.
-/// CLI args from argv are null-terminated in memory, but the Zig type
-/// system doesn't know. This copies into a buffer and adds the sentinel.
-var path_buf_a: [4096]u8 = undefined;
-var path_buf_b: [4096]u8 = undefined;
-var path_buf_toggle: bool = false;
-
+/// Convert a []const u8 from argv to [:0]const u8.
+/// CLI args from std.process.args() are null-terminated in memory.
+/// The flags parser returns []const u8 but the underlying argv is [:0].
 fn to_sentinel(path: []const u8) [:0]const u8 {
-    // Alternate between two buffers so two calls can coexist.
-    const buf = if (path_buf_toggle) &path_buf_b else &path_buf_a;
-    path_buf_toggle = !path_buf_toggle;
-    if (path.len >= buf.len) fatal("path too long");
-    @memcpy(buf[0..path.len], path);
-    buf[path.len] = 0;
-    return buf[0..path.len :0];
+    assert(path.ptr[path.len] == 0); // argv is null-terminated
+    return path[0..path.len :0];
 }
 
 fn open_wal(path: []const u8) std.posix.fd_t {
