@@ -9,13 +9,12 @@ export function route(req: RouteRequest): RouteResult | null {
 
 // [prefetch] .cancel_order
 export function prefetch(msg: PrefetchMessage): Record<string, PrefetchQuery> {
-  return {
-    order: {
-      sql: "SELECT id, total_cents, items_len, status, timeout_at, payment_ref FROM orders WHERE id = ?1",
-      params: [msg.id],
-      mode: "one",
-    },
+  const order: PrefetchQuery = {
+    sql: "SELECT id, total_cents, items_len, status, timeout_at, payment_ref FROM orders WHERE id = ?1",
+    params: [msg.id],
+    mode: "one",
   };
+  return { order };
 }
 
 // [handle] .cancel_order

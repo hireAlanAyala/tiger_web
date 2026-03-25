@@ -15,18 +15,17 @@ export function route(req: RouteRequest): RouteResult | null {
 
 // [prefetch] .transfer_inventory
 export function prefetch(msg: PrefetchMessage): Record<string, PrefetchQuery> {
-  return {
-    source: {
-      sql: "SELECT id, name, description, price_cents, inventory, version, active FROM products WHERE id = ?1",
-      params: [msg.id],
-      mode: "one",
-    },
-    target: {
-      sql: "SELECT id, name, description, price_cents, inventory, version, active FROM products WHERE id = ?1",
-      params: [msg.body.target_id],
-      mode: "one",
-    },
+  const source: PrefetchQuery = {
+    sql: "SELECT id, name, description, price_cents, inventory, version, active FROM products WHERE id = ?1",
+    params: [msg.id],
+    mode: "one",
   };
+  const target: PrefetchQuery = {
+    sql: "SELECT id, name, description, price_cents, inventory, version, active FROM products WHERE id = ?1",
+    params: [msg.body.target_id],
+    mode: "one",
+  };
+  return { source, target };
 }
 
 // [handle] .transfer_inventory

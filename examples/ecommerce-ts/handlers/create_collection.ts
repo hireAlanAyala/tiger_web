@@ -12,13 +12,12 @@ export function route(req: RouteRequest): RouteResult | null {
 
 // [prefetch] .create_collection
 export function prefetch(msg: PrefetchMessage): Record<string, PrefetchQuery> {
-  return {
-    existing: {
-      sql: "SELECT id FROM collections WHERE id = ?1",
-      params: [msg.id],
-      mode: "one",
-    },
+  const existing: PrefetchQuery = {
+    sql: "SELECT id FROM collections WHERE id = ?1",
+    params: [msg.id],
+    mode: "one",
   };
+  return { existing };
 }
 
 // [handle] .create_collection

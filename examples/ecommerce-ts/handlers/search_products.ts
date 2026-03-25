@@ -11,13 +11,12 @@ export function route(req: RouteRequest): RouteResult | null {
 // [prefetch] .search_products
 export function prefetch(msg: PrefetchMessage): Record<string, PrefetchQuery> {
   const q = String(msg.body.query || "");
-  return {
-    results: {
-      sql: "SELECT id, name, description, price_cents, inventory, version, active FROM products WHERE active = 1 AND name LIKE ?1 ORDER BY id LIMIT 50",
-      params: [`%${q}%`],
-      mode: "all",
-    },
+  const results: PrefetchQuery = {
+    sql: "SELECT id, name, description, price_cents, inventory, version, active FROM products WHERE active = 1 AND name LIKE ?1 ORDER BY id LIMIT 50",
+    params: [`%${q}%`],
+    mode: "all",
   };
+  return { results };
 }
 
 // [handle] .search_products

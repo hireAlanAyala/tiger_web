@@ -12,13 +12,12 @@ export function route(req: RouteRequest): RouteResult | null {
 
 // [prefetch] .verify_login_code
 export function prefetch(msg: PrefetchMessage): Record<string, PrefetchQuery> {
-  return {
-    login_code: {
-      sql: "SELECT email, code, expires_at FROM login_codes WHERE email = ?1",
-      params: [msg.body.email],
-      mode: "one",
-    },
+  const login_code: PrefetchQuery = {
+    sql: "SELECT email, code, expires_at FROM login_codes WHERE email = ?1",
+    params: [msg.body.email],
+    mode: "one",
   };
+  return { login_code };
 }
 
 // [handle] .verify_login_code

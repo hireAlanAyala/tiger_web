@@ -9,13 +9,12 @@ export function route(_req: RouteRequest): RouteResult | null {
 
 // [prefetch] .list_collections
 export function prefetch(_msg: PrefetchMessage): Record<string, PrefetchQuery> {
-  return {
-    collections: {
-      sql: "SELECT id, name, active FROM collections WHERE active = 1 ORDER BY id LIMIT ?1",
-      params: [50],
-      mode: "all",
-    },
+  const collections: PrefetchQuery = {
+    sql: "SELECT id, name, active FROM collections WHERE active = 1 ORDER BY id LIMIT ?1",
+    params: [50],
+    mode: "all",
   };
+  return { collections };
 }
 
 // [handle] .list_collections

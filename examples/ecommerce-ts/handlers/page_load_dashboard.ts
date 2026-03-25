@@ -9,23 +9,22 @@ export function route(_req: RouteRequest): RouteResult | null {
 
 // [prefetch] .page_load_dashboard
 export function prefetch(_msg: PrefetchMessage): Record<string, PrefetchQuery> {
-  return {
-    products: {
-      sql: "SELECT id, name, description, price_cents, inventory, version, active FROM products WHERE active = 1 ORDER BY id LIMIT ?1",
-      params: [50],
-      mode: "all",
-    },
-    collections: {
-      sql: "SELECT id, name, active FROM collections WHERE active = 1 ORDER BY id LIMIT ?1",
-      params: [50],
-      mode: "all",
-    },
-    orders: {
-      sql: "SELECT id, total_cents, items_len, status, timeout_at, payment_ref FROM orders ORDER BY id LIMIT ?1",
-      params: [50],
-      mode: "all",
-    },
+  const products: PrefetchQuery = {
+    sql: "SELECT id, name, description, price_cents, inventory, version, active FROM products WHERE active = 1 ORDER BY id LIMIT ?1",
+    params: [50],
+    mode: "all",
   };
+  const collections: PrefetchQuery = {
+    sql: "SELECT id, name, active FROM collections WHERE active = 1 ORDER BY id LIMIT ?1",
+    params: [50],
+    mode: "all",
+  };
+  const orders: PrefetchQuery = {
+    sql: "SELECT id, total_cents, items_len, status, timeout_at, payment_ref FROM orders ORDER BY id LIMIT ?1",
+    params: [50],
+    mode: "all",
+  };
+  return { products, collections, orders };
 }
 
 // [handle] .page_load_dashboard

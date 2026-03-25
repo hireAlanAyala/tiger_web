@@ -8,13 +8,12 @@ export function route(req: RouteRequest): RouteResult | null {
 
 // [prefetch] .delete_product
 export function prefetch(msg: PrefetchMessage): Record<string, PrefetchQuery> {
-  return {
-    product: {
-      sql: "SELECT id, name, description, price_cents, inventory, version, active FROM products WHERE id = ?1",
-      params: [msg.id],
-      mode: "one",
-    },
+  const product: PrefetchQuery = {
+    sql: "SELECT id, name, description, price_cents, inventory, version, active FROM products WHERE id = ?1",
+    params: [msg.id],
+    mode: "one",
   };
+  return { product };
 }
 
 // [handle] .delete_product
