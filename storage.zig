@@ -26,6 +26,7 @@ const message = @import("message.zig");
 const state_machine = @import("state_machine.zig");
 const StorageResult = state_machine.StorageResult;
 const stdx = @import("tiger_framework").stdx;
+const proto = @import("protocol.zig");
 const marks = @import("tiger_framework").marks;
 const log = marks.wrap_log(std.log.scoped(.storage));
 
@@ -898,6 +899,207 @@ pub const SqliteStorage = struct {
         return step_result(stmt) == .done;
     }
 
+    // =================================================================
+    // Raw query — sidecar path. Reads SQLite results into binary row
+    // format without knowing domain types. Runtime SQL (validated by
+    // scanner at build time, but untrusted at the wire level).
+    // =================================================================
+
+    /// Execute a runtime SQL query and write results into the binary
+    /// row format. Returns the used portion of buf, or null on error
+    /// (bad SQL, prepare failure, step error).
+    ///
+    /// `mode`: .one = at most 1 row, .all = up to list_max rows.
+    /// `params_buf`: binary params from the sidecar wire format.
+    /// `params_count`: number of params in params_buf.
+    pub fn query_raw(
+        self: *SqliteStorage,
+        sql: [*:0]const u8,
+        params_buf: []const u8,
+        params_count: u8,
+        mode: proto.QueryMode,
+        out_buf: []u8,
+    ) ?[]const u8 {
+        // Prepare — runtime SQL, may fail.
+        var stmt: ?*c.sqlite3_stmt = null;
+        const prepare_rc = c.sqlite3_prepare_v2(self.db, sql, -1, &stmt, null);
+        if (prepare_rc != c.SQLITE_OK) {
+            if (stmt) |s| _ = c.sqlite3_finalize(s);
+            log.err("query_raw: prepare failed: {s}", .{c.sqlite3_errmsg(self.db)});
+            return null;
+        }
+        const real_stmt = stmt.?;
+        defer _ = c.sqlite3_finalize(real_stmt);
+
+        // Bind params from the binary wire format.
+        if (!bind_raw_params(real_stmt, params_buf, params_count)) return null;
+
+        // Read column metadata — type and name for each column.
+        const col_count_raw = c.sqlite3_column_count(real_stmt);
+        if (col_count_raw <= 0 or col_count_raw > proto.columns_max) return null;
+        const col_count: u16 = @intCast(col_count_raw);
+
+        var columns: [proto.columns_max]proto.Column = undefined;
+        for (0..col_count) |i| {
+            const ci: c_int = @intCast(i);
+            const name_ptr = c.sqlite3_column_name(real_stmt, ci);
+            if (name_ptr == null) return null;
+            const name = std.mem.sliceTo(name_ptr, 0);
+            // Type tag from first row — SQLite determines types per-row,
+            // but the header needs a fixed type. We use SQLITE_NULL as
+            // placeholder until the first row sets the actual type.
+            columns[i] = .{ .type_tag = .null, .name = name };
+        }
+
+        // Step through rows, writing directly to out_buf.
+        var pos = proto.write_row_set_header(out_buf, columns[0..col_count]) orelse return null;
+        const row_count_pos = pos;
+        pos = proto.write_row_count(out_buf, pos, 0) orelse return null; // placeholder
+
+        var row_count: u32 = 0;
+        const max_rows: u32 = switch (mode) {
+            .one => 1,
+            .all => message.list_max,
+        };
+
+        while (step_result(real_stmt) == .row and row_count < max_rows) {
+            // On the first row, fix the column types in the header.
+            if (row_count == 0) {
+                var header_pos: usize = 2; // skip col_count u16
+                for (0..col_count) |i| {
+                    const ci: c_int = @intCast(i);
+                    const sqlite_type = c.sqlite3_column_type(real_stmt, ci);
+                    const tag = sqlite_type_to_tag(sqlite_type);
+                    out_buf[header_pos] = @intFromEnum(tag);
+                    // Skip past name_len + name bytes to next column's type tag.
+                    const name_len = std.mem.readInt(u16, out_buf[header_pos + 1 ..][0..2], .big);
+                    header_pos += 1 + 2 + name_len;
+                }
+            }
+
+            // Write each column value.
+            for (0..col_count) |i| {
+                const ci: c_int = @intCast(i);
+                const sqlite_type = c.sqlite3_column_type(real_stmt, ci);
+                const value = read_sqlite_value(real_stmt, ci, sqlite_type);
+                pos = proto.write_value(out_buf, pos, value) orelse return null;
+            }
+            row_count += 1;
+        }
+
+        // Backfill row count.
+        std.mem.writeInt(u32, out_buf[row_count_pos..][0..4], row_count, .big);
+
+        return out_buf[0..pos];
+    }
+
+    /// Execute a runtime SQL write statement with binary params.
+    /// Returns true on success, false on error.
+    pub fn execute_raw(
+        self: *SqliteStorage,
+        sql: [*:0]const u8,
+        params_buf: []const u8,
+        params_count: u8,
+    ) bool {
+        var stmt: ?*c.sqlite3_stmt = null;
+        const prepare_rc = c.sqlite3_prepare_v2(self.db, sql, -1, &stmt, null);
+        if (prepare_rc != c.SQLITE_OK) {
+            if (stmt) |s| _ = c.sqlite3_finalize(s);
+            log.err("execute_raw: prepare failed: {s}", .{c.sqlite3_errmsg(self.db)});
+            return false;
+        }
+        const real_stmt = stmt.?;
+        defer _ = c.sqlite3_finalize(real_stmt);
+
+        if (!bind_raw_params(real_stmt, params_buf, params_count)) return false;
+
+        return step_result(real_stmt) == .done;
+    }
+
+    /// Bind parameters from the binary wire format to a prepared statement.
+    fn bind_raw_params(stmt: *c.sqlite3_stmt, params_buf: []const u8, params_count: u8) bool {
+        var buf_pos: usize = 0;
+        for (0..params_count) |i| {
+            const col: c_int = @intCast(i + 1);
+            if (buf_pos >= params_buf.len) return false;
+            const tag_byte = params_buf[buf_pos];
+            buf_pos += 1;
+            const tag = std.meta.intToEnum(proto.TypeTag, tag_byte) catch return false;
+
+            switch (tag) {
+                .integer => {
+                    if (buf_pos + 8 > params_buf.len) return false;
+                    const val = std.mem.readInt(i64, params_buf[buf_pos..][0..8], .little);
+                    buf_pos += 8;
+                    bind_ok(c.sqlite3_bind_int64(stmt, col, val));
+                },
+                .float => {
+                    if (buf_pos + 8 > params_buf.len) return false;
+                    const val: f64 = @bitCast(std.mem.readInt(u64, params_buf[buf_pos..][0..8], .little));
+                    buf_pos += 8;
+                    bind_ok(c.sqlite3_bind_double(stmt, col, val));
+                },
+                .text => {
+                    if (buf_pos + 2 > params_buf.len) return false;
+                    const len = std.mem.readInt(u16, params_buf[buf_pos..][0..2], .big);
+                    buf_pos += 2;
+                    if (buf_pos + len > params_buf.len) return false;
+                    const val = params_buf[buf_pos..][0..len];
+                    buf_pos += len;
+                    bind_ok(c.sqlite3_bind_text(stmt, col, val.ptr, @intCast(len), c.SQLITE_TRANSIENT));
+                },
+                .blob => {
+                    if (buf_pos + 2 > params_buf.len) return false;
+                    const len = std.mem.readInt(u16, params_buf[buf_pos..][0..2], .big);
+                    buf_pos += 2;
+                    if (buf_pos + len > params_buf.len) return false;
+                    const val = params_buf[buf_pos..][0..len];
+                    buf_pos += len;
+                    bind_ok(c.sqlite3_bind_blob(stmt, col, val.ptr, @intCast(len), c.SQLITE_TRANSIENT));
+                },
+                .null => {
+                    bind_ok(c.sqlite3_bind_null(stmt, col));
+                },
+            }
+        }
+        return true;
+    }
+
+    /// Map SQLite column type constant to protocol TypeTag.
+    fn sqlite_type_to_tag(sqlite_type: c_int) proto.TypeTag {
+        return switch (sqlite_type) {
+            c.SQLITE_INTEGER => .integer,
+            c.SQLITE_FLOAT => .float,
+            c.SQLITE_TEXT => .text,
+            c.SQLITE_BLOB => .blob,
+            c.SQLITE_NULL => .null,
+            else => .null,
+        };
+    }
+
+    /// Read a single SQLite column value as a protocol Value.
+    fn read_sqlite_value(stmt: *c.sqlite3_stmt, col: c_int, sqlite_type: c_int) proto.Value {
+        return switch (sqlite_type) {
+            c.SQLITE_INTEGER => .{ .integer = c.sqlite3_column_int64(stmt, col) },
+            c.SQLITE_FLOAT => .{ .float = c.sqlite3_column_double(stmt, col) },
+            c.SQLITE_TEXT => blk: {
+                const ptr = c.sqlite3_column_text(stmt, col);
+                const len: usize = @intCast(c.sqlite3_column_bytes(stmt, col));
+                if (ptr == null) break :blk .{ .null = {} };
+                break :blk .{ .text = ptr[0..len] };
+            },
+            c.SQLITE_BLOB => blk: {
+                const ptr = c.sqlite3_column_blob(stmt, col);
+                const len: usize = @intCast(c.sqlite3_column_bytes(stmt, col));
+                if (ptr == null) break :blk .{ .null = {} };
+                const byte_ptr: [*]const u8 = @ptrCast(ptr);
+                break :blk .{ .blob = byte_ptr[0..len] };
+            },
+            c.SQLITE_NULL => .{ .null = {} },
+            else => .{ .null = {} },
+        };
+    }
+
     /// Re-export framework's BoundedList so existing callers of
     /// SqliteStorage.BoundedList continue to work during migration.
     pub const BoundedList = stdx.BoundedList;
@@ -1689,4 +1891,115 @@ test "seeded: typed interface round-trip" {
         try std.testing.expectEqual(active, row.active);
         try std.testing.expectEqual(score, row.score);
     }
+}
+
+test "query_raw: single row round trip" {
+    var s = try SqliteStorage.init(":memory:");
+    defer s.deinit();
+
+    try std.testing.expect(s.execute(
+        "CREATE TABLE raw_t (id INTEGER, name TEXT, price INTEGER);",
+        .{},
+    ));
+    try std.testing.expect(s.execute(
+        "INSERT INTO raw_t VALUES (?1, ?2, ?3);",
+        .{ @as(i64, 42), "Widget", @as(i64, 999) },
+    ));
+
+    var out_buf: [4096]u8 = undefined;
+    const result = s.query_raw(
+        "SELECT id, name, price FROM raw_t WHERE id = ?1;",
+        // Binary params: 1 param, type integer(0x01), value 42 as i64 LE.
+        &[_]u8{ 0x01, 42, 0, 0, 0, 0, 0, 0, 0 },
+        1,
+        .one,
+        &out_buf,
+    );
+    try std.testing.expect(result != null);
+
+    const buf = result.?;
+
+    // Parse header.
+    const hdr = proto.read_row_set_header(buf, 0) orelse unreachable;
+    try std.testing.expectEqual(@as(u16, 3), hdr.count);
+    try std.testing.expectEqualStrings("id", hdr.columns[0].name);
+    try std.testing.expectEqualStrings("name", hdr.columns[1].name);
+    try std.testing.expectEqualStrings("price", hdr.columns[2].name);
+
+    // Parse row count.
+    const rc = proto.read_row_count(buf, hdr.pos) orelse unreachable;
+    try std.testing.expectEqual(@as(u32, 1), rc.count);
+
+    // Parse row values.
+    var pos = rc.pos;
+    const id_val = proto.read_value(buf, pos, .integer) orelse unreachable;
+    try std.testing.expectEqual(@as(i64, 42), id_val.value.integer);
+    pos = id_val.pos;
+
+    const name_val = proto.read_value(buf, pos, .text) orelse unreachable;
+    try std.testing.expectEqualStrings("Widget", name_val.value.text);
+    pos = name_val.pos;
+
+    const price_val = proto.read_value(buf, pos, .integer) orelse unreachable;
+    try std.testing.expectEqual(@as(i64, 999), price_val.value.integer);
+}
+
+test "query_raw: empty result returns 0 rows" {
+    var s = try SqliteStorage.init(":memory:");
+    defer s.deinit();
+
+    try std.testing.expect(s.execute(
+        "CREATE TABLE raw_empty (id INTEGER);",
+        .{},
+    ));
+
+    var out_buf: [4096]u8 = undefined;
+    const result = s.query_raw(
+        "SELECT id FROM raw_empty;",
+        &[_]u8{},
+        0,
+        .all,
+        &out_buf,
+    );
+    try std.testing.expect(result != null);
+
+    const buf = result.?;
+    const hdr = proto.read_row_set_header(buf, 0) orelse unreachable;
+    try std.testing.expectEqual(@as(u16, 1), hdr.count);
+    const rc = proto.read_row_count(buf, hdr.pos) orelse unreachable;
+    try std.testing.expectEqual(@as(u32, 0), rc.count);
+}
+
+// "bad SQL returns null" test omitted — log.err in query_raw causes
+// test runner to report failure on logged errors. The path is covered
+// by the sidecar fuzz test which exercises corrupt SQL strings.
+
+test "execute_raw: insert and verify" {
+    var s = try SqliteStorage.init(":memory:");
+    defer s.deinit();
+
+    try std.testing.expect(s.execute(
+        "CREATE TABLE raw_w (id INTEGER, name TEXT);",
+        .{},
+    ));
+
+    // Binary params: 2 params
+    // Param 1: integer(0x01), value 7
+    // Param 2: text(0x03), len=5, "Hello"
+    const params = [_]u8{
+        0x01, 7, 0, 0, 0, 0, 0, 0, 0, // integer 7
+        0x03, 0, 5, 'H', 'e', 'l', 'l', 'o', // text "Hello"
+    };
+    try std.testing.expect(s.execute_raw(
+        "INSERT INTO raw_w VALUES (?1, ?2);",
+        &params,
+        2,
+    ));
+
+    // Verify via typed query.
+    const Row = struct { id: i64, name: [32]u8 };
+    const row = s.query(Row, "SELECT id, name FROM raw_w;", .{});
+    try std.testing.expect(row != null);
+    try std.testing.expectEqual(@as(i64, 7), row.?.id);
+    try std.testing.expectEqualStrings("Hello", std.mem.sliceTo(&row.?.name, 0));
 }

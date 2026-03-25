@@ -481,7 +481,12 @@ test "read_value rejects truncated text" {
     try std.testing.expect(read_value(&buf, 0, .text) == null);
 }
 
+// Frame IO tests require libc (socketpair). They run when protocol.zig
+// is tested directly via `zig build unit-test` with -lc, and in the
+// sidecar test modules. Guarded to avoid compile errors when included
+// as a dependency of non-libc modules.
 test "frame round trip" {
+    if (!@import("builtin").link_libc) return error.SkipZigTest;
     const pair = test_socketpair();
     defer std.posix.close(pair[1]);
 
