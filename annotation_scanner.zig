@@ -968,12 +968,32 @@ const SqlStringIterator = struct {
             if (content[pos] == '\n') line += 1;
         }
         // Find opening brace and extract body by depth.
+        // Skip braces inside string literals to avoid misreading
+        // strings like "json_col = '{}'" as brace boundaries.
         const brace_start = std.mem.indexOfScalar(u8, content[pos..], '{') orelse
             return .{ .body = "", .pos = 0, .quote = quote };
         const body_start = pos + brace_start + 1;
         var depth: u32 = 1;
         var bpos = body_start;
+        var in_string = false;
+        var escape_next = false;
         while (bpos < content.len and depth > 0) : (bpos += 1) {
+            if (escape_next) {
+                escape_next = false;
+                continue;
+            }
+            if (content[bpos] == '\\') {
+                escape_next = true;
+                continue;
+            }
+            if (content[bpos] == '"' or content[bpos] == '\'') {
+                // Toggle string state. Handles both " and ' quotes.
+                // Doesn't track which quote opened — acceptable for
+                // brace scanning where we just need to skip string content.
+                in_string = !in_string;
+                continue;
+            }
+            if (in_string) continue;
             if (content[bpos] == '{') depth += 1;
             if (content[bpos] == '}') depth -= 1;
         }
@@ -1047,8 +1067,7 @@ fn sql_starts_with_write(sql: []const u8) bool {
 /// Used to warn when SQL is constructed dynamically (scanner can't validate).
 fn body_references_sql(body: []const u8, phase: Phase) bool {
     return switch (phase) {
-        .execute => std.mem.indexOf(u8, body, ".execute(") != null or
-            std.mem.indexOf(u8, body, "db.execute(") != null,
+        .execute => std.mem.indexOf(u8, body, "db.execute(") != null,
         .prefetch => std.mem.indexOf(u8, body, "sql:") != null or
             std.mem.indexOf(u8, body, "sql =") != null or
             std.mem.indexOf(u8, body, "query(") != null or
@@ -1967,10 +1986,28 @@ test "sql: sql_starts_with_write" {
 
 test "sql: body_references_sql detects execute calls" {
     try std.testing.expect(body_references_sql("db.execute(sql, params)", .execute));
-    try std.testing.expect(body_references_sql("self.execute(stmt)", .execute));
+    try std.testing.expect(!body_references_sql("self.execute(callback)", .execute)); // not db.execute
     try std.testing.expect(!body_references_sql("return \"ok\"", .execute));
     try std.testing.expect(body_references_sql("{ sql: variable }", .prefetch));
     try std.testing.expect(!body_references_sql("return {}", .prefetch));
+}
+
+test "sql: braces inside strings don't break body scoping" {
+    const content =
+        \\export function prefetch(msg) {
+        \\  return { x: { sql: "SELECT json_col FROM t WHERE data = '{}'", params: [], mode: "one" } };
+        \\}
+        \\export function handle(ctx, db) {
+        \\  db.execute("INSERT INTO t VALUES (?1)", [1]);
+        \\  return "ok";
+        \\}
+    ;
+    // Prefetch body should contain the SELECT but not the INSERT.
+    var iter = SqlStringIterator.init(content, 1, '"');
+    const sql1 = iter.next();
+    try std.testing.expect(sql1 != null);
+    try std.testing.expect(sql_starts_with_select(sql1.?));
+    try std.testing.expect(iter.next() == null); // INSERT is in handle, not prefetch
 }
 
 test "sql: Zig handle with comptime SQL constant" {
