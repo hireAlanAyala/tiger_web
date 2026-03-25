@@ -76,6 +76,7 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
     addFramework(sim_tests.root_module, framework);
+    sim_tests.linkSystemLibrary("sqlite3");
     sim_tests.linkLibC();
     const run_sim_tests = b.addRunArtifact(sim_tests);
     const test_step = b.step("test", "Run simulation tests");
