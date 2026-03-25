@@ -2199,3 +2199,104 @@ test "execute_raw: insert and verify" {
     try std.testing.expectEqual(@as(i64, 7), row.?.id);
     try std.testing.expectEqualStrings("Hello", std.mem.sliceTo(&row.?.name, 0));
 }
+
+test "WriteView recording captures SQL and params" {
+    var s = try SqliteStorage.init(":memory:");
+    defer s.deinit();
+
+    try std.testing.expect(s.execute("CREATE TABLE rec_t (id INTEGER, name TEXT);", .{}));
+
+    var record_buf: [4096]u8 = undefined;
+    var wv = SqliteStorage.WriteView.init_recording(&s, &record_buf);
+
+    s.begin();
+    wv.execute("INSERT INTO rec_t VALUES (?1, ?2);", .{ @as(i64, 99), "TestName" });
+    s.commit();
+
+    // Verify recording captured the write.
+    try std.testing.expectEqual(@as(u8, 1), wv.record_count);
+    try std.testing.expect(wv.record_pos > 0);
+
+    // Parse the recorded data — same format as sidecar protocol.
+    const data = record_buf[0..wv.record_pos];
+    var pos: usize = 0;
+
+    // sql: [u16 BE sql_len][sql_bytes]
+    const sql_len = std.mem.readInt(u16, data[pos..][0..2], .big);
+    pos += 2;
+    const sql = data[pos..][0..sql_len];
+    pos += sql_len;
+    try std.testing.expectEqualStrings("INSERT INTO rec_t VALUES (?1, ?2);", sql);
+
+    // params: [u8 param_count][params...]
+    const param_count = data[pos];
+    pos += 1;
+    try std.testing.expectEqual(@as(u8, 2), param_count);
+
+    // Param 1: integer 99
+    try std.testing.expectEqual(@as(u8, 0x01), data[pos]); // integer tag
+    pos += 1;
+    const val = std.mem.readInt(i64, data[pos..][0..8], .little);
+    try std.testing.expectEqual(@as(i64, 99), val);
+    pos += 8;
+
+    // Param 2: text "TestName"
+    try std.testing.expectEqual(@as(u8, 0x03), data[pos]); // text tag
+    pos += 1;
+    const text_len = std.mem.readInt(u16, data[pos..][0..2], .big);
+    pos += 2;
+    try std.testing.expectEqualStrings("TestName", data[pos..][0..text_len]);
+    pos += text_len;
+
+    // Consumed all recorded bytes.
+    try std.testing.expectEqual(wv.record_pos, pos);
+
+    // Verify the write actually executed.
+    const Row = struct { id: i64, name: [32]u8 };
+    const row = s.query(Row, "SELECT id, name FROM rec_t;", .{});
+    try std.testing.expect(row != null);
+    try std.testing.expectEqual(@as(i64, 99), row.?.id);
+    try std.testing.expectEqualStrings("TestName", std.mem.sliceTo(&row.?.name, 0));
+}
+
+test "WriteView recording multiple writes" {
+    var s = try SqliteStorage.init(":memory:");
+    defer s.deinit();
+
+    try std.testing.expect(s.execute("CREATE TABLE rec2_t (id INTEGER);", .{}));
+
+    var record_buf: [4096]u8 = undefined;
+    var wv = SqliteStorage.WriteView.init_recording(&s, &record_buf);
+
+    s.begin();
+    wv.execute("INSERT INTO rec2_t VALUES (?1);", .{@as(i64, 1)});
+    wv.execute("INSERT INTO rec2_t VALUES (?1);", .{@as(i64, 2)});
+    wv.execute("INSERT INTO rec2_t VALUES (?1);", .{@as(i64, 3)});
+    s.commit();
+
+    try std.testing.expectEqual(@as(u8, 3), wv.record_count);
+    try std.testing.expect(wv.record_pos > 0);
+}
+
+test "WriteView without recording works normally" {
+    var s = try SqliteStorage.init(":memory:");
+    defer s.deinit();
+
+    try std.testing.expect(s.execute("CREATE TABLE norec_t (id INTEGER);", .{}));
+
+    var wv = SqliteStorage.WriteView.init(&s);
+
+    s.begin();
+    wv.execute("INSERT INTO norec_t VALUES (?1);", .{@as(i64, 42)});
+    s.commit();
+
+    // No recording — record_buf is null, record_count is 0.
+    try std.testing.expectEqual(@as(u8, 0), wv.record_count);
+    try std.testing.expectEqual(@as(usize, 0), wv.record_pos);
+
+    // Write still executed.
+    const Row = struct { id: i64 };
+    const row = s.query(Row, "SELECT id FROM norec_t;", .{});
+    try std.testing.expect(row != null);
+    try std.testing.expectEqual(@as(i64, 42), row.?.id);
+}

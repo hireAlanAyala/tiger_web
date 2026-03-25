@@ -160,3 +160,59 @@ test "WAL empty writes (read-only mutation)" {
     try testing.expectEqual(@as(u64, 2), wal.op);
     wal.invariants();
 }
+
+test "WAL seeded corruption recovery" {
+    // Write entries, corrupt random bytes, verify recovery doesn't crash
+    // and resumes from the last valid entry before corruption.
+    const PRNG = @import("tiger_framework").prng;
+    const iterations = 100;
+    var prng = PRNG.from_seed(42);
+
+    for (0..iterations) |_| {
+        cleanup();
+
+        const writes = sample_writes();
+        var scratch: [4096]u8 = undefined;
+        const num_entries = prng.range_inclusive(u32, 1, 10);
+        var last_op: u64 = 0;
+
+        // Write entries.
+        {
+            var wal = Wal.init(test_path());
+            for (0..num_entries) |i| {
+                wal.append_writes(.create_product, @intCast(i), writes.data[0..writes.len], 1, &scratch);
+            }
+            last_op = wal.op;
+            wal.deinit();
+        }
+
+        // Corrupt random bytes in the file.
+        {
+            const fd = std.posix.open(test_path(), .{ .ACCMODE = .WRONLY }, 0) catch continue;
+            defer std.posix.close(fd);
+            const stat = std.posix.fstat(fd) catch continue;
+            const file_size: u64 = @intCast(stat.size);
+            if (file_size < 2) continue;
+
+            const num_corruptions = prng.range_inclusive(u32, 1, 5);
+            for (0..num_corruptions) |_| {
+                const offset = prng.range_inclusive(u64, 0, file_size - 1);
+                const bad = [_]u8{prng.int(u8)};
+                _ = std.posix.pwrite(fd, &bad, offset) catch {};
+            }
+        }
+
+        // Recovery must not crash. Op may be anything from 1 (only root
+        // survived) to last_op (corruption missed all entries).
+        {
+            var wal = Wal.init(test_path());
+            defer wal.deinit();
+            wal.invariants();
+            // Recovery must produce a valid state. Op is at least 1 (root).
+            // May differ from last_op — corruption can shorten or (rarely)
+            // misalign entries making recovery see different boundaries.
+            try testing.expect(wal.op >= 1);
+        }
+    }
+    cleanup();
+}

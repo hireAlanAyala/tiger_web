@@ -76,6 +76,12 @@ comptime {
     const max_handle_response = 1 + 1 + 1 + writes_max * max_write_entry + 1 + queries_max * (1 + sql_max + 1 + 1);
     assert(frame_max >= max_handle_response);
 
+    // WAL entry worst case: header(64) + writes(writes_max × max_write_entry).
+    // Must fit in wal.entry_max (the server's scratch buffer).
+    const wal = @import("tiger_framework").wal;
+    const max_wal_entry = @sizeOf(wal.EntryHeader) + writes_max * max_write_entry;
+    assert(wal.entry_max >= max_wal_entry);
+
     // cell_value_max must hold every domain string field.
     assert(cell_value_max >= message.product_description_max);
     assert(cell_value_max >= message.product_name_max);

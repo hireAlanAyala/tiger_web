@@ -77,7 +77,7 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
         connections_used: u32,
 
         wal: ?*Wal,
-        wal_scratch: [256 * 1024]u8, // scratch buffer for assembling WAL entries
+        wal_scratch: [@import("wal.zig").entry_max]u8,
 
         tick_count: u32,
 

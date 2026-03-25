@@ -27,8 +27,13 @@ const cs = @import("checksum.zig");
 
 const log = std.log.scoped(.wal);
 
-/// WAL entry header — fixed-size prefix of every entry.
-/// The rest of the entry (SQL writes) is variable-size.
+/// Maximum WAL entry size: header + worst-case SQL writes.
+/// Exported so the server can size its scratch buffer.
+/// The actual max depends on protocol constants — but since the WAL
+/// is in the framework (no protocol dependency), we use a fixed bound
+/// and the server asserts it's sufficient at comptime.
+pub const entry_max = 256 * 1024;
+
 /// WAL entry header. Extern struct, largest-alignment-first to avoid padding.
 pub const EntryHeader = extern struct {
     checksum: u128,     // 16 bytes, align 16
