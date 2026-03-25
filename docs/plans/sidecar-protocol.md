@@ -749,13 +749,36 @@ state for the same input.
 4. ~~Implement param deserializer in Zig (binary params → SQLite bind)~~ ✓
 5. ~~Implement row deserializer in TS (binary row format → JS objects)~~ ✓
 6. ~~Implement param serializer in TS (JS values → binary param format)~~ ✓
-7. Rebuild `sidecar.zig` — 3-round-trip exchange, binary framing
-8. Wire `sidecar_pipeline` in `app.zig` — calls storage/auth/WAL building blocks
-9. Rebuild dispatch socket server in adapter — binary framing
-10. Rebuild `sidecar_fuzz.zig` — fuzz full exchange with corrupt data
-11. SQL validation pass in annotation scanner
-12. WAL format change — SQL writes instead of Message bodies
-13. Comptime worst-case sizing assertions
-14. Delete JSON helpers from `sidecar.zig`
-15. Cross-pipeline correctness test — same operation through native and
-    sidecar pipelines produces same database state
+7. ~~Rebuild `sidecar.zig` — 3-round-trip exchange, binary framing~~ ✓
+8. ~~Wire `sidecar_pipeline` in `app.zig` — two pipelines, shared building blocks~~ ✓
+9. ~~Rebuild dispatch socket server in adapter — binary framing~~ ✓
+10. ~~Rebuild `sidecar_fuzz.zig` — fuzz full exchange + storage path~~ ✓
+11. ~~SQL validation pass in annotation scanner~~ ✓
+12. WAL format change — SQL writes instead of Message bodies (separate project)
+13. ~~Comptime worst-case sizing assertions~~ ✓
+14. ~~Delete JSON helpers from `sidecar.zig`~~ ✓ (deleted during rewrite)
+15. ~~Cross-pipeline correctness test — bidirectional + disconnect~~ ✓
+
+## Status
+
+The sidecar binary protocol is complete. All delivery steps except
+step 12 (WAL format change) are done and tested.
+
+The WAL currently writes Messages with empty bodies for sidecar
+operations. This is a known gap — the WAL entry is useless for sidecar
+requests (no body, no SQL writes). The sidecar works end-to-end
+without WAL changes. Step 12 is a separate project that touches
+wal.zig, replay.zig, wal_test.zig, and server.zig.
+
+What's built and proven:
+- Binary row format: defined, fuzzed (10K events), cross-language verified
+- Zig row serializer: SQLite → binary rows, tested with real storage
+- TS binary serde: row reader, param writer, 14 tests + cross-language vector
+- Sidecar client: 3-RT binary exchange, owned state (no aliasing)
+- Two pipelines: native SM + sidecar, shared building blocks, proven bidirectional
+- Binary dispatch: TS speaks binary, shared frame buffer, validated operations
+- Sidecar fuzzer: 7 paths including full storage path, 10K events, no crashes
+- SQL validation: scanner checks SELECT/INSERT at build time, flags non-literals
+- Comptime sizing: route request + handle response worst cases proven at compile time
+- Cross-language: enum mappings + protocol constants verified between Zig and TS
+- Cross-pipeline: native create → sidecar read, sidecar create → native read, disconnect
