@@ -139,7 +139,7 @@ pub fn StateMachineType(comptime StorageParam: type) type {
 pub const Storage = @import("storage.zig").SqliteStorage;
 pub const SM = StateMachineType(Storage);
 
-pub const Wal = @import("tiger_framework").wal.WalType(Message, message.wal_root);
+pub const Wal = @import("tiger_framework").wal.WalType(Operation);
 
 /// Optional sidecar client — when set, translate delegates to the
 /// external process instead of the Zig-native handlers.

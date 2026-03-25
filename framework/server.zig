@@ -77,6 +77,7 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
         connections_used: u32,
 
         wal: ?*Wal,
+        wal_scratch: [256 * 1024]u8, // scratch buffer for assembling WAL entries
 
         tick_count: u32,
 
@@ -201,6 +202,11 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
             server.state_machine.begin_batch();
             defer server.state_machine.commit_batch();
 
+            // Enable WAL recording for native pipeline if WAL is active.
+            if (server.wal != null) {
+                server.state_machine.wal_record_buf = &server.wal_scratch;
+            }
+
             for (server.connections) |*conn| {
                 if (conn.state != .ready) continue;
 
@@ -287,12 +293,32 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
                     conn.keep_alive = commit_result.response.keep_alive;
                 }
 
-                // WAL: log mutations after execute. No fsync — SQLite is the authority.
+                // WAL: log SQL writes after execute.
                 if (server.wal) |wal| {
                     if (!wal.disabled and msg.operation.is_mutation()) {
-                        const timestamp = server.state_machine.now;
-                        const entry = wal.prepare(msg, timestamp);
-                        wal.append(&entry);
+                        const sm = server.state_machine;
+                        if (@hasDecl(App, "sidecar") and App.sidecar != null) {
+                            // Sidecar pipeline: writes are in client.handle_writes.
+                            const client = &App.sidecar.?;
+                            wal.append_writes(
+                                msg.operation,
+                                sm.now,
+                                client.handle_writes,
+                                client.handle_write_count,
+                                &server.wal_scratch,
+                            );
+                        } else {
+                            // Native pipeline: writes recorded by WriteView.
+                            wal.append_writes(
+                                msg.operation,
+                                sm.now,
+                                if (sm.wal_record_buf) |buf| buf[0..sm.wal_record_len] else "",
+                                sm.wal_record_count,
+                                &server.wal_scratch,
+                            );
+                            sm.wal_record_len = 0;
+                            sm.wal_record_count = 0;
+                        }
                     }
                 }
             }

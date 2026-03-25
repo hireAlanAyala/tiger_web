@@ -185,6 +185,13 @@ pub fn StateMachineType(comptime Storage: type, comptime Handlers: type) type {
         /// concern owned by the SM, not the handlers.
         prefetch_identity: ?message.PrefetchIdentity,
 
+        /// WAL recording: if set, commit() records SQL writes into this buffer.
+        /// The server sets this before process_inbox and reads wal_record_len
+        /// after commit to get the recorded data for wal.append_writes().
+        wal_record_buf: ?[]u8 = null,
+        wal_record_len: usize = 0,
+        wal_record_count: u8 = 0,
+
         pub fn init(storage: *Storage, log_trace: bool, prng_seed: u64, secret_key: *const [auth.key_length]u8) StateMachine {
             return .{
                 .storage = storage,
@@ -269,13 +276,19 @@ pub fn StateMachineType(comptime Storage: type, comptime Handlers: type) type {
             // Handle writes directly to storage. The transaction is
             // managed by begin_batch/commit_batch at the server level —
             // all writes in a tick share one transaction.
-            var write_view = Storage.WriteView.init(self.storage);
+            var write_view = if (self.wal_record_buf) |buf|
+                Storage.WriteView.init_recording(self.storage, buf)
+            else
+                Storage.WriteView.init(self.storage);
             const handle_result = Handlers.handler_execute(
                 cache,
                 msg,
                 fw,
                 &write_view,
             );
+            // Store recording output for the server's WAL append.
+            self.wal_record_len = write_view.record_pos;
+            self.wal_record_count = write_view.record_count;
 
             const identity = self.prefetch_identity orelse std.mem.zeroes(message.PrefetchIdentity);
             const is_auth = identity.is_authenticated != 0 or

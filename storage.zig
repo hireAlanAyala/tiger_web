@@ -111,19 +111,109 @@ pub const SqliteStorage = struct {
     /// methods on WriteView are part of the contract.
     pub const WriteView = struct {
         storage: *SqliteStorage,
+        // WAL recording: if set, each execute() also records the SQL + params.
+        record_buf: ?[]u8 = null,
+        record_pos: usize = 0,
+        record_count: u8 = 0,
 
         pub fn init(storage: *SqliteStorage) WriteView {
             return .{ .storage = storage };
         }
 
+        pub fn init_recording(storage: *SqliteStorage, buf: []u8) WriteView {
+            return .{ .storage = storage, .record_buf = buf };
+        }
+
         /// Execute a write statement. Asserts success — if prefetch
         /// validated the data, the write must succeed. A failure here
         /// means the handler's precondition check was wrong.
-        pub fn execute(self: WriteView, comptime sql_str: [*:0]const u8, args: anytype) void {
+        /// If recording is enabled, also records SQL + params for the WAL.
+        pub fn execute(self: *WriteView, comptime sql_str: [*:0]const u8, args: anytype) void {
             const ok = self.storage.execute(sql_str, args);
-            assert(ok); // prefetch proved the precondition, write must succeed
+            assert(ok);
+
+            // Record for WAL if buffer is set.
+            if (self.record_buf) |buf| {
+                const sql_slice = std.mem.sliceTo(sql_str, 0);
+                var pos = self.record_pos;
+
+                // sql: [u16 BE sql_len][sql_bytes]
+                if (pos + 2 + sql_slice.len > buf.len) return; // overflow — skip recording
+                std.mem.writeInt(u16, buf[pos..][0..2], @intCast(sql_slice.len), .big);
+                pos += 2;
+                @memcpy(buf[pos..][0..sql_slice.len], sql_slice);
+                pos += sql_slice.len;
+
+                // params: [u8 param_count][params...]
+                const fields = @typeInfo(@TypeOf(args)).@"struct".fields;
+                if (pos >= buf.len) return;
+                buf[pos] = @intCast(fields.len);
+                pos += 1;
+
+                // Serialize each param using the binary protocol format.
+                inline for (fields) |field| {
+                    const val = @field(args, field.name);
+                    pos = record_param(buf, pos, val);
+                }
+
+                self.record_pos = pos;
+                self.record_count += 1;
+            }
         }
     };
+
+    /// Serialize a single param value into the WAL recording buffer.
+    /// Same binary format as the sidecar protocol (protocol.zig TypeTag).
+    fn record_param(buf: []u8, pos_in: usize, val: anytype) usize {
+        const T = @TypeOf(val);
+        var pos = pos_in;
+        if (pos >= buf.len) return pos;
+
+        if (T == u128) {
+            buf[pos] = 0x04; // blob
+            pos += 1;
+            if (pos + 2 + 16 > buf.len) return pos;
+            std.mem.writeInt(u16, buf[pos..][0..2], 16, .big);
+            pos += 2;
+            std.mem.writeInt(u128, buf[pos..][0..16], val, .big);
+            pos += 16;
+        } else if (T == bool) {
+            buf[pos] = 0x01; // integer
+            pos += 1;
+            if (pos + 8 > buf.len) return pos;
+            std.mem.writeInt(i64, buf[pos..][0..8], if (val) 1 else 0, .little);
+            pos += 8;
+        } else if (comptime is_byte_slice(T)) {
+            buf[pos] = 0x03; // text
+            pos += 1;
+            const slice: []const u8 = val;
+            if (pos + 2 + slice.len > buf.len) return pos;
+            std.mem.writeInt(u16, buf[pos..][0..2], @intCast(slice.len), .big);
+            pos += 2;
+            @memcpy(buf[pos..][0..slice.len], slice);
+            pos += slice.len;
+        } else if (comptime is_string_literal(T)) {
+            buf[pos] = 0x03; // text
+            pos += 1;
+            const slice: []const u8 = val;
+            if (pos + 2 + slice.len > buf.len) return pos;
+            std.mem.writeInt(u16, buf[pos..][0..2], @intCast(slice.len), .big);
+            pos += 2;
+            @memcpy(buf[pos..][0..slice.len], slice);
+            pos += slice.len;
+        } else if (@typeInfo(T) == .int or @typeInfo(T) == .comptime_int) {
+            buf[pos] = 0x01; // integer
+            pos += 1;
+            if (pos + 8 > buf.len) return pos;
+            std.mem.writeInt(i64, buf[pos..][0..8], @intCast(val), .little);
+            pos += 8;
+        } else {
+            // Unknown type — skip.
+            buf[pos] = 0x05; // null
+            pos += 1;
+        }
+        return pos;
+    }
 
     db: *c.sqlite3,
     stmt_get: *c.sqlite3_stmt,
