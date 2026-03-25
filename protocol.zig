@@ -500,6 +500,47 @@ test "frame round trip" {
     std.posix.close(pair[0]);
 }
 
+test "cross-language test vector — write to /tmp for TS reader" {
+    // Write a known row set to a file. The TS test (serde_test.ts) reads
+    // the same file and verifies agreement. This is a direct cross-language
+    // test — not transitive through the spec.
+    //
+    // Columns: id(integer), name(text), price(integer), data(blob), score(float)
+    // Row 1: id=42, name="Widget", price=-1, data=[0xDE,0xAD], score=3.14
+    // Row 2: id=0, name="", price=999, data=[], score=-0.0
+
+    var buf: [4096]u8 = undefined;
+    const columns = [_]Column{
+        .{ .type_tag = .integer, .name = "id" },
+        .{ .type_tag = .text, .name = "name" },
+        .{ .type_tag = .integer, .name = "price" },
+        .{ .type_tag = .blob, .name = "data" },
+        .{ .type_tag = .float, .name = "score" },
+    };
+
+    var pos = write_row_set_header(&buf, &columns) orelse unreachable;
+    pos = write_row_count(&buf, pos, 2) orelse unreachable;
+
+    // Row 1
+    pos = write_value(&buf, pos, .{ .integer = 42 }) orelse unreachable;
+    pos = write_value(&buf, pos, .{ .text = "Widget" }) orelse unreachable;
+    pos = write_value(&buf, pos, .{ .integer = -1 }) orelse unreachable;
+    pos = write_value(&buf, pos, .{ .blob = &[_]u8{ 0xDE, 0xAD } }) orelse unreachable;
+    pos = write_value(&buf, pos, .{ .float = 3.14 }) orelse unreachable;
+
+    // Row 2
+    pos = write_value(&buf, pos, .{ .integer = 0 }) orelse unreachable;
+    pos = write_value(&buf, pos, .{ .text = "" }) orelse unreachable;
+    pos = write_value(&buf, pos, .{ .integer = 999 }) orelse unreachable;
+    pos = write_value(&buf, pos, .{ .blob = "" }) orelse unreachable;
+    pos = write_value(&buf, pos, .{ .float = -0.0 }) orelse unreachable;
+
+    // Write to file.
+    const file = std.fs.cwd().createFile("/tmp/tiger_row_test.bin", .{}) catch unreachable;
+    defer file.close();
+    file.writeAll(buf[0..pos]) catch unreachable;
+}
+
 fn test_socketpair() [2]std.posix.fd_t {
     var fds: [2]std.posix.fd_t = undefined;
     const rc = std.c.socketpair(std.posix.AF.UNIX, std.posix.SOCK.STREAM, 0, &fds);

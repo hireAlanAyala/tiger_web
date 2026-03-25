@@ -3,6 +3,7 @@
 // Run: npx tsx generated/serde_test.ts
 
 import { readRowSet, writeParams, writeSqlDeclarations, writeWriteQueue, TypeTag } from "./serde.ts";
+import { readFileSync, existsSync } from "fs";
 
 let passed = 0;
 
@@ -270,6 +271,131 @@ function assertEq(actual: unknown, expected: unknown, msg: string): void {
   assertEq(dv.getUint8(0), 1, "writes: count");
 
   passed++;
+}
+
+// --- Test 9: Negative integers ---
+{
+  const bytes: number[] = [];
+  bytes.push(0x00, 0x01); // 1 column
+  bytes.push(TypeTag.integer);
+  bytes.push(0x00, 0x03);
+  bytes.push(0x76, 0x61, 0x6C); // "val"
+  bytes.push(0x00, 0x00, 0x00, 0x02); // 2 rows
+
+  // Row 1: val = -1 (i64 LE: all FF)
+  bytes.push(0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF);
+  // Row 2: val = -42 (i64 LE: 0xFFFFFFFFFFFFFFD6)
+  bytes.push(0xD6, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF);
+
+  const buf = new DataView(new Uint8Array(bytes).buffer);
+  const { result } = readRowSet(buf, 0);
+
+  assertEq(result.rows[0].val, -1, "neg: -1");
+  assertEq(result.rows[1].val, -42, "neg: -42");
+
+  passed++;
+}
+
+// --- Test 10: Negative integer param writer round-trip ---
+{
+  const paramBuf = new ArrayBuffer(64);
+  const dv = new DataView(paramBuf);
+
+  const bytesWritten = writeParams(dv, 0, [-42]);
+  assertEq(dv.getUint8(0), TypeTag.integer, "neg param: tag");
+  // Read back the i64 LE value.
+  const lo = dv.getUint32(1, true);
+  const hi = dv.getInt32(5, true);
+  const val = hi * 0x100000000 + lo;
+  assertEq(val, -42, "neg param: value");
+  assertEq(bytesWritten, 9, "neg param: bytes");
+
+  passed++;
+}
+
+// --- Test 11: Blob value in row set ---
+{
+  const bytes: number[] = [];
+  bytes.push(0x00, 0x01); // 1 column
+  bytes.push(TypeTag.blob);
+  bytes.push(0x00, 0x04);
+  bytes.push(0x64, 0x61, 0x74, 0x61); // "data"
+  bytes.push(0x00, 0x00, 0x00, 0x01); // 1 row
+
+  // Row 1: data = [0xDE, 0xAD, 0xBE, 0xEF]
+  bytes.push(0x00, 0x04); // u16 BE len = 4
+  bytes.push(0xDE, 0xAD, 0xBE, 0xEF);
+
+  const buf = new DataView(new Uint8Array(bytes).buffer);
+  const { result } = readRowSet(buf, 0);
+
+  const blob = result.rows[0].data as Uint8Array;
+  assert(blob instanceof Uint8Array, "blob: is Uint8Array");
+  assertEq(blob.length, 4, "blob: length");
+  assertEq(blob[0], 0xDE, "blob[0]");
+  assertEq(blob[1], 0xAD, "blob[1]");
+  assertEq(blob[2], 0xBE, "blob[2]");
+  assertEq(blob[3], 0xEF, "blob[3]");
+
+  passed++;
+}
+
+// --- Test 12: MAX_SAFE_INTEGER serialized as integer, not float ---
+{
+  const paramBuf = new ArrayBuffer(64);
+  const dv = new DataView(paramBuf);
+
+  writeParams(dv, 0, [Number.MAX_SAFE_INTEGER]);
+  assertEq(dv.getUint8(0), TypeTag.integer, "max_safe: tag is integer not float");
+
+  passed++;
+}
+
+// --- Test 13: Direct cross-language test vector ---
+// Reads /tmp/tiger_row_test.bin written by protocol.zig unit test.
+// Run `zig build unit-test` first to generate the file.
+{
+  const vectorPath = "/tmp/tiger_row_test.bin";
+  if (existsSync(vectorPath)) {
+    const fileBytes = readFileSync(vectorPath);
+    const buf = new DataView(fileBytes.buffer, fileBytes.byteOffset, fileBytes.byteLength);
+    const { result } = readRowSet(buf, 0);
+
+    // 5 columns: id, name, price, data, score
+    assertEq(result.columns.length, 5, "xlang: col count");
+    assertEq(result.columns[0].name, "id", "xlang: col 0");
+    assertEq(result.columns[1].name, "name", "xlang: col 1");
+    assertEq(result.columns[2].name, "price", "xlang: col 2");
+    assertEq(result.columns[3].name, "data", "xlang: col 3");
+    assertEq(result.columns[4].name, "score", "xlang: col 4");
+
+    // 2 rows
+    assertEq(result.rows.length, 2, "xlang: row count");
+
+    // Row 1: id=42, name="Widget", price=-1, data=[0xDE,0xAD], score=3.14
+    assertEq(result.rows[0].id, 42, "xlang: r0 id");
+    assertEq(result.rows[0].name, "Widget", "xlang: r0 name");
+    assertEq(result.rows[0].price, -1, "xlang: r0 price");
+    const blob0 = result.rows[0].data as Uint8Array;
+    assertEq(blob0.length, 2, "xlang: r0 data len");
+    assertEq(blob0[0], 0xDE, "xlang: r0 data[0]");
+    assertEq(blob0[1], 0xAD, "xlang: r0 data[1]");
+    assertEq(result.rows[0].score, 3.14, "xlang: r0 score");
+
+    // Row 2: id=0, name="", price=999, data=[], score=-0.0
+    assertEq(result.rows[1].id, 0, "xlang: r1 id");
+    assertEq(result.rows[1].name, "", "xlang: r1 name");
+    assertEq(result.rows[1].price, 999, "xlang: r1 price");
+    const blob1 = result.rows[1].data as Uint8Array;
+    assertEq(blob1.length, 0, "xlang: r1 data len");
+    // -0.0: Object.is distinguishes -0 from +0
+    assert(Object.is(result.rows[1].score, -0), "xlang: r1 score is -0");
+
+    passed++;
+    console.log("  (cross-language vector test passed)");
+  } else {
+    console.log("  (skipped cross-language test — run `zig build unit-test` first to generate vector)");
+  }
 }
 
 console.log(`${passed} serde tests passed`);
