@@ -14,12 +14,29 @@
 //!   [u8 write_count]    number of SQL write statements
 //!   [writes...]         write_count × { u16 sql_len, sql, u8 param_count, params }
 //!
+//! Design decisions:
+//!
+//! **SQL writes, not handler inputs.** The original WAL stored Messages
+//! (operation + id + typed body). Replay re-executed handlers. This
+//! required the sidecar to serialize typed bodies — bringing per-type
+//! serde back into the protocol. SQL-write WAL eliminates the body
+//! format question: replay re-executes SQL, no handlers needed.
+//!
+//! **Why not input replay?** TigerBeetle stores inputs because replay
+//! IS the replication protocol. We don't replicate. SQLite handles
+//! crash recovery. Our WAL is a diagnostic tool. The fuzzer verifies
+//! determinism (same input → same output), not WAL replay.
+//!
+//! **Debug flow:** WAL investigates (what SQL ran?), seed reproduces
+//! (fuzz test with the bug's seed), simulation verifies (auditor
+//! checks outcomes after fix). Each tool has a role.
+//!
+//! **Append ordering:** DB first, then WAL. A missing entry is obvious
+//! and safe (detectable gap). A phantom entry is silent and dangerous
+//! (WAL lies). Option B is strictly better.
+//!
 //! No fsync — the kernel flushes on its own schedule. SQLite is the
 //! authority; the WAL is a diagnostic notebook.
-//!
-//! Append ordering: DB first, then WAL. A missing entry is obvious and
-//! safe; a phantom entry is silent and dangerous.
-//! See the previous version's module doc for the full reasoning.
 
 const std = @import("std");
 const assert = std.debug.assert;

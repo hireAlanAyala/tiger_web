@@ -17,7 +17,9 @@
 //!
 //! Sidecar failure at any point: close connection, return error to HTTP
 //! client, reconnect lazily on next request. No mid-exchange retry.
-//! See docs/plans/sidecar-protocol.md.
+//! No retry because: writes may have committed, re-running the handler
+//! against post-commit state produces different results. The operation
+//! either completed or it didn't. The client retries (TB pattern).
 
 const std = @import("std");
 const assert = std.debug.assert;

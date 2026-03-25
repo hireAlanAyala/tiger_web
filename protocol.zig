@@ -5,8 +5,25 @@
 //!   RT2: prefetch_results → handle_render_response
 //!   RT3: render_results → html_response
 //!
-//! The wire carries rows, not domain structs. One generic row reader per
-//! language. SQL is the schema contract. No per-type serde.
+//! Design decisions:
+//!
+//! **Self-describing rows, not domain structs.** The original protocol
+//! serialized PrefetchCache (65KB, 11 typed slots) and WriteSlot (tagged
+//! union). Adding a table meant 4 changes. The new protocol carries rows
+//! — one generic reader per language, no per-type serde. Adding a table
+//! doesn't touch the protocol. SQL is the schema contract.
+//!
+//! **Not JSON.** The first rebuild used JSON frames. This introduced
+//! hand-rolled parsing (150 lines), 1MB buffers, runtime string matching.
+//! Binary type tags + lengths have no parsing — just read and advance.
+//!
+//! **Column names on the wire.** Redundant — the sidecar knows the SQL.
+//! But omitting names means column order matters. A schema change silently
+//! misaligns data. Names: ~50 bytes per result set, safety over bandwidth.
+//!
+//! **Always 3 round trips.** Considered 2 RTs (skip render when no render
+//! SQL). Rejected: the database is the bottleneck, not the socket. 50us
+//! for an empty RT is not worth a second code path. One path everywhere.
 //!
 //! Frame format: [u32 big-endian payload_length][u8 message_tag][payload]
 

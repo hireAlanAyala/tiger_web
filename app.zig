@@ -465,12 +465,23 @@ pub const CommitResult = struct {
 // round trips) doesn't match the SM's phased dispatch (prefetch →
 // execute → render as separate local calls with typed PrefetchCache).
 //
+// Alternatives considered:
+//   A. Sidecar as Handlers backend (single pipeline) — rejected.
+//      Impedance mismatch: RT2 spans prefetch→execute. Requires dummy
+//      cache, stored state between SM calls, buffer aliasing.
+//   B. Sidecar bypass in commit_and_encode — rejected.
+//      Makes commit_and_encode two implementations.
+//   C. Generalize Cache to opaque bytes — rejected.
+//      PrefetchCache is union(Operation). The real problem is RT2
+//      spanning two SM phases, not the cache type.
+//
+// TigerBeetle has this pattern: real IO and simulated IO share building
+// blocks but have different orchestration. Same here.
+//
 // Both pipelines call the same building blocks: storage.begin/commit,
 // auth.resolve_credential, http_response encoding. The building blocks
-// are shared. The composition is per-path.
-//
-// See docs/plans/sidecar-protocol.md "Pipeline architecture" for the
-// full design rationale and rejected alternatives.
+// are shared. The composition is per-path. Correctness proven by
+// cross-pipeline test (sidecar_test.zig).
 // =====================================================================
 
 /// Process an HTTP request through the sidecar pipeline.
@@ -517,7 +528,7 @@ pub fn sidecar_commit_and_encode(
 
     const is_auth = identity.is_authenticated != 0;
     const cookie_hdr = http_response.format_cookie_header(
-        message.SessionAction.none, // session_action deferred — see plan
+        message.SessionAction.none, // session_action deferred — session-as-writes replaces this
         identity.user_id,
         is_auth,
         identity.is_new != 0,
@@ -553,7 +564,7 @@ pub fn sidecar_commit_and_encode(
 const TestSM = SM; // Tests use the same SM type as production
 
 // extract_cache tests removed — the sidecar cache protocol needs redesign
-// for the new handler-based SM. See TODO in extract_cache above.
+// extract_cache tests removed — sidecar has its own pipeline, no shared cache.
 
 test "duplicate insert returns false" {
     var storage = try Storage.init(":memory:");
