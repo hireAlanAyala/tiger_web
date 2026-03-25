@@ -26,9 +26,10 @@ pub const writes_max = message.writes_max;
 pub const sql_max = 4096;
 
 /// Maximum number of queries in a prefetch or render declaration.
-/// Derived: order_items_max (20) is the most queries a single handler needs
-/// (create_order prefetches one product per item). Headroom for future handlers.
-pub const queries_max = message.order_items_max + 12;
+/// Derived: create_order prefetches one product per order item (order_items_max).
+/// page_load_dashboard prefetches 3 lists. The max is the larger of the two.
+/// No headroom — if a handler exceeds this, it's a design problem, not a cap problem.
+pub const queries_max = @max(message.order_items_max, 3);
 
 /// Maximum column name length.
 pub const column_name_max = 128;
