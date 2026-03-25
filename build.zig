@@ -60,17 +60,14 @@ pub fn build(b: *std.Build) void {
     replay_step.dependOn(&replay_cmd.step);
 
     // --- Simulation tests ---
-    const sim_exe = b.addExecutable(.{
-        .name = "tiger-sim",
+    const sim_tests = b.addTest(.{
         .root_source_file = b.path("sim.zig"),
         .target = target,
         .optimize = optimize,
     });
-    sim_exe.linkSystemLibrary("sqlite3");
-    sim_exe.linkLibC();
-    b.installArtifact(sim_exe);
-    const run_sim_tests = b.addRunArtifact(sim_exe);
-    if (b.args) |args| run_sim_tests.addArgs(args);
+    sim_tests.linkSystemLibrary("sqlite3");
+    sim_tests.linkLibC();
+    const run_sim_tests = b.addRunArtifact(sim_tests);
     const test_step = b.step("test", "Run simulation tests");
     test_step.dependOn(&run_sim_tests.step);
 
