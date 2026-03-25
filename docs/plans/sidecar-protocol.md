@@ -754,21 +754,18 @@ state for the same input.
 9. ~~Rebuild dispatch socket server in adapter — binary framing~~ ✓
 10. ~~Rebuild `sidecar_fuzz.zig` — fuzz full exchange + storage path~~ ✓
 11. ~~SQL validation pass in annotation scanner~~ ✓
-12. WAL format change — SQL writes instead of Message bodies (separate project)
+12. ~~WAL format change — SQL writes instead of Message bodies~~ ✓
 13. ~~Comptime worst-case sizing assertions~~ ✓
 14. ~~Delete JSON helpers from `sidecar.zig`~~ ✓ (deleted during rewrite)
 15. ~~Cross-pipeline correctness test — bidirectional + disconnect~~ ✓
 
 ## Status
 
-The sidecar binary protocol is complete. All delivery steps except
-step 12 (WAL format change) are done and tested.
+All 15 delivery steps are complete.
 
-The WAL currently writes Messages with empty bodies for sidecar
-operations. This is a known gap — the WAL entry is useless for sidecar
-requests (no body, no SQL writes). The sidecar works end-to-end
-without WAL changes. Step 12 is a separate project that touches
-wal.zig, replay.zig, wal_test.zig, and server.zig.
+Remaining follow-up: replay.zig needs a rewrite for the SQL-write WAL.
+The replay tool reads entries and re-executes SQL (no handlers needed).
+Excluded from the build until rewritten.
 
 What's built and proven:
 - Binary row format: defined, fuzzed (10K events), cross-language verified
