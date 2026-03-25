@@ -5,7 +5,7 @@ import { readFileSync, writeFileSync, mkdirSync, rmSync, existsSync } from "fs";
 import { execSync } from "child_process";
 
 if (!existsSync("generated/types.generated.ts")) {
-  console.error("error: generated/types.generated.ts not found. Run `zig build codegen` first.");
+  console.error("error: generated/types.generated.ts not found.");
   process.exit(1);
 }
 

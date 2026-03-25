@@ -58,12 +58,12 @@ Native commit handles storage, auth, WAL. Sidecar provides HTML.
 
 | File | Role |
 |---|---|
-| `codegen.zig` | Comptime type introspection → `generated/types.generated.ts` (types + serde) |
-| `serde_test_codegen.zig` | Generates serde round-trip test vectors |
-| `annotation_scanner.zig` | Scans `[route]`/`[handle]`/`[render]` annotations, outputs manifest |
-| `sidecar.zig` | Unix socket client (`SidecarClient`) — translate + execute_render |
-| `protocol.zig` | Wire format types (TranslateRequest/Response, PrefetchCache, WriteSlot) |
-| `adapters/typescript.ts` | Reads manifest, generates `dispatch.generated.ts` |
+| `annotation_scanner.zig` | Scans annotations, validates status exhaustiveness + SQL read/write |
+| `sidecar.zig` | Unix socket client — 3-RT binary protocol exchange |
+| `protocol.zig` | Self-describing binary row format, frame IO, type tags |
+| `adapters/typescript.ts` | Reads manifest, generates binary dispatch |
+| `generated/types.generated.ts` | Hand-written TS SDK (handler types + enum mappings) |
+| `generated/serde.ts` | Hand-written TS binary row reader + param writer |
 | `examples/ecommerce-ts/handlers/*.ts` | Developer's annotated handler functions |
 
 ### Framework (`framework/`) — domain-free, parameterized on App

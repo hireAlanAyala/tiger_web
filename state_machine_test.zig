@@ -16,7 +16,7 @@
 //! See docs/plans/db-configuration.md.
 //!
 //! This file is separate from state_machine.zig so that files importing
-//! the SM module (codegen, protocol, sidecar) don't transitively pull
+//! the SM module (protocol, sidecar) don't transitively pull
 //! in app.zig → storage.zig → sqlite3.
 
 const std = @import("std");
@@ -42,8 +42,7 @@ fn make_test_product(id: u128, name: []const u8, price: u32) message.Product {
 }
 
 // Test types — lazily evaluated. Only compiled when a test block
-// references them. This prevents codegen.zig (which imports state_machine
-// for module-level types) from pulling in app.zig → storage.zig → sqlite3.
+// references them. Keeps the SM module light for importers.
 const sm_test_key: *const [auth.key_length]u8 = "tiger-web-test-key-0123456789ab!";
 
 fn list_params(active_filter: message.ListParams.ActiveFilter) message.ListParams {
