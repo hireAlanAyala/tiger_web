@@ -416,7 +416,7 @@ pub const SidecarClient = struct {
 
     /// Skip past one param list in a binary buffer.
     /// Returns new position, or null if malformed.
-    fn skip_params(data: []const u8, start: usize, param_count: u8) ?usize {
+    pub fn skip_params(data: []const u8, start: usize, param_count: u8) ?usize {
         var pos = start;
         for (0..param_count) |_| {
             if (pos >= data.len) return null;
@@ -456,7 +456,7 @@ pub const SidecarClient = struct {
 
     /// Iterator over SQL declarations (prefetch or render).
     /// Format: [u8 query_count][queries: { key, sql, mode, params }]
-    const DeclIterator = struct {
+    pub const DeclIterator = struct {
         data: []const u8,
         pos: usize,
         remaining: u8,
@@ -469,7 +469,7 @@ pub const SidecarClient = struct {
             mode: protocol.QueryMode,
         };
 
-        fn init(data: []const u8) ?DeclIterator {
+        pub fn init(data: []const u8) ?DeclIterator {
             if (data.len == 0) return null;
             return .{
                 .data = data,
@@ -479,7 +479,7 @@ pub const SidecarClient = struct {
             };
         }
 
-        fn next(self: *DeclIterator) ?Entry {
+        pub fn next(self: *DeclIterator) ?Entry {
             if (self.remaining == 0) return null;
             self.remaining -= 1;
 

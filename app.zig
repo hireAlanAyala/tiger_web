@@ -517,7 +517,7 @@ pub fn sidecar_commit_and_encode(
 
     const is_auth = identity.is_authenticated != 0;
     const cookie_hdr = http_response.format_cookie_header(
-        .none, // session_action deferred — see plan
+        message.SessionAction.none, // session_action deferred — see plan
         identity.user_id,
         is_auth,
         identity.is_new != 0,
