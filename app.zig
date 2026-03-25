@@ -503,7 +503,11 @@ pub fn sidecar_commit_and_encode(
     // The server's begin_batch/commit_batch wraps the entire tick.
     if (!client.execute_writes(sm.storage)) return null;
 
-    // Phase 4: RT3 — execute render SQL (post-commit), receive HTML.
+    // Phase 4: RT3 — execute render SQL, receive HTML.
+    // Writes are visible via read-your-writes within the server's open
+    // transaction. The actual commit (commit_batch) runs after process_inbox
+    // returns. Render sees the correct data — not "post-commit" in the
+    // SQLite sense, but the writes have been applied.
     const ro_post = StorageParam.ReadView.init(sm.storage);
     const html = client.execute_render(ro_post) orelse return null;
 

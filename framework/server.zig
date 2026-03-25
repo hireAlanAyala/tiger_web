@@ -249,9 +249,13 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
                         conn.set_response(commit_result.response.offset, commit_result.response.len);
                         conn.keep_alive = commit_result.response.keep_alive;
                     } else {
-                        // Sidecar failure — return error to client.
+                        // Sidecar failure — the request WAS routed (translate
+                        // succeeded), but execution failed (socket error, bad
+                        // SQL, sidecar crash). Distinct from unmapped_response
+                        // which means no route matched.
                         server.state_machine.tracer.cancel(.execute);
-                        const resp = unmapped_response(conn);
+                        log.warn("sidecar pipeline failed for {s} fd={d}", .{ @tagName(msg.operation), conn.fd });
+                        const resp = sidecar_error_response(conn);
                         conn.set_response(resp.offset, resp.len);
                         conn.keep_alive = false;
                     }
@@ -392,6 +396,21 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
                 "Connection: close\r\n" ++
                 "\r\n" ++
                 "invalid request\n";
+            @memcpy(conn.send_buf[0..response.len], response);
+            return .{ .offset = 0, .len = response.len };
+        }
+
+        /// Write an error response for sidecar pipeline failures.
+        /// Distinct from unmapped_response: the request WAS routed, but
+        /// execution failed (sidecar crash, bad SQL, socket error).
+        fn sidecar_error_response(conn: *Connection) struct { offset: u32, len: u32 } {
+            const response =
+                "HTTP/1.1 200 OK\r\n" ++
+                "Content-Type: text/plain\r\n" ++
+                "Content-Length: 14\r\n" ++
+                "Connection: close\r\n" ++
+                "\r\n" ++
+                "sidecar error\n";
             @memcpy(conn.send_buf[0..response.len], response);
             return .{ .offset = 0, .len = response.len };
         }
