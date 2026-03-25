@@ -30,7 +30,7 @@ export function handle(ctx: HandleContext, db: WriteDb): string {
   if (ctx.prefetched.existing) return "version_conflict";
   db.execute(
     "INSERT INTO products (id, name, description, price_cents, inventory, version, active) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-    [ctx.body.id, ctx.body.name, ctx.body.description || "", ctx.body.price_cents || 0, ctx.body.inventory || 0, 1, true],
+    ctx.body.id, ctx.body.name, ctx.body.description || "", ctx.body.price_cents || 0, ctx.body.inventory || 0, 1, true,
   );
   return "ok";
 }

@@ -20,7 +20,7 @@ export function handle(ctx: HandleContext, db: WriteDb): string {
   if (!ctx.prefetched.collection) return "not_found";
   db.execute(
     "INSERT INTO collection_members (collection_id, product_id, removed) VALUES (?1, ?2, 0) ON CONFLICT(collection_id, product_id) DO UPDATE SET removed = 0",
-    [ctx.id, ctx.body.product_id],
+    ctx.id, ctx.body.product_id,
   );
   return "ok";
 }

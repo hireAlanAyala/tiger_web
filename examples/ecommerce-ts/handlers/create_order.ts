@@ -41,14 +41,14 @@ export function handle(ctx: HandleContext, db: WriteDb): string {
     const product = ctx.prefetched[`product_${i}`];
     db.execute(
       "UPDATE products SET inventory = ?2, version = ?3 WHERE id = ?1",
-      [items[i].product_id, product.inventory - items[i].quantity, product.version + 1],
+      items[i].product_id, product.inventory - items[i].quantity, product.version + 1,
     );
   }
 
   // Create order.
   db.execute(
     "INSERT INTO orders (id, total_cents, items_len, status, timeout_at) VALUES (?1, ?2, ?3, ?4, ?5)",
-    [ctx.body.id, total, items.length, "pending", 0],
+    ctx.body.id, total, items.length, "pending", 0,
   );
 
   // Create order items.
@@ -56,7 +56,7 @@ export function handle(ctx: HandleContext, db: WriteDb): string {
     const product = ctx.prefetched[`product_${i}`];
     db.execute(
       "INSERT INTO order_items (order_id, product_id, name, quantity, price_cents, line_total_cents) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-      [ctx.body.id, items[i].product_id, product.name, items[i].quantity, product.price_cents, product.price_cents * items[i].quantity],
+      ctx.body.id, items[i].product_id, product.name, items[i].quantity, product.price_cents, product.price_cents * items[i].quantity,
     );
   }
 

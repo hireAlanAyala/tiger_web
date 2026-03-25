@@ -17,7 +17,7 @@ export function handle(ctx: HandleContext, db: WriteDb): string {
   if (!ctx.prefetched.collection) return "not_found";
   db.execute(
     "UPDATE collection_members SET removed = 1 WHERE collection_id = ?1 AND product_id = ?2 AND removed = 0",
-    [ctx.id, ctx.body.product_id],
+    ctx.id, ctx.body.product_id,
   );
   return "ok";
 }

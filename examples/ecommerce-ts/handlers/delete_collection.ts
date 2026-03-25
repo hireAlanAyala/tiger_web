@@ -15,7 +15,7 @@ export function prefetch(msg: PrefetchMessage, db: PrefetchDb) {
 // [handle] .delete_collection
 export function handle(ctx: HandleContext, db: WriteDb): string {
   if (!ctx.prefetched.collection) return "not_found";
-  db.execute("UPDATE collections SET active = ?2 WHERE id = ?1", [ctx.id, false]);
+  db.execute("UPDATE collections SET active = ?2 WHERE id = ?1", ctx.id, false);
   return "ok";
 }
 

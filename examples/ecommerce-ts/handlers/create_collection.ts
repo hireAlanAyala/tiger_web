@@ -21,7 +21,7 @@ export function handle(ctx: HandleContext, db: WriteDb): string {
   if (ctx.prefetched.existing) return "version_conflict";
   db.execute(
     "INSERT INTO collections (id, name, active) VALUES (?1, ?2, ?3)",
-    [ctx.body.id, ctx.body.name, true],
+    ctx.body.id, ctx.body.name, true,
   );
   return "ok";
 }

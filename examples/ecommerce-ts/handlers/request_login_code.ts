@@ -23,7 +23,7 @@ export function handle(ctx: HandleContext, db: WriteDb): string {
   const expires_at = Date.now() + 600_000; // 10 minutes
   db.execute(
     "INSERT INTO login_codes (email, code, expires_at) VALUES (?1, ?2, ?3) ON CONFLICT(email) DO UPDATE SET code = ?2, expires_at = ?3",
-    [ctx.body.email, code, expires_at],
+    ctx.body.email, code, expires_at,
   );
   return "ok";
 }

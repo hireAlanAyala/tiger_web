@@ -31,7 +31,7 @@ export function handle(ctx: HandleContext, db: WriteDb): string {
   if (ctx.body.version !== ctx.prefetched.product.version) return "version_conflict";
   db.execute(
     "UPDATE products SET name = ?2, description = ?3, price_cents = ?4, inventory = ?5, version = ?6, active = ?7 WHERE id = ?1",
-    [ctx.id, ctx.body.name, ctx.body.description || "", ctx.body.price_cents || 0, ctx.body.inventory || 0, (ctx.prefetched.product.version as number) + 1, true],
+    ctx.id, ctx.body.name, ctx.body.description || "", ctx.body.price_cents || 0, ctx.body.inventory || 0, (ctx.prefetched.product.version as number) + 1, true,
   );
   return "ok";
 }

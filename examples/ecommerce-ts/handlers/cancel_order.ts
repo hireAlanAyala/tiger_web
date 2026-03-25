@@ -17,7 +17,7 @@ export function prefetch(msg: PrefetchMessage, db: PrefetchDb) {
 export function handle(ctx: HandleContext, db: WriteDb): string {
   if (!ctx.prefetched.order) return "not_found";
   if (ctx.prefetched.order.status !== "pending") return "order_not_pending";
-  db.execute("UPDATE orders SET status = ?2 WHERE id = ?1", [ctx.id, "cancelled"]);
+  db.execute("UPDATE orders SET status = ?2 WHERE id = ?1", ctx.id, "cancelled");
   return "ok";
 }
 

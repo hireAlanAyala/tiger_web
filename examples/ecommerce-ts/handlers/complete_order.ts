@@ -27,7 +27,7 @@ export function handle(ctx: HandleContext, db: WriteDb): string {
   // TODO: restore inventory if failed, set payment_ref
   db.execute(
     "UPDATE orders SET status = ?2 WHERE id = ?1",
-    [ctx.id, ctx.body.result],
+    ctx.id, ctx.body.result,
   );
   return "ok";
 }

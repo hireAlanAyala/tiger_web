@@ -18,7 +18,7 @@ export function handle(ctx: HandleContext, db: WriteDb): string {
   if (!ctx.prefetched.product.active) return "not_found";
   db.execute(
     "UPDATE products SET active = ?2 WHERE id = ?1",
-    [ctx.id, false],
+    ctx.id, false,
   );
   return "ok";
 }

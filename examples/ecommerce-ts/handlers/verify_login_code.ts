@@ -25,7 +25,7 @@ export function handle(ctx: HandleContext, db: WriteDb): string {
   // Replace with framework-provided timestamp (ctx.fw.now) once available.
   if (entry.expires_at < Date.now()) return "code_expired";
   // Consume the code.
-  db.execute("DELETE FROM login_codes WHERE email = ?1", [ctx.body.email]);
+  db.execute("DELETE FROM login_codes WHERE email = ?1", ctx.body.email);
   return "ok";
 }
 

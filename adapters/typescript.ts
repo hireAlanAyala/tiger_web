@@ -292,7 +292,7 @@ const server = net.createServer((conn) => {
       // Call handle — queues writes via db.execute().
       const writes: WriteEntry[] = [];
       const db = {
-        execute(sql: string, params: unknown[]): void {
+        execute(sql: string, ...params: unknown[]): void {
           writes.push({ sql, params });
         },
       };

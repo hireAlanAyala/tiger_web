@@ -30,11 +30,11 @@ export function handle(ctx: HandleContext, db: WriteDb): string {
   if (source.inventory < qty) return "insufficient_inventory";
   db.execute(
     "UPDATE products SET inventory = ?2, version = ?3 WHERE id = ?1",
-    [ctx.id, source.inventory - qty, source.version + 1],
+    ctx.id, source.inventory - qty, source.version + 1,
   );
   db.execute(
     "UPDATE products SET inventory = ?2, version = ?3 WHERE id = ?1",
-    [ctx.body.target_id, target.inventory + qty, target.version + 1],
+    ctx.body.target_id, target.inventory + qty, target.version + 1,
   );
   return "ok";
 }

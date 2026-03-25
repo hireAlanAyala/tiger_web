@@ -149,7 +149,7 @@ export interface HandleContext<P = any> {
 
 /** Write-only database — handle calls db.execute() to queue SQL writes. */
 export interface WriteDb {
-  execute(sql: string, params: unknown[]): void;
+  execute(sql: string, ...params: unknown[]): void;
 }
 
 /** Render context — status + prefetched data for producing HTML.
