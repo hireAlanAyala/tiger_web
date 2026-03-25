@@ -137,39 +137,50 @@ pub fn WalType(comptime Operation: type) type {
                 }
 
                 // Scan forward to find the last valid entry.
-                // Variable-size entries: read entry_len, skip entry_len bytes.
-                var offset: u64 = 0;
+                // Read each full entry and verify checksum + parent chain.
+                // Cost: reads the entire WAL file once at startup. Acceptable
+                // for a diagnostic WAL — recovery runs once, not per request.
+                var entry_buf: [entry_max]u8 align(@alignOf(EntryHeader)) = undefined;
+                var scan_offset: u64 = 0;
                 var last_valid_checksum: u128 = expected.checksum;
                 var last_valid_op: u64 = 0;
+                var last_valid_end: u64 = @sizeOf(EntryHeader); // after root
                 var entries_read: u64 = 0;
 
-                while (offset < file_size) {
-                    // Read header.
-                    var hdr_buf: [@sizeOf(EntryHeader)]u8 align(@alignOf(EntryHeader)) = undefined;
-                    const n = std.posix.pread(read_fd, &hdr_buf, offset) catch break;
+                while (scan_offset < file_size) {
+                    // Read header to get entry_len.
+                    const n = std.posix.pread(read_fd, entry_buf[0..@sizeOf(EntryHeader)], scan_offset) catch break;
                     if (n < @sizeOf(EntryHeader)) break;
 
-                    const hdr: *const EntryHeader = @ptrCast(@alignCast(&hdr_buf));
-                    if (hdr.entry_len < @sizeOf(EntryHeader) or hdr.entry_len > 256 * 1024) break;
-                    if (offset + hdr.entry_len > file_size) break;
+                    const hdr: *const EntryHeader = @ptrCast(@alignCast(&entry_buf));
+                    if (hdr.entry_len < @sizeOf(EntryHeader) or hdr.entry_len > entry_max) break;
+                    if (scan_offset + hdr.entry_len > file_size) break;
 
-                    // For checksum verification, read the full entry.
-                    // For recovery we only need the header fields.
-                    // Skip full verification for now — just trust entry_len and chain.
+                    // Read full entry for checksum verification.
+                    const full_n = std.posix.pread(read_fd, entry_buf[0..hdr.entry_len], scan_offset) catch break;
+                    if (full_n != hdr.entry_len) break;
+
+                    // Verify parent chain.
                     if (hdr.parent != last_valid_checksum and entries_read > 0) break;
+
+                    // Verify checksum over everything after the checksum field.
+                    const checksum_offset = @offsetOf(EntryHeader, "checksum") + @sizeOf(u128);
+                    const computed = cs.checksum(entry_buf[checksum_offset..hdr.entry_len]);
+                    if (computed != hdr.checksum) break;
 
                     last_valid_checksum = hdr.checksum;
                     last_valid_op = hdr.op;
                     entries_read += 1;
-                    offset += hdr.entry_len;
+                    last_valid_end = scan_offset + hdr.entry_len;
+                    scan_offset += hdr.entry_len;
                 }
 
                 op = last_valid_op + 1;
                 parent = last_valid_checksum;
 
-                if (offset < file_size) {
-                    log.warn("truncating {d} corrupt bytes at tail", .{file_size - offset});
-                    std.posix.ftruncate(fd, offset) catch {};
+                if (last_valid_end < file_size) {
+                    log.warn("truncating {d} corrupt bytes at tail", .{file_size - last_valid_end});
+                    std.posix.ftruncate(fd, last_valid_end) catch {};
                 }
                 log.info("recovered: entries={d} next_op={d}", .{ entries_read, op });
             } else {
