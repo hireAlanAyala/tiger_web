@@ -16,10 +16,7 @@
    handler/route refactors. Each test needs assertions updated for
    the new handler architecture (SQL writes, match_route, etc.).
 
-4. **Codegen rewrite** — codegen.zig generates old binary serde that's
-   no longer used. Running `zig build codegen` overwrites the hand-written
-   SDK (types.generated.ts). Needs rewrite to generate only constants +
-   enum mappings, or delete entirely.
+4. ~~**Codegen**~~ — DELETED. Hand-written SDK + cross-language tests.
 
 5. **Session as writes** — DEFERRED
    Remove session_action from HandleResult. Session changes via
