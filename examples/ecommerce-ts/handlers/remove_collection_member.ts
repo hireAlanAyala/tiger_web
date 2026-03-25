@@ -33,4 +33,5 @@ export function render(ctx: RenderContext): string {
     case "ok": return "<div>Removed</div>";
     case "not_found": return '<div class="error">Collection not found</div>';
   }
+  throw new Error("unreachable: " + ctx.status);
 }

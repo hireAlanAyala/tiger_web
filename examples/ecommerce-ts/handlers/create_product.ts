@@ -46,4 +46,5 @@ export function render(ctx: RenderContext): string {
     case "ok": return "";
     case "version_conflict": return '<div class="error">Product already exists</div>';
   }
+  throw new Error("unreachable: " + ctx.status);
 }

@@ -30,4 +30,5 @@ export function render(ctx: RenderContext): string {
     case "ok": return `<div>Collection: ${esc(ctx.prefetched.collection.name)}</div>`;
     case "not_found": return '<div class="error">Collection not found</div>';
   }
+  throw new Error("unreachable: " + ctx.status);
 }

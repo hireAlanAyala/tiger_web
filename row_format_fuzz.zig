@@ -16,7 +16,6 @@ const PRNG = @import("tiger_framework").prng;
 const log = std.log.scoped(.fuzz);
 
 pub fn main(allocator: std.mem.Allocator, args: FuzzArgs) !void {
-    _ = allocator;
     const seed = args.seed;
     const events_max = args.events_max orelse 10_000;
     var prng = PRNG.from_seed(seed);
@@ -33,7 +32,7 @@ pub fn main(allocator: std.mem.Allocator, args: FuzzArgs) !void {
         });
 
         switch (event) {
-            .valid_row_set => fuzz_valid_row_set(&prng, &stats),
+            .valid_row_set => fuzz_valid_row_set(allocator, &prng, &stats),
             .empty_row_set => fuzz_empty_row_set(&stats),
             .single_value => fuzz_single_value(&prng, &stats),
             .max_columns => fuzz_max_columns(&prng, &stats),
@@ -75,7 +74,7 @@ const Stats = struct {
 // Fuzz: valid row set round trip
 // =====================================================================
 
-fn fuzz_valid_row_set(prng: *PRNG, stats: *Stats) void {
+fn fuzz_valid_row_set(allocator: std.mem.Allocator, prng: *PRNG, stats: *Stats) void {
     stats.valid_row_sets += 1;
 
     const col_count = prng.range_inclusive(u16, 1, 8);
@@ -100,37 +99,39 @@ fn fuzz_valid_row_set(prng: *PRNG, stats: *Stats) void {
     const row_count = prng.range_inclusive(u32, 0, 10);
 
     // Generate random values for each cell.
-    // Max 10 rows x 8 columns = 80 cells. Backing uses 256 bytes per cell
-    // (not cell_value_max) to keep stack reasonable. Max-size values are
-    // tested by fuzz_single_value instead.
+    // Heap-allocated backing — allows full cell_value_max testing in row sets.
     const max_cells = 10 * 8;
-    const cell_backing = 256;
     var values: [max_cells]protocol.Value = undefined;
-    var value_backing: [max_cells][cell_backing]u8 = undefined;
+
+    // Allocate one contiguous backing block for all cell data.
+    const backing_block = allocator.alloc(u8, max_cells * protocol.cell_value_max) catch return;
+    defer allocator.free(backing_block);
 
     for (0..row_count) |r| {
         for (0..col_count) |c| {
             const idx = r * col_count + c;
-            values[idx] = random_value_bounded(prng, columns[c].type_tag, &value_backing[idx]);
+            const offset = idx * protocol.cell_value_max;
+            values[idx] = random_value_bounded(prng, columns[c].type_tag, backing_block[offset..][0..protocol.cell_value_max]);
         }
     }
 
-    // Serialize.
-    var buf: [protocol.frame_max]u8 = undefined;
-    var pos = protocol.write_row_set_header(&buf, columns[0..col_count]) orelse {
+    // Serialize into heap buffer (frame_max may be large).
+    const buf = allocator.alloc(u8, protocol.frame_max) catch return;
+    defer allocator.free(buf);
+    var pos = protocol.write_row_set_header(buf, columns[0..col_count]) orelse {
         // Buffer too small for this combination — skip.
         return;
     };
-    pos = protocol.write_row_count(&buf, pos, row_count) orelse return;
+    pos = protocol.write_row_count(buf, pos, row_count) orelse return;
 
     for (0..row_count) |r| {
         for (0..col_count) |c| {
-            pos = protocol.write_value(&buf, pos, values[r * col_count + c]) orelse return;
+            pos = protocol.write_value(buf, pos, values[r * col_count + c]) orelse return;
         }
     }
 
     // Deserialize and assert agreement.
-    const hdr = protocol.read_row_set_header(&buf, 0) orelse unreachable;
+    const hdr = protocol.read_row_set_header(buf, 0) orelse unreachable;
     assert(hdr.count == col_count);
 
     for (0..col_count) |i| {
@@ -138,14 +139,14 @@ fn fuzz_valid_row_set(prng: *PRNG, stats: *Stats) void {
         assert(hdr.columns[i].type_tag == columns[i].type_tag);
     }
 
-    const rc = protocol.read_row_count(&buf, hdr.pos) orelse unreachable;
+    const rc = protocol.read_row_count(buf, hdr.pos) orelse unreachable;
     assert(rc.count == row_count);
 
     var rpos = rc.pos;
     for (0..row_count) |r| {
         for (0..col_count) |c| {
             const idx = r * col_count + c;
-            const result = protocol.read_value(&buf, rpos, columns[c].type_tag) orelse unreachable;
+            const result = protocol.read_value(buf, rpos, columns[c].type_tag) orelse unreachable;
             assert_value_equal(values[idx], result.value);
             rpos = result.pos;
         }
@@ -163,7 +164,8 @@ fn fuzz_empty_row_set(stats: *Stats) void {
     stats.empty_row_sets += 1;
 
     var buf: [64]u8 = undefined;
-    const pos = protocol.write_row_set_header(&buf, &.{}) orelse unreachable;
+    const empty_cols = [_]protocol.Column{};
+    const pos = protocol.write_row_set_header(&buf, &empty_cols) orelse unreachable;
     const write_end = protocol.write_row_count(&buf, pos, 0) orelse unreachable;
 
     const hdr = protocol.read_row_set_header(&buf, 0) orelse unreachable;

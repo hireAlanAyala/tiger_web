@@ -81,7 +81,7 @@ pub fn main() !void {
     if (cli.log_debug) log.info("log_level=debug log_trace={}", .{cli.log_trace});
     // Sidecar: connect to external unix socket process.
     if (cli.sidecar) |path| {
-        App.sidecar = .{ .path = path };
+        App.sidecar = App.SidecarClient.init(path);
         if (!App.sidecar.?.connect()) {
             log.err("failed to connect to sidecar at {s}", .{path});
             std.process.exit(1);

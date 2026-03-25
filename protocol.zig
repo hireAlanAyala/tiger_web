@@ -18,19 +18,17 @@ const message = @import("message.zig");
 // Constants
 // =====================================================================
 
-/// Maximum frame payload size. Derived from worst-case content:
-/// prefetch results with list_max rows of max row size.
-/// Exact value comptime-derivable once row format is stable.
-pub const frame_max = 256 * 1024;
-
 /// Maximum number of write SQL statements from a single handle() call.
+/// Derived from the domain constant — sidecar cannot exceed what the SM accepts.
 pub const writes_max = message.writes_max;
 
 /// Maximum SQL string length in a single query/write.
 pub const sql_max = 4096;
 
 /// Maximum number of queries in a prefetch or render declaration.
-pub const queries_max = 32;
+/// Derived: order_items_max (20) is the most queries a single handler needs
+/// (create_order prefetches one product per item). Headroom for future handlers.
+pub const queries_max = message.order_items_max + 12;
 
 /// Maximum column name length.
 pub const column_name_max = 128;
@@ -39,20 +37,40 @@ pub const column_name_max = 128;
 pub const columns_max = 32;
 
 /// Maximum text/blob value length in a single cell.
+/// Must hold the largest domain string field.
 pub const cell_value_max = 4096;
 
-/// Maximum params per SQL query/write.
-pub const params_max = 16;
+/// Maximum frame payload size.
+///
+/// The largest frame is prefetch_results: multiple row sets in one frame.
+/// Practical worst case: page_load_dashboard — 3 queries × 50 rows × ~750
+/// bytes per row ≈ 115KB. create_order — 20 queries × 1 row ≈ 15KB.
+///
+/// 256KB handles all current handlers with margin. If a handler exceeds
+/// this, the prefetch declared too many queries or the rows are too wide.
+/// The framework asserts at the serialization boundary.
+pub const frame_max = 256 * 1024;
 
 comptime {
     assert(writes_max > 0);
     assert(writes_max == message.writes_max);
     assert(sql_max > 0);
     assert(queries_max > 0);
+    assert(queries_max >= message.order_items_max);
     assert(columns_max > 0);
-    assert(params_max > 0);
-    assert(frame_max > 0);
+
+    // Frame size: must hold worst-case prefetch results.
+    // 3 queries × 50 rows × 1KB/row = 150KB, well under 256KB.
+    assert(frame_max >= 3 * message.list_max * 1024);
     assert(frame_max <= 1024 * 1024); // stay under 1MB
+
+    // cell_value_max must hold every domain string field.
+    assert(cell_value_max >= message.product_description_max);
+    assert(cell_value_max >= message.product_name_max);
+    assert(cell_value_max >= message.collection_name_max);
+    assert(cell_value_max >= message.search_query_max);
+    assert(cell_value_max >= message.email_max);
+    assert(cell_value_max >= message.payment_ref_max);
 }
 
 // =====================================================================
@@ -91,14 +109,17 @@ pub const QueryMode = enum(u8) {
 // =====================================================================
 
 /// Column descriptor — type tag + name.
+/// Name is a slice into the frame buffer — aliases recv_buf.
+/// Consume before next read_frame call.
 pub const Column = struct {
     type_tag: TypeTag,
-    name: []const u8, // slice into the frame buffer
-
-    comptime {
-        assert(column_name_max <= std.math.maxInt(u16));
-    }
+    name: []const u8,
 };
+
+comptime {
+    assert(column_name_max <= std.math.maxInt(u16));
+    assert(cell_value_max <= std.math.maxInt(u16));
+}
 
 /// A typed value in a row.
 pub const Value = union(TypeTag) {

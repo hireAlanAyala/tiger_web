@@ -30,4 +30,5 @@ export function render(ctx: RenderContext): string {
     case "ok": return `<div class="inventory">${ctx.prefetched.product.inventory}</div>`;
     case "not_found": return '<div class="error">Product not found</div>';
   }
+  throw new Error("unreachable: " + ctx.status);
 }

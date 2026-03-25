@@ -72,4 +72,5 @@ export function render(ctx: RenderContext): string {
     case "not_found": return '<div class="error">Product not found</div>';
     case "insufficient_inventory": return '<div class="error">Insufficient inventory</div>';
   }
+  throw new Error("unreachable: " + ctx.status);
 }

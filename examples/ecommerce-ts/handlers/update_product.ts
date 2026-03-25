@@ -48,4 +48,5 @@ export function render(ctx: RenderContext): string {
     case "not_found": return '<div class="error">Product not found</div>';
     case "version_conflict": return '<div class="error">Version conflict</div>';
   }
+  throw new Error("unreachable: " + ctx.status);
 }

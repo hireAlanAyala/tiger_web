@@ -37,4 +37,5 @@ export function render(ctx: RenderContext): string {
     case "ok": return "<div>Created</div>";
     case "version_conflict": return '<div class="error">Collection already exists</div>';
   }
+  throw new Error("unreachable: " + ctx.status);
 }

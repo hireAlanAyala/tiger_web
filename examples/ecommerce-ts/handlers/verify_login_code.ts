@@ -41,4 +41,5 @@ export function render(ctx: RenderContext): string {
     case "invalid_code": return '<div class="error">Invalid code</div>';
     case "code_expired": return '<div class="error">Code expired</div>';
   }
+  throw new Error("unreachable: " + ctx.status);
 }

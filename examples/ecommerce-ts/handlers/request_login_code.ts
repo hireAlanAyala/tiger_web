@@ -33,4 +33,5 @@ export function render(ctx: RenderContext): string {
   switch (ctx.status) {
     case "ok": return "<div>Code sent</div>";
   }
+  throw new Error("unreachable: " + ctx.status);
 }

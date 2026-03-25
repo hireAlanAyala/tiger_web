@@ -24,22 +24,31 @@ pub const SidecarClient = struct {
     fd: std.posix.fd_t = -1,
     path: []const u8,
 
-    // Frame buffers — static arrays, reused per request.
+    // Frame buffers — heap-allocated once at init, reused per request.
     // Single-threaded: one request at a time.
-    send_buf: [protocol.frame_max]u8 = undefined,
-    recv_buf: [protocol.frame_max + 4]u8 = undefined,
+    // Stored as pointers so SidecarClient is small (fits in ?SidecarClient
+    // on app.zig module-level without 512KB in BSS).
+    send_buf: *[protocol.frame_max]u8,
+    recv_buf: *[protocol.frame_max + 4]u8,
 
     comptime {
         // Memory budget: two frame buffers allocated once at startup.
-        assert(2 * (protocol.frame_max + 4) < 3 * 1024 * 1024);
+        assert(2 * (protocol.frame_max + 4) < 1024 * 1024);
+        // SidecarClient itself is small — just fd, path slice, two pointers.
+        assert(@sizeOf(SidecarClient) <= 64);
     }
 
-    fn send_slice(self: *SidecarClient) []u8 {
-        return &self.send_buf;
-    }
-
-    fn recv_slice(self: *SidecarClient) []u8 {
-        return &self.recv_buf;
+    pub fn init(path: []const u8) SidecarClient {
+        // Allocate frame buffers from the page allocator — once, at startup.
+        const send = std.heap.page_allocator.create([protocol.frame_max]u8) catch
+            @panic("sidecar: failed to allocate send buffer");
+        const recv = std.heap.page_allocator.create([protocol.frame_max + 4]u8) catch
+            @panic("sidecar: failed to allocate recv buffer");
+        return .{
+            .path = path,
+            .send_buf = send,
+            .recv_buf = recv,
+        };
     }
 
     /// Connect to the sidecar unix socket. Returns false on failure.
@@ -103,7 +112,7 @@ pub const SidecarClient = struct {
         // Build route request JSON.
         // {tag:"route", method:"GET", path:"/products/abc", body:"...", params:{}}
         // params populated by framework pre-matching — for now empty, sidecar does its own matching.
-        var fbs = std.io.fixedBufferStream(self.send_slice());
+        var fbs = std.io.fixedBufferStream(self.send_buf);
         const w = fbs.writer();
         w.print("{{\"tag\":\"route\",\"method\":\"{s}\",\"path\":", .{@tagName(method)}) catch return null;
         writeJsonString(w, path) catch return null;
@@ -118,7 +127,7 @@ pub const SidecarClient = struct {
         }
 
         // Read route response.
-        const resp_json = protocol.read_frame(self.fd, self.recv_slice()) orelse {
+        const resp_json = protocol.read_frame(self.fd, self.recv_buf) orelse {
             self.handle_disconnect();
             return null;
         };

@@ -34,4 +34,5 @@ export function render(ctx: RenderContext): string {
     case "ok": return '<div class="product">Deleted</div>';
     case "not_found": return '<div class="error">Product not found</div>';
   }
+  throw new Error("unreachable: " + ctx.status);
 }

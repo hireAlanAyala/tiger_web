@@ -33,4 +33,5 @@ export function render(ctx: RenderContext): string {
     }
     case "not_found": return '<div class="error">Order not found</div>';
   }
+  throw new Error("unreachable: " + ctx.status);
 }
