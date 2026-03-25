@@ -243,6 +243,39 @@ different because the execution models are different:
 - **Native**: local function calls, typed data passing via PrefetchCache
 - **Sidecar**: wire round trips, binary data passing via socket frames
 
+### Auth in the sidecar pipeline
+
+The sidecar handles business logic. The framework handles identity.
+
+In the native path, the server fills `Message.credential` from the HTTP
+cookie. The SM resolves the credential to a `user_id + identity`
+(authenticated or anonymous). Handlers receive the identity via
+`ctx.fw.identity`.
+
+In the sidecar pipeline, `translate()` returns `operation + id` from
+the sidecar — no credential. The credential comes from the HTTP request,
+not the sidecar. The pipeline resolves credentials using the same auth
+building block the SM uses. The resolved identity is framework-side
+state — the sidecar handlers receive it if they need it (e.g., to render
+the user's name), but auth enforcement is the framework's responsibility.
+
+Same auth functions, different call site. No duplication.
+
+### Session action — deferred
+
+The native handle can return `session_action = .set_authenticated`
+(login) or `.clear` (logout). The sidecar's handle_render_response
+currently sends `status(u8) + writes + render_declarations` but no
+session action.
+
+For now, `session_action = .none` for all sidecar requests. Only logout
+uses it, and session-as-writes is already deferred in the plan (handlers
+will write to a sessions table via `db.execute` instead of returning a
+session_action field).
+
+When needed: add a `session_action(u8)` byte to the handle_render_response
+frame after the status byte. One byte, no protocol redesign.
+
 ### Why this doesn't hurt correctness
 
 Determinism comes from the handler logic and the database, not the
