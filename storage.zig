@@ -387,6 +387,10 @@ pub const SqliteStorage = struct {
         exec(self.db, "COMMIT;");
     }
 
+    pub fn rollback(self: *SqliteStorage) void {
+        exec(self.db, "ROLLBACK;");
+    }
+
     pub fn deinit(self: *SqliteStorage) void {
         _ = c.sqlite3_finalize(self.stmt_get);
         _ = c.sqlite3_finalize(self.stmt_put);

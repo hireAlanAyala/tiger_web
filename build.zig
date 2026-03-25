@@ -160,9 +160,7 @@ pub fn build(b: *std.Build) void {
     // Modules that need sqlite3 + libc (import app.zig → storage.zig → sqlite3).
     // state_machine_test.zig is separate from state_machine.zig so that
     // files importing the SM module don't transitively need sqlite3.
-    // replay.zig excluded — pending rewrite for SQL-write WAL format.
-    // See docs/plans/sidecar-protocol.md "WAL: SQL writes, not handler inputs".
-    for ([_][]const u8{ "storage.zig", "state_machine_test.zig", "sidecar.zig", "sidecar_test.zig" }) |mod| {
+    for ([_][]const u8{ "storage.zig", "replay.zig", "state_machine_test.zig", "sidecar.zig", "sidecar_test.zig" }) |mod| {
         const unit_test = b.addTest(.{
             .root_source_file = b.path(mod),
             .target = target,
