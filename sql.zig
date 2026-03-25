@@ -32,4 +32,6 @@ pub const orders = struct {
         "INSERT INTO orders (id, total_cents, items_len, status, timeout_at) VALUES (?1, ?2, ?3, ?4, ?5);";
     pub const insert_item: [*:0]const u8 =
         "INSERT INTO order_items (order_id, product_id, name, quantity, price_cents, line_total_cents) VALUES (?1, ?2, ?3, ?4, ?5, ?6);";
+    pub const update_status: [*:0]const u8 =
+        "UPDATE orders SET status = ?2 WHERE id = ?1;";
 };

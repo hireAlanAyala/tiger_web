@@ -100,7 +100,7 @@ pub fn handle(ctx: Context, db: anytype) t.HandleResult {
 // [render] .create_order
 pub fn render(ctx: Context) []const u8 {
     return switch (ctx.status) {
-        .ok => "",
+        .ok => "<div>Order created — Pending</div>",
         .not_found => "<div class=\"error\">Product not found</div>",
         .insufficient_inventory => "<div class=\"error\">Insufficient inventory</div>",
     };

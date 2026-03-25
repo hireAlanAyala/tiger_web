@@ -1,7 +1,7 @@
 const std = @import("std");
 const t = @import("../prelude.zig");
 
-pub const Status = enum { ok, not_found };
+pub const Status = enum { ok, not_found, order_not_pending };
 
 pub const Prefetch = struct { order: ?t.OrderRow };
 
@@ -29,15 +29,17 @@ pub fn prefetch(storage: anytype, msg: *const t.Message) ?Prefetch {
 
 // [handle] .cancel_order
 pub fn handle(ctx: Context, db: anytype) t.HandleResult {
-    _ = ctx;
-    _ = db;
-    return .{ .status = .not_found };
+    const order = ctx.prefetched.order orelse return .{ .status = .not_found };
+    if (order.status != .pending) return .{ .status = .order_not_pending };
+    db.execute(t.sql.orders.update_status, .{ order.id, @intFromEnum(t.OrderStatus.cancelled) });
+    return .{};
 }
 
 // [render] .cancel_order
 pub fn render(ctx: Context) []const u8 {
     return switch (ctx.status) {
-        .ok => "",
+        .ok => "<div>Order cancelled</div>",
         .not_found => "<div class=\"error\">Order not found</div>",
+        .order_not_pending => "<div class=\"error\">Order is not pending</div>",
     };
 }
