@@ -249,8 +249,8 @@ function assertEq(actual: unknown, expected: unknown, msg: string): void {
   const dv = new DataView(buf);
 
   const decls = [
-    { key: "product", sql: "SELECT id FROM products WHERE id = ?1", mode: "one" as const, params: [42] },
-    { key: "orders", sql: "SELECT id FROM orders", mode: "all" as const, params: [] },
+    { key: "product", sql: "SELECT id FROM products WHERE id = ?1", mode: "query" as const, params: [42] },
+    { key: "orders", sql: "SELECT id FROM orders", mode: "queryAll" as const, params: [] },
   ];
 
   const bytesWritten = writeSqlDeclarations(dv, 0, decls);

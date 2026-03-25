@@ -395,7 +395,7 @@ fn query(args: QueryArgs) void {
     // Execute the user's query.
     const stdout = std.io.getStdOut().writer();
     var out_buf: [protocol.frame_max]u8 = undefined;
-    const result = storage.query_raw(args.sql, "", 0, .all, &out_buf);
+    const result = storage.query_raw(args.sql, "", 0, .query_all, &out_buf);
     if (result) |row_data| {
         // Parse and print the row set.
         const hdr = protocol.read_row_set_header(row_data, 0) orelse {

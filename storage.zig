@@ -1017,7 +1017,7 @@ pub const SqliteStorage = struct {
     /// (bad SQL, prepare failure, step error).
     ///
     /// SQL is `[]const u8` (length-prefixed from wire), not null-terminated.
-    /// `mode`: .one = at most 1 row, .all = up to list_max rows.
+    /// `mode`: .query = at most 1 row, .query_all = up to list_max rows.
     /// `params_buf`: binary params from the sidecar wire format.
     /// `params_count`: number of params in params_buf.
     ///
@@ -1066,8 +1066,8 @@ pub const SqliteStorage = struct {
 
         var row_count: u32 = 0;
         const max_rows: u32 = switch (mode) {
-            .one => 1,
-            .all => message.list_max,
+            .query => 1,
+            .query_all => message.list_max,
         };
 
         while (step_result(real_stmt) == .row and row_count < max_rows) {
@@ -2035,7 +2035,7 @@ test "query_raw: single row round trip" {
         // Binary params: 1 param, type integer(0x01), value 42 as i64 LE.
         &[_]u8{ 0x01, 42, 0, 0, 0, 0, 0, 0, 0 },
         1,
-        .one,
+        .query,
         &out_buf,
     );
     try std.testing.expect(result != null);
@@ -2081,7 +2081,7 @@ test "query_raw: empty result returns 0 rows" {
         "SELECT id FROM raw_empty;",
         &[_]u8{},
         0,
-        .all,
+        .query_all,
         &out_buf,
     );
     try std.testing.expect(result != null);
@@ -2099,7 +2099,7 @@ test "query_raw: bad SQL returns null" {
 
     const mark = marks.check("prepare_raw: failed");
     var out_buf: [4096]u8 = undefined;
-    const result = s.query_raw("NOT VALID SQL;", &[_]u8{}, 0, .one, &out_buf);
+    const result = s.query_raw("NOT VALID SQL;", &[_]u8{}, 0, .query, &out_buf);
     try std.testing.expect(result == null);
     try mark.expect_hit();
 }
@@ -2114,7 +2114,7 @@ test "query_raw: multiple rows (mode all)" {
     try std.testing.expect(s.execute("INSERT INTO raw_multi VALUES (?1, ?2);", .{ @as(i64, 3), "gamma" }));
 
     var out_buf: [4096]u8 = undefined;
-    const result = s.query_raw("SELECT id, val FROM raw_multi ORDER BY id;", &[_]u8{}, 0, .all, &out_buf);
+    const result = s.query_raw("SELECT id, val FROM raw_multi ORDER BY id;", &[_]u8{}, 0, .query_all, &out_buf);
     try std.testing.expect(result != null);
 
     const buf = result.?;
@@ -2157,7 +2157,7 @@ test "query_raw: rejects write statement" {
 
     const mark = marks.check("query_raw: statement is not read-only");
     var out_buf: [4096]u8 = undefined;
-    const result = s.query_raw("INSERT INTO raw_ro VALUES (1);", &[_]u8{}, 0, .one, &out_buf);
+    const result = s.query_raw("INSERT INTO raw_ro VALUES (1);", &[_]u8{}, 0, .query, &out_buf);
     try std.testing.expect(result == null);
     try mark.expect_hit();
 }

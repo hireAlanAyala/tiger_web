@@ -21,8 +21,8 @@ export const TypeTag = {
 } as const;
 
 export const QueryMode = {
-  one: 0x00,
-  all: 0x01,
+  query: 0x00,
+  queryAll: 0x01,
 } as const;
 
 export const MessageTag = {
@@ -249,7 +249,7 @@ function writeTypedParam(buf: DataView, pos: number, val: unknown): number {
 export interface SqlDeclaration {
   key: string;
   sql: string;
-  mode: "one" | "all";
+  mode: "query" | "queryAll";
   params: unknown[];
 }
 
@@ -296,7 +296,7 @@ export function writeSqlDeclarations(buf: DataView, offset: number, declarations
     pos += sqlBytes.length;
 
     // Mode.
-    buf.setUint8(pos, decl.mode === "all" ? QueryMode.all : QueryMode.one);
+    buf.setUint8(pos, decl.mode === "queryAll" ? QueryMode.queryAll : QueryMode.query);
     pos += 1;
 
     // Params — u8 count.

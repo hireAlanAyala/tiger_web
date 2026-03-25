@@ -298,7 +298,7 @@ fn fuzz_prefetch_with_storage(prng: *PRNG, stats: *Stats, storage: *Storage) voi
             dpos += 2;
             @memcpy(decl_buf[dpos..][0..sql.len], sql);
             dpos += sql.len;
-            decl_buf[dpos] = @intFromEnum(protocol.QueryMode.one);
+            decl_buf[dpos] = @intFromEnum(protocol.QueryMode.query);
             dpos += 1;
             decl_buf[dpos] = 0; // 0 params
             dpos += 1;
@@ -317,7 +317,7 @@ fn fuzz_prefetch_with_storage(prng: *PRNG, stats: *Stats, storage: *Storage) voi
             dpos += 2;
             @memcpy(decl_buf[dpos..][0..sql.len], sql);
             dpos += sql.len;
-            decl_buf[dpos] = @intFromEnum(protocol.QueryMode.one);
+            decl_buf[dpos] = @intFromEnum(protocol.QueryMode.query);
             dpos += 1;
             decl_buf[dpos] = 0;
             dpos += 1;

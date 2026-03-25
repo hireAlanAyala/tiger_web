@@ -1,4 +1,4 @@
-import type { RouteRequest, RouteResult, PrefetchMessage, PrefetchQuery, HandleContext, RenderContext } from "tiger-web";
+import type { RouteRequest, RouteResult, PrefetchMessage, PrefetchDb, HandleContext, RenderContext } from "tiger-web";
 
 // [route] .page_load_login
 // match GET /login
@@ -7,7 +7,7 @@ export function route(_req: RouteRequest): RouteResult | null {
 }
 
 // [prefetch] .page_load_login
-export function prefetch(_msg: PrefetchMessage): Record<string, PrefetchQuery> {
+export function prefetch(_msg: PrefetchMessage, _db: PrefetchDb) {
   return {};
 }
 

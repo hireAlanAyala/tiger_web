@@ -124,8 +124,18 @@ export interface PrefetchMessage {
 export interface PrefetchQuery {
   sql: string;
   params: unknown[];
-  /** "one" = single row or null, "all" = array of rows. */
-  mode: "one" | "all";
+  mode: "query" | "queryAll";
+}
+
+/** Read-only database for prefetch — records query declarations.
+ *  db.query() and db.queryAll() don't execute SQL — they return
+ *  declarations that the framework sends to the Zig storage layer.
+ *  Only query and queryAll are available. No execute, no writes. */
+export interface PrefetchDb {
+  /** Single row or null. */
+  query(sql: string, ...params: unknown[]): PrefetchQuery;
+  /** Array of rows. */
+  queryAll(sql: string, ...params: unknown[]): PrefetchQuery;
 }
 
 /** Handle context — prefetched data + request body for the handle phase.

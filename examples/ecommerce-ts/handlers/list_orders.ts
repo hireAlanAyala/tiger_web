@@ -1,4 +1,4 @@
-import type { RouteRequest, RouteResult, PrefetchMessage, PrefetchQuery, HandleContext, RenderContext } from "tiger-web";
+import type { RouteRequest, RouteResult, PrefetchMessage, PrefetchDb, HandleContext, RenderContext } from "tiger-web";
 import { price } from "tiger-web";
 
 // [route] .list_orders
@@ -8,12 +8,8 @@ export function route(_req: RouteRequest): RouteResult | null {
 }
 
 // [prefetch] .list_orders
-export function prefetch(_msg: PrefetchMessage): Record<string, PrefetchQuery> {
-  const orders: PrefetchQuery = {
-    sql: "SELECT id, total_cents, items_len, status, timeout_at, payment_ref FROM orders ORDER BY id LIMIT ?1",
-    params: [50],
-    mode: "all",
-  };
+export function prefetch(_msg: PrefetchMessage, db: PrefetchDb) {
+  const orders = db.queryAll("SELECT id, total_cents, items_len, status, timeout_at, payment_ref FROM orders ORDER BY id LIMIT ?1", 50);
   return { orders };
 }
 

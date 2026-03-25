@@ -236,14 +236,22 @@ const server = net.createServer((conn) => {
       // Call prefetch handler — get SQL declarations. Store keys for RT2.
       const prefetchFn = prefetchHandlers[routeOperation];
       const prefetchMsg = { operation: routeOperation, id: routeId, body: routeBody };
-      const queries: Record<string, any> = prefetchFn ? prefetchFn(prefetchMsg) : {};
+
+      // PrefetchDb — records query declarations. Only query and queryAll
+      // are available. No execute, no writes. The handler calls db.query()
+      // which returns a PrefetchQuery declaration, not a result.
+      const db = {
+        query: (sql: string, ...params: unknown[]) => ({ sql, params, mode: "query" as const }),
+        queryAll: (sql: string, ...params: unknown[]) => ({ sql, params, mode: "queryAll" as const }),
+      };
+      const queries: Record<string, any> = prefetchFn ? prefetchFn(prefetchMsg, db) : {};
 
       prefetchKeys = Object.keys(queries);
       prefetchModes = {};
       const decls: SqlDeclaration[] = prefetchKeys.map(key => {
         const q = queries[key];
-        prefetchModes[key] = q.mode || 'one';
-        return { key, sql: q.sql, mode: q.mode || 'one', params: q.params || [] };
+        prefetchModes[key] = q.mode || 'query';
+        return { key, sql: q.sql, mode: q.mode || 'query', params: q.params || [] };
       });
 
       // Build response into reusable frame buffer.

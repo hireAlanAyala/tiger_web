@@ -1,4 +1,4 @@
-import type { RouteRequest, RouteResult, PrefetchMessage, PrefetchQuery, HandleContext, RenderContext } from "tiger-web";
+import type { RouteRequest, RouteResult, PrefetchMessage, PrefetchDb, HandleContext, RenderContext } from "tiger-web";
 import { esc } from "tiger-web";
 
 // [route] .list_collections
@@ -8,12 +8,8 @@ export function route(_req: RouteRequest): RouteResult | null {
 }
 
 // [prefetch] .list_collections
-export function prefetch(_msg: PrefetchMessage): Record<string, PrefetchQuery> {
-  const collections: PrefetchQuery = {
-    sql: "SELECT id, name, active FROM collections WHERE active = 1 ORDER BY id LIMIT ?1",
-    params: [50],
-    mode: "all",
-  };
+export function prefetch(_msg: PrefetchMessage, db: PrefetchDb) {
+  const collections = db.queryAll("SELECT id, name, active FROM collections WHERE active = 1 ORDER BY id LIMIT ?1", 50);
   return { collections };
 }
 

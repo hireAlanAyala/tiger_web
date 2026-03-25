@@ -1,4 +1,4 @@
-import type { RouteRequest, RouteResult, PrefetchMessage, PrefetchQuery, HandleContext, RenderContext } from "tiger-web";
+import type { RouteRequest, RouteResult, PrefetchMessage, PrefetchDb, HandleContext, RenderContext } from "tiger-web";
 import { esc, price } from "tiger-web";
 
 // [route] .search_products
@@ -9,13 +9,9 @@ export function route(req: RouteRequest): RouteResult | null {
 }
 
 // [prefetch] .search_products
-export function prefetch(msg: PrefetchMessage): Record<string, PrefetchQuery> {
+export function prefetch(msg: PrefetchMessage, db: PrefetchDb) {
   const q = String(msg.body.query || "");
-  const results: PrefetchQuery = {
-    sql: "SELECT id, name, description, price_cents, inventory, version, active FROM products WHERE active = 1 AND name LIKE ?1 ORDER BY id LIMIT 50",
-    params: [`%${q}%`],
-    mode: "all",
-  };
+  const results = db.queryAll("SELECT id, name, description, price_cents, inventory, version, active FROM products WHERE active = 1 AND name LIKE ?1 ORDER BY id LIMIT 50", `%${q}%`);
   return { results };
 }
 

@@ -1,4 +1,4 @@
-import type { RouteRequest, RouteResult, PrefetchMessage, PrefetchQuery, HandleContext, WriteDb, RenderContext } from "tiger-web";
+import type { RouteRequest, RouteResult, PrefetchMessage, PrefetchDb, HandleContext, WriteDb, RenderContext } from "tiger-web";
 
 // [route] .verify_login_code
 // match POST /login/verify
@@ -11,12 +11,8 @@ export function route(req: RouteRequest): RouteResult | null {
 }
 
 // [prefetch] .verify_login_code
-export function prefetch(msg: PrefetchMessage): Record<string, PrefetchQuery> {
-  const login_code: PrefetchQuery = {
-    sql: "SELECT email, code, expires_at FROM login_codes WHERE email = ?1",
-    params: [msg.body.email],
-    mode: "one",
-  };
+export function prefetch(msg: PrefetchMessage, db: PrefetchDb) {
+  const login_code = db.query("SELECT email, code, expires_at FROM login_codes WHERE email = ?1", msg.body.email);
   return { login_code };
 }
 

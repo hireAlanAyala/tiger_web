@@ -1,4 +1,4 @@
-import type { RouteRequest, RouteResult, PrefetchMessage, PrefetchQuery, HandleContext, WriteDb, RenderContext } from "tiger-web";
+import type { RouteRequest, RouteResult, PrefetchMessage, PrefetchDb, HandleContext, WriteDb, RenderContext } from "tiger-web";
 
 // [route] .create_order
 // match POST /orders
@@ -11,16 +11,14 @@ export function route(req: RouteRequest): RouteResult | null {
 }
 
 // [prefetch] .create_order
-export function prefetch(msg: PrefetchMessage): Record<string, PrefetchQuery> {
-  // Prefetch all products referenced by the order items.
-  const queries: Record<string, PrefetchQuery> = {};
+export function prefetch(msg: PrefetchMessage, db: PrefetchDb) {
   const items = msg.body.items as Array<{ product_id: string; quantity: number }>;
+  const queries: Record<string, any> = {};
   for (let i = 0; i < items.length; i++) {
-    queries[`product_${i}`] = {
-      sql: "SELECT id, name, description, price_cents, inventory, version, active FROM products WHERE id = ?1",
-      params: [items[i].product_id],
-      mode: "one",
-    };
+    queries[`product_${i}`] = db.query(
+      "SELECT id, name, description, price_cents, inventory, version, active FROM products WHERE id = ?1",
+      items[i].product_id,
+    );
   }
   return queries;
 }

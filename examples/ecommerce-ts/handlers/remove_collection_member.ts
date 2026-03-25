@@ -1,4 +1,4 @@
-import type { RouteRequest, RouteResult, PrefetchMessage, PrefetchQuery, HandleContext, WriteDb, RenderContext } from "tiger-web";
+import type { RouteRequest, RouteResult, PrefetchMessage, PrefetchDb, HandleContext, WriteDb, RenderContext } from "tiger-web";
 
 // [route] .remove_collection_member
 // match DELETE /collections/:id/members/:sub_id
@@ -7,12 +7,8 @@ export function route(req: RouteRequest): RouteResult | null {
 }
 
 // [prefetch] .remove_collection_member
-export function prefetch(msg: PrefetchMessage): Record<string, PrefetchQuery> {
-  const collection: PrefetchQuery = {
-    sql: "SELECT id, name, active FROM collections WHERE id = ?1",
-    params: [msg.id],
-    mode: "one",
-  };
+export function prefetch(msg: PrefetchMessage, db: PrefetchDb) {
+  const collection = db.query("SELECT id, name, active FROM collections WHERE id = ?1", msg.id);
   return { collection };
 }
 

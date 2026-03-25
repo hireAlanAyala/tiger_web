@@ -253,7 +253,7 @@ fn mock_sidecar_create_product(fd: std.posix.fd_t) void {
     pos += 2;
     @memcpy(send_buf[pos..][0..sql.len], sql);
     pos += sql.len;
-    send_buf[pos] = @intFromEnum(protocol.QueryMode.one);
+    send_buf[pos] = @intFromEnum(protocol.QueryMode.query);
     pos += 1;
     // param: blob u128 BE = 2
     send_buf[pos] = 1; // param count
@@ -400,7 +400,7 @@ fn write_prefetch_decl_get_product(buf: []u8) usize {
     pos += 2;
     @memcpy(buf[pos..][0..sql.len], sql);
     pos += sql.len;
-    buf[pos] = @intFromEnum(protocol.QueryMode.one);
+    buf[pos] = @intFromEnum(protocol.QueryMode.query);
     pos += 1;
     buf[pos] = 1; // 1 param
     pos += 1;

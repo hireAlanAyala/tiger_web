@@ -1,4 +1,4 @@
-import type { RouteRequest, RouteResult, PrefetchMessage, PrefetchQuery, HandleContext, WriteDb, RenderContext } from "tiger-web";
+import type { RouteRequest, RouteResult, PrefetchMessage, PrefetchDb, HandleContext, WriteDb, RenderContext } from "tiger-web";
 
 // [route] .update_product
 // match PUT /products/:id
@@ -20,12 +20,8 @@ export function route(req: RouteRequest): RouteResult | null {
 }
 
 // [prefetch] .update_product
-export function prefetch(msg: PrefetchMessage): Record<string, PrefetchQuery> {
-  const product: PrefetchQuery = {
-    sql: "SELECT id, name, description, price_cents, inventory, version, active FROM products WHERE id = ?1",
-    params: [msg.id],
-    mode: "one",
-  };
+export function prefetch(msg: PrefetchMessage, db: PrefetchDb) {
+  const product = db.query("SELECT id, name, description, price_cents, inventory, version, active FROM products WHERE id = ?1", msg.id);
   return { product };
 }
 

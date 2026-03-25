@@ -134,9 +134,10 @@ pub const MessageTag = enum(u8) {
 };
 
 /// Query mode — single row or array.
+/// Named to match the PrefetchDb API: db.query() and db.queryAll().
 pub const QueryMode = enum(u8) {
-    one = 0x00, // row_count is 0 (null) or 1
-    all = 0x01, // row_count is 0..N
+    query = 0x00, // row_count is 0 (null) or 1
+    query_all = 0x01, // row_count is 0..N
 };
 
 // =====================================================================
