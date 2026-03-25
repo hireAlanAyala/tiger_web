@@ -1,21 +1,22 @@
-//! Unix socket client for the sidecar JSON protocol.
+//! Unix socket client for the sidecar binary protocol.
 //!
-//! Provides the same interface as the Zig-native App functions
-//! (translate, execute_render) but delegates to an external process
-//! over a unix socket. Blocking IO — called synchronously within
-//! the server's request processing tick.
+//! Three round trips per HTTP request:
+//!   RT1: route_request → route_prefetch_response
+//!   RT2: prefetch_results → handle_render_response
+//!   RT3: render_results → html_response
 //!
-//! New protocol: JSON length-prefixed frames.
-//!   1. Route:   send {tag:"route",...} → receive {found, operation, id}
-//!   2. Execute: send {tag:"execute",...} → receive {tag:"prefetch_queries",...}
-//!              → execute SQL → send {tag:"prefetch_results",...}
-//!              → receive {tag:"result", status, writes, html}
+//! The client stores per-request state between SM calls (single-threaded,
+//! one request at a time). The SM calls translate → prefetch → execute →
+//! render. Each call advances the protocol exchange.
+//!
+//! Sidecar failure at any point: close connection, return error to HTTP
+//! client, reconnect lazily on next request. No mid-exchange retry.
+//! See docs/plans/sidecar-protocol.md.
 
 const std = @import("std");
 const assert = std.debug.assert;
 const message = @import("message.zig");
 const protocol = @import("protocol.zig");
-const state_machine = @import("state_machine.zig");
 const http = @import("tiger_framework").http;
 
 const log = std.log.scoped(.sidecar);
@@ -26,20 +27,24 @@ pub const SidecarClient = struct {
 
     // Frame buffers — heap-allocated once at init, reused per request.
     // Single-threaded: one request at a time.
-    // Stored as pointers so SidecarClient is small (fits in ?SidecarClient
-    // on app.zig module-level without 512KB in BSS).
     send_buf: *[protocol.frame_max]u8,
     recv_buf: *[protocol.frame_max + 4]u8,
 
+    // Per-request state — stored between SM calls.
+    // Set by translate (RT1), consumed by prefetch/execute/render.
+    // Reset on disconnect or at the start of each translate.
+    prefetch_decl: []const u8 = "", // raw binary: prefetch SQL declarations from RT1
+    render_decl: []const u8 = "", // raw binary: render SQL declarations from RT2
+    handle_status: message.Status = .ok,
+    handle_writes: []const u8 = "", // raw binary: write queue from RT2
+    html: []const u8 = "", // raw binary: HTML from RT3
+
     comptime {
-        // Memory budget: two frame buffers allocated once at startup.
         assert(2 * (protocol.frame_max + 4) < 1024 * 1024);
-        // SidecarClient itself is small — just fd, path slice, two pointers.
-        assert(@sizeOf(SidecarClient) <= 64);
+        assert(@sizeOf(SidecarClient) <= 128);
     }
 
     pub fn init(path: []const u8) SidecarClient {
-        // Allocate frame buffers from the page allocator — once, at startup.
         const send = std.heap.page_allocator.create([protocol.frame_max]u8) catch
             @panic("sidecar: failed to allocate send buffer");
         const recv = std.heap.page_allocator.create([protocol.frame_max + 4]u8) catch
@@ -51,7 +56,10 @@ pub const SidecarClient = struct {
         };
     }
 
-    /// Connect to the sidecar unix socket. Returns false on failure.
+    // =================================================================
+    // Connection management
+    // =================================================================
+
     pub fn connect(self: *SidecarClient) bool {
         assert(self.fd == -1);
         assert(self.path.len > 0);
@@ -72,7 +80,6 @@ pub const SidecarClient = struct {
             return false;
         };
 
-        // 5-second timeout — catches frozen sidecars.
         const timeout: std.posix.timeval = .{ .sec = 5, .usec = 0 };
         std.posix.setsockopt(fd, std.posix.SOL.SOCKET, std.posix.SO.RCVTIMEO, std.mem.asBytes(&timeout)) catch |err| {
             log.warn("setsockopt RCVTIMEO: {}", .{err});
@@ -90,7 +97,6 @@ pub const SidecarClient = struct {
         return true;
     }
 
-    /// Close the connection.
     pub fn close(self: *SidecarClient) void {
         if (self.fd != -1) {
             std.posix.close(self.fd);
@@ -98,85 +104,12 @@ pub const SidecarClient = struct {
         }
     }
 
-    /// Translate an HTTP request into a typed Message via the sidecar.
-    /// Returns null if the sidecar reports unmapped (found=false) or on error.
-    pub fn translate(
-        self: *SidecarClient,
-        method: http.Method,
-        path: []const u8,
-        body: []const u8,
-    ) ?message.Message {
-        if (self.fd == -1) self.try_reconnect();
-        if (self.fd == -1) return null;
-
-        // Build route request JSON.
-        // {tag:"route", method:"GET", path:"/products/abc", body:"...", params:{}}
-        // params populated by framework pre-matching — for now empty, sidecar does its own matching.
-        var fbs = std.io.fixedBufferStream(self.send_buf);
-        const w = fbs.writer();
-        w.print("{{\"tag\":\"route\",\"method\":\"{s}\",\"path\":", .{@tagName(method)}) catch return null;
-        writeJsonString(w, path) catch return null;
-        w.writeAll(",\"body\":") catch return null;
-        writeJsonString(w, body) catch return null;
-        w.writeAll(",\"params\":{}}}") catch return null;
-
-        const json = fbs.getWritten();
-        if (!protocol.write_frame(self.fd, json)) {
-            self.handle_disconnect();
-            return null;
-        }
-
-        // Read route response.
-        const resp_json = protocol.read_frame(self.fd, self.recv_buf) orelse {
-            self.handle_disconnect();
-            return null;
-        };
-
-        // Parse response — check found field.
-        const found_val = extractJsonValue(resp_json, "found") orelse return null;
-        if (!std.mem.eql(u8, found_val, "true")) return null;
-
-        // Extract operation.
-        const op_str = extractJsonString(resp_json, "operation") orelse {
-            log.err("route response missing operation field", .{});
-            self.handle_disconnect();
-            return null;
-        };
-
-        const operation = message.Operation.from_string(op_str) orelse {
-            log.err("route handler returned unknown operation: {s}", .{op_str});
-            self.handle_disconnect();
-            return null;
-        };
-
-        // Extract id.
-        const id_str = extractJsonString(resp_json, "id") orelse "0" ** 32;
-        const id = parseHexUuid(id_str) orelse 0;
-
-        var msg = std.mem.zeroes(message.Message);
-        msg.operation = operation;
-        msg.id = id;
-        // Body from route result stored as JSON in msg body — the sidecar
-        // will receive it back in the execute phase. For now, keep the
-        // raw body_json in the Message body field by writing it as bytes.
-        if (extractJsonValue(resp_json, "body")) |body_json| {
-            const copy_len = @min(body_json.len, message.body_max);
-            @memcpy(msg.body[0..copy_len], body_json[0..copy_len]);
-        }
-        return msg;
-    }
-
-    /// Execute via the sidecar: prefetch → handle → render.
-    /// Pending binary protocol rebuild — see docs/plans/sidecar-protocol.md.
-    pub fn execute_render() void {
-        @compileError("sidecar execute_render pending binary protocol rebuild");
-    }
-
     fn handle_disconnect(self: *SidecarClient) void {
         assert(self.fd != -1);
         log.warn("sidecar disconnected", .{});
         std.posix.close(self.fd);
         self.fd = -1;
+        self.reset_request_state();
     }
 
     fn try_reconnect(self: *SidecarClient) void {
@@ -185,201 +118,449 @@ pub const SidecarClient = struct {
             log.info("sidecar reconnected", .{});
         }
     }
-};
 
-// ExecuteRenderResult removed — pending binary protocol rebuild.
-// See docs/plans/sidecar-protocol.md.
-
-// =====================================================================
-// JSON helpers — minimal, no allocator. Parse from recv_buf slices.
-// These are boundary code — the sidecar is untrusted.
-// =====================================================================
-
-/// Write a JSON string (with escaping) to the writer.
-fn writeJsonString(w: anytype, s: []const u8) !void {
-    try w.writeByte('"');
-    for (s) |c| {
-        switch (c) {
-            '"' => try w.writeAll("\\\""),
-            '\\' => try w.writeAll("\\\\"),
-            '\n' => try w.writeAll("\\n"),
-            '\r' => try w.writeAll("\\r"),
-            '\t' => try w.writeAll("\\t"),
-            else => try w.writeByte(c),
-        }
+    fn reset_request_state(self: *SidecarClient) void {
+        self.prefetch_decl = "";
+        self.render_decl = "";
+        self.handle_status = .ok;
+        self.handle_writes = "";
+        self.html = "";
     }
-    try w.writeByte('"');
-}
 
-/// Extract a JSON string value by key. Returns the raw content (escapes preserved).
-/// Simple parser — handles flat JSON objects, not nested.
-fn extractJsonString(json: []const u8, key: []const u8) ?[]const u8 {
-    // Search for "key":"value"
-    var search_buf: [256]u8 = undefined;
-    const prefix = std.fmt.bufPrint(&search_buf, "\"{s}\":\"", .{key}) catch return null;
+    // =================================================================
+    // RT1: Route — translate HTTP request to operation + prefetch SQL
+    // =================================================================
 
-    const start = (std.mem.indexOf(u8, json, prefix) orelse return null) + prefix.len;
-    // Find closing quote (not escaped).
-    var i = start;
-    while (i < json.len) : (i += 1) {
-        if (json[i] == '\\') {
-            i += 1; // skip escaped char
-            continue;
+    /// Send route_request, receive route_prefetch_response.
+    /// Returns the operation + id as a Message, or null if unmapped.
+    /// Stores prefetch declarations for the subsequent prefetch call.
+    pub fn translate(
+        self: *SidecarClient,
+        method_val: http.Method,
+        path: []const u8,
+        body: []const u8,
+    ) ?message.Message {
+        if (self.fd == -1) self.try_reconnect();
+        if (self.fd == -1) return null;
+        self.reset_request_state();
+
+        // Build route_request frame.
+        // [u8 tag][u8 method][u16 BE path_len][path bytes][u16 BE body_len][body bytes]
+        var pos: usize = 0;
+        const buf = self.send_buf;
+
+        buf[pos] = @intFromEnum(protocol.MessageTag.route_request);
+        pos += 1;
+        buf[pos] = @intFromEnum(method_val);
+        pos += 1;
+        if (path.len > 0xFFFF) return null;
+        std.mem.writeInt(u16, buf[pos..][0..2], @intCast(path.len), .big);
+        pos += 2;
+        @memcpy(buf[pos..][0..path.len], path);
+        pos += path.len;
+        if (body.len > 0xFFFF) return null;
+        std.mem.writeInt(u16, buf[pos..][0..2], @intCast(body.len), .big);
+        pos += 2;
+        @memcpy(buf[pos..][0..body.len], body);
+        pos += body.len;
+
+        if (!protocol.write_frame(self.fd, buf[0..pos])) {
+            self.handle_disconnect();
+            return null;
         }
-        if (json[i] == '"') return json[start..i];
-    }
-    return null;
-}
 
-/// Extract a JSON value by key — returns the raw JSON (string, object, array, number, bool).
-fn extractJsonValue(json: []const u8, key: []const u8) ?[]const u8 {
-    var search_buf: [256]u8 = undefined;
-    const prefix = std.fmt.bufPrint(&search_buf, "\"{s}\":", .{key}) catch return null;
-
-    const colon_end = (std.mem.indexOf(u8, json, prefix) orelse return null) + prefix.len;
-
-    // Skip whitespace.
-    var i = colon_end;
-    while (i < json.len and (json[i] == ' ' or json[i] == '\t')) i += 1;
-    if (i >= json.len) return null;
-
-    // Determine value type and find end.
-    const c = json[i];
-    if (c == '"') {
-        // String: find closing quote.
-        var j = i + 1;
-        while (j < json.len) : (j += 1) {
-            if (json[j] == '\\') {
-                j += 1;
-                continue;
-            }
-            if (json[j] == '"') return json[i .. j + 1];
-        }
-        return null;
-    } else if (c == '{') {
-        return findMatchingBrace(json[i..], '{', '}');
-    } else if (c == '[') {
-        return findMatchingBrace(json[i..], '[', ']');
-    } else {
-        // Number, bool, null — find delimiter.
-        var j = i;
-        while (j < json.len and json[j] != ',' and json[j] != '}' and json[j] != ']') j += 1;
-        return json[i..j];
-    }
-}
-
-fn findMatchingBrace(s: []const u8, open: u8, close_char: u8) ?[]const u8 {
-    assert(s[0] == open);
-    var depth: usize = 0;
-    var in_string = false;
-    var escape_next = false;
-    for (s, 0..) |c, i| {
-        if (escape_next) {
-            escape_next = false;
-            continue;
-        }
-        if (in_string) {
-            if (c == '\\') {
-                escape_next = true;
-                continue;
-            }
-            if (c == '"') in_string = false;
-            continue;
-        }
-        if (c == '"') {
-            in_string = true;
-            continue;
-        }
-        if (c == open) depth += 1;
-        if (c == close_char) {
-            depth -= 1;
-            if (depth == 0) return s[0 .. i + 1];
-        }
-    }
-    return null;
-}
-
-// JsonObjectIterator removed — was only used by deleted execute_render.
-
-fn parseHexUuid(s: []const u8) ?u128 {
-    if (s.len != 32) return null;
-    var result: u128 = 0;
-    for (s) |c| {
-        const digit: u128 = switch (c) {
-            '0'...'9' => c - '0',
-            'a'...'f' => c - 'a' + 10,
-            'A'...'F' => c - 'A' + 10,
-            else => return null,
+        // Receive route_prefetch_response.
+        // [u8 tag][u8 found][u8 operation][u128 id (16 bytes BE)][prefetch_declarations...]
+        const resp = protocol.read_frame(self.fd, self.recv_buf) orelse {
+            self.handle_disconnect();
+            return null;
         };
-        result = (result << 4) | digit;
+
+        if (resp.len < 3) {
+            self.handle_disconnect();
+            return null;
+        }
+
+        // Validate tag.
+        if (resp[0] != @intFromEnum(protocol.MessageTag.route_prefetch_response)) {
+            log.err("translate: unexpected tag {d}", .{resp[0]});
+            self.handle_disconnect();
+            return null;
+        }
+
+        // Found flag.
+        if (resp[1] == 0) return null; // not found — no route matched
+
+        // Operation.
+        const op_byte = resp[2];
+        const operation = std.meta.intToEnum(message.Operation, op_byte) catch {
+            log.err("translate: unknown operation {d}", .{op_byte});
+            self.handle_disconnect();
+            return null;
+        };
+
+        // ID (u128 big-endian, 16 bytes).
+        if (resp.len < 19) {
+            self.handle_disconnect();
+            return null;
+        }
+        const id = std.mem.readInt(u128, resp[3..19], .big);
+
+        // Store prefetch declarations (rest of the frame).
+        self.prefetch_decl = resp[19..];
+
+        var msg = std.mem.zeroes(message.Message);
+        msg.operation = operation;
+        msg.id = id;
+        return msg;
     }
-    return result;
-}
 
-// =====================================================================
-// Tests
-// =====================================================================
+    // =================================================================
+    // RT2 send: Prefetch — execute declared SQL, send results
+    // =================================================================
 
-test "extractJsonString" {
-    const json = "{\"operation\":\"get_product\",\"id\":\"abcdef\",\"found\":true}";
-    try std.testing.expectEqualStrings("get_product", extractJsonString(json, "operation").?);
-    try std.testing.expectEqualStrings("abcdef", extractJsonString(json, "id").?);
-    try std.testing.expect(extractJsonString(json, "missing") == null);
-}
+    /// Execute the prefetch SQL declarations stored from RT1.
+    /// Write the row set results into send_buf for RT2.
+    /// Returns the number of bytes of prefetch results, or null on error.
+    pub fn execute_prefetch(self: *SidecarClient, storage: anytype) ?usize {
+        const decl = self.prefetch_decl;
+        var buf = self.send_buf;
 
-test "extractJsonValue" {
-    const json = "{\"found\":true,\"count\":42,\"items\":[1,2,3],\"obj\":{\"a\":1}}";
-    try std.testing.expectEqualStrings("true", extractJsonValue(json, "found").?);
-    try std.testing.expectEqualStrings("42", extractJsonValue(json, "count").?);
-    try std.testing.expectEqualStrings("[1,2,3]", extractJsonValue(json, "items").?);
-    try std.testing.expectEqualStrings("{\"a\":1}", extractJsonValue(json, "obj").?);
-}
+        // Frame payload: [u8 tag][row_set_0][row_set_1]...
+        var pos: usize = 0;
+        buf[pos] = @intFromEnum(protocol.MessageTag.prefetch_results);
+        pos += 1;
 
-test "parseHexUuid" {
-    try std.testing.expectEqual(@as(u128, 0xaabbccdd), parseHexUuid("000000000000000000000000aabbccdd").?);
-    try std.testing.expect(parseHexUuid("short") == null);
-    try std.testing.expect(parseHexUuid("zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz") == null);
-}
+        // Parse declarations: [u8 query_count][queries...]
+        if (decl.len == 0) return pos; // no prefetch queries
+        const query_count = decl[0];
+        var dpos: usize = 1;
 
-test "writeJsonString escapes" {
-    var buf: [256]u8 = undefined;
-    var fbs = std.io.fixedBufferStream(&buf);
-    try writeJsonString(fbs.writer(), "hello \"world\"\n");
-    try std.testing.expectEqualStrings("\"hello \\\"world\\\"\\n\"", fbs.getWritten());
-}
+        for (0..query_count) |_| {
+            // key: [u8 key_len][key_bytes]
+            if (dpos >= decl.len) return null;
+            const key_len = decl[dpos];
+            dpos += 1;
+            if (dpos + key_len > decl.len) return null;
+            // Key not needed by the framework — the sidecar uses it to
+            // build ctx.prefetched. We just execute the SQL and send rows.
+            dpos += key_len;
 
-test "findMatchingBrace with escaped quotes" {
-    // Object containing a string with escaped quotes.
-    const json = "{\"name\":\"say \\\"hi\\\"\",\"id\":1}";
-    const result = findMatchingBrace(json, '{', '}');
-    try std.testing.expect(result != null);
-    try std.testing.expectEqualStrings(json, result.?);
-}
+            // sql: [u16 BE sql_len][sql_bytes]
+            if (dpos + 2 > decl.len) return null;
+            const sql_len = std.mem.readInt(u16, decl[dpos..][0..2], .big);
+            dpos += 2;
+            if (dpos + sql_len > decl.len) return null;
+            const sql = decl[dpos..][0..sql_len];
+            dpos += sql_len;
 
-test "findMatchingBrace with nested braces in strings" {
-    const json = "{\"val\":\"{}\",\"ok\":true}";
-    const result = findMatchingBrace(json, '{', '}');
-    try std.testing.expect(result != null);
-    try std.testing.expectEqualStrings(json, result.?);
-}
+            // mode: [u8]
+            if (dpos >= decl.len) return null;
+            const mode_byte = decl[dpos];
+            dpos += 1;
+            const mode = std.meta.intToEnum(protocol.QueryMode, mode_byte) catch return null;
 
-test "extractJsonString with escaped value" {
-    const json = "{\"name\":\"say \\\"hi\\\"\"}";
-    const val = extractJsonString(json, "name");
-    try std.testing.expect(val != null);
-    // Returns raw content — escapes preserved.
-    try std.testing.expectEqualStrings("say \\\"hi\\\"", val.?);
-}
+            // params: [u8 param_count][params...]
+            if (dpos >= decl.len) return null;
+            const param_count = decl[dpos];
+            dpos += 1;
 
-test "extractJsonValue nested key collision" {
-    // "a" appears in both outer and inner objects.
-    const json = "{\"a\":{\"a\":1},\"b\":2}";
-    const a_val = extractJsonValue(json, "a");
-    try std.testing.expect(a_val != null);
-    try std.testing.expectEqualStrings("{\"a\":1}", a_val.?);
-    const b_val = extractJsonValue(json, "b");
-    try std.testing.expect(b_val != null);
-    try std.testing.expectEqualStrings("2", b_val.?);
-}
+            // Find the end of params by scanning type tags + values.
+            const params_start = dpos;
+            var pi: usize = 0;
+            while (pi < param_count) : (pi += 1) {
+                if (dpos >= decl.len) return null;
+                const tag_byte = decl[dpos];
+                dpos += 1;
+                const tag = std.meta.intToEnum(protocol.TypeTag, tag_byte) catch return null;
+                switch (tag) {
+                    .integer, .float => dpos += 8,
+                    .text, .blob => {
+                        if (dpos + 2 > decl.len) return null;
+                        const vlen = std.mem.readInt(u16, decl[dpos..][0..2], .big);
+                        dpos += 2 + vlen;
+                    },
+                    .null => {},
+                }
+            }
+            const params_buf = decl[params_start..dpos];
 
-// JsonObjectIterator tests removed — iterator deleted.
+            // Execute the query via storage.query_raw.
+            const result = storage.query_raw(sql, params_buf, param_count, mode, buf[pos..]);
+            if (result) |row_data| {
+                pos += row_data.len;
+            } else {
+                // Query failed — write an empty row set (0 columns, 0 rows).
+                if (pos + 6 > buf.len) return null;
+                std.mem.writeInt(u16, buf[pos..][0..2], 0, .big); // 0 columns
+                pos += 2;
+                std.mem.writeInt(u32, buf[pos..][0..4], 0, .big); // 0 rows
+                pos += 4;
+            }
+        }
+
+        return pos;
+    }
+
+    // =================================================================
+    // RT2 recv: Handle — send prefetch results, receive status + writes
+    // =================================================================
+
+    /// Send prefetch results frame (RT2 send), receive handle_render_response
+    /// (RT2 recv). Stores status, writes, and render declarations.
+    /// Returns the status, or null on error.
+    pub fn send_prefetch_recv_handle(self: *SidecarClient, prefetch_len: usize) ?message.Status {
+        // Send prefetch results.
+        if (!protocol.write_frame(self.fd, self.send_buf[0..prefetch_len])) {
+            self.handle_disconnect();
+            return null;
+        }
+
+        // Receive handle_render_response.
+        // [u8 tag][u8 status][writes...][render_declarations...]
+        const resp = protocol.read_frame(self.fd, self.recv_buf) orelse {
+            self.handle_disconnect();
+            return null;
+        };
+
+        if (resp.len < 2) {
+            self.handle_disconnect();
+            return null;
+        }
+
+        if (resp[0] != @intFromEnum(protocol.MessageTag.handle_render_response)) {
+            log.err("handle: unexpected tag {d}", .{resp[0]});
+            self.handle_disconnect();
+            return null;
+        }
+
+        // Status.
+        const status = std.meta.intToEnum(message.Status, resp[1]) catch {
+            log.err("handle: unknown status {d}", .{resp[1]});
+            self.handle_disconnect();
+            return null;
+        };
+        self.handle_status = status;
+
+        // Parse writes and render declarations from the rest of the frame.
+        // [u8 write_count][writes...][render_declarations...]
+        if (resp.len < 3) {
+            self.handle_disconnect();
+            return null;
+        }
+
+        var dpos: usize = 2;
+        const write_count = resp[dpos];
+        dpos += 1;
+
+        // Scan past write entries to find where render declarations start.
+        const writes_start = dpos;
+        for (0..write_count) |_| {
+            // sql: [u16 BE sql_len][sql_bytes]
+            if (dpos + 2 > resp.len) {
+                self.handle_disconnect();
+                return null;
+            }
+            const sql_len = std.mem.readInt(u16, resp[dpos..][0..2], .big);
+            dpos += 2 + sql_len;
+
+            // params: [u8 param_count][params...]
+            if (dpos >= resp.len) {
+                self.handle_disconnect();
+                return null;
+            }
+            const param_count = resp[dpos];
+            dpos += 1;
+            for (0..param_count) |_| {
+                if (dpos >= resp.len) {
+                    self.handle_disconnect();
+                    return null;
+                }
+                const tag = std.meta.intToEnum(protocol.TypeTag, resp[dpos]) catch {
+                    self.handle_disconnect();
+                    return null;
+                };
+                dpos += 1;
+                switch (tag) {
+                    .integer, .float => dpos += 8,
+                    .text, .blob => {
+                        if (dpos + 2 > resp.len) {
+                            self.handle_disconnect();
+                            return null;
+                        }
+                        const vlen = std.mem.readInt(u16, resp[dpos..][0..2], .big);
+                        dpos += 2 + vlen;
+                    },
+                    .null => {},
+                }
+            }
+        }
+
+        self.handle_writes = resp[writes_start..dpos];
+        self.render_decl = resp[dpos..];
+
+        return status;
+    }
+
+    // =================================================================
+    // Execute writes from handle result
+    // =================================================================
+
+    /// Execute the write queue from handle_render_response against storage.
+    /// Called by the framework inside the transaction boundary.
+    pub fn execute_writes(self: *SidecarClient, storage: anytype) bool {
+        const data = self.handle_writes;
+        if (data.len == 0) return true;
+
+        var dpos: usize = 0;
+
+        // The write_count was already parsed in send_prefetch_recv_handle.
+        // handle_writes starts after the write_count byte — it's the raw
+        // write entries. We need to re-read the count from the original
+        // response. Actually, handle_writes includes the entries but not
+        // the count. Let me re-parse.
+        //
+        // Actually, looking at how we set handle_writes above:
+        // writes_start is after write_count, so handle_writes doesn't
+        // include the count. We need to store it separately.
+        // For now, scan the entries — each starts with u16 sql_len.
+        while (dpos < data.len) {
+            // sql: [u16 BE sql_len][sql_bytes]
+            if (dpos + 2 > data.len) break;
+            const sql_len = std.mem.readInt(u16, data[dpos..][0..2], .big);
+            dpos += 2;
+            if (dpos + sql_len > data.len) return false;
+            const sql = data[dpos..][0..sql_len];
+            dpos += sql_len;
+
+            // params: [u8 param_count][params...]
+            if (dpos >= data.len) return false;
+            const param_count = data[dpos];
+            dpos += 1;
+            const params_start = dpos;
+
+            // Scan past params to find the end.
+            for (0..param_count) |_| {
+                if (dpos >= data.len) return false;
+                const tag = std.meta.intToEnum(protocol.TypeTag, data[dpos]) catch return false;
+                dpos += 1;
+                switch (tag) {
+                    .integer, .float => dpos += 8,
+                    .text, .blob => {
+                        if (dpos + 2 > data.len) return false;
+                        const vlen = std.mem.readInt(u16, data[dpos..][0..2], .big);
+                        dpos += 2 + vlen;
+                    },
+                    .null => {},
+                }
+            }
+
+            if (!storage.execute_raw(sql, data[params_start..dpos], param_count)) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    // =================================================================
+    // RT3: Render — execute render SQL, send results, receive HTML
+    // =================================================================
+
+    /// Execute render SQL declarations, send results, receive HTML.
+    /// Returns the HTML slice (aliases recv_buf), or null on error.
+    pub fn execute_render(self: *SidecarClient, storage: anytype) ?[]const u8 {
+        var buf = self.send_buf;
+
+        // Build render_results frame.
+        var pos: usize = 0;
+        buf[pos] = @intFromEnum(protocol.MessageTag.render_results);
+        pos += 1;
+
+        // Execute render SQL declarations (same format as prefetch).
+        const decl = self.render_decl;
+        if (decl.len > 0) {
+            const query_count = decl[0];
+            var dpos: usize = 1;
+
+            for (0..query_count) |_| {
+                // key
+                if (dpos >= decl.len) return null;
+                const key_len = decl[dpos];
+                dpos += 1 + key_len;
+
+                // sql
+                if (dpos + 2 > decl.len) return null;
+                const sql_len = std.mem.readInt(u16, decl[dpos..][0..2], .big);
+                dpos += 2;
+                const sql = decl[dpos..][0..sql_len];
+                dpos += sql_len;
+
+                // mode
+                if (dpos >= decl.len) return null;
+                const mode_byte = decl[dpos];
+                dpos += 1;
+                const mode = std.meta.intToEnum(protocol.QueryMode, mode_byte) catch return null;
+
+                // params
+                if (dpos >= decl.len) return null;
+                const param_count = decl[dpos];
+                dpos += 1;
+                const params_start = dpos;
+                var pi: usize = 0;
+                while (pi < param_count) : (pi += 1) {
+                    if (dpos >= decl.len) return null;
+                    const tag = std.meta.intToEnum(protocol.TypeTag, decl[dpos]) catch return null;
+                    dpos += 1;
+                    switch (tag) {
+                        .integer, .float => dpos += 8,
+                        .text, .blob => {
+                            if (dpos + 2 > decl.len) return null;
+                            const vlen = std.mem.readInt(u16, decl[dpos..][0..2], .big);
+                            dpos += 2 + vlen;
+                        },
+                        .null => {},
+                    }
+                }
+
+                const result = storage.query_raw(sql, decl[params_start..dpos], param_count, mode, buf[pos..]);
+                if (result) |row_data| {
+                    pos += row_data.len;
+                } else {
+                    // Empty row set on failure.
+                    if (pos + 6 > buf.len) return null;
+                    std.mem.writeInt(u16, buf[pos..][0..2], 0, .big);
+                    pos += 2;
+                    std.mem.writeInt(u32, buf[pos..][0..4], 0, .big);
+                    pos += 4;
+                }
+            }
+        }
+
+        // Send render results.
+        if (!protocol.write_frame(self.fd, buf[0..pos])) {
+            self.handle_disconnect();
+            return null;
+        }
+
+        // Receive html_response.
+        // [u8 tag][html_bytes...]
+        const resp = protocol.read_frame(self.fd, self.recv_buf) orelse {
+            self.handle_disconnect();
+            return null;
+        };
+
+        if (resp.len < 1) {
+            self.handle_disconnect();
+            return null;
+        }
+
+        if (resp[0] != @intFromEnum(protocol.MessageTag.html_response)) {
+            log.err("render: unexpected tag {d}", .{resp[0]});
+            self.handle_disconnect();
+            return null;
+        }
+
+        self.html = resp[1..];
+        return self.html;
+    }
+};

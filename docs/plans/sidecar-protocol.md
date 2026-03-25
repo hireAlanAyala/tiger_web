@@ -144,31 +144,187 @@ framework sends an empty row set. The sidecar renders immediately. The
 cost is ~50us for the empty round trip. The gain is one code path
 everywhere — framework, dispatch, fuzzer, tests.
 
-## SM integration
+## Pipeline architecture — two pipelines, shared building blocks
 
-The sidecar is a different backend for the same SM interface — same as
-how `SqliteStorage` and `SimIO` are different backends for Storage/IO.
-The SM drives the same pipeline regardless of which backend is active.
+### The problem
+
+The SM pipeline calls handler phases separately: translate → prefetch →
+execute → render. Each is a synchronous function call to a local Zig
+handler module. The SM passes typed data between phases through a
+comptime `PrefetchCache` union.
+
+The sidecar protocol is a 3-round-trip socket conversation. RT2
+(send prefetch results, receive handle response) spans the boundary
+between the SM's prefetch and execute phases. Forcing the sidecar
+into the SM pipeline requires:
+
+- **Stored state between SM calls.** The sidecar client holds prefetch
+  declarations, write queues, and render declarations as buffer slices
+  across separate SM function calls.
+- **Dummy cache.** The SM stores and passes a `PrefetchCache` that the
+  sidecar never uses. Dead type in the pipeline.
+- **Buffer aliasing.** Stored slices alias `recv_buf`. Each phase
+  overwrites the buffer, invalidating previous slices. Correctness
+  depends on the SM calling phases in order — a contract not expressed
+  in the type system.
+
+### Options considered
+
+**Option A: Sidecar as Handlers backend (single pipeline).**
+The sidecar implements the SM's Handlers interface. The SM drives
+translate → prefetch → execute → render without knowing it's talking
+to a sidecar. Dummy cache, stored state, buffer aliasing.
+
+Rejected: the impedance mismatch between the SM's phased dispatch and
+the sidecar's round-trip protocol creates fragile state management.
+A change to the SM's call ordering or retry semantics silently breaks
+the sidecar's stored state.
+
+**Option B: Sidecar bypass in commit_and_encode.**
+All sidecar IO in one function, SM pipeline runs with dummies.
+
+Rejected: `commit_and_encode` becomes two implementations. Violates
+"SM doesn't know about sidecar." The SM's guarantees (transactions,
+auth, WAL) must be replicated inside the bypass function.
+
+**Option C: Generalize SM Cache to support opaque bytes.**
+Add a sidecar variant to PrefetchCache that holds binary row data.
+
+Rejected: PrefetchCache is `union(Operation)` — each variant is an
+operation. A sidecar variant breaks the operation-indexed structure.
+And the real problem isn't the cache type — it's that RT2 spans two
+SM phases.
+
+### Decision: two pipelines, shared building blocks
+
+TigerBeetle has this pattern. Their real IO path and simulated IO path
+have different orchestration but share the same state machine and storage
+building blocks. The simulation doesn't go through the real IO pipeline —
+it has its own driver that calls the same SM methods in a different
+sequence.
+
+Same pattern here. The building blocks are the product. The orchestration
+is the adapter.
 
 ```
-SM pipeline          Zig-native                Sidecar
-─────────────────────────────────────────────────────────────────
-translate()          handler.route()           RT1: send route_request,
-                                               recv route_prefetch_response
+// Shared building blocks (framework owns these)
+storage.begin_batch()       // transaction boundary
+storage.commit_batch()      // transaction boundary
+storage.query_raw()         // execute SQL, return binary rows
+storage.execute_raw()       // execute SQL write
+auth.resolve_credential()   // cookie → identity
+wal.append()                // record committed SQL writes
+http_response.encode()      // HTML → HTTP response
+sse.encode()                // HTML → SSE response
 
-handler_prefetch()   handler.prefetch(ro)      execute declared prefetch SQL
+// Native pipeline — SM orchestrates
+msg = translate(method, path, body)
+cache = handler_prefetch(storage, msg)
+storage.begin_batch()
+result = handler_execute(cache, msg, fw, db)
+storage.commit_batch()
+html = dispatch_render(cache, operation, status, storage)
 
-handler_execute()    handler.handle(ctx, db)   RT2: send prefetch_results,
-                                               recv handle_render_response,
-                                               execute writes in transaction
-
-dispatch_render()    handler.render(ctx)       RT3: send render_results,
-                                               recv html_response
+// Sidecar pipeline — sidecar_pipeline orchestrates
+msg = client.translate(method, path, body)         // RT1
+prefetch_data = client.execute_prefetch(storage)    // local SQL
+handle_result = client.exchange_handle(prefetch_data) // RT2
+storage.begin_batch()
+client.execute_writes(storage)                      // writes in txn
+storage.commit_batch()
+render_data = client.execute_render_sql(storage)    // local SQL
+html = client.exchange_render(render_data)          // RT3
 ```
 
-The SM doesn't know it's talking to a sidecar. It calls the same
-interface methods. The Handlers implementation for the sidecar path
-translates SM calls into wire messages.
+Both pipelines call the same storage/auth/WAL building blocks. The
+building blocks are shared — no duplicated logic. The composition is
+different because the execution models are different:
+
+- **Native**: local function calls, typed data passing via PrefetchCache
+- **Sidecar**: wire round trips, binary data passing via socket frames
+
+### Why this doesn't hurt correctness
+
+Determinism comes from the handler logic and the database, not the
+pipeline orchestration. Both pipelines execute the same SQL against
+the same SQLite. Same writes, same transaction boundaries, same state.
+
+Correctness comes from the building blocks: `begin_batch` before writes,
+`commit_batch` after, WAL after commit, render after commit. Both
+pipelines call the same functions in the same order.
+
+The risk with two pipelines is maintenance, not correctness. If the SM
+adds a new concern, the sidecar pipeline must add the same call. This
+is a code review problem — the building block exists, it just needs to
+be called. The alternative (impedance mismatch) creates an implicit
+ordering risk that's harder to catch in review.
+
+### Correctness proof
+
+A test that proves both pipelines produce the same outcome for the
+same input. Not the same call sequence — the same database state after
+commit. The auditor can be extended: run a native request and a sidecar
+request for the same operation, assert they produce the same writes.
+
+### Implementation
+
+The sidecar pipeline lives in `app.zig` alongside `commit_and_encode`.
+The server calls it when `sidecar != null`:
+
+```zig
+// server.zig process_inbox (simplified)
+const msg = App.translate(method, path, body) orelse return unmapped;
+
+if (App.sidecar != null) {
+    return App.sidecar_pipeline(msg, storage, send_buf, ...);
+} else {
+    return App.commit_and_encode(sm, msg, send_buf, ...);
+}
+```
+
+The `sidecar_pipeline` function:
+
+```zig
+pub fn sidecar_pipeline(
+    msg: Message,
+    storage: *Storage,
+    send_buf: []u8,
+    is_sse: bool,
+    secret_key: *const [auth.key_length]u8,
+) ?CommitResult {
+    const client = &sidecar.?;
+
+    // Phase 1: execute prefetch SQL (declared in RT1, stored on client)
+    const prefetch_len = client.execute_prefetch(
+        Storage.ReadView.init(storage),
+    ) orelse return null;
+
+    // Phase 2: RT2 — send prefetch results, receive handle + writes
+    const status = client.send_prefetch_recv_handle(prefetch_len) orelse return null;
+
+    // Phase 3: execute writes inside transaction
+    storage.begin_batch();
+    const writes_ok = client.execute_writes(storage);
+    if (writes_ok) {
+        storage.commit_batch();
+    } else {
+        storage.rollback_batch();
+        return null;
+    }
+
+    // Phase 4: RT3 — execute render SQL, send results, receive HTML
+    const html = client.execute_render(
+        Storage.ReadView.init(storage),
+    ) orelse return null;
+
+    // Phase 5: encode HTTP response (same as native path)
+    // ... cookie, SSE/full-page encoding ...
+}
+```
+
+The SM is untouched. The Handlers interface is untouched. The sidecar
+pipeline calls the same storage methods as the SM does internally.
+The server decides which pipeline to use at the top level.
 
 ### Sidecar failure mid-exchange
 
@@ -436,8 +592,12 @@ The TS handler API is wire-format-independent. All of this survives:
 
 - **`protocol.zig`** — frame headers, row format, SQL declaration format,
   param format. All as extern structs with comptime assertions. No domain types.
-- **`sidecar.zig`** — binary framing, generic row serializer (SQLite rows →
-  wire format), param deserializer (wire format → SQLite bind). No JSON.
+- **`sidecar.zig`** — binary framing, 3-RT socket exchange. Connection
+  management, translate (RT1), execute_prefetch, exchange_handle (RT2),
+  execute_render (RT3). No JSON. No SM Handlers interface.
+- **`app.zig`** — new `sidecar_pipeline` function alongside `commit_and_encode`.
+  Calls the same storage/auth/WAL building blocks as the SM path. Server
+  decides which pipeline to use: `if (sidecar) sidecar_pipeline() else sm_pipeline()`.
 - **`codegen.zig`** — generates a generic row reader + param writer per
   language, not per-type serde. Much smaller output.
 - **Dispatch socket server** (in adapter output) — binary framing, generic
@@ -537,19 +697,32 @@ Start with the fuzzer. Row format fuzz test first — generate random row
 sets, serialize, deserialize, assert round-trip. The format falls out of
 what the fuzzer exercises. Then implement to pass the fuzzer.
 
+**7. "Sidecar as SM Handlers backend — impedance mismatch."**
+The SM's pipeline calls phases separately with typed data passing. The
+sidecar's protocol is a 3-RT socket conversation. Forcing the sidecar
+into the SM pipeline requires stored state between calls, dummy cache,
+and buffer aliasing. Resolution: two pipelines, shared building blocks.
+TigerBeetle has this pattern — real IO and simulated IO have different
+orchestration but share the same SM and storage. The building blocks
+(transactions, auth, WAL) are shared. The composition is per-path.
+Correctness proven by testing both pipelines produce the same database
+state for the same input.
+
 ## Delivery order
 
-1. Row format fuzz test — generate random row sets, serialize, deserialize,
-   assert round-trip (drives the format design)
-2. Define row/param/declaration format structs in `protocol.zig`
-3. Implement row serializer in Zig (SQLite rows → binary row format)
-4. Implement param deserializer in Zig (binary params → SQLite bind)
-5. Implement row deserializer in TS (binary row format → JS objects)
-6. Implement param serializer in TS (JS values → binary param format)
+1. ~~Row format fuzz test~~ ✓
+2. ~~Define row/param/declaration format in `protocol.zig`~~ ✓
+3. ~~Implement row serializer in Zig (SQLite rows → binary row format)~~ ✓
+4. ~~Implement param deserializer in Zig (binary params → SQLite bind)~~ ✓
+5. ~~Implement row deserializer in TS (binary row format → JS objects)~~ ✓
+6. ~~Implement param serializer in TS (JS values → binary param format)~~ ✓
 7. Rebuild `sidecar.zig` — 3-round-trip exchange, binary framing
-8. Rebuild dispatch socket server in adapter — binary framing
-9. Rebuild `sidecar_fuzz.zig` — fuzz full exchange with corrupt data
-10. SQL validation pass in annotation scanner
-11. WAL format change — SQL writes instead of Message bodies
-12. Comptime worst-case sizing assertions
-13. Delete JSON helpers from `sidecar.zig`
+8. Wire `sidecar_pipeline` in `app.zig` — calls storage/auth/WAL building blocks
+9. Rebuild dispatch socket server in adapter — binary framing
+10. Rebuild `sidecar_fuzz.zig` — fuzz full exchange with corrupt data
+11. SQL validation pass in annotation scanner
+12. WAL format change — SQL writes instead of Message bodies
+13. Comptime worst-case sizing assertions
+14. Delete JSON helpers from `sidecar.zig`
+15. Cross-pipeline correctness test — same operation through native and
+    sidecar pipelines produces same database state
