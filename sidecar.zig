@@ -34,6 +34,14 @@ pub const SidecarClient = struct {
         assert(2 * (protocol.frame_max + 4) < 3 * 1024 * 1024);
     }
 
+    fn send_slice(self: *SidecarClient) []u8 {
+        return &self.send_buf;
+    }
+
+    fn recv_slice(self: *SidecarClient) []u8 {
+        return &self.recv_buf;
+    }
+
     /// Connect to the sidecar unix socket. Returns false on failure.
     pub fn connect(self: *SidecarClient) bool {
         assert(self.fd == -1);
@@ -95,7 +103,7 @@ pub const SidecarClient = struct {
         // Build route request JSON.
         // {tag:"route", method:"GET", path:"/products/abc", body:"...", params:{}}
         // params populated by framework pre-matching — for now empty, sidecar does its own matching.
-        var fbs = std.io.fixedBufferStream(self.send_buf);
+        var fbs = std.io.fixedBufferStream(self.send_slice());
         const w = fbs.writer();
         w.print("{{\"tag\":\"route\",\"method\":\"{s}\",\"path\":", .{@tagName(method)}) catch return null;
         writeJsonString(w, path) catch return null;
@@ -110,7 +118,7 @@ pub const SidecarClient = struct {
         }
 
         // Read route response.
-        const resp_json = protocol.read_frame(self.fd, self.recv_buf) orelse {
+        const resp_json = protocol.read_frame(self.fd, self.recv_slice()) orelse {
             self.handle_disconnect();
             return null;
         };
@@ -168,7 +176,7 @@ pub const SidecarClient = struct {
         if (self.fd == -1) return false;
 
         // Send execute request.
-        var fbs = std.io.fixedBufferStream(self.send_buf);
+        var fbs = std.io.fixedBufferStream(self.send_slice());
         const w = fbs.writer();
         w.print("{{\"tag\":\"execute\",\"operation\":\"{s}\",\"id\":\"{x:0>32}\",\"body\":", .{ @tagName(operation), id }) catch return false;
         // Write body as JSON object from the raw bytes (which contain JSON from route).
@@ -186,13 +194,13 @@ pub const SidecarClient = struct {
         }
 
         // Receive prefetch queries from sidecar.
-        const queries_json = protocol.read_frame(self.fd, self.recv_buf) orelse {
+        const queries_json = protocol.read_frame(self.fd, self.recv_slice()) orelse {
             self.handle_disconnect();
             return false;
         };
 
         // Execute prefetch queries against storage and build results JSON.
-        var rfbs = std.io.fixedBufferStream(self.send_buf);
+        var rfbs = std.io.fixedBufferStream(self.send_slice());
         const rw = rfbs.writer();
         rw.writeAll("{\"tag\":\"prefetch_results\",\"results\":{") catch return false;
 
@@ -233,7 +241,7 @@ pub const SidecarClient = struct {
         }
 
         // Receive handle+render result.
-        const result_json = protocol.read_frame(self.fd, self.recv_buf) orelse {
+        const result_json = protocol.read_frame(self.fd, self.recv_slice()) orelse {
             self.handle_disconnect();
             return false;
         };

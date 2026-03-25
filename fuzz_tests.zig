@@ -20,6 +20,7 @@ const Fuzzers = .{
     .state_machine = @import("fuzz.zig"),
     .replay = @import("replay_fuzz.zig"),
     .sidecar = @import("sidecar_fuzz.zig"),
+    .row_format = @import("row_format_fuzz.zig"),
     // Quickly run all fuzzers as a smoke test
     .smoke = {},
 };
@@ -56,6 +57,7 @@ fn main_smoke() !void {
             .state_machine => 10_000,
             .replay => 5_000,
             .sidecar => 5_000,
+            .row_format => 10_000,
         };
 
         var timer_single = try std.time.Timer.start();
