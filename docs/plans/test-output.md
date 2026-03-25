@@ -167,14 +167,25 @@ space limit) belongs in the simulation harness we haven't built yet.
 
 ## Delivery order
 
-1. Revert sim.zig to `addTest` with `test "name" {}` blocks
-2. Add `test { std.testing.log_level = .err; }` init block
-3. Change all `SimIO.init(hardcoded)` to use `from_seed_testing()`
-4. Revert build.zig sim step to `b.addTest`
-5. Remove custom main, panic handler, CLI infrastructure from sim.zig
-6. Keep: module boundary elimination, marks.zig, fuzz_tests.zig logFn
-7. Verify: `zig build test` output is clean, seeded, deterministic
-8. Save executable infrastructure for simulation-testing.md plan
+Write sim.zig fresh as an addTest file. Do not revert — the current
+executable version has 2300 lines of correct test logic buried under
+executable infrastructure. Write the new file preserving the SimIO
+struct, helper functions, and test logic while replacing the wiring.
+
+1. Write new sim.zig header: imports, `test {}` init block with
+   `std.testing.log_level = .err` and `limit_address_space()`
+2. Preserve SimIO struct and helpers unchanged
+3. Write each test as `test "name" {}` using:
+   - `PRNG.from_seed_testing()` for SimIO seed
+   - `std.testing.allocator` for Server.init
+   - `try` / `std.testing.expect` / `std.testing.expectEqual`
+   - `return error.TestUnexpectedResult` for missing responses
+4. Write PRNG fuzz tests with seeds derived from `from_seed_testing()`
+5. No custom main, panic handler, CLI, logFn, sim_tests table
+6. Update build.zig: `b.addTest` instead of `b.addExecutable`
+7. Keep: module boundary elimination, marks.zig, fuzz_tests.zig logFn
+8. Verify: `zig build test` output is clean, seeded, deterministic
+9. Save executable infrastructure for simulation-testing.md plan
 
 ## Infrastructure to relocate to simulation-testing.md
 
