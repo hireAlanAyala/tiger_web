@@ -300,7 +300,10 @@ export function writeSqlDeclarations(buf: DataView, offset: number, declarations
     buf.setUint8(pos, decl.mode === "all" ? QueryMode.all : QueryMode.one);
     pos += 1;
 
-    // Params.
+    // Params — u8 count.
+    if (decl.params.length > 0xFF) {
+      throw new Error("declaration params exceed u8 max count: " + decl.params.length);
+    }
     buf.setUint8(pos, decl.params.length);
     pos += 1;
     const bytesWritten = writeParams(buf, pos, decl.params);
@@ -346,7 +349,10 @@ export function writeWriteQueue(buf: DataView, offset: number, writes: WriteEntr
     new Uint8Array(buf.buffer, buf.byteOffset + pos, sqlBytes.length).set(sqlBytes);
     pos += sqlBytes.length;
 
-    // Params.
+    // Params — u8 count.
+    if (entry.params.length > 0xFF) {
+      throw new Error("write params exceed u8 max count: " + entry.params.length);
+    }
     buf.setUint8(pos, entry.params.length);
     pos += 1;
     const bytesWritten = writeParams(buf, pos, entry.params);
