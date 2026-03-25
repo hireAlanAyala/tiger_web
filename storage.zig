@@ -903,6 +903,14 @@ pub const SqliteStorage = struct {
     // Raw query — sidecar path. Reads SQLite results into binary row
     // format without knowing domain types. Runtime SQL (validated by
     // scanner at build time, but untrusted at the wire level).
+    //
+    // Error paths use log.mark.warn, not log.mark.err. These are err-
+    // severity conditions in production (sidecar bug or corruption),
+    // but Zig's test runner fails on any err-level log output. The
+    // marks system can't override the test runner. Using warn lets
+    // tests assert the error path fires via mark.expect_hit() without
+    // the test runner treating the log as a failure. Production
+    // severity is sacrificed for testability — the mark fires either way.
     // =================================================================
 
     /// Execute a runtime SQL query and write results into the binary
@@ -1013,6 +1021,7 @@ pub const SqliteStorage = struct {
     /// Prepare a runtime SQL statement. Returns null on failure.
     /// SQL is []const u8 (length-prefixed from wire), not null-terminated.
     fn prepare_raw(self: *SqliteStorage, sql: []const u8) ?*c.sqlite3_stmt {
+        assert(sql.len > 0); // empty SQL is never valid — sidecar bug
         var stmt: ?*c.sqlite3_stmt = null;
         const rc = c.sqlite3_prepare_v2(self.db, sql.ptr, @intCast(sql.len), &stmt, null);
         if (rc != c.SQLITE_OK) {
@@ -1036,7 +1045,7 @@ pub const SqliteStorage = struct {
         var buf_pos: usize = 0;
         for (0..params_count) |i| {
             const col: c_int = @intCast(i + 1);
-            if (buf_pos >= params_buf.len and params_count > 0) return false;
+            if (buf_pos >= params_buf.len) return false;
             const tag_byte = params_buf[buf_pos];
             buf_pos += 1;
             const tag = std.meta.intToEnum(proto.TypeTag, tag_byte) catch return false;
