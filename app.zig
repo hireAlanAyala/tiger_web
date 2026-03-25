@@ -153,6 +153,13 @@ pub var sidecar: ?SidecarClient = null;
 ///
 /// Tries all handler route functions. Asserts at most one matches
 /// (duplicate route detection — always, not just in debug).
+///
+/// This is a runtime assert, not comptime, because not all handlers
+/// declare route_method/route_pattern. Handlers without the `// match`
+/// directive are only discoverable at runtime via their route() function.
+/// Comptime checking would only cover handlers with match directives,
+/// creating a partial guarantee. The runtime assert is the universal
+/// catch — it fires on the first request that triggers a duplicate.
 pub fn translate(method: http.Method, path: []const u8, body: []const u8) ?Message {
     if (sidecar) |*client| return client.translate(method, path, body);
 
