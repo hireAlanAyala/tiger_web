@@ -76,6 +76,7 @@ See user-space.md for the declaration-based prefetch design.
 
 
 # Backlog
+- framework author debugging improved a lot, user space debugging should improve more at the compiler assertions
 - TS sidecar render should return effects array, not single string. Same spec as Zig tuples:
   `return [["patch", "#toast", html, "append"], ["sync", "/dashboard"]]`
   Requires: TS adapter generates effects return type, dispatch sends effects over wire,

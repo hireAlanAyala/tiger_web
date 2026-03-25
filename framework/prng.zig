@@ -82,10 +82,19 @@ pub fn ratio(numerator: u64, denominator: u64) Ratio {
 
 /// Bridge to Zig's built-in test seed for reproducible unit tests.
 /// Usage: `var prng = PRNG.from_seed_testing();`
-/// Seed is passed via `--seed=N` to the test binary; defaults vary per run.
+/// In test binaries: seed from `--seed=N` via std.testing.random_seed.
+/// In executables that set `pub var testing_seed`: seed from that var.
+/// Matches TigerBeetle's from_seed_testing() — one function, works
+/// in both test and executable contexts.
 pub fn from_seed_testing() PRNG {
-    comptime assert(@import("builtin").is_test);
-    return .from_seed(std.testing.random_seed);
+    const root = @import("root");
+    const seed: u64 = if (@hasDecl(root, "testing_seed"))
+        root.testing_seed
+    else blk: {
+        comptime assert(@import("builtin").is_test);
+        break :blk std.testing.random_seed;
+    };
+    return .from_seed(seed);
 }
 
 pub fn from_seed(seed: u64) PRNG {
