@@ -7,6 +7,7 @@
 
 // --- Constants (match protocol.zig) ---
 
+export const frame_max = 256 * 1024;
 export const columns_max = 32;
 export const column_name_max = 128;
 export const cell_value_max = 4096;

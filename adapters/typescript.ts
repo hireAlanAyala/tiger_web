@@ -147,7 +147,7 @@ out += `// --- Binary protocol ---
 
 import {
   readRowSet, writeParams, writeSqlDeclarations, writeWriteQueue,
-  MessageTag, TypeTag,
+  MessageTag, TypeTag, frame_max,
   type SqlDeclaration, type WriteEntry,
 } from './serde.ts';
 import { OperationValues, StatusValues, OperationNames } from './types.generated.ts';
@@ -166,8 +166,8 @@ const socketPath = process.argv[2];
 if (!socketPath) { console.error('Usage: node dispatch.generated.ts <socket-path>'); process.exit(1); }
 
 // Frame buffer — allocated once, reused per request. Avoids GC pressure.
-const FRAME_MAX = 256 * 1024;
-const frameBuf = new ArrayBuffer(FRAME_MAX);
+// frame_max imported from serde.ts — cross-language verified by serde_test.ts.
+const frameBuf = new ArrayBuffer(frame_max);
 const frameDv = new DataView(frameBuf);
 
 const server = net.createServer((conn) => {
@@ -297,7 +297,9 @@ const server = net.createServer((conn) => {
       // Build response into reusable frame buffer.
       let rpos = 0;
       frameDv.setUint8(rpos, MessageTag.handle_render_response); rpos += 1;
-      frameDv.setUint8(rpos, StatusValues[status] || 1); rpos += 1;
+      const statusByte = StatusValues[status];
+      if (statusByte === undefined) throw new Error('unknown status from handle: ' + status);
+      frameDv.setUint8(rpos, statusByte); rpos += 1;
       rpos += writeWriteQueue(frameDv, rpos, writes);
       rpos += writeSqlDeclarations(frameDv, rpos, renderDecls);
       sendFrame(conn, new Uint8Array(frameBuf, 0, rpos));

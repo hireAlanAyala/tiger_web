@@ -150,7 +150,7 @@ const renderHandlers: Record<string, Function> = {
 
 import {
   readRowSet, writeParams, writeSqlDeclarations, writeWriteQueue,
-  MessageTag, TypeTag,
+  MessageTag, TypeTag, frame_max,
   type SqlDeclaration, type WriteEntry,
 } from './serde.ts';
 import { OperationValues, StatusValues, OperationNames } from './types.generated.ts';
@@ -168,13 +168,21 @@ const _encoder = new TextEncoder();
 const socketPath = process.argv[2];
 if (!socketPath) { console.error('Usage: node dispatch.generated.ts <socket-path>'); process.exit(1); }
 
+// Frame buffer — allocated once, reused per request. Avoids GC pressure.
+// frame_max imported from serde.ts — cross-language verified by serde_test.ts.
+const frameBuf = new ArrayBuffer(frame_max);
+const frameDv = new DataView(frameBuf);
+
 const server = net.createServer((conn) => {
   console.log('[sidecar] client connected');
   let pending = Buffer.alloc(0);
 
-  // Per-request state — stored between RT1 and RT2.
+  // Per-request state — stored between RT1 and RT2/RT3.
   let routeBody: Record<string, any> = {};
   let routeOperation = '';
+  let routeId = '';
+  let prefetchKeys: string[] = [];
+  let prefetchModes: Record<string, string> = {};
 
   function processFrames(): void {
     while (pending.length >= 4) {
@@ -219,56 +227,54 @@ const server = net.createServer((conn) => {
 
       routeOperation = result.operation;
       routeBody = result.body || {};
+      routeId = String(result.id).padStart(32, '0');
 
-      // Call prefetch handler — get SQL declarations.
+      // Validate operation exists in dispatch tables.
+      if (!(routeOperation in handleHandlers) || !(routeOperation in renderHandlers)) {
+        console.error('[sidecar] operation not in dispatch tables:', routeOperation);
+        sendFrame(conn, new Uint8Array([MessageTag.route_prefetch_response, 0]));
+        return;
+      }
+
+      // Call prefetch handler — get SQL declarations. Store keys for RT2.
       const prefetchFn = prefetchHandlers[routeOperation];
-      const prefetchMsg = { operation: routeOperation, id: result.id, body: routeBody };
+      const prefetchMsg = { operation: routeOperation, id: routeId, body: routeBody };
       const queries: Record<string, any> = prefetchFn ? prefetchFn(prefetchMsg) : {};
 
-      // Build declarations array.
-      const decls: SqlDeclaration[] = Object.entries(queries).map(([key, q]: [string, any]) => ({
-        key,
-        sql: q.sql,
-        mode: q.mode || 'one',
-        params: q.params || [],
-      }));
+      prefetchKeys = Object.keys(queries);
+      prefetchModes = {};
+      const decls: SqlDeclaration[] = prefetchKeys.map(key => {
+        const q = queries[key];
+        prefetchModes[key] = q.mode || 'one';
+        return { key, sql: q.sql, mode: q.mode || 'one', params: q.params || [] };
+      });
 
-      // Build response: [tag][found=1][operation u8][id u128 BE][prefetch_declarations]
-      const respBuf = new ArrayBuffer(4096);
-      const respDv = new DataView(respBuf);
+      // Build response into reusable frame buffer.
       let rpos = 0;
-      respDv.setUint8(rpos, MessageTag.route_prefetch_response); rpos += 1;
-      respDv.setUint8(rpos, 1); rpos += 1; // found
-      respDv.setUint8(rpos, OperationValues[routeOperation] || 0); rpos += 1;
+      frameDv.setUint8(rpos, MessageTag.route_prefetch_response); rpos += 1;
+      frameDv.setUint8(rpos, 1); rpos += 1; // found
+      frameDv.setUint8(rpos, OperationValues[routeOperation] || 0); rpos += 1;
 
       // ID as u128 BE (16 bytes from hex string).
-      const idHex = String(result.id).padStart(32, '0');
       for (let i = 0; i < 16; i++) {
-        respDv.setUint8(rpos + i, parseInt(idHex.substring(i * 2, i * 2 + 2), 16));
+        frameDv.setUint8(rpos + i, parseInt(routeId.substring(i * 2, i * 2 + 2), 16));
       }
       rpos += 16;
 
-      // Prefetch declarations.
-      rpos += writeSqlDeclarations(respDv, rpos, decls);
-
-      sendFrame(conn, new Uint8Array(respBuf, 0, rpos));
+      rpos += writeSqlDeclarations(frameDv, rpos, decls);
+      sendFrame(conn, new Uint8Array(frameBuf, 0, rpos));
 
     } else if (tag === MessageTag.prefetch_results) {
       // RT2: prefetch_results → handle_render_response
-      // Parse row sets — one per prefetch query, keyed by declaration order.
+      // Parse row sets using stored keys from RT1 (no re-call).
       let pos = 1; // skip tag
-      const prefetchFn = prefetchHandlers[routeOperation];
-      const prefetchMsg = { operation: routeOperation, id: '0'.repeat(32), body: routeBody };
-      const queries: Record<string, any> = prefetchFn ? prefetchFn(prefetchMsg) : {};
-      const keys = Object.keys(queries);
 
       const prefetched: Record<string, any> = {};
-      for (const key of keys) {
+      for (const key of prefetchKeys) {
         if (pos >= frame.length) break;
         const { result: rowSet, offset: newPos } = readRowSet(dv, pos);
         pos = newPos;
-        const mode = queries[key]?.mode || 'one';
-        if (mode === 'one') {
+        if (prefetchModes[key] === 'one') {
           prefetched[key] = rowSet.rows.length > 0 ? rowSet.rows[0] : null;
         } else {
           prefetched[key] = rowSet.rows;
@@ -276,7 +282,7 @@ const server = net.createServer((conn) => {
       }
 
       // Build handle context.
-      const ctx = { operation: routeOperation, id: '0'.repeat(32), prefetched, body: routeBody };
+      const ctx = { operation: routeOperation, id: routeId, prefetched, body: routeBody };
 
       // Call handle — queues writes via db.execute().
       const writes: WriteEntry[] = [];
@@ -286,37 +292,30 @@ const server = net.createServer((conn) => {
         },
       };
       const handleFn = handleHandlers[routeOperation];
-      const status: string = handleFn ? handleFn(ctx, db) : 'ok';
+      const status: string = handleFn(ctx, db);
 
-      // Call render — get declarations or immediate HTML.
-      const renderFn = renderHandlers[routeOperation];
-      const renderCtx = { ...ctx, status, is_sse: false };
-
-      // Check if render handler declares queries (takes db param).
-      // For now, all renders are immediate (no render db access).
-      // Render declarations will be added when render-with-db is wired.
+      // Render declarations (empty for now — render-with-db deferred).
       const renderDecls: SqlDeclaration[] = [];
 
-      // Build response: [tag][status u8][u8 write_count][writes...][render_declarations]
-      const respBuf = new ArrayBuffer(256 * 1024);
-      const respDv = new DataView(respBuf);
+      // Build response into reusable frame buffer.
       let rpos = 0;
-      respDv.setUint8(rpos, MessageTag.handle_render_response); rpos += 1;
-      respDv.setUint8(rpos, StatusValues[status] || 1); rpos += 1;
-      rpos += writeWriteQueue(respDv, rpos, writes);
-      rpos += writeSqlDeclarations(respDv, rpos, renderDecls);
-
-      sendFrame(conn, new Uint8Array(respBuf, 0, rpos));
+      frameDv.setUint8(rpos, MessageTag.handle_render_response); rpos += 1;
+      const statusByte = StatusValues[status];
+      if (statusByte === undefined) throw new Error('unknown status from handle: ' + status);
+      frameDv.setUint8(rpos, statusByte); rpos += 1;
+      rpos += writeWriteQueue(frameDv, rpos, writes);
+      rpos += writeSqlDeclarations(frameDv, rpos, renderDecls);
+      sendFrame(conn, new Uint8Array(frameBuf, 0, rpos));
 
       // Store render context for RT3.
+      const renderCtx = { ...ctx, status, is_sse: false };
       (conn as any)._renderCtx = renderCtx;
-      (conn as any)._renderFn = renderFn;
 
     } else if (tag === MessageTag.render_results) {
       // RT3: render_results → html_response
-      // Parse render row sets (if any). For now, render has no db access.
+      // Render row sets will be parsed here when render-with-db is wired.
       const renderCtx = (conn as any)._renderCtx;
-      const renderFn = (conn as any)._renderFn;
+      const renderFn = renderHandlers[routeOperation];
 
       const html: string = renderFn ? renderFn(renderCtx) : '';
       const htmlBytes = _encoder.encode(html);

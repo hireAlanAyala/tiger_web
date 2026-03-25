@@ -566,6 +566,10 @@ test "cross-language enum vector — write operation/status mappings" {
             w.print("\"{s}\":{d}", .{ f.name, f.value }) catch unreachable;
         }
     }
+    w.writeAll("},\"constants\":{") catch unreachable;
+    w.print("\"frame_max\":{d},\"writes_max\":{d},\"queries_max\":{d},\"columns_max\":{d},\"cell_value_max\":{d},\"column_name_max\":{d},\"sql_max\":{d}", .{
+        frame_max, writes_max, queries_max, columns_max, cell_value_max, column_name_max, sql_max,
+    }) catch unreachable;
     w.writeAll("}}") catch unreachable;
 
     const file = std.fs.cwd().createFile("/tmp/tiger_enum_test.json", .{}) catch unreachable;

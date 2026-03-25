@@ -8,7 +8,7 @@
 // The Zig tests MUST run first to generate the cross-language vector.
 // CI must enforce this ordering.
 
-import { readRowSet, writeParams, writeSqlDeclarations, writeWriteQueue, TypeTag } from "./serde.ts";
+import { readRowSet, writeParams, writeSqlDeclarations, writeWriteQueue, TypeTag, frame_max, columns_max, column_name_max, cell_value_max } from "./serde.ts";
 import { OperationValues, StatusValues } from "./types.generated.ts";
 import { readFileSync, existsSync } from "fs";
 
@@ -431,8 +431,15 @@ function assertEq(actual: unknown, expected: unknown, msg: string): void {
       assert(name in data.statuses, `TS has status '${name}' not in Zig`);
     }
 
+    // Verify constants match between Zig and TS.
+    const c = data.constants;
+    assertEq(frame_max, c.frame_max, "constant frame_max");
+    assertEq(columns_max, c.columns_max, "constant columns_max");
+    assertEq(column_name_max, c.column_name_max, "constant column_name_max");
+    assertEq(cell_value_max, c.cell_value_max, "constant cell_value_max");
+
     passed++;
-    console.log("  (cross-language enum mapping test passed)");
+    console.log("  (cross-language enum + constants test passed)");
   } else {
     console.log("  (skipped enum mapping test — run `zig build unit-test` first)");
   }
