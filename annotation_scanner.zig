@@ -1875,3 +1875,116 @@ test "render: Zig multi-status with other switches" {
     try std.testing.expect(has_name(&ss, "not_found"));
     try std.testing.expect(has_name(&ss, "pending"));
 }
+
+// =====================================================================
+// SQL validation tests
+// =====================================================================
+
+test "sql: SqlStringIterator extracts SQL from TS prefetch" {
+    const content =
+        \\export function prefetch(msg) {
+        \\  return {
+        \\    product: { sql: "SELECT id, name FROM products WHERE id = ?1", params: [msg.id], mode: "one" },
+        \\  };
+        \\}
+    ;
+    var iter = SqlStringIterator.init(content, 1, '"');
+    const sql1 = iter.next();
+    try std.testing.expect(sql1 != null);
+    try std.testing.expect(sql_starts_with_select(sql1.?));
+    try std.testing.expect(iter.next() == null); // "one" is not SQL
+}
+
+test "sql: SqlStringIterator extracts SQL from TS handle" {
+    const content =
+        \\export function handle(ctx, db) {
+        \\  db.execute("INSERT INTO products VALUES (?1, ?2)", [ctx.id, ctx.name]);
+        \\  return "ok";
+        \\}
+    ;
+    var iter = SqlStringIterator.init(content, 1, '"');
+    const sql1 = iter.next();
+    try std.testing.expect(sql1 != null);
+    try std.testing.expect(sql_starts_with_write(sql1.?));
+    try std.testing.expect(iter.next() == null); // "ok" is not SQL
+}
+
+test "sql: SqlStringIterator skips non-SQL strings" {
+    const content =
+        \\export function render(ctx) {
+        \\  if (ctx.status === "ok") return "<div>Done</div>";
+        \\  return "<div>Error</div>";
+        \\}
+    ;
+    var iter = SqlStringIterator.init(content, 1, '"');
+    // "ok", "<div>Done</div>", "<div>Error</div>" — none are SQL.
+    try std.testing.expect(iter.next() == null);
+}
+
+test "sql: SqlStringIterator scoped to function body" {
+    // Two functions — SQL in the second must not be found when scanning the first.
+    const content =
+        \\export function prefetch(msg) {
+        \\  return { x: { sql: "SELECT 1", params: [], mode: "one" } };
+        \\}
+        \\export function handle(ctx, db) {
+        \\  db.execute("INSERT INTO t VALUES (?1)", [1]);
+        \\  return "ok";
+        \\}
+    ;
+    // Scan from line 1 (prefetch) — should only find SELECT.
+    var iter1 = SqlStringIterator.init(content, 1, '"');
+    const sql1 = iter1.next();
+    try std.testing.expect(sql1 != null);
+    try std.testing.expect(sql_starts_with_select(sql1.?));
+    try std.testing.expect(iter1.next() == null); // INSERT is in the next function
+
+    // Scan from line 4 (handle) — should only find INSERT.
+    var iter2 = SqlStringIterator.init(content, 4, '"');
+    const sql2 = iter2.next();
+    try std.testing.expect(sql2 != null);
+    try std.testing.expect(sql_starts_with_write(sql2.?));
+    try std.testing.expect(iter2.next() == null);
+}
+
+test "sql: sql_starts_with_select case insensitive" {
+    try std.testing.expect(sql_starts_with_select("SELECT id FROM t"));
+    try std.testing.expect(sql_starts_with_select("select id FROM t"));
+    try std.testing.expect(sql_starts_with_select("  SELECT id FROM t"));
+    try std.testing.expect(!sql_starts_with_select("INSERT INTO t VALUES (1)"));
+    try std.testing.expect(!sql_starts_with_select("DELETE FROM t"));
+    try std.testing.expect(!sql_starts_with_select(""));
+}
+
+test "sql: sql_starts_with_write" {
+    try std.testing.expect(sql_starts_with_write("INSERT INTO t VALUES (1)"));
+    try std.testing.expect(sql_starts_with_write("UPDATE t SET x = 1"));
+    try std.testing.expect(sql_starts_with_write("DELETE FROM t WHERE id = 1"));
+    try std.testing.expect(sql_starts_with_write("  insert into t values (1)"));
+    try std.testing.expect(!sql_starts_with_write("SELECT id FROM t"));
+    try std.testing.expect(!sql_starts_with_write(""));
+}
+
+test "sql: body_references_sql detects execute calls" {
+    try std.testing.expect(body_references_sql("db.execute(sql, params)", .execute));
+    try std.testing.expect(body_references_sql("self.execute(stmt)", .execute));
+    try std.testing.expect(!body_references_sql("return \"ok\"", .execute));
+    try std.testing.expect(body_references_sql("{ sql: variable }", .prefetch));
+    try std.testing.expect(!body_references_sql("return {}", .prefetch));
+}
+
+test "sql: Zig handle with comptime SQL constant" {
+    // Zig handlers use db.execute(t.sql.products.insert, ...) — no string literal.
+    const content =
+        \\pub fn handle(ctx: Context, db: anytype) t.HandleResult {
+        \\    db.execute(t.sql.products.insert, .{ entity.id, entity.name });
+        \\    return .{};
+        \\}
+    ;
+    var iter = SqlStringIterator.init(content, 1, '"');
+    // No SQL string literals found.
+    try std.testing.expect(iter.next() == null);
+    // But body references execute.
+    const body = SqlStringIterator.init(content, 1, '"').body;
+    try std.testing.expect(body_references_sql(body, .execute));
+}
