@@ -541,6 +541,38 @@ test "cross-language test vector — write to /tmp for TS reader" {
     file.writeAll(buf[0..pos]) catch unreachable;
 }
 
+test "cross-language enum vector — write operation/status mappings" {
+    // Write operation and status enum mappings as JSON. The TS test reads
+    // this file and verifies its OperationValues/StatusValues match.
+    var buf: [4096]u8 = undefined;
+    var fbs = std.io.fixedBufferStream(&buf);
+    const w = fbs.writer();
+
+    w.writeAll("{\"operations\":{") catch unreachable;
+    {
+        var first = true;
+        inline for (@typeInfo(message.Operation).@"enum".fields) |f| {
+            if (!first) w.writeAll(",") catch unreachable;
+            first = false;
+            w.print("\"{s}\":{d}", .{ f.name, f.value }) catch unreachable;
+        }
+    }
+    w.writeAll("},\"statuses\":{") catch unreachable;
+    {
+        var first = true;
+        inline for (@typeInfo(message.Status).@"enum".fields) |f| {
+            if (!first) w.writeAll(",") catch unreachable;
+            first = false;
+            w.print("\"{s}\":{d}", .{ f.name, f.value }) catch unreachable;
+        }
+    }
+    w.writeAll("}}") catch unreachable;
+
+    const file = std.fs.cwd().createFile("/tmp/tiger_enum_test.json", .{}) catch unreachable;
+    defer file.close();
+    file.writeAll(fbs.getWritten()) catch unreachable;
+}
+
 fn test_socketpair() [2]std.posix.fd_t {
     var fds: [2]std.posix.fd_t = undefined;
     const rc = std.c.socketpair(std.posix.AF.UNIX, std.posix.SOCK.STREAM, 0, &fds);

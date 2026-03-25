@@ -9,6 +9,7 @@
 // CI must enforce this ordering.
 
 import { readRowSet, writeParams, writeSqlDeclarations, writeWriteQueue, TypeTag } from "./serde.ts";
+import { OperationValues, StatusValues } from "./types.generated.ts";
 import { readFileSync, existsSync } from "fs";
 
 let passed = 0;
@@ -401,6 +402,39 @@ function assertEq(actual: unknown, expected: unknown, msg: string): void {
     console.log("  (cross-language vector test passed)");
   } else {
     console.log("  (skipped cross-language test — run `zig build unit-test` first to generate vector)");
+  }
+}
+
+// --- Test 14: Cross-language enum mapping verification ---
+// Reads /tmp/tiger_enum_test.json written by protocol.zig unit test.
+// Verifies that OperationValues and StatusValues in types.generated.ts
+// match the Zig enum values exactly.
+{
+  const enumPath = "/tmp/tiger_enum_test.json";
+  if (existsSync(enumPath)) {
+    const data = JSON.parse(readFileSync(enumPath, "utf-8"));
+
+    // Verify operations.
+    for (const [name, value] of Object.entries(data.operations)) {
+      assertEq(OperationValues[name], value, `operation ${name}`);
+    }
+    // Verify TS doesn't have extra operations.
+    for (const name of Object.keys(OperationValues)) {
+      assert(name in data.operations, `TS has operation '${name}' not in Zig`);
+    }
+
+    // Verify statuses.
+    for (const [name, value] of Object.entries(data.statuses)) {
+      assertEq(StatusValues[name], value, `status ${name}`);
+    }
+    for (const name of Object.keys(StatusValues)) {
+      assert(name in data.statuses, `TS has status '${name}' not in Zig`);
+    }
+
+    passed++;
+    console.log("  (cross-language enum mapping test passed)");
+  } else {
+    console.log("  (skipped enum mapping test — run `zig build unit-test` first)");
   }
 }
 
