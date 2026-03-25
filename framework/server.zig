@@ -27,6 +27,8 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
         assert(@hasDecl(App, "Wal"));
         assert(@hasDecl(App, "translate"));
         assert(@hasDecl(App, "commit_and_encode"));
+        // sidecar_commit_and_encode is optional — only required if App has a sidecar field.
+        if (@hasDecl(App, "sidecar")) assert(@hasDecl(App, "sidecar_commit_and_encode"));
 
         // Framework contracts on App types.
         // Status must have .ok — framework uses it for control flow (render vs close).
@@ -229,26 +231,57 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
                 conn.is_datastar_request = parsed.is_datastar_request;
                 msg.set_credential(parsed.identity_cookie);
 
-                // Prefetch. Storage busy → skip, retry next tick.
-                server.state_machine.tracer.start(.prefetch);
-                if (!server.state_machine.prefetch(msg)) {
-                    server.state_machine.tracer.cancel(.prefetch);
-                    continue;
-                }
-                server.state_machine.tracer.stop(.prefetch, msg.operation);
+                if (@hasDecl(App, "sidecar") and App.sidecar != null) {
+                    // Sidecar pipeline — own orchestration, shared building blocks.
+                    // Prefetch, handle, and render happen inside the pipeline.
+                    server.state_machine.tracer.start(.execute);
+                    const result = App.sidecar_commit_and_encode(
+                        Storage,
+                        server.state_machine,
+                        msg,
+                        &conn.send_buf,
+                        conn.is_datastar_request,
+                        server.state_machine.secret_key,
+                    );
+                    if (result) |commit_result| {
+                        server.state_machine.tracer.stop(.execute, msg.operation);
+                        server.state_machine.tracer.trace_log(msg.operation, commit_result.status, conn.fd);
+                        conn.set_response(commit_result.response.offset, commit_result.response.len);
+                        conn.keep_alive = commit_result.response.keep_alive;
+                    } else {
+                        // Sidecar failure — return error to client.
+                        server.state_machine.tracer.cancel(.execute);
+                        const resp = unmapped_response(conn);
+                        conn.set_response(resp.offset, resp.len);
+                        conn.keep_alive = false;
+                    }
+                } else {
+                    // Native pipeline — SM orchestrates prefetch → commit → render.
 
-                // Execute + render (native or sidecar — App decides).
-                server.state_machine.tracer.start(.execute);
-                const commit_result = App.commit_and_encode(
-                    Storage,
-                    server.state_machine,
-                    msg,
-                    &conn.send_buf,
-                    conn.is_datastar_request,
-                    server.state_machine.secret_key,
-                );
-                server.state_machine.tracer.stop(.execute, msg.operation);
-                server.state_machine.tracer.trace_log(msg.operation, commit_result.status, conn.fd);
+                    // Prefetch. Storage busy → skip, retry next tick.
+                    server.state_machine.tracer.start(.prefetch);
+                    if (!server.state_machine.prefetch(msg)) {
+                        server.state_machine.tracer.cancel(.prefetch);
+                        continue;
+                    }
+                    server.state_machine.tracer.stop(.prefetch, msg.operation);
+
+                    // Execute + render.
+                    server.state_machine.tracer.start(.execute);
+                    const commit_result = App.commit_and_encode(
+                        Storage,
+                        server.state_machine,
+                        msg,
+                        &conn.send_buf,
+                        conn.is_datastar_request,
+                        server.state_machine.secret_key,
+                    );
+                    server.state_machine.tracer.stop(.execute, msg.operation);
+                    server.state_machine.tracer.trace_log(msg.operation, commit_result.status, conn.fd);
+
+                    conn.set_response(commit_result.response.offset, commit_result.response.len);
+                    conn.keep_alive = commit_result.response.keep_alive;
+                }
 
                 // WAL: log mutations after execute. No fsync — SQLite is the authority.
                 if (server.wal) |wal| {
@@ -258,9 +291,6 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
                         wal.append(&entry);
                     }
                 }
-
-                conn.set_response(commit_result.response.offset, commit_result.response.len);
-                conn.keep_alive = commit_result.response.keep_alive;
             }
         }
 

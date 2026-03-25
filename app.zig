@@ -459,6 +459,90 @@ pub const CommitResult = struct {
 };
 
 // =====================================================================
+// Sidecar pipeline — separate orchestration, shared building blocks
+//
+// The sidecar has its own pipeline because its execution model (3 wire
+// round trips) doesn't match the SM's phased dispatch (prefetch →
+// execute → render as separate local calls with typed PrefetchCache).
+//
+// Both pipelines call the same building blocks: storage.begin/commit,
+// auth.resolve_credential, http_response encoding. The building blocks
+// are shared. The composition is per-path.
+//
+// See docs/plans/sidecar-protocol.md "Pipeline architecture" for the
+// full design rationale and rejected alternatives.
+// =====================================================================
+
+/// Process an HTTP request through the sidecar pipeline.
+/// Called by the server when sidecar is active, instead of
+/// sm.prefetch() + commit_and_encode().
+///
+/// The server's begin_batch/commit_batch wraps the entire tick,
+/// so writes from execute_writes run inside the existing transaction.
+pub fn sidecar_commit_and_encode(
+    comptime StorageParam: type,
+    sm: *StateMachineType(StorageParam),
+    msg: Message,
+    send_buf: []u8,
+    is_datastar_request: bool,
+    secret_key: *const [auth.key_length]u8,
+) ?CommitResult {
+    const client = &sidecar.?;
+
+    // Auth: resolve credential → identity. Same building block as SM.prefetch().
+    sm.resolve_credential(msg);
+
+    // Phase 1: execute prefetch SQL declared by sidecar in RT1.
+    const ro = StorageParam.ReadView.init(sm.storage);
+    const prefetch_len = client.execute_prefetch(ro) orelse return null;
+
+    // Phase 2: RT2 — send prefetch results, receive handle result.
+    const status = client.send_prefetch_recv_handle(prefetch_len) orelse return null;
+
+    // Phase 3: execute writes inside the server's transaction.
+    // The server's begin_batch/commit_batch wraps the entire tick.
+    if (!client.execute_writes(sm.storage)) return null;
+
+    // Phase 4: RT3 — execute render SQL (post-commit), receive HTML.
+    const ro_post = StorageParam.ReadView.init(sm.storage);
+    const html = client.execute_render(ro_post) orelse return null;
+
+    // Phase 5: encode HTTP response — same as native path.
+    const identity = sm.prefetch_identity orelse std.mem.zeroes(message.PrefetchIdentity);
+    defer sm.prefetch_identity = null;
+
+    const is_auth = identity.is_authenticated != 0;
+    const cookie_hdr = http_response.format_cookie_header(
+        .none, // session_action deferred — see plan
+        identity.user_id,
+        is_auth,
+        identity.is_new != 0,
+        secret_key,
+    );
+    const set_cookie: ?[]const u8 = if (cookie_hdr.len > 0) cookie_hdr.slice() else null;
+
+    if (is_datastar_request) {
+        var pos: usize = 0;
+        pos += sse.encode_headers(send_buf[pos..], set_cookie);
+        if (html.len > 0) {
+            pos += sse.encode_render_result(send_buf[pos..], html);
+        }
+        return .{
+            .status = status,
+            .response = .{ .offset = 0, .len = @intCast(pos), .keep_alive = false },
+        };
+    } else {
+        if (html.len > 0) {
+            @memcpy(send_buf[http_response.header_reserve..][0..html.len], html);
+        }
+        return .{
+            .status = status,
+            .response = http_response.backfill_headers(send_buf, html.len, set_cookie),
+        };
+    }
+}
+
+// =====================================================================
 // Tests
 // =====================================================================
 

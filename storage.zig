@@ -56,6 +56,11 @@ pub const SqliteStorage = struct {
             return self.storage.query_all(T, max, sql_str, args);
         }
 
+        // Raw SQL read — sidecar path. Runtime SQL, binary row format.
+        pub fn query_raw(self: ReadView, sql: []const u8, params_buf: []const u8, params_count: u8, mode: proto.QueryMode, out_buf: []u8) ?[]const u8 {
+            return self.storage.query_raw(sql, params_buf, params_count, mode, out_buf);
+        }
+
         // Legacy reads — kept for handlers that use domain extern structs
         pub fn get(self: ReadView, id: u128, out: *message.Product) StorageResult {
             return self.storage.get(id, out);
