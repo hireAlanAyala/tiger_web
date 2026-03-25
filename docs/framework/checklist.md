@@ -18,6 +18,8 @@ After implementing a feature, walk through these before committing.
 - [ ] New state transition exercised by sim
 - [ ] Worst-case sizing validated (comptime derivation or unit test)
 - [ ] New type in bind_param/read_column has a fixed-input round-trip test and is covered by the seeded round-trip fuzzer
+- [ ] Test assertions check the **actual system invariant**, not a proxy for it. Assert on the system's real output contract (response body content, database state, observable side effects) — never on implementation details or assumed protocol behavior that the system doesn't actually use. A test that checks a proxy can pass for months while hiding a real bug, and actively misdirects debugging toward phantom infrastructure issues.
+  - Case study: a sim test used HTTP status codes (404 vs 200) to distinguish "delete won" from "update won" in a race. The server always returns 200 — status is in the body. The 404 branch was dead code. The test only passed when the update won the race, and the failure was misdiagnosed as a SimIO multi-connection bug for an entire debugging session. Fix: check `body_contains("Product not found") or body_contains("Updated")` — the actual observable contract.
 
 ## Concepts
 - [ ] No intermediate abstraction that just forwards a value without transforming it (exception: capability restriction wrappers like ReadOnlyStorage that subtract methods are structural, not indirection)

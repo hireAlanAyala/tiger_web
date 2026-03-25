@@ -2,7 +2,7 @@ const std = @import("std");
 const t = @import("../prelude.zig");
 const message = @import("../message.zig");
 
-pub const Status = enum { ok, not_found, order_not_pending };
+pub const Status = enum { ok, not_found, order_not_pending, order_expired };
 
 pub const Prefetch = struct {
     order: ?t.OrderRow,
@@ -41,6 +41,18 @@ pub fn prefetch(storage: anytype, msg: *const t.Message) ?Prefetch {
 pub fn handle(ctx: Context, db: anytype) t.HandleResult {
     const order = ctx.prefetched.order orelse return .{ .status = .not_found };
     if (order.status != .pending) return .{ .status = .order_not_pending };
+    if (ctx.fw.now > 0 and order.timeout_at > 0 and ctx.fw.now >= order.timeout_at) {
+        // Order expired — restore inventory and mark failed.
+        db.execute(t.sql.orders.update_status, .{ order.id, @intFromEnum(message.OrderStatus.failed) });
+        const items = ctx.prefetched.items orelse return .{ .status = .order_expired };
+        for (items.slice()) |item| {
+            db.execute(
+                "UPDATE products SET inventory = inventory + ?2 WHERE id = ?1;",
+                .{ item.product_id, item.quantity },
+            );
+        }
+        return .{ .status = .order_expired };
+    }
 
     const event = ctx.body_val();
     const new_status: message.OrderStatus = switch (event.result) {
@@ -73,6 +85,7 @@ pub fn render(ctx: Context, db: anytype) []const u8 {
     switch (ctx.status) {
         .not_found => return "<div class=\"error\">Order not found</div>",
         .order_not_pending => return "<div class=\"error\">Order is not pending</div>",
+        .order_expired => return "<div class=\"error\">Order Expired</div>",
         .ok => {},
     }
 

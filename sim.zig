@@ -1168,14 +1168,14 @@ test "interleaved writes — update and delete same entity across connections" {
     const get_resp = run_until_response(&server, &sim_io, 0, 500) orelse
         return error.TestUnexpectedResult;
 
-    // If delete ran last → 404 (soft-deleted).
-    // If update ran last → 200 (product active with updated name).
+    // Always-200 server — check body content, not HTTP status.
+    // If delete ran last → product inactive → "Product not found".
+    // If update ran last → product active with updated name → "Updated".
     // Either is correct — the invariant is consistency, not ordering.
-    switch (get_resp.status_code) {
-        404 => {}, // delete won
-        200 => try std.testing.expect(body_contains(get_resp.body, "Updated")),
-        else => return error.TestUnexpectedResult,
-    }
+    const body = get_resp.body;
+    const deleted = body_contains(body, "Product not found");
+    const updated = body_contains(body, "Updated");
+    try std.testing.expect(deleted or updated);
 }
 
 // =====================================================================
@@ -1441,7 +1441,7 @@ test "cancel order — client cancels, worker completion rejected" {
     sim_io.inject_post(0, "/orders/" ++ test_order_uuid ++ "/cancel", "");
     const cancel_resp = run_until_response(&server, &sim_io, 0, 500) orelse return error.TestUnexpectedResult;
     try std.testing.expectEqual(cancel_resp.status_code, 200);
-    try std.testing.expect(body_contains(cancel_resp.body, "Cancelled"));
+    try std.testing.expect(body_contains(cancel_resp.body, "Order cancelled"));
     clear_and_reconnect(&sim_io, &server, 0);
 
     // Worker tries to complete — rejected (order not pending, error in SSE fragment).
@@ -1450,7 +1450,7 @@ test "cancel order — client cancels, worker completion rejected" {
     );
     const complete_resp = run_until_close_response(&server, &sim_io, 1, 500) orelse return error.TestUnexpectedResult;
     try std.testing.expectEqual(complete_resp.status_code, 200);
-    try std.testing.expect(body_contains(complete_resp.body, "Order Not Pending"));
+    try std.testing.expect(body_contains(complete_resp.body, "Order is not pending"));
     sim_io.clear_response(1);
 
     // Inventory fully restored.
@@ -1495,7 +1495,7 @@ test "cancel order — cancel already confirmed is rejected" {
     sim_io.inject_post_datastar(0, "/orders/" ++ test_order_uuid ++ "/cancel", "");
     const cancel_resp = run_until_close_response(&server, &sim_io, 0, 500) orelse return error.TestUnexpectedResult;
     try std.testing.expectEqual(cancel_resp.status_code, 200);
-    try std.testing.expect(body_contains(cancel_resp.body, "Order Not Pending"));
+    try std.testing.expect(body_contains(cancel_resp.body, "Order is not pending"));
     clear_and_reconnect(&sim_io, &server, 0);
 
     // Inventory stays at confirmed level.

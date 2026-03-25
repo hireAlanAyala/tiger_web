@@ -420,15 +420,15 @@ pub fn commit_and_encode(
     // Render: handler produces HTML, framework wraps it.
     if (is_datastar_request) {
         // SSE: headers + events written sequentially from offset 0.
+        // Render into scratch buffer to avoid aliasing — the SSE encoder
+        // prepends event framing before the content in send_buf, so rendering
+        // directly into send_buf would overlap with the encode destination.
         var pos: usize = 0;
         pos += sse.encode_headers(send_buf[pos..], set_cookie);
 
-        // Render into a temporary region after the headers.
-        const render_buf = send_buf[pos..];
         const ro = StorageParam.ReadView.init(sm.storage);
-        const html = dispatch_render(cache, msg.operation, pipeline_resp.status, fw, render_buf, ro);
+        const html = dispatch_render(cache, msg.operation, pipeline_resp.status, fw, &render_scratch_buf, ro);
 
-        // Encode the render result as SSE events after the headers.
         if (html.len > 0) {
             pos += sse.encode_render_result(send_buf[pos..], html);
         }

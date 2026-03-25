@@ -36,7 +36,27 @@ pub fn handle(ctx: Context, db: anytype) t.HandleResult {
 
 // [render] .list_orders
 pub fn render(ctx: Context) []const u8 {
-    _ = ctx;
-    // TODO: render order cards
-    return "";
+    const h = t.html;
+    var buf = ctx.render_buf;
+    var pos: usize = 0;
+
+    const orders = (ctx.prefetched.orders orelse return "").slice();
+    if (orders.len == 0) return "<div>No orders</div>";
+
+    for (orders) |order| {
+        pos += h.raw(buf[pos..], "<div class=\"card\">Order <strong>");
+        pos += h.uuid(buf[pos..], order.id);
+        pos += h.raw(buf[pos..], "</strong> &mdash; ");
+        pos += h.raw(buf[pos..], switch (order.status) {
+            .pending => "Pending",
+            .confirmed => "Confirmed",
+            .failed => "Failed",
+            .cancelled => "Cancelled",
+        });
+        pos += h.raw(buf[pos..], " &mdash; ");
+        pos += h.price_u64(buf[pos..], order.total_cents);
+        pos += h.raw(buf[pos..], "</div>");
+    }
+
+    return buf[0..pos];
 }
