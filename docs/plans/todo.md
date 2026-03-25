@@ -12,9 +12,9 @@
    Chained queries solved by syncing external data to local db via
    worker jobs.
 
-3. **Sim test update** — sim.zig compiles but tests fail due to
-   handler/route refactors. Each test needs assertions updated for
-   the new handler architecture (SQL writes, match_route, etc.).
+3. **Sim test update** — 78/85 passing. 7 remaining failures need
+   complete_order/cancel_order handler implementation (TODO stubs).
+   Also: interleaved writes multi-connection SimIO issue.
 
 4. ~~**Codegen**~~ — DELETED. Hand-written SDK + cross-language tests.
 
