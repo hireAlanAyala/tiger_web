@@ -2273,34 +2273,57 @@ fn build_simple_request_with_headers(buf: *[2048]u8, method: []const u8, path: [
 }
 
 fn run_fuzz(seed: u64) !void {
-    const events_max = 2000;
+    // Assertions must be active — fuzz tests depend on invariant checks
+    // in server.tick() and connection state machines. Matches TB's
+    // `comptime assert(constants.verify)` guard.
+    comptime assert(@import("builtin").mode == .Debug or
+        @import("builtin").mode == .ReleaseSafe);
 
-    log.debug("        seed={d} events={d}", .{ seed, events_max });
+    const iterations = 10;
+    const events_per_iteration = 2000;
 
-    var prng = PRNG.from_seed(seed);
+    var outer_prng = PRNG.from_seed(seed);
 
-    var sim_io = SimIO.init(prng.int(u64));
-    var storage = try App.Storage.init(":memory:");
-    defer storage.deinit();
-    var sim_fault_prng = PRNG.from_seed(prng.int(u64));
-    App.fault_prng = &sim_fault_prng;
-    var sm = StateMachine.init(&storage, false, 0, test_key);
-    var time_sim = TimeSim{};
-    var server = try Server.init(std.testing.allocator, &sim_io, &sm, 1, time_sim.time(), null);
-    defer server.deinit(std.testing.allocator);
+    // Multiple iterations with fresh state each time — different seeds
+    // explore different trajectories from empty database. Matches TB's
+    // unit test fuzz pattern (100 iterations × N events).
+    for (0..iterations) |_| {
+        var prng = PRNG.from_seed(outer_prng.int(u64));
+        var sim_io = SimIO.init(prng.int(u64));
+        var storage = try App.Storage.init(":memory:");
+        defer storage.deinit();
+        var sim_fault_prng = PRNG.from_seed(prng.int(u64));
+        App.fault_prng = &sim_fault_prng;
+        App.fault_busy_ratio = PRNG.ratio(prng.range_inclusive(u64, 5, 20), 100);
+        var sm = StateMachine.init(&storage, false, 0, test_key);
+        sm.now = 1_700_000_000;
+        var time_sim = TimeSim{};
+        var server = try Server.init(std.testing.allocator, &sim_io, &sm, 1, time_sim.time(), null);
+        defer server.deinit(std.testing.allocator);
 
-    var fuzzer = Fuzzer.init();
+        var fuzzer = Fuzzer.init();
 
-    // Seed the system: connect a client and let it establish.
-    sim_io.connect_client(0);
-    fuzzer.client_connected[0] = true;
-    fuzzer.connected_count = 1;
-    run_ticks(&server, &sim_io, 10);
+        sim_io.connect_client(0);
+        fuzzer.client_connected[0] = true;
+        fuzzer.connected_count = 1;
+        run_ticks(&server, &sim_io, 10);
 
-    for (0..events_max) |_| {
-        const action = prng.enum_uniform(FuzzAction);
-        fuzzer.step(action, &prng, &sim_io, &server, &storage);
+        for (0..events_per_iteration) |_| {
+            const action = prng.enum_uniform(FuzzAction);
+            fuzzer.step(action, &prng, &sim_io, &server, &storage);
+
+            // Invariant check every iteration — not just at end.
+            // Matches TB's pattern: assert structural invariants
+            // after every operation, not just after the loop.
+            assert(fuzzer.connected_count >= 1);
+            assert(fuzzer.product_count <= Fuzzer.id_pool_max);
+            assert(fuzzer.collection_count <= Fuzzer.id_pool_max);
+            assert(fuzzer.order_count <= Fuzzer.id_pool_max);
+        }
     }
+
+    App.fault_prng = null;
+    App.fault_busy_ratio = PRNG.Ratio.zero();
 }
 
 test "PRNG fuzz — full stack seed 1" {
