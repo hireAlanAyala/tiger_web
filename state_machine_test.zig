@@ -23,11 +23,11 @@ const std = @import("std");
 const assert = std.debug.assert;
 const message = @import("message.zig");
 const state_machine = @import("state_machine.zig");
-const auth = @import("tiger_framework").auth;
-const stdx = @import("tiger_framework").stdx;
+const auth = @import("framework/lib.zig").auth;
+const stdx = @import("framework/lib.zig").stdx;
 const App = @import("app.zig");
 const TestStateMachine = App.SM;
-const PRNG = @import("tiger_framework").prng;
+const PRNG = @import("framework/lib.zig").prng;
 
 // Tests
 

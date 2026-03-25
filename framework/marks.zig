@@ -11,7 +11,11 @@ const std = @import("std");
 const assert = std.debug.assert;
 const builtin = @import("builtin");
 
-const GlobalStateType = if (builtin.is_test) struct {
+/// Marks are active in test builds and in executables that opt in via
+/// `pub const enable_marks = true;` in their root source file (e.g. sim.zig).
+pub const enabled = builtin.is_test or (if (@hasDecl(@import("root"), "enable_marks")) @import("root").enable_marks else false);
+
+const GlobalStateType = if (enabled) struct {
     mark_name: ?[]const u8 = null,
     mark_hit_count: u32 = 0,
 } else void;
@@ -22,7 +26,7 @@ pub const Mark = struct {
     name: []const u8,
 
     pub fn expect_hit(mark: Mark) !void {
-        comptime assert(builtin.is_test);
+        comptime assert(enabled);
         assert(global_state.mark_name.?.ptr == mark.name.ptr);
         defer global_state = .{};
 
@@ -33,7 +37,7 @@ pub const Mark = struct {
     }
 
     pub fn expect_not_hit(mark: Mark) !void {
-        comptime assert(builtin.is_test);
+        comptime assert(enabled);
         assert(global_state.mark_name.?.ptr == mark.name.ptr);
         defer global_state = .{};
 
@@ -45,7 +49,7 @@ pub const Mark = struct {
 };
 
 pub fn check(name: []const u8) Mark {
-    comptime assert(builtin.is_test);
+    comptime assert(enabled);
     assert(global_state.mark_name == null);
     assert(global_state.mark_hit_count == 0);
 
@@ -55,7 +59,7 @@ pub fn check(name: []const u8) Mark {
 
 pub fn wrap_log(comptime base: type) type {
     return struct {
-        pub const mark = if (builtin.is_test) struct {
+        pub const mark = if (enabled) struct {
             pub fn err(comptime fmt: []const u8, args: anytype) void {
                 record(fmt);
                 base.err(fmt, args);
@@ -85,7 +89,7 @@ pub fn wrap_log(comptime base: type) type {
 }
 
 fn record(fmt: []const u8) void {
-    comptime assert(builtin.is_test);
+    comptime assert(enabled);
     if (global_state.mark_name) |mark_active| {
         if (std.mem.indexOf(u8, fmt, mark_active) != null) {
             global_state.mark_hit_count += 1;

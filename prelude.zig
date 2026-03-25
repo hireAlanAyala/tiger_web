@@ -7,7 +7,7 @@
 //! each app defines its own prelude based on its domain types.
 
 const std = @import("std");
-const fw = @import("tiger_framework");
+const fw = @import("framework/lib.zig");
 const message = @import("message.zig");
 const sm = @import("state_machine.zig");
 

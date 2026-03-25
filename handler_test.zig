@@ -2,7 +2,7 @@
 //! If this compiles, the handler's signatures pass comptime validation.
 
 const std = @import("std");
-const fw = @import("tiger_framework");
+const fw = @import("framework/lib.zig");
 const message = @import("message.zig");
 const state_machine = @import("state_machine.zig");
 const get_product = @import("handlers/get_product.zig");

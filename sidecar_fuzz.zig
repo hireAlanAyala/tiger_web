@@ -15,7 +15,7 @@ const message = @import("message.zig");
 const protocol = @import("protocol.zig");
 const sidecar = @import("sidecar.zig");
 const FuzzArgs = @import("fuzz_lib.zig").FuzzArgs;
-const PRNG = @import("tiger_framework").prng;
+const PRNG = @import("framework/lib.zig").prng;
 
 const Storage = @import("storage.zig").SqliteStorage;
 

@@ -1,13 +1,13 @@
 const std = @import("std");
 const assert = std.debug.assert;
-const stdx = @import("tiger_framework").stdx;
+const stdx = @import("framework/lib.zig").stdx;
 const message = @import("message.zig");
-const auth = @import("tiger_framework").auth;
-const TracerType = @import("tiger_framework").tracer.TracerType;
+const auth = @import("framework/lib.zig").auth;
+const TracerType = @import("framework/lib.zig").tracer.TracerType;
 const Tracer = TracerType(message.Operation, message.Status);
-const marks = @import("tiger_framework").marks;
+const marks = @import("framework/lib.zig").marks;
 const log = marks.wrap_log(std.log.scoped(.state_machine));
-const PRNG = @import("tiger_framework").prng;
+const PRNG = @import("framework/lib.zig").prng;
 
 /// Storage result — the availability contract between framework and database.
 ///
@@ -162,7 +162,7 @@ pub fn input_valid(msg: message.Message) bool {
 
 pub fn StateMachineType(comptime Storage: type, comptime Handlers: type) type {
     // Storage must define its own read/write split.
-    @import("tiger_framework").read_only_storage.assertReadView(Storage);
+    @import("framework/lib.zig").read_only_storage.assertReadView(Storage);
 
     return struct {
         const StateMachine = @This();

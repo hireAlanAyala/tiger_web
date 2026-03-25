@@ -11,9 +11,9 @@
 
 const std = @import("std");
 const assert = std.debug.assert;
-const flags = @import("tiger_framework").flags;
-const wal_mod = @import("tiger_framework").wal;
-const cs = @import("tiger_framework").checksum;
+const flags = @import("framework/lib.zig").flags;
+const wal_mod = @import("framework/lib.zig").wal;
+const cs = @import("framework/lib.zig").checksum;
 const message = @import("message.zig");
 const protocol = @import("protocol.zig");
 const Storage = @import("storage.zig").SqliteStorage;

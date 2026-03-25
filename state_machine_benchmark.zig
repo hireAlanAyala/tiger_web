@@ -13,10 +13,10 @@ const Bench = @import("framework/bench.zig");
 const message = @import("message.zig");
 const state_machine = @import("state_machine.zig");
 const App = @import("app.zig");
-const auth = @import("tiger_framework").auth;
+const auth = @import("framework/lib.zig").auth;
 const StateMachine = App.SM;
 const fuzz = @import("fuzz.zig");
-const PRNG = @import("tiger_framework").prng;
+const PRNG = @import("framework/lib.zig").prng;
 
 const bench_test_key: *const [auth.key_length]u8 = "tiger-web-test-key-0123456789ab!";
 

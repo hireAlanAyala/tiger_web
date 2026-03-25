@@ -1,7 +1,7 @@
 const std = @import("std");
 const assert = std.debug.assert;
-const stdx = @import("tiger_framework").stdx;
-const cs = @import("tiger_framework").checksum;
+const stdx = @import("framework/lib.zig").stdx;
+const cs = @import("framework/lib.zig").checksum;
 
 pub const maybe = stdx.maybe;
 

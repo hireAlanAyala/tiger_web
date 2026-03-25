@@ -4,18 +4,11 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
-    // Framework as a local package dependency.
-    const framework = b.dependency("tiger_framework", .{
-        .target = target,
-        .optimize = optimize,
-    }).module("tiger_framework");
-
-    // Helper: add framework module + system libs to a compile step.
-    const addFramework = struct {
-        fn apply(mod: *std.Build.Module, fw: *std.Build.Module) void {
-            mod.addImport("tiger_framework", fw);
-        }
-    }.apply;
+    // No framework module — all framework files imported via direct file
+    // path (@import("framework/lib.zig")). This keeps everything in one
+    // compilation unit so std_options in the root controls logging for
+    // ALL code including framework internals. Matches TigerBeetle: one
+    // compilation unit, root owns log config.
 
     // --- Main executable ---
     const exe = b.addExecutable(.{
@@ -24,7 +17,6 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
-    addFramework(exe.root_module, framework);
     exe.linkSystemLibrary("sqlite3");
     exe.linkLibC();
     b.installArtifact(exe);
@@ -42,7 +34,6 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
-    addFramework(worker_exe.root_module, framework);
     b.installArtifact(worker_exe);
 
     const worker_cmd = b.addRunArtifact(worker_exe);
@@ -58,7 +49,6 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
-    addFramework(replay_exe.root_module, framework);
     replay_exe.linkSystemLibrary("sqlite3");
     replay_exe.linkLibC();
     b.installArtifact(replay_exe);
@@ -70,15 +60,17 @@ pub fn build(b: *std.Build) void {
     replay_step.dependOn(&replay_cmd.step);
 
     // --- Simulation tests ---
-    const sim_tests = b.addTest(.{
+    const sim_exe = b.addExecutable(.{
+        .name = "tiger-sim",
         .root_source_file = b.path("sim.zig"),
         .target = target,
         .optimize = optimize,
     });
-    addFramework(sim_tests.root_module, framework);
-    sim_tests.linkSystemLibrary("sqlite3");
-    sim_tests.linkLibC();
-    const run_sim_tests = b.addRunArtifact(sim_tests);
+    sim_exe.linkSystemLibrary("sqlite3");
+    sim_exe.linkLibC();
+    b.installArtifact(sim_exe);
+    const run_sim_tests = b.addRunArtifact(sim_exe);
+    if (b.args) |args| run_sim_tests.addArgs(args);
     const test_step = b.step("test", "Run simulation tests");
     test_step.dependOn(&run_sim_tests.step);
 
@@ -89,7 +81,6 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
-    addFramework(fuzz_exe.root_module, framework);
     fuzz_exe.linkSystemLibrary("sqlite3");
     fuzz_exe.linkLibC();
     b.installArtifact(fuzz_exe);
@@ -107,14 +98,9 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
-    addFramework(scanner_exe.root_module, framework);
     b.installArtifact(scanner_exe);
 
     const scanner_cmd = b.addRunArtifact(scanner_exe);
-    // No dependency on getInstallStep() — scanner reads source text,
-    // it doesn't need the main exe or other artifacts to be built.
-    // Scan directory passed via `zig build scan -- <dir>`.
-    // Defaults to handlers/ (Zig-native) if no args given.
     if (b.args) |args| {
         scanner_cmd.addArgs(args);
     } else {
@@ -124,9 +110,6 @@ pub fn build(b: *std.Build) void {
     scanner_step.dependOn(&scanner_cmd.step);
 
     // --- Unit tests for individual modules ---
-    // Modules with no C dependencies.
-    // These must NOT import app.zig (which pulls in SqliteStorage → sqlite3).
-    // They use state_machine and message module-level types directly.
     const modules = [_][]const u8{
         "message.zig",
         "wal_test.zig",
@@ -139,39 +122,23 @@ pub fn build(b: *std.Build) void {
             .target = target,
             .optimize = optimize,
         });
-        addFramework(unit_test.root_module, framework);
         const run_unit_test = b.addRunArtifact(unit_test);
         unit_test_step.dependOn(&run_unit_test.step);
     }
 
-    // Modules that need libc only (no sqlite3).
-    for ([_][]const u8{}) |mod| {
-        const unit_test = b.addTest(.{
-            .root_source_file = b.path(mod),
-            .target = target,
-            .optimize = optimize,
-        });
-        addFramework(unit_test.root_module, framework);
-        unit_test.linkLibC();
-        unit_test_step.dependOn(&b.addRunArtifact(unit_test).step);
-    }
-
-    // Modules that need sqlite3 + libc (import app.zig → storage.zig → sqlite3).
-    // state_machine_test.zig is separate from state_machine.zig so that
-    // files importing the SM module don't transitively need sqlite3.
+    // Modules that need sqlite3 + libc.
     for ([_][]const u8{ "storage.zig", "replay.zig", "state_machine_test.zig", "sidecar.zig", "sidecar_test.zig" }) |mod| {
         const unit_test = b.addTest(.{
             .root_source_file = b.path(mod),
             .target = target,
             .optimize = optimize,
         });
-        addFramework(unit_test.root_module, framework);
         unit_test.linkSystemLibrary("sqlite3");
         unit_test.linkLibC();
         unit_test_step.dependOn(&b.addRunArtifact(unit_test).step);
     }
 
-    // Framework unit tests (run from the framework's own test targets).
+    // Framework unit tests.
     const fw_test_modules = [_][]const u8{
         "framework/tracer.zig",
         "framework/http.zig",
@@ -191,9 +158,6 @@ pub fn build(b: *std.Build) void {
         unit_test_step.dependOn(&b.addRunArtifact(unit_test).step);
     }
 
-    // Codegen deleted — types.generated.ts and serde.ts are hand-written SDK.
-    // Cross-language tests verify enum mappings + constants between Zig and TS.
-
     // --- Adapter test (opt-in, requires npx tsx) ---
     const adapter_test_cmd = b.addSystemCommand(&.{ "npx", "-y", "tsx", "adapters/typescript_test.ts" });
     const adapter_test_step = b.step("test-adapter", "Run TypeScript adapter test");
@@ -208,7 +172,6 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
-    addFramework(bench_smoke.root_module, framework);
     bench_smoke.root_module.addOptions("bench_options", bench_smoke_options);
     bench_smoke.linkSystemLibrary("sqlite3");
     bench_smoke.linkLibC();
@@ -222,7 +185,6 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
-    addFramework(bench_real.root_module, framework);
     bench_real.root_module.addOptions("bench_options", bench_real_options);
     bench_real.linkSystemLibrary("sqlite3");
     bench_real.linkLibC();

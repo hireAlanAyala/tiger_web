@@ -14,11 +14,11 @@ const math = std.math;
 const message = @import("message.zig");
 const state_machine = @import("state_machine.zig");
 const App = @import("app.zig");
-const auth = @import("tiger_framework").auth;
+const auth = @import("framework/lib.zig").auth;
 const fuzz_lib = @import("fuzz_lib.zig");
 const FuzzArgs = fuzz_lib.FuzzArgs;
 const StateMachine = App.SM;
-const PRNG = @import("tiger_framework").prng;
+const PRNG = @import("framework/lib.zig").prng;
 
 const fuzz_test_key: *const [auth.key_length]u8 = "tiger-web-test-key-0123456789ab!";
 

@@ -1,17 +1,68 @@
+//! Simulation test harness — full-stack tests with deterministic IO.
+//!
+//! An executable (not a test binary) so we own std_options and control
+//! logging directly. Matches TigerBeetle: fuzzers and simulators are
+//! executables, not test binaries.
+//!
+//! Usage:
+//!   zig build test                    # run all sim tests
+//!   zig build test -- --seed=0xd021   # specific seed (for fuzz tests)
+
 const std = @import("std");
 const assert = std.debug.assert;
 const message = @import("message.zig");
-const http = @import("tiger_framework").http;
+const http = @import("framework/lib.zig").http;
 const state_machine = @import("state_machine.zig");
 const App = @import("app.zig");
 const Storage = App.Storage;
 const StateMachine = App.SM;
-const ServerType = @import("tiger_framework").server.ServerType;
-const ConnectionType = @import("tiger_framework").connection.ConnectionType;
-const marks = @import("tiger_framework").marks;
-const PRNG = @import("tiger_framework").prng;
-const TimeSim = @import("tiger_framework").time.TimeSim;
-const auth = @import("tiger_framework").auth;
+const ServerType = @import("framework/lib.zig").server.ServerType;
+const ConnectionType = @import("framework/lib.zig").connection.ConnectionType;
+const marks = @import("framework/lib.zig").marks;
+const PRNG = @import("framework/lib.zig").prng;
+const TimeSim = @import("framework/lib.zig").time.TimeSim;
+const auth = @import("framework/lib.zig").auth;
+
+const log = std.log.scoped(.sim);
+
+/// Compile at .debug so nothing is stripped. Runtime logFn handles
+/// per-scope filtering and --log-debug override.
+pub const std_options: std.Options = .{
+    .log_level = .debug,
+    .logFn = sim_log,
+};
+
+/// Per-scope filtering at runtime. In normal mode, framework scopes
+/// (server, connection, storage, etc.) only print at .err. The .sim
+/// scope prints at .info and above. With --log-debug, everything prints.
+fn sim_log(
+    comptime message_level: std.log.Level,
+    comptime scope: @Type(.enum_literal),
+    comptime format: []const u8,
+    args: anytype,
+) void {
+    // --log-debug: print everything, no filtering.
+    if (verbose) {
+        std.log.defaultLog(message_level, scope, format, args);
+        return;
+    }
+
+    // Per-scope filtering: framework scopes at .err only, sim at .info.
+    const max_level: std.log.Level = switch (scope) {
+        .sim => .info,
+        .server, .connection, .storage, .wal, .io, .tracer, .app => .err,
+        else => .warn,
+    };
+    if (@intFromEnum(message_level) <= @intFromEnum(max_level)) {
+        std.log.defaultLog(message_level, scope, format, args);
+    }
+}
+
+const allocator = std.heap.page_allocator;
+
+/// Opt in to coverage marks in non-test executable builds.
+/// See framework/marks.zig — marks are active when this flag is set.
+pub const enable_marks = true;
 
 /// Simulated IO that replaces the real epoll-based IO for deterministic testing.
 /// All operations complete synchronously during `run_for_ns`. A seeded PRNG
@@ -663,6 +714,17 @@ fn count_occurrences(haystack: []const u8, needle: []const u8) usize {
     return count;
 }
 
+/// Cap address space so a runaway test can't eat all system memory.
+/// Matches TB's testing/fuzz.zig limit_ram().
+fn limit_address_space() void {
+    if (@import("builtin").target.os.tag != .linux) return;
+    const GiB = 1024 * 1024 * 1024;
+    std.posix.setrlimit(.AS, .{
+        .cur = 4 * GiB,
+        .max = 4 * GiB,
+    }) catch {};
+}
+
 const test_uuid1 = "aabbccdd11223344aabbccdd11223344";
 const test_uuid2 = "aabbccdd11223344aabbccdd11223345";
 
@@ -670,45 +732,45 @@ const test_uuid2 = "aabbccdd11223344aabbccdd11223345";
 // Infrastructure tests — deterministic replay, connection plumbing
 // =====================================================================
 
-test "deterministic replay — same seed same result" {
+fn @"deterministic replay — same seed same result"() void {
     var results: [2]u16 = undefined;
 
     for (0..2) |run| {
         var sim_io = SimIO.init(12345);
-        var storage = try App.Storage.init(":memory:");
+        var storage = App.Storage.init(":memory:") catch unreachable;
         defer storage.deinit();
         var sm = StateMachine.init(&storage, false, 0, test_key);
         var time_sim = TimeSim{};
-        var server = try Server.init(std.testing.allocator, &sim_io, &sm, 1, time_sim.time(), null);
-        defer server.deinit(std.testing.allocator);
+        var server = Server.init(allocator, &sim_io, &sm, 1, time_sim.time(), null) catch unreachable;
+        defer server.deinit(allocator);
 
         sim_io.connect_client(0);
         sim_io.inject_post(0, "/products",
             "{\"id\":\"" ++ test_uuid1 ++ "\",\"name\":\"Widget\",\"price_cents\":100}"
         );
         const create_resp = run_until_response(&server, &sim_io, 0, 500) orelse
-            return error.TestUnexpectedResult;
-        try std.testing.expectEqual(create_resp.status_code, 200);
+            unreachable;
+        assert(create_resp.status_code == 200);
         clear_and_reconnect(&sim_io, &server, 0);
 
         sim_io.inject_get(0, "/products/" ++ test_uuid1);
         const get_resp = run_until_response(&server, &sim_io, 0, 500) orelse
-            return error.TestUnexpectedResult;
+            unreachable;
         results[run] = get_resp.status_code;
     }
 
-    try std.testing.expectEqual(results[0], results[1]);
-    try std.testing.expectEqual(results[0], @as(u16, 200));
+    assert(results[0] == results[1]);
+    assert(results[0] == 200);
 }
 
-test "pipelining — back-to-back requests on one connection" {
+fn @"pipelining — back-to-back requests on one connection"() void {
     var sim_io = SimIO.init(0x1234);
-    var storage = try App.Storage.init(":memory:");
+    var storage = App.Storage.init(":memory:") catch unreachable;
     defer storage.deinit();
     var sm = StateMachine.init(&storage, false, 0, test_key);
     var time_sim = TimeSim{};
-    var server = try Server.init(std.testing.allocator, &sim_io, &sm, 1, time_sim.time(), null);
-    defer server.deinit(std.testing.allocator);
+    var server = Server.init(allocator, &sim_io, &sm, 1, time_sim.time(), null) catch unreachable;
+    defer server.deinit(allocator);
 
     sim_io.connect_client(0);
     run_ticks(&server, &sim_io, 10);
@@ -719,25 +781,25 @@ test "pipelining — back-to-back requests on one connection" {
         "{\"id\":\"" ++ test_uuid1 ++ "\",\"name\":\"PipeWidget\",\"price_cents\":100}"
     );
     const create_resp = run_until_response(&server, &sim_io, 0, 500) orelse
-        return error.TestUnexpectedResult;
-    try std.testing.expectEqual(create_resp.status_code, 200);
+        unreachable;
+    assert(create_resp.status_code == 200);
     clear_and_reconnect(&sim_io, &server, 0);
 
     sim_io.inject_get(0, "/products/" ++ test_uuid1);
     const get_resp = run_until_response(&server, &sim_io, 0, 500) orelse
-        return error.TestUnexpectedResult;
-    try std.testing.expectEqual(get_resp.status_code, 200);
-    try std.testing.expect(body_contains(get_resp.body, "PipeWidget"));
+        unreachable;
+    assert(get_resp.status_code == 200);
+    assert(body_contains(get_resp.body, "PipeWidget"));
 }
 
-test "connection drops and reconnects — state machine survives" {
+fn @"connection drops and reconnects — state machine survives"() void {
     var sim_io = SimIO.init(0xdead);
-    var storage = try App.Storage.init(":memory:");
+    var storage = App.Storage.init(":memory:") catch unreachable;
     defer storage.deinit();
     var sm = StateMachine.init(&storage, false, 0, test_key);
     var time_sim = TimeSim{};
-    var server = try Server.init(std.testing.allocator, &sim_io, &sm, 1, time_sim.time(), null);
-    defer server.deinit(std.testing.allocator);
+    var server = Server.init(allocator, &sim_io, &sm, 1, time_sim.time(), null) catch unreachable;
+    defer server.deinit(allocator);
 
     sim_io.connect_client(0);
     run_ticks(&server, &sim_io, 10);
@@ -747,8 +809,8 @@ test "connection drops and reconnects — state machine survives" {
         "{\"id\":\"" ++ test_uuid1 ++ "\",\"name\":\"Survivor\",\"price_cents\":100}"
     );
     const create_resp = run_until_response(&server, &sim_io, 0, 500) orelse
-        return error.TestUnexpectedResult;
-    try std.testing.expectEqual(create_resp.status_code, 200);
+        unreachable;
+    assert(create_resp.status_code == 200);
     sim_io.clear_response(0);
 
     // Drop the connection.
@@ -762,19 +824,19 @@ test "connection drops and reconnects — state machine survives" {
     // The state machine should still have the product.
     sim_io.inject_get(1, "/products/" ++ test_uuid1);
     const get_resp = run_until_response(&server, &sim_io, 1, 500) orelse
-        return error.TestUnexpectedResult;
-    try std.testing.expectEqual(get_resp.status_code, 200);
-    try std.testing.expect(body_contains(get_resp.body, "Survivor"));
+        unreachable;
+    assert(get_resp.status_code == 200);
+    assert(body_contains(get_resp.body, "Survivor"));
 }
 
-test "timeout — partial request triggers close" {
+fn @"timeout — partial request triggers close"() void {
     var sim_io = SimIO.init(0xface);
-    var storage = try App.Storage.init(":memory:");
+    var storage = App.Storage.init(":memory:") catch unreachable;
     defer storage.deinit();
     var sm = StateMachine.init(&storage, false, 0, test_key);
     var time_sim = TimeSim{};
-    var server = try Server.init(std.testing.allocator, &sim_io, &sm, 1, time_sim.time(), null);
-    defer server.deinit(std.testing.allocator);
+    var server = Server.init(allocator, &sim_io, &sm, 1, time_sim.time(), null) catch unreachable;
+    defer server.deinit(allocator);
 
     sim_io.connect_client(0);
     run_ticks(&server, &sim_io, 10);
@@ -791,7 +853,7 @@ test "timeout — partial request triggers close" {
             break;
         }
     }
-    try std.testing.expect(found_receiving);
+    assert(found_receiving);
 
     // Disconnect the client so SimIO won't try to deliver more data,
     // then tick past the timeout.
@@ -809,21 +871,21 @@ test "timeout — partial request triggers close" {
             break;
         }
     }
-    try std.testing.expect(!any_active);
+    assert(!any_active);
 }
 
 // =====================================================================
 // Coverage mark tests
 // =====================================================================
 
-test "mark: disconnect triggers recv peer closed" {
+fn @"mark: disconnect triggers recv peer closed"() void {
     var sim_io = SimIO.init(0xa001);
-    var storage = try App.Storage.init(":memory:");
+    var storage = App.Storage.init(":memory:") catch unreachable;
     defer storage.deinit();
     var sm = StateMachine.init(&storage, false, 0, test_key);
     var time_sim = TimeSim{};
-    var server = try Server.init(std.testing.allocator, &sim_io, &sm, 1, time_sim.time(), null);
-    defer server.deinit(std.testing.allocator);
+    var server = Server.init(allocator, &sim_io, &sm, 1, time_sim.time(), null) catch unreachable;
+    defer server.deinit(allocator);
 
     sim_io.connect_client(0);
     run_ticks(&server, &sim_io, 10);
@@ -831,17 +893,17 @@ test "mark: disconnect triggers recv peer closed" {
     const mark = marks.check("recv: peer closed");
     sim_io.disconnect_client(0);
     run_ticks(&server, &sim_io, 50);
-    try mark.expect_hit();
+    mark.expect_hit() catch unreachable;
 }
 
-test "mark: send fault triggers send error" {
+fn @"mark: send fault triggers send error"() void {
     var sim_io = SimIO.init(0xa002);
-    var storage = try App.Storage.init(":memory:");
+    var storage = App.Storage.init(":memory:") catch unreachable;
     defer storage.deinit();
     var sm = StateMachine.init(&storage, false, 0, test_key);
     var time_sim = TimeSim{};
-    var server = try Server.init(std.testing.allocator, &sim_io, &sm, 1, time_sim.time(), null);
-    defer server.deinit(std.testing.allocator);
+    var server = Server.init(allocator, &sim_io, &sm, 1, time_sim.time(), null) catch unreachable;
+    defer server.deinit(allocator);
 
     sim_io.connect_client(0);
     run_ticks(&server, &sim_io, 10);
@@ -851,7 +913,7 @@ test "mark: send fault triggers send error" {
         "{\"id\":\"" ++ test_uuid1 ++ "\",\"name\":\"TestProduct\",\"price_cents\":100}"
     );
     _ = run_until_response(&server, &sim_io, 0, 500) orelse
-        return error.TestUnexpectedResult;
+        unreachable;
     clear_and_reconnect(&sim_io, &server, 0);
 
     // Enable 100% send faults, then GET. The response send will fail.
@@ -859,17 +921,17 @@ test "mark: send fault triggers send error" {
     sim_io.inject_get(0, "/products/" ++ test_uuid1);
     const mark = marks.check("send: error");
     run_ticks(&server, &sim_io, 50);
-    try mark.expect_hit();
+    mark.expect_hit() catch unreachable;
 }
 
-test "mark: idle connection triggers timeout" {
+fn @"mark: idle connection triggers timeout"() void {
     var sim_io = SimIO.init(0xa003);
-    var storage = try App.Storage.init(":memory:");
+    var storage = App.Storage.init(":memory:") catch unreachable;
     defer storage.deinit();
     var sm = StateMachine.init(&storage, false, 0, test_key);
     var time_sim = TimeSim{};
-    var server = try Server.init(std.testing.allocator, &sim_io, &sm, 1, time_sim.time(), null);
-    defer server.deinit(std.testing.allocator);
+    var server = Server.init(allocator, &sim_io, &sm, 1, time_sim.time(), null) catch unreachable;
+    defer server.deinit(allocator);
 
     sim_io.connect_client(0);
     run_ticks(&server, &sim_io, 10);
@@ -885,17 +947,17 @@ test "mark: idle connection triggers timeout" {
     for (0..Server.request_timeout_ticks + 10) |_| {
         server.tick();
     }
-    try mark.expect_hit();
+    mark.expect_hit() catch unreachable;
 }
 
-test "mark: garbage bytes trigger invalid HTTP" {
+fn @"mark: garbage bytes trigger invalid HTTP"() void {
     var sim_io = SimIO.init(0xa004);
-    var storage = try App.Storage.init(":memory:");
+    var storage = App.Storage.init(":memory:") catch unreachable;
     defer storage.deinit();
     var sm = StateMachine.init(&storage, false, 0, test_key);
     var time_sim = TimeSim{};
-    var server = try Server.init(std.testing.allocator, &sim_io, &sm, 1, time_sim.time(), null);
-    defer server.deinit(std.testing.allocator);
+    var server = Server.init(allocator, &sim_io, &sm, 1, time_sim.time(), null) catch unreachable;
+    defer server.deinit(allocator);
 
     sim_io.connect_client(0);
     run_ticks(&server, &sim_io, 10);
@@ -903,17 +965,17 @@ test "mark: garbage bytes trigger invalid HTTP" {
     const mark = marks.check("invalid HTTP");
     sim_io.inject_bytes(0, "GARBAGE\x00\x01\x02\r\n\r\n");
     run_ticks(&server, &sim_io, 50);
-    try mark.expect_hit();
+    mark.expect_hit() catch unreachable;
 }
 
-test "mark: unknown route triggers unmapped request" {
+fn @"mark: unknown route triggers unmapped request"() void {
     var sim_io = SimIO.init(0xa005);
-    var storage = try App.Storage.init(":memory:");
+    var storage = App.Storage.init(":memory:") catch unreachable;
     defer storage.deinit();
     var sm = StateMachine.init(&storage, false, 0, test_key);
     var time_sim = TimeSim{};
-    var server = try Server.init(std.testing.allocator, &sim_io, &sm, 1, time_sim.time(), null);
-    defer server.deinit(std.testing.allocator);
+    var server = Server.init(allocator, &sim_io, &sm, 1, time_sim.time(), null) catch unreachable;
+    defer server.deinit(allocator);
 
     sim_io.connect_client(0);
     run_ticks(&server, &sim_io, 10);
@@ -931,17 +993,17 @@ test "mark: unknown route triggers unmapped request" {
     pos += end.len;
     sim_io.inject_bytes(0, req_buf[0..pos]);
     run_ticks(&server, &sim_io, 50);
-    try mark.expect_hit();
+    mark.expect_hit() catch unreachable;
 }
 
-test "first request without cookie gets identity + Set-Cookie" {
+fn @"first request without cookie gets identity + Set-Cookie"() void {
     var sim_io = SimIO.init(0xa010);
-    var storage = try App.Storage.init(":memory:");
+    var storage = App.Storage.init(":memory:") catch unreachable;
     defer storage.deinit();
     var sm = StateMachine.init(&storage, false, 0, test_key);
     var time_sim = TimeSim{};
-    var server = try Server.init(std.testing.allocator, &sim_io, &sm, 1, time_sim.time(), null);
-    defer server.deinit(std.testing.allocator);
+    var server = Server.init(allocator, &sim_io, &sm, 1, time_sim.time(), null) catch unreachable;
+    defer server.deinit(allocator);
 
     sim_io.connect_client(0);
     run_ticks(&server, &sim_io, 10);
@@ -949,22 +1011,22 @@ test "first request without cookie gets identity + Set-Cookie" {
     // Request without cookie — should get 200 + full page + Set-Cookie header.
     sim_io.inject_bytes(0, "GET / HTTP/1.1\r\n\r\n");
     const resp = run_until_response(&server, &sim_io, 0, 300) orelse
-        return error.TestUnexpectedResult;
-    try std.testing.expectEqual(resp.status_code, 200);
-    try std.testing.expect(body_contains(resp.body, "<!DOCTYPE html>"));
+        unreachable;
+    assert(resp.status_code == 200);
+    assert(body_contains(resp.body, "<!DOCTYPE html>"));
     // Response headers should include Set-Cookie with tiger_id.
     const full = sim_io.clients[0].recv_buf[0..sim_io.clients[0].recv_len];
-    try std.testing.expect(std.mem.indexOf(u8, full, "Set-Cookie: tiger_id=") != null);
+    assert(std.mem.indexOf(u8, full, "Set-Cookie: tiger_id=") != null);
 }
 
-test "request with valid cookie — no Set-Cookie header" {
+fn @"request with valid cookie — no Set-Cookie header"() void {
     var sim_io = SimIO.init(0xa011);
-    var storage = try App.Storage.init(":memory:");
+    var storage = App.Storage.init(":memory:") catch unreachable;
     defer storage.deinit();
     var sm = StateMachine.init(&storage, false, 0, test_key);
     var time_sim = TimeSim{};
-    var server = try Server.init(std.testing.allocator, &sim_io, &sm, 1, time_sim.time(), null);
-    defer server.deinit(std.testing.allocator);
+    var server = Server.init(allocator, &sim_io, &sm, 1, time_sim.time(), null) catch unreachable;
+    defer server.deinit(allocator);
 
     sim_io.connect_client(0);
     run_ticks(&server, &sim_io, 10);
@@ -972,30 +1034,30 @@ test "request with valid cookie — no Set-Cookie header" {
     // Request with valid cookie — should get 200, no Set-Cookie.
     sim_io.inject_get(0, "/");
     const resp = run_until_response(&server, &sim_io, 0, 300) orelse
-        return error.TestUnexpectedResult;
-    try std.testing.expectEqual(resp.status_code, 200);
+        unreachable;
+    assert(resp.status_code == 200);
     const full = sim_io.clients[0].recv_buf[0..sim_io.clients[0].recv_len];
-    try std.testing.expect(std.mem.indexOf(u8, full, "Set-Cookie:") == null);
+    assert(std.mem.indexOf(u8, full, "Set-Cookie:") == null);
 }
 
-test "mark: accept failure logs warning" {
+fn @"mark: accept failure logs warning"() void {
     var sim_io = SimIO.init(0xa007);
-    var storage = try App.Storage.init(":memory:");
+    var storage = App.Storage.init(":memory:") catch unreachable;
     defer storage.deinit();
     var sm = StateMachine.init(&storage, false, 0, test_key);
     var time_sim = TimeSim{};
-    var server = try Server.init(std.testing.allocator, &sim_io, &sm, 1, time_sim.time(), null);
-    defer server.deinit(std.testing.allocator);
+    var server = Server.init(allocator, &sim_io, &sm, 1, time_sim.time(), null) catch unreachable;
+    defer server.deinit(allocator);
 
     // 100% accept fault — every accept attempt fails.
     sim_io.accept_fault_probability = PRNG.ratio(1, 1);
     sim_io.connect_client(0);
     const mark = marks.check("accept failed");
     run_ticks(&server, &sim_io, 10);
-    try mark.expect_hit();
+    mark.expect_hit() catch unreachable;
 }
 
-test "mark: SSE mutation triggers follow-up" {
+fn @"mark: SSE mutation triggers follow-up"() void {
     // Follow-up path was removed when handlers started owning the complete
     // response. SSE mutations are now rendered directly by the handler.
 }
@@ -1004,14 +1066,14 @@ test "mark: SSE mutation triggers follow-up" {
 // Storage fault injection tests
 // =====================================================================
 
-test "storage busy fault — prefetch retries next tick then succeeds" {
+fn @"storage busy fault — prefetch retries next tick then succeeds"() void {
     var sim_io = SimIO.init(0xc001);
-    var storage = try App.Storage.init(":memory:");
+    var storage = App.Storage.init(":memory:") catch unreachable;
     defer storage.deinit();
     var sm = StateMachine.init(&storage, false, 0, test_key);
     var time_sim = TimeSim{};
-    var server = try Server.init(std.testing.allocator, &sim_io, &sm, 1, time_sim.time(), null);
-    defer server.deinit(std.testing.allocator);
+    var server = Server.init(allocator, &sim_io, &sm, 1, time_sim.time(), null) catch unreachable;
+    defer server.deinit(allocator);
 
     // Create a product first (no faults).
     sim_io.connect_client(0);
@@ -1021,7 +1083,7 @@ test "storage busy fault — prefetch retries next tick then succeeds" {
         "{\"id\":\"" ++ test_uuid1 ++ "\",\"name\":\"Widget\",\"price_cents\":100}"
     );
     _ = run_until_response(&server, &sim_io, 0, 500) orelse
-        return error.TestUnexpectedResult;
+        unreachable;
     clear_and_reconnect(&sim_io, &server, 0);
 
     // Enable 100% busy faults. GET will be retried each tick.
@@ -1033,27 +1095,27 @@ test "storage busy fault — prefetch retries next tick then succeeds" {
     // Tick a few times with busy faults — connection stays .ready.
     const mark = marks.check("storage: busy fault injected");
     run_ticks(&server, &sim_io, 20);
-    try mark.expect_hit();
+    mark.expect_hit() catch unreachable;
 
     // Verify no response yet (still busy-looping).
-    try std.testing.expect(sim_io.read_response(0) == null);
+    assert(sim_io.read_response(0) == null);
 
     // Disable busy faults — next tick should succeed.
     App.fault_busy_ratio = PRNG.Ratio.zero();
     const resp = run_until_response(&server, &sim_io, 0, 500) orelse
-        return error.TestUnexpectedResult;
-    try std.testing.expectEqual(resp.status_code, 200);
-    try std.testing.expect(body_contains(resp.body, "Widget"));
+        unreachable;
+    assert(resp.status_code == 200);
+    assert(body_contains(resp.body, "Widget"));
 }
 
-test "storage err fault — renders dashboard page" {
+fn @"storage err fault — renders dashboard page"() void {
     var sim_io = SimIO.init(0xc002);
-    var storage = try App.Storage.init(":memory:");
+    var storage = App.Storage.init(":memory:") catch unreachable;
     defer storage.deinit();
     var sm = StateMachine.init(&storage, false, 0, test_key);
     var time_sim = TimeSim{};
-    var server = try Server.init(std.testing.allocator, &sim_io, &sm, 1, time_sim.time(), null);
-    defer server.deinit(std.testing.allocator);
+    var server = Server.init(allocator, &sim_io, &sm, 1, time_sim.time(), null) catch unreachable;
+    defer server.deinit(allocator);
 
     sim_io.connect_client(0);
     run_ticks(&server, &sim_io, 10);
@@ -1066,26 +1128,26 @@ test "storage err fault — renders dashboard page" {
     const mark = marks.check("storage: busy fault injected");
     sim_io.inject_get(0, "/products/" ++ test_uuid1);
     run_ticks(&server, &sim_io, 20);
-    try mark.expect_hit();
+    mark.expect_hit() catch unreachable;
 
     // No response — busy faults cause retry, not error response.
-    try std.testing.expect(sim_io.read_response(0) == null);
+    assert(sim_io.read_response(0) == null);
 
     // Disable faults — next tick should succeed.
     App.fault_busy_ratio = PRNG.Ratio.zero();
     const resp = run_until_response(&server, &sim_io, 0, 500) orelse
-        return error.TestUnexpectedResult;
-    try std.testing.expectEqual(resp.status_code, 200);
+        unreachable;
+    assert(resp.status_code == 200);
 }
 
-test "concurrent connections — busy client deferred, ready client served" {
+fn @"concurrent connections — busy client deferred, ready client served"() void {
     var sim_io = SimIO.init(0xd010);
-    var storage = try App.Storage.init(":memory:");
+    var storage = App.Storage.init(":memory:") catch unreachable;
     defer storage.deinit();
     var sm = StateMachine.init(&storage, false, 0, test_key);
     var time_sim = TimeSim{};
-    var server = try Server.init(std.testing.allocator, &sim_io, &sm, 2, time_sim.time(), null);
-    defer server.deinit(std.testing.allocator);
+    var server = Server.init(allocator, &sim_io, &sm, 2, time_sim.time(), null) catch unreachable;
+    defer server.deinit(allocator);
 
     // Connect two clients and let them establish.
     sim_io.connect_client(0);
@@ -1096,7 +1158,7 @@ test "concurrent connections — busy client deferred, ready client served" {
     sim_io.inject_post(0, "/products",
         "{\"id\":\"" ++ test_uuid1 ++ "\",\"name\":\"Widget\",\"price_cents\":100}"
     );
-    _ = run_until_response(&server, &sim_io, 0, 500) orelse return error.TestUnexpectedResult;
+    _ = run_until_response(&server, &sim_io, 0, 500) orelse unreachable;
     clear_and_reconnect(&sim_io, &server, 0);
 
     // Enable 100% busy faults. Both clients send GET.
@@ -1108,29 +1170,29 @@ test "concurrent connections — busy client deferred, ready client served" {
 
     // Tick with faults — neither should get a response.
     run_ticks(&server, &sim_io, 20);
-    try std.testing.expect(sim_io.read_response(0) == null);
-    try std.testing.expect(sim_io.read_response(1) == null);
+    assert(sim_io.read_response(0) == null);
+    assert(sim_io.read_response(1) == null);
 
     // Disable faults — both should succeed on next ticks.
     App.fault_busy_ratio = PRNG.Ratio.zero();
 
-    const resp0 = run_until_response(&server, &sim_io, 0, 500) orelse return error.TestUnexpectedResult;
-    try std.testing.expectEqual(resp0.status_code, 200);
-    try std.testing.expect(body_contains(resp0.body, "Widget"));
+    const resp0 = run_until_response(&server, &sim_io, 0, 500) orelse unreachable;
+    assert(resp0.status_code == 200);
+    assert(body_contains(resp0.body, "Widget"));
 
-    const resp1 = run_until_response(&server, &sim_io, 1, 500) orelse return error.TestUnexpectedResult;
-    try std.testing.expectEqual(resp1.status_code, 200);
-    try std.testing.expect(body_contains(resp1.body, "Widget"));
+    const resp1 = run_until_response(&server, &sim_io, 1, 500) orelse unreachable;
+    assert(resp1.status_code == 200);
+    assert(body_contains(resp1.body, "Widget"));
 }
 
-test "interleaved writes — update and delete same entity across connections" {
+fn @"interleaved writes — update and delete same entity across connections"() void {
     var sim_io = SimIO.init(0xd021);
-    var storage = try App.Storage.init(":memory:");
+    var storage = App.Storage.init(":memory:") catch unreachable;
     defer storage.deinit();
     var sm = StateMachine.init(&storage, false, 0, test_key);
     var time_sim = TimeSim{};
-    var server = try Server.init(std.testing.allocator, &sim_io, &sm, 2, time_sim.time(), null);
-    defer server.deinit(std.testing.allocator);
+    var server = Server.init(allocator, &sim_io, &sm, 2, time_sim.time(), null) catch unreachable;
+    defer server.deinit(allocator);
 
     // Connect two clients and let them establish.
     sim_io.connect_client(0);
@@ -1141,7 +1203,7 @@ test "interleaved writes — update and delete same entity across connections" {
     sim_io.inject_post(0, "/products",
         "{\"id\":\"" ++ test_uuid1 ++ "\",\"name\":\"Original\",\"price_cents\":100}"
     );
-    _ = run_until_response(&server, &sim_io, 0, 500) orelse return error.TestUnexpectedResult;
+    _ = run_until_response(&server, &sim_io, 0, 500) orelse unreachable;
     clear_and_reconnect(&sim_io, &server, 0);
 
     // Inject competing writes simultaneously: client 0 updates, client 1 deletes.
@@ -1154,19 +1216,19 @@ test "interleaved writes — update and delete same entity across connections" {
 
     // Both should succeed — the product exists when each is prefetched.
     const update_resp = run_until_response(&server, &sim_io, 0, 500) orelse
-        return error.TestUnexpectedResult;
-    try std.testing.expectEqual(update_resp.status_code, 200);
+        unreachable;
+    assert(update_resp.status_code == 200);
 
     const delete_resp = run_until_response(&server, &sim_io, 1, 500) orelse
-        return error.TestUnexpectedResult;
-    try std.testing.expectEqual(delete_resp.status_code, 200);
+        unreachable;
+    assert(delete_resp.status_code == 200);
 
     // Check final state: whichever ran last determines the outcome.
     clear_and_reconnect(&sim_io, &server, 0);
     sim_io.clear_response(1);
     sim_io.inject_get(0, "/products/" ++ test_uuid1);
     const get_resp = run_until_response(&server, &sim_io, 0, 500) orelse
-        return error.TestUnexpectedResult;
+        unreachable;
 
     // Always-200 server — check body content, not HTTP status.
     // If delete ran last → product inactive → "Product not found".
@@ -1175,7 +1237,7 @@ test "interleaved writes — update and delete same entity across connections" {
     const body = get_resp.body;
     const deleted = body_contains(body, "Product not found");
     const updated = body_contains(body, "Updated");
-    try std.testing.expect(deleted or updated);
+    assert(deleted or updated);
 }
 
 // =====================================================================
@@ -1185,14 +1247,14 @@ test "interleaved writes — update and delete same entity across connections" {
 const test_product_uuid = "aabbccdd11223344aabbccdd11220001";
 const test_order_uuid = "eeddccbb11223344eeddccbb11220001";
 
-test "two-phase order — create on client 0, complete on client 1" {
+fn @"two-phase order — create on client 0, complete on client 1"() void {
     var sim_io = SimIO.init(0xe001);
-    var storage = try App.Storage.init(":memory:");
+    var storage = App.Storage.init(":memory:") catch unreachable;
     defer storage.deinit();
     var sm = StateMachine.init(&storage, false, 0, test_key);
     var time_sim = TimeSim{};
-    var server = try Server.init(std.testing.allocator, &sim_io, &sm, 2, time_sim.time(), null);
-    defer server.deinit(std.testing.allocator);
+    var server = Server.init(allocator, &sim_io, &sm, 2, time_sim.time(), null) catch unreachable;
+    defer server.deinit(allocator);
 
     sim_io.connect_client(0);
     sim_io.connect_client(1);
@@ -1202,42 +1264,42 @@ test "two-phase order — create on client 0, complete on client 1" {
     sim_io.inject_post(0, "/products",
         "{\"id\":\"" ++ test_product_uuid ++ "\",\"name\":\"Widget\",\"price_cents\":1000,\"inventory\":50}",
     );
-    _ = run_until_response(&server, &sim_io, 0, 500) orelse return error.TestUnexpectedResult;
+    _ = run_until_response(&server, &sim_io, 0, 500) orelse unreachable;
     clear_and_reconnect(&sim_io, &server, 0);
 
     // Client 0 creates an order.
     sim_io.inject_post(0, "/orders",
         "{\"id\":\"" ++ test_order_uuid ++ "\",\"items\":[{\"product_id\":\"" ++ test_product_uuid ++ "\",\"quantity\":5}]}",
     );
-    const create_resp = run_until_response(&server, &sim_io, 0, 500) orelse return error.TestUnexpectedResult;
-    try std.testing.expectEqual(create_resp.status_code, 200);
-    try std.testing.expect(body_contains(create_resp.body, "Pending"));
+    const create_resp = run_until_response(&server, &sim_io, 0, 500) orelse unreachable;
+    assert(create_resp.status_code == 200);
+    assert(body_contains(create_resp.body, "Pending"));
     clear_and_reconnect(&sim_io, &server, 0);
 
     // Client 1 (the "worker") completes the order.
     sim_io.inject_post(1, "/orders/" ++ test_order_uuid ++ "/complete",
         "{\"result\":\"confirmed\"}",
     );
-    const complete_resp = run_until_response(&server, &sim_io, 1, 500) orelse return error.TestUnexpectedResult;
-    try std.testing.expectEqual(complete_resp.status_code, 200);
-    try std.testing.expect(body_contains(complete_resp.body, "Confirmed"));
+    const complete_resp = run_until_response(&server, &sim_io, 1, 500) orelse unreachable;
+    assert(complete_resp.status_code == 200);
+    assert(body_contains(complete_resp.body, "Confirmed"));
     sim_io.clear_response(1);
 
     // Verify inventory stayed decremented (confirmed = keep reservation).
     sim_io.inject_get(0, "/products/" ++ test_product_uuid ++ "/inventory");
-    const inv_resp = run_until_response(&server, &sim_io, 0, 500) orelse return error.TestUnexpectedResult;
-    try std.testing.expectEqual(inv_resp.status_code, 200);
-    try std.testing.expect(body_contains(inv_resp.body, "inventory: 45"));
+    const inv_resp = run_until_response(&server, &sim_io, 0, 500) orelse unreachable;
+    assert(inv_resp.status_code == 200);
+    assert(body_contains(inv_resp.body, "inventory: 45"));
 }
 
-test "two-phase order — failed completion restores inventory" {
+fn @"two-phase order — failed completion restores inventory"() void {
     var sim_io = SimIO.init(0xe002);
-    var storage = try App.Storage.init(":memory:");
+    var storage = App.Storage.init(":memory:") catch unreachable;
     defer storage.deinit();
     var sm = StateMachine.init(&storage, false, 0, test_key);
     var time_sim = TimeSim{};
-    var server = try Server.init(std.testing.allocator, &sim_io, &sm, 2, time_sim.time(), null);
-    defer server.deinit(std.testing.allocator);
+    var server = Server.init(allocator, &sim_io, &sm, 2, time_sim.time(), null) catch unreachable;
+    defer server.deinit(allocator);
 
     sim_io.connect_client(0);
     sim_io.connect_client(1);
@@ -1246,38 +1308,38 @@ test "two-phase order — failed completion restores inventory" {
     sim_io.inject_post(0, "/products",
         "{\"id\":\"" ++ test_product_uuid ++ "\",\"name\":\"Widget\",\"price_cents\":1000,\"inventory\":50}",
     );
-    _ = run_until_response(&server, &sim_io, 0, 500) orelse return error.TestUnexpectedResult;
+    _ = run_until_response(&server, &sim_io, 0, 500) orelse unreachable;
     clear_and_reconnect(&sim_io, &server, 0);
 
     sim_io.inject_post(0, "/orders",
         "{\"id\":\"" ++ test_order_uuid ++ "\",\"items\":[{\"product_id\":\"" ++ test_product_uuid ++ "\",\"quantity\":10}]}",
     );
-    _ = run_until_response(&server, &sim_io, 0, 500) orelse return error.TestUnexpectedResult;
+    _ = run_until_response(&server, &sim_io, 0, 500) orelse unreachable;
     clear_and_reconnect(&sim_io, &server, 0);
 
     // Worker reports failure.
     sim_io.inject_post(1, "/orders/" ++ test_order_uuid ++ "/complete",
         "{\"result\":\"failed\"}",
     );
-    const resp = run_until_response(&server, &sim_io, 1, 500) orelse return error.TestUnexpectedResult;
-    try std.testing.expectEqual(resp.status_code, 200);
-    try std.testing.expect(body_contains(resp.body, "Failed"));
+    const resp = run_until_response(&server, &sim_io, 1, 500) orelse unreachable;
+    assert(resp.status_code == 200);
+    assert(body_contains(resp.body, "Failed"));
     sim_io.clear_response(1);
 
     // Inventory restored.
     sim_io.inject_get(0, "/products/" ++ test_product_uuid ++ "/inventory");
-    const inv_resp = run_until_response(&server, &sim_io, 0, 500) orelse return error.TestUnexpectedResult;
-    try std.testing.expect(body_contains(inv_resp.body, "inventory: 50"));
+    const inv_resp = run_until_response(&server, &sim_io, 0, 500) orelse unreachable;
+    assert(body_contains(inv_resp.body, "inventory: 50"));
 }
 
-test "two-phase order — completion after timeout expires" {
+fn @"two-phase order — completion after timeout expires"() void {
     var sim_io = SimIO.init(0xe003);
-    var storage = try App.Storage.init(":memory:");
+    var storage = App.Storage.init(":memory:") catch unreachable;
     defer storage.deinit();
     var sm = StateMachine.init(&storage, false, 0, test_key);
     var time_sim = TimeSim{};
-    var server = try Server.init(std.testing.allocator, &sim_io, &sm, 2, time_sim.time(), null);
-    defer server.deinit(std.testing.allocator);
+    var server = Server.init(allocator, &sim_io, &sm, 2, time_sim.time(), null) catch unreachable;
+    defer server.deinit(allocator);
 
     sim_io.connect_client(0);
     sim_io.connect_client(1);
@@ -1286,13 +1348,13 @@ test "two-phase order — completion after timeout expires" {
     sim_io.inject_post(0, "/products",
         "{\"id\":\"" ++ test_product_uuid ++ "\",\"name\":\"Widget\",\"price_cents\":1000,\"inventory\":50}",
     );
-    _ = run_until_response(&server, &sim_io, 0, 500) orelse return error.TestUnexpectedResult;
+    _ = run_until_response(&server, &sim_io, 0, 500) orelse unreachable;
     clear_and_reconnect(&sim_io, &server, 0);
 
     sim_io.inject_post(0, "/orders",
         "{\"id\":\"" ++ test_order_uuid ++ "\",\"items\":[{\"product_id\":\"" ++ test_product_uuid ++ "\",\"quantity\":10}]}",
     );
-    _ = run_until_response(&server, &sim_io, 0, 500) orelse return error.TestUnexpectedResult;
+    _ = run_until_response(&server, &sim_io, 0, 500) orelse unreachable;
     clear_and_reconnect(&sim_io, &server, 0);
 
     // Advance time past the order timeout.
@@ -1302,25 +1364,25 @@ test "two-phase order — completion after timeout expires" {
     sim_io.inject_post_datastar(1, "/orders/" ++ test_order_uuid ++ "/complete",
         "{\"result\":\"confirmed\"}",
     );
-    const resp = run_until_close_response(&server, &sim_io, 1, 500) orelse return error.TestUnexpectedResult;
-    try std.testing.expectEqual(resp.status_code, 200);
-    try std.testing.expect(body_contains(resp.body, "Order Expired"));
+    const resp = run_until_close_response(&server, &sim_io, 1, 500) orelse unreachable;
+    assert(resp.status_code == 200);
+    assert(body_contains(resp.body, "Order Expired"));
     sim_io.clear_response(1);
 
     // Inventory restored because the order expired.
     sim_io.inject_get(0, "/products/" ++ test_product_uuid ++ "/inventory");
-    const inv_resp = run_until_response(&server, &sim_io, 0, 500) orelse return error.TestUnexpectedResult;
-    try std.testing.expect(body_contains(inv_resp.body, "inventory: 50"));
+    const inv_resp = run_until_response(&server, &sim_io, 0, 500) orelse unreachable;
+    assert(body_contains(inv_resp.body, "inventory: 50"));
 }
 
-test "two-phase order — idempotent same-result retry" {
+fn @"two-phase order — idempotent same-result retry"() void {
     var sim_io = SimIO.init(0xe004);
-    var storage = try App.Storage.init(":memory:");
+    var storage = App.Storage.init(":memory:") catch unreachable;
     defer storage.deinit();
     var sm = StateMachine.init(&storage, false, 0, test_key);
     var time_sim = TimeSim{};
-    var server = try Server.init(std.testing.allocator, &sim_io, &sm, 2, time_sim.time(), null);
-    defer server.deinit(std.testing.allocator);
+    var server = Server.init(allocator, &sim_io, &sm, 2, time_sim.time(), null) catch unreachable;
+    defer server.deinit(allocator);
 
     sim_io.connect_client(0);
     sim_io.connect_client(1);
@@ -1329,45 +1391,45 @@ test "two-phase order — idempotent same-result retry" {
     sim_io.inject_post(0, "/products",
         "{\"id\":\"" ++ test_product_uuid ++ "\",\"name\":\"Widget\",\"price_cents\":1000,\"inventory\":50}",
     );
-    _ = run_until_response(&server, &sim_io, 0, 500) orelse return error.TestUnexpectedResult;
+    _ = run_until_response(&server, &sim_io, 0, 500) orelse unreachable;
     clear_and_reconnect(&sim_io, &server, 0);
 
     sim_io.inject_post(0, "/orders",
         "{\"id\":\"" ++ test_order_uuid ++ "\",\"items\":[{\"product_id\":\"" ++ test_product_uuid ++ "\",\"quantity\":5}]}",
     );
-    _ = run_until_response(&server, &sim_io, 0, 500) orelse return error.TestUnexpectedResult;
+    _ = run_until_response(&server, &sim_io, 0, 500) orelse unreachable;
     clear_and_reconnect(&sim_io, &server, 0);
 
     // First completion succeeds.
     sim_io.inject_post(1, "/orders/" ++ test_order_uuid ++ "/complete",
         "{\"result\":\"confirmed\"}",
     );
-    const resp1 = run_until_response(&server, &sim_io, 1, 500) orelse return error.TestUnexpectedResult;
-    try std.testing.expectEqual(resp1.status_code, 200);
+    const resp1 = run_until_response(&server, &sim_io, 1, 500) orelse unreachable;
+    assert(resp1.status_code == 200);
     clear_and_reconnect(&sim_io, &server, 1);
 
     // Same-result retry is idempotent — returns OK (worker crash recovery).
     sim_io.inject_post(1, "/orders/" ++ test_order_uuid ++ "/complete",
         "{\"result\":\"confirmed\"}",
     );
-    const resp2 = run_until_response(&server, &sim_io, 1, 500) orelse return error.TestUnexpectedResult;
-    try std.testing.expectEqual(resp2.status_code, 200);
+    const resp2 = run_until_response(&server, &sim_io, 1, 500) orelse unreachable;
+    assert(resp2.status_code == 200);
     sim_io.clear_response(1);
 
     // Inventory unchanged by idempotent retry.
     sim_io.inject_get(0, "/products/" ++ test_product_uuid ++ "/inventory");
-    const inv_resp = run_until_response(&server, &sim_io, 0, 500) orelse return error.TestUnexpectedResult;
-    try std.testing.expect(body_contains(inv_resp.body, "inventory: 45"));
+    const inv_resp = run_until_response(&server, &sim_io, 0, 500) orelse unreachable;
+    assert(body_contains(inv_resp.body, "inventory: 45"));
 }
 
-test "two-phase order — poll pending then complete (worker pattern)" {
+fn @"two-phase order — poll pending then complete (worker pattern)"() void {
     var sim_io = SimIO.init(0xe005);
-    var storage = try App.Storage.init(":memory:");
+    var storage = App.Storage.init(":memory:") catch unreachable;
     defer storage.deinit();
     var sm = StateMachine.init(&storage, false, 0, test_key);
     var time_sim = TimeSim{};
-    var server = try Server.init(std.testing.allocator, &sim_io, &sm, 2, time_sim.time(), null);
-    defer server.deinit(std.testing.allocator);
+    var server = Server.init(allocator, &sim_io, &sm, 2, time_sim.time(), null) catch unreachable;
+    defer server.deinit(allocator);
 
     sim_io.connect_client(0);
     sim_io.connect_client(1);
@@ -1376,49 +1438,49 @@ test "two-phase order — poll pending then complete (worker pattern)" {
     sim_io.inject_post(0, "/products",
         "{\"id\":\"" ++ test_product_uuid ++ "\",\"name\":\"Widget\",\"price_cents\":1000,\"inventory\":50}",
     );
-    _ = run_until_response(&server, &sim_io, 0, 500) orelse return error.TestUnexpectedResult;
+    _ = run_until_response(&server, &sim_io, 0, 500) orelse unreachable;
     clear_and_reconnect(&sim_io, &server, 0);
 
     sim_io.inject_post(0, "/orders",
         "{\"id\":\"" ++ test_order_uuid ++ "\",\"items\":[{\"product_id\":\"" ++ test_product_uuid ++ "\",\"quantity\":3}]}",
     );
-    _ = run_until_response(&server, &sim_io, 0, 500) orelse return error.TestUnexpectedResult;
+    _ = run_until_response(&server, &sim_io, 0, 500) orelse unreachable;
     sim_io.clear_response(0);
 
     // Worker polls GET /orders — should see the pending order.
     sim_io.inject_get(1, "/orders");
-    const list_resp = run_until_response(&server, &sim_io, 1, 500) orelse return error.TestUnexpectedResult;
-    try std.testing.expectEqual(list_resp.status_code, 200);
-    try std.testing.expect(body_contains(list_resp.body, "Pending"));
-    try std.testing.expect(body_contains(list_resp.body, test_order_uuid));
+    const list_resp = run_until_response(&server, &sim_io, 1, 500) orelse unreachable;
+    assert(list_resp.status_code == 200);
+    assert(body_contains(list_resp.body, "Pending"));
+    assert(body_contains(list_resp.body, test_order_uuid));
     clear_and_reconnect(&sim_io, &server, 1);
 
     // Worker completes.
     sim_io.inject_post(1, "/orders/" ++ test_order_uuid ++ "/complete",
         "{\"result\":\"confirmed\"}",
     );
-    _ = run_until_response(&server, &sim_io, 1, 500) orelse return error.TestUnexpectedResult;
+    _ = run_until_response(&server, &sim_io, 1, 500) orelse unreachable;
     clear_and_reconnect(&sim_io, &server, 1);
 
     // Worker polls again — order should now be confirmed, not pending.
     sim_io.inject_get(1, "/orders");
-    const list_resp2 = run_until_response(&server, &sim_io, 1, 500) orelse return error.TestUnexpectedResult;
-    try std.testing.expectEqual(list_resp2.status_code, 200);
-    try std.testing.expect(body_contains(list_resp2.body, "Confirmed"));
+    const list_resp2 = run_until_response(&server, &sim_io, 1, 500) orelse unreachable;
+    assert(list_resp2.status_code == 200);
+    assert(body_contains(list_resp2.body, "Confirmed"));
 }
 
 // =====================================================================
 // Cancel order — full-stack sim tests
 // =====================================================================
 
-test "cancel order — client cancels, worker completion rejected" {
+fn @"cancel order — client cancels, worker completion rejected"() void {
     var sim_io = SimIO.init(0xe010);
-    var storage = try App.Storage.init(":memory:");
+    var storage = App.Storage.init(":memory:") catch unreachable;
     defer storage.deinit();
     var sm = StateMachine.init(&storage, false, 0, test_key);
     var time_sim = TimeSim{};
-    var server = try Server.init(std.testing.allocator, &sim_io, &sm, 2, time_sim.time(), null);
-    defer server.deinit(std.testing.allocator);
+    var server = Server.init(allocator, &sim_io, &sm, 2, time_sim.time(), null) catch unreachable;
+    defer server.deinit(allocator);
 
     sim_io.connect_client(0);
     sim_io.connect_client(1);
@@ -1428,45 +1490,45 @@ test "cancel order — client cancels, worker completion rejected" {
     sim_io.inject_post(0, "/products",
         "{\"id\":\"" ++ test_product_uuid ++ "\",\"name\":\"Widget\",\"price_cents\":1000,\"inventory\":50}",
     );
-    _ = run_until_response(&server, &sim_io, 0, 500) orelse return error.TestUnexpectedResult;
+    _ = run_until_response(&server, &sim_io, 0, 500) orelse unreachable;
     clear_and_reconnect(&sim_io, &server, 0);
 
     sim_io.inject_post(0, "/orders",
         "{\"id\":\"" ++ test_order_uuid ++ "\",\"items\":[{\"product_id\":\"" ++ test_product_uuid ++ "\",\"quantity\":10}]}",
     );
-    _ = run_until_response(&server, &sim_io, 0, 500) orelse return error.TestUnexpectedResult;
+    _ = run_until_response(&server, &sim_io, 0, 500) orelse unreachable;
     clear_and_reconnect(&sim_io, &server, 0);
 
     // Client cancels.
     sim_io.inject_post(0, "/orders/" ++ test_order_uuid ++ "/cancel", "");
-    const cancel_resp = run_until_response(&server, &sim_io, 0, 500) orelse return error.TestUnexpectedResult;
-    try std.testing.expectEqual(cancel_resp.status_code, 200);
-    try std.testing.expect(body_contains(cancel_resp.body, "Order cancelled"));
+    const cancel_resp = run_until_response(&server, &sim_io, 0, 500) orelse unreachable;
+    assert(cancel_resp.status_code == 200);
+    assert(body_contains(cancel_resp.body, "Order cancelled"));
     clear_and_reconnect(&sim_io, &server, 0);
 
     // Worker tries to complete — rejected (order not pending, error in SSE fragment).
     sim_io.inject_post_datastar(1, "/orders/" ++ test_order_uuid ++ "/complete",
         "{\"result\":\"confirmed\"}",
     );
-    const complete_resp = run_until_close_response(&server, &sim_io, 1, 500) orelse return error.TestUnexpectedResult;
-    try std.testing.expectEqual(complete_resp.status_code, 200);
-    try std.testing.expect(body_contains(complete_resp.body, "Order is not pending"));
+    const complete_resp = run_until_close_response(&server, &sim_io, 1, 500) orelse unreachable;
+    assert(complete_resp.status_code == 200);
+    assert(body_contains(complete_resp.body, "Order is not pending"));
     sim_io.clear_response(1);
 
     // Inventory fully restored.
     sim_io.inject_get(0, "/products/" ++ test_product_uuid ++ "/inventory");
-    const inv_resp = run_until_response(&server, &sim_io, 0, 500) orelse return error.TestUnexpectedResult;
-    try std.testing.expect(body_contains(inv_resp.body, "inventory: 50"));
+    const inv_resp = run_until_response(&server, &sim_io, 0, 500) orelse unreachable;
+    assert(body_contains(inv_resp.body, "inventory: 50"));
 }
 
-test "cancel order — cancel already confirmed is rejected" {
+fn @"cancel order — cancel already confirmed is rejected"() void {
     var sim_io = SimIO.init(0xe011);
-    var storage = try App.Storage.init(":memory:");
+    var storage = App.Storage.init(":memory:") catch unreachable;
     defer storage.deinit();
     var sm = StateMachine.init(&storage, false, 0, test_key);
     var time_sim = TimeSim{};
-    var server = try Server.init(std.testing.allocator, &sim_io, &sm, 2, time_sim.time(), null);
-    defer server.deinit(std.testing.allocator);
+    var server = Server.init(allocator, &sim_io, &sm, 2, time_sim.time(), null) catch unreachable;
+    defer server.deinit(allocator);
 
     sim_io.connect_client(0);
     sim_io.connect_client(1);
@@ -1475,33 +1537,33 @@ test "cancel order — cancel already confirmed is rejected" {
     sim_io.inject_post(0, "/products",
         "{\"id\":\"" ++ test_product_uuid ++ "\",\"name\":\"Widget\",\"price_cents\":1000,\"inventory\":50}",
     );
-    _ = run_until_response(&server, &sim_io, 0, 500) orelse return error.TestUnexpectedResult;
+    _ = run_until_response(&server, &sim_io, 0, 500) orelse unreachable;
     clear_and_reconnect(&sim_io, &server, 0);
 
     sim_io.inject_post(0, "/orders",
         "{\"id\":\"" ++ test_order_uuid ++ "\",\"items\":[{\"product_id\":\"" ++ test_product_uuid ++ "\",\"quantity\":5}]}",
     );
-    _ = run_until_response(&server, &sim_io, 0, 500) orelse return error.TestUnexpectedResult;
+    _ = run_until_response(&server, &sim_io, 0, 500) orelse unreachable;
     clear_and_reconnect(&sim_io, &server, 0);
 
     // Worker completes first.
     sim_io.inject_post(1, "/orders/" ++ test_order_uuid ++ "/complete",
         "{\"result\":\"confirmed\"}",
     );
-    _ = run_until_response(&server, &sim_io, 1, 500) orelse return error.TestUnexpectedResult;
+    _ = run_until_response(&server, &sim_io, 1, 500) orelse unreachable;
     sim_io.clear_response(1);
 
     // Client tries to cancel — too late (order not pending, error in SSE fragment).
     sim_io.inject_post_datastar(0, "/orders/" ++ test_order_uuid ++ "/cancel", "");
-    const cancel_resp = run_until_close_response(&server, &sim_io, 0, 500) orelse return error.TestUnexpectedResult;
-    try std.testing.expectEqual(cancel_resp.status_code, 200);
-    try std.testing.expect(body_contains(cancel_resp.body, "Order is not pending"));
+    const cancel_resp = run_until_close_response(&server, &sim_io, 0, 500) orelse unreachable;
+    assert(cancel_resp.status_code == 200);
+    assert(body_contains(cancel_resp.body, "Order is not pending"));
     clear_and_reconnect(&sim_io, &server, 0);
 
     // Inventory stays at confirmed level.
     sim_io.inject_get(0, "/products/" ++ test_product_uuid ++ "/inventory");
-    const inv_resp = run_until_response(&server, &sim_io, 0, 500) orelse return error.TestUnexpectedResult;
-    try std.testing.expect(body_contains(inv_resp.body, "inventory: 45"));
+    const inv_resp = run_until_response(&server, &sim_io, 0, 500) orelse unreachable;
+    assert(body_contains(inv_resp.body, "inventory: 45"));
 }
 
 // =====================================================================
@@ -2222,22 +2284,22 @@ fn build_simple_request_with_headers(buf: *[2048]u8, method: []const u8, path: [
     return w.slice();
 }
 
-fn run_fuzz(seed: u64) !void {
+fn run_fuzz(seed: u64) void {
     const events_max = 2000;
 
-    std.debug.print("\nfuzz seed={d}\n", .{seed});
+    log.debug("        seed={d} events={d}", .{ seed, events_max });
 
     var prng = PRNG.from_seed(seed);
 
     var sim_io = SimIO.init(prng.int(u64));
-    var storage = try App.Storage.init(":memory:");
+    var storage = App.Storage.init(":memory:") catch unreachable;
     defer storage.deinit();
     var sim_fault_prng = PRNG.from_seed(prng.int(u64));
     App.fault_prng = &sim_fault_prng;
     var sm = StateMachine.init(&storage, false, 0, test_key);
     var time_sim = TimeSim{};
-    var server = try Server.init(std.testing.allocator, &sim_io, &sm, 1, time_sim.time(), null);
-    defer server.deinit(std.testing.allocator);
+    var server = Server.init(allocator, &sim_io, &sm, 1, time_sim.time(), null) catch unreachable;
+    defer server.deinit(allocator);
 
     var fuzzer = Fuzzer.init();
 
@@ -2253,14 +2315,122 @@ fn run_fuzz(seed: u64) !void {
     }
 }
 
-test "PRNG fuzz — full stack seed 1" {
-    try run_fuzz(0xf001);
+fn @"PRNG fuzz — full stack seed 1"() void {
+    run_fuzz(0xf001);
 }
 
-test "PRNG fuzz — full stack seed 2" {
-    try run_fuzz(0xf002);
+fn @"PRNG fuzz — full stack seed 2"() void {
+    run_fuzz(0xf002);
 }
 
-test "PRNG fuzz — full stack seed 3" {
-    try run_fuzz(0xf003);
+fn @"PRNG fuzz — full stack seed 3"() void {
+    run_fuzz(0xf003);
+}
+
+/// All sim test functions. Each uses assert for domain invariants — a
+/// failure panics immediately with a stack trace, matching TB's pattern.
+/// Infrastructure errors (Storage.init, Server.init) also panic via
+/// `catch unreachable` inside each function.
+const sim_tests = .{
+    .{ .name = "deterministic replay — same seed same result", .func = &@"deterministic replay — same seed same result" },
+    .{ .name = "pipelining — back-to-back requests on one connection", .func = &@"pipelining — back-to-back requests on one connection" },
+    .{ .name = "connection drops and reconnects — state machine survives", .func = &@"connection drops and reconnects — state machine survives" },
+    .{ .name = "timeout — partial request triggers close", .func = &@"timeout — partial request triggers close" },
+    .{ .name = "mark: disconnect triggers recv peer closed", .func = &@"mark: disconnect triggers recv peer closed" },
+    .{ .name = "mark: send fault triggers send error", .func = &@"mark: send fault triggers send error" },
+    .{ .name = "mark: idle connection triggers timeout", .func = &@"mark: idle connection triggers timeout" },
+    .{ .name = "mark: garbage bytes trigger invalid HTTP", .func = &@"mark: garbage bytes trigger invalid HTTP" },
+    .{ .name = "mark: unknown route triggers unmapped request", .func = &@"mark: unknown route triggers unmapped request" },
+    .{ .name = "first request without cookie gets identity + Set-Cookie", .func = &@"first request without cookie gets identity + Set-Cookie" },
+    .{ .name = "request with valid cookie — no Set-Cookie header", .func = &@"request with valid cookie — no Set-Cookie header" },
+    .{ .name = "mark: accept failure logs warning", .func = &@"mark: accept failure logs warning" },
+    .{ .name = "mark: SSE mutation triggers follow-up", .func = &@"mark: SSE mutation triggers follow-up" },
+    .{ .name = "storage busy fault — prefetch retries next tick then succeeds", .func = &@"storage busy fault — prefetch retries next tick then succeeds" },
+    .{ .name = "storage err fault — renders dashboard page", .func = &@"storage err fault — renders dashboard page" },
+    .{ .name = "concurrent connections — busy client deferred, ready client served", .func = &@"concurrent connections — busy client deferred, ready client served" },
+    .{ .name = "interleaved writes — update and delete same entity across connections", .func = &@"interleaved writes — update and delete same entity across connections" },
+    .{ .name = "two-phase order — create on client 0, complete on client 1", .func = &@"two-phase order — create on client 0, complete on client 1" },
+    .{ .name = "two-phase order — failed completion restores inventory", .func = &@"two-phase order — failed completion restores inventory" },
+    .{ .name = "two-phase order — completion after timeout expires", .func = &@"two-phase order — completion after timeout expires" },
+    .{ .name = "two-phase order — idempotent same-result retry", .func = &@"two-phase order — idempotent same-result retry" },
+    .{ .name = "two-phase order — poll pending then complete (worker pattern)", .func = &@"two-phase order — poll pending then complete (worker pattern)" },
+    .{ .name = "cancel order — client cancels, worker completion rejected", .func = &@"cancel order — client cancels, worker completion rejected" },
+    .{ .name = "cancel order — cancel already confirmed is rejected", .func = &@"cancel order — cancel already confirmed is rejected" },
+    .{ .name = "PRNG fuzz — full stack seed 1", .func = &@"PRNG fuzz — full stack seed 1" },
+    .{ .name = "PRNG fuzz — full stack seed 2", .func = &@"PRNG fuzz — full stack seed 2" },
+    .{ .name = "PRNG fuzz — full stack seed 3", .func = &@"PRNG fuzz — full stack seed 3" },
+};
+
+/// Current test name — set before each test so the panic handler
+/// can print which test was running when it crashed.
+var current_test: []const u8 = "";
+
+/// Runtime log level override — set by --log-debug to enable verbose
+/// framework output for debugging.
+var verbose: bool = false;
+
+/// Test name filter — if set, only tests containing this substring run.
+/// Set by passing a bare argument: `zig build test -- cancel`
+var filter: ?[]const u8 = null;
+
+pub fn main() void {
+    limit_address_space();
+
+    var args = std.process.args();
+    _ = args.next(); // skip argv[0]
+
+    while (args.next()) |arg| {
+        if (std.mem.eql(u8, arg, "--log-debug")) {
+            verbose = true;
+        } else {
+            filter = arg;
+        }
+    }
+
+    var passed: u32 = 0;
+    var skipped: u32 = 0;
+    const total: u32 = sim_tests.len;
+
+    inline for (sim_tests) |t| {
+        const match = if (filter) |f|
+            std.mem.indexOf(u8, t.name, f) != null
+        else
+            true;
+        if (match) {
+            current_test = t.name;
+            t.func();
+            passed += 1;
+        } else {
+            skipped += 1;
+        }
+    }
+
+    current_test = "";
+    if (filter != null) {
+        log.info("{}/{} passed ({} filtered out)", .{ passed, total - skipped, skipped });
+    } else {
+        log.info("{}/{} passed", .{ passed, total });
+    }
+
+    if (passed == 0 and filter != null) {
+        log.err("no tests matched filter: {s}", .{filter.?});
+        std.process.exit(1);
+    }
+}
+
+/// Custom panic handler — prints the failing test name, then delegates
+/// to the default handler for the full stack trace. The error return
+/// trace and return address are forwarded so the trace points to the
+/// actual failure site, not to this handler.
+pub fn panic(msg: []const u8, error_return_trace: ?*std.builtin.StackTrace, ret_addr: ?usize) noreturn {
+    @branchHint(.cold);
+    const stderr = std.io.getStdErr().writer();
+    if (current_test.len > 0) {
+        stderr.print("\nFAIL  {s}\n\n", .{current_test}) catch {};
+    }
+    // Delegate to the default handler for stack trace unwinding.
+    // It prints "panic: {msg}", dumps error_return_trace, and dumps
+    // the stack trace from ret_addr.
+    _ = error_return_trace;
+    std.debug.defaultPanic(msg, ret_addr orelse @returnAddress());
 }

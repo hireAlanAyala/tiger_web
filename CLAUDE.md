@@ -24,9 +24,14 @@ npm run dev                 # start sidecar + server on port 3000
 
 # --- Testing ---
 ./zig/zig build unit-test    # unit tests (message, state_machine, http, marks, codec)
-./zig/zig build test         # simulation tests (PRNG-driven, full stack)
+./zig/zig build test         # simulation tests (27 full-stack scenarios + PRNG fuzz)
+./zig/zig build test -- cancel                     # filter: only tests matching "cancel"
+./zig/zig build test -- --log-debug                # verbose: all framework log output
+./zig/zig build test -- --log-debug cancel         # both: verbose + filter
 ./zig/zig build fuzz -- state_machine              # random seed
 ./zig/zig build fuzz -- state_machine 12345        # specific seed
+./zig/zig build fuzz -- --events-max=1000 state_machine  # with options
+./zig/zig build fuzz -- smoke                      # all fuzzers, small event counts
 ./zig/zig build scan -- examples/ecommerce-ts/handlers/  # validate annotations
 ./zig/zig build fuzz -- --events-max=1000 state_machine  # with options
 ./zig/zig build fuzz -- smoke                      # all fuzzers, small event counts
@@ -97,7 +102,7 @@ Native commit handles storage, auth, WAL. Sidecar provides HTML.
 | `state_machine.zig` | `StateMachineType(Storage, Handlers)` — prefetch/commit pipeline, HandleResult, transaction boundaries |
 | `storage.zig` | `SqliteStorage` — SQLite backend with ReadView (prefetch) and WriteView (handle), prepared statements, WAL mode |
 | `sql.zig` | Shared SQL constants — single source of truth for write statements (INSERT/UPDATE per table) |
-| `sim.zig` | `SimIO` + `SqliteStorage(:memory:)` with PRNG-driven fault injection |
+| `sim.zig` | Simulation harness (executable, not test binary) — `SimIO` + `SqliteStorage(:memory:)` with PRNG-driven fault injection, per-scope log filtering, `--log-debug` and test name filter |
 | `fuzz_tests.zig` | Fuzz test dispatcher — single binary routing to all fuzzers, matches TB's fuzz_tests.zig |
 | `fuzz_lib.zig` | Shared fuzz utilities — `FuzzArgs` struct, `random_enum_weights`, matches TB's testing/fuzz.zig |
 | `fuzz.zig` | State machine fuzzer — bypasses HTTP, calls prefetch/commit directly |
@@ -182,7 +187,7 @@ Levels: ~70% debug (invisible by default), ~20% warn (recoverable operational is
 | `http.zig` | — | No logging (pure parser, no side effects) |
 | `message.zig` | — | No logging (types only) |
 | `marks.zig` | — | No logging (test infrastructure) |
-| `sim.zig` | — | No logging (test infrastructure) |
+| `sim.zig` | `.sim` | Custom `logFn` with per-scope filtering; `--log-debug` enables verbose |
 
 ### Where to log
 

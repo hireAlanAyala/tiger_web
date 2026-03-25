@@ -11,10 +11,33 @@
 
 const std = @import("std");
 const assert = std.debug.assert;
-const flags = @import("tiger_framework").flags;
+const flags = @import("framework/lib.zig").flags;
 const fuzz = @import("fuzz_lib.zig");
 
 const log = std.log.scoped(.fuzz);
+
+/// Per-scope filtering — silence framework infrastructure, keep fuzzer output.
+/// Matches sim.zig pattern: root owns std_options, custom logFn.
+pub const std_options: std.Options = .{
+    .log_level = .debug,
+    .logFn = fuzz_log,
+};
+
+fn fuzz_log(
+    comptime message_level: std.log.Level,
+    comptime scope: @Type(.enum_literal),
+    comptime format: []const u8,
+    args: anytype,
+) void {
+    const max_level: std.log.Level = switch (scope) {
+        .fuzz => .info,
+        .server, .connection, .storage, .wal, .io, .tracer, .app => .err,
+        else => .info,
+    };
+    if (@intFromEnum(message_level) <= @intFromEnum(max_level)) {
+        std.log.defaultLog(message_level, scope, format, args);
+    }
+}
 
 const Fuzzers = .{
     .state_machine = @import("fuzz.zig"),

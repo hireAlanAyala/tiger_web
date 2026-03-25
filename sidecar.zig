@@ -25,7 +25,7 @@ const std = @import("std");
 const assert = std.debug.assert;
 const message = @import("message.zig");
 const protocol = @import("protocol.zig");
-const http = @import("tiger_framework").http;
+const http = @import("framework/lib.zig").http;
 
 const log = std.log.scoped(.sidecar);
 
