@@ -1,6 +1,12 @@
 // Cross-language round-trip test for the binary row format.
 // Hand-constructed binary matches what protocol.zig + storage.zig produce.
-// Run: npx tsx generated/serde_test.ts
+//
+// Run:
+//   ./zig/zig build unit-test   # generates /tmp/tiger_row_test.bin
+//   npx tsx generated/serde_test.ts
+//
+// The Zig tests MUST run first to generate the cross-language vector.
+// CI must enforce this ordering.
 
 import { readRowSet, writeParams, writeSqlDeclarations, writeWriteQueue, TypeTag } from "./serde.ts";
 import { readFileSync, existsSync } from "fs";

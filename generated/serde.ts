@@ -163,15 +163,18 @@ export function writeParams(buf: DataView, offset: number, params: unknown[]): n
   return pos - offset;
 }
 
+const I64_MAX = 2n ** 63n - 1n;
+const I64_MIN = -(2n ** 63n);
+
 /**
  * Write a single typed parameter value.
  * JS type → wire type mapping:
- *   number → integer (if integer) or float
- *   string → text
+ *   number → integer (if safe integer) or float
+ *   string → text (length must fit u16)
  *   boolean → integer (0 or 1)
- *   Uint8Array → blob
+ *   Uint8Array → blob (length must fit u16)
  *   null/undefined → null
- *   bigint → integer (clamped to i64)
+ *   bigint → integer (must fit i64)
  */
 function writeTypedParam(buf: DataView, pos: number, val: unknown): number {
   if (val === null || val === undefined) {
@@ -182,7 +185,6 @@ function writeTypedParam(buf: DataView, pos: number, val: unknown): number {
   if (typeof val === "boolean") {
     buf.setUint8(pos, TypeTag.integer);
     pos += 1;
-    // Write as i64 LE: 0 or 1.
     buf.setInt32(pos, val ? 1 : 0, true);
     buf.setInt32(pos + 4, 0, true);
     return pos + 8;
@@ -192,7 +194,6 @@ function writeTypedParam(buf: DataView, pos: number, val: unknown): number {
     if (Number.isInteger(val) && Math.abs(val) <= Number.MAX_SAFE_INTEGER) {
       buf.setUint8(pos, TypeTag.integer);
       pos += 1;
-      // i64 little-endian from a JS number.
       const lo = val & 0xFFFFFFFF;
       const hi = Math.floor(val / 0x100000000);
       buf.setUint32(pos, lo >>> 0, true);
@@ -207,6 +208,9 @@ function writeTypedParam(buf: DataView, pos: number, val: unknown): number {
   }
 
   if (typeof val === "bigint") {
+    if (val > I64_MAX || val < I64_MIN) {
+      throw new Error("bigint param exceeds i64 range: " + val);
+    }
     buf.setUint8(pos, TypeTag.integer);
     pos += 1;
     buf.setBigInt64(pos, val, true);
@@ -217,6 +221,9 @@ function writeTypedParam(buf: DataView, pos: number, val: unknown): number {
     buf.setUint8(pos, TypeTag.text);
     pos += 1;
     const encoded = _encoder.encode(val);
+    if (encoded.length > 0xFFFF) {
+      throw new Error("text param exceeds u16 max length: " + encoded.length);
+    }
     buf.setUint16(pos, encoded.length, false);
     pos += 2;
     new Uint8Array(buf.buffer, buf.byteOffset + pos, encoded.length).set(encoded);
@@ -226,6 +233,9 @@ function writeTypedParam(buf: DataView, pos: number, val: unknown): number {
   if (val instanceof Uint8Array) {
     buf.setUint8(pos, TypeTag.blob);
     pos += 1;
+    if (val.length > 0xFFFF) {
+      throw new Error("blob param exceeds u16 max length: " + val.length);
+    }
     buf.setUint16(pos, val.length, false);
     pos += 2;
     new Uint8Array(buf.buffer, buf.byteOffset + pos, val.length).set(val);
@@ -266,15 +276,21 @@ export function writeSqlDeclarations(buf: DataView, offset: number, declarations
   pos += 1;
 
   for (const decl of declarations) {
-    // Key.
+    // Key — u8 length.
     const keyBytes = _encoder.encode(decl.key);
+    if (keyBytes.length > 0xFF) {
+      throw new Error("declaration key exceeds u8 max length: " + decl.key);
+    }
     buf.setUint8(pos, keyBytes.length);
     pos += 1;
     new Uint8Array(buf.buffer, buf.byteOffset + pos, keyBytes.length).set(keyBytes);
     pos += keyBytes.length;
 
-    // SQL.
+    // SQL — u16 length.
     const sqlBytes = _encoder.encode(decl.sql);
+    if (sqlBytes.length > 0xFFFF) {
+      throw new Error("declaration SQL exceeds u16 max length: " + sqlBytes.length);
+    }
     buf.setUint16(pos, sqlBytes.length, false);
     pos += 2;
     new Uint8Array(buf.buffer, buf.byteOffset + pos, sqlBytes.length).set(sqlBytes);
@@ -320,8 +336,11 @@ export function writeWriteQueue(buf: DataView, offset: number, writes: WriteEntr
   pos += 1;
 
   for (const entry of writes) {
-    // SQL.
+    // SQL — u16 length.
     const sqlBytes = _encoder.encode(entry.sql);
+    if (sqlBytes.length > 0xFFFF) {
+      throw new Error("write SQL exceeds u16 max length: " + sqlBytes.length);
+    }
     buf.setUint16(pos, sqlBytes.length, false);
     pos += 2;
     new Uint8Array(buf.buffer, buf.byteOffset + pos, sqlBytes.length).set(sqlBytes);
