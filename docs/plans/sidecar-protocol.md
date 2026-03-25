@@ -759,13 +759,9 @@ state for the same input.
 14. ~~Delete JSON helpers from `sidecar.zig`~~ ✓ (deleted during rewrite)
 15. ~~Cross-pipeline correctness test — bidirectional + disconnect~~ ✓
 
-## Status
+## Status — COMPLETE
 
-All 15 delivery steps are complete.
-
-Remaining follow-up: replay.zig needs a rewrite for the SQL-write WAL.
-The replay tool reads entries and re-executes SQL (no handlers needed).
-Excluded from the build until rewritten.
+All 15 delivery steps are done. No remaining follow-ups.
 
 What's built and proven:
 - Binary row format: defined, fuzzed (10K events), cross-language verified
@@ -776,6 +772,10 @@ What's built and proven:
 - Binary dispatch: TS speaks binary, shared frame buffer, validated operations
 - Sidecar fuzzer: 7 paths including full storage path, 10K events, no crashes
 - SQL validation: scanner checks SELECT/INSERT at build time, flags non-literals
-- Comptime sizing: route request + handle response worst cases proven at compile time
+- Comptime sizing: route request + handle response + WAL entry worst cases proven
 - Cross-language: enum mappings + protocol constants verified between Zig and TS
 - Cross-pipeline: native create → sidecar read, sidecar create → native read, disconnect
+- SQL-write WAL: variable-size entries, checksum verification, seeded corruption test
+- WAL recording: WriteView captures SQL + params alongside executing
+- Replay tool: verify, inspect, replay, query — rewritten for SQL-write format
+- Replay fuzzer: write → replay round trip, 2551 entries

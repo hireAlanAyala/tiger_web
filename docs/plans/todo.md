@@ -3,8 +3,8 @@
 1. ~~**Sidecar protocol rebuild**~~ — DONE 2026-03-25
    Self-describing binary rows, two pipelines (native SM + sidecar),
    SQL-write WAL, 24 TS handler files, binary dispatch, fuzzed,
-   cross-language verified. See `docs/plans/sidecar-protocol.md`.
-   Follow-up: replay.zig rewrite for SQL-write WAL.
+   cross-language verified, replay tool rewritten.
+   See `docs/plans/sidecar-protocol.md`.
 
 2. **Worker integration** — `docs/plans/worker.md` — DEFERRED
    worker.fetch in prefetch (framework resolves across ticks).
