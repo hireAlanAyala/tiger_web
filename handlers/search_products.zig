@@ -33,8 +33,8 @@ pub fn route(method: t.http.Method, raw_path: []const u8, body: []const u8) ?t.M
 pub fn prefetch(storage: anytype, msg: *const t.Message) ?Prefetch {
     _ = msg;
     return .{ .products = storage.query_all(t.ProductRow, t.list_max,
-        "SELECT id, name, description, price_cents, inventory, version, active FROM products WHERE active = 1 ORDER BY id;",
-        .{}) };
+        "SELECT id, name, description, price_cents, inventory, version, active FROM products WHERE active = 1 ORDER BY id LIMIT ?1;",
+        .{@as(u32, t.list_max)}) };
 }
 
 // [handle] .search_products
