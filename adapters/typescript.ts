@@ -151,6 +151,50 @@ for (const ann of manifest.annotations) {
   }
 }
 
+// Sort routes by specificity: literal segments before param segments at each
+// position, longer patterns before shorter. This ensures /products/search is
+// tried before /products/:id — a literal "search" is more specific than a
+// param capture. Matches how every HTTP router resolves ambiguity.
+//
+// Zig's native pipeline uses comptime inline for (declaration order) and
+// asserts no duplicate matches. We sort at generation time for determinism
+// regardless of filesystem directory listing order.
+function routeSpecificity(pattern: string): number[] {
+  if (pattern === "/") return [0]; // root is least specific
+  return pattern.slice(1).split("/").map(seg =>
+    seg.startsWith(":") ? 0 : 1  // literal=1 (more specific), param=0
+  );
+}
+
+routeTable.sort((a, b) => {
+  // Group by method first.
+  if (a.method !== b.method) return a.method < b.method ? -1 : 1;
+
+  const specA = routeSpecificity(a.pattern);
+  const specB = routeSpecificity(b.pattern);
+
+  // More segments = more specific (try first).
+  if (specA.length !== specB.length) return specB.length - specA.length;
+
+  // Same length: compare segment-by-segment. Literal beats param.
+  for (let i = 0; i < specA.length; i++) {
+    if (specA[i] !== specB[i]) return specB[i] - specA[i]; // higher specificity first
+  }
+
+  // Identical specificity — stable sort by operation name for determinism.
+  return a.operation < b.operation ? -1 : 1;
+});
+
+// Detect duplicate routes: same method + pattern from different operations.
+for (let i = 0; i < routeTable.length - 1; i++) {
+  const a = routeTable[i];
+  const b = routeTable[i + 1];
+  if (a.method === b.method && a.pattern === b.pattern) {
+    console.error(`error: duplicate route: ${a.method.toUpperCase()} ${a.pattern} — ${a.operation} vs ${b.operation}`);
+    process.exit(1);
+  }
+}
+
 // Generate route table. matchRoute is imported from routing.ts (shared module,
 // verified by cross-language test vectors in route_match_vectors.json).
 out += `// --- Route matching ---
