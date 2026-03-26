@@ -91,6 +91,38 @@ pub fn main(_: std.mem.Allocator, args: FuzzArgs) !void {
     var op_weights = fuzz_lib.random_enum_weights(&prng, message.Operation);
     op_weights.root = 0; // .root is a WAL sentinel, not an application operation.
 
+    // Dependency guarantees: if an operation has non-zero weight, its
+    // prerequisites must too. Otherwise the operation always returns null
+    // (no entities to reference) and coverage assertion fires.
+    // create_order, complete_order, cancel_order, get_order, list_orders → need products
+    // add/remove_collection_member → need products AND collections
+    // get_product, delete_product, update_product, get_product_inventory, transfer_inventory → need products
+    // get_collection, delete_collection → need collections
+    if (op_weights.create_order > 0 or
+        op_weights.complete_order > 0 or
+        op_weights.cancel_order > 0 or
+        op_weights.get_product > 0 or
+        op_weights.delete_product > 0 or
+        op_weights.update_product > 0 or
+        op_weights.get_product_inventory > 0 or
+        op_weights.transfer_inventory > 0 or
+        op_weights.search_products > 0)
+    {
+        op_weights.create_product = @max(op_weights.create_product, 1);
+    }
+    if (op_weights.get_collection > 0 or
+        op_weights.delete_collection > 0 or
+        op_weights.add_collection_member > 0 or
+        op_weights.remove_collection_member > 0)
+    {
+        op_weights.create_collection = @max(op_weights.create_collection, 1);
+    }
+    if (op_weights.add_collection_member > 0 or
+        op_weights.remove_collection_member > 0)
+    {
+        op_weights.create_product = @max(op_weights.create_product, 1);
+    }
+
     var coverage = OperationCoverage{};
     var features = FeatureCoverage{};
 
