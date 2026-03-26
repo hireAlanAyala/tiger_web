@@ -93,8 +93,19 @@ The CFO code is ported but needs a machine running `cfo_supervisor.sh`
 continuously to actually fuzz. Without this, the infrastructure exists
 but produces no seeds.
 
+### Machine sizing
+TB runs "a cluster of machines" (HACKING.md) — each identifies itself
+by hostname in git commits (`use_hostname = true`). No specs in their
+codebase. Their VOPR fuzzers are CPU-hungry (30min timeout, weight 8),
+so they likely use 16+ core machines.
+
+Our fuzzers are single-process, sub-minute, no massive comptime
+instantiation. 2-4 cores is plenty — each core runs one fuzzer in
+parallel. A 2-vCPU machine running 2 fuzzers continuously produces
+~3,800 seeds/hour (2 fuzzers × ~30s average × 60min).
+
 ### Setup
-1. Provision a VM (Hetzner CX22 ~€4/mo, or Oracle free tier ARM)
+1. Provision a VM (Hetzner CX22 ~€4/mo 2 vCPU, or Oracle free tier 4 ARM cores)
 2. Install: git, C compiler (for sqlite3 linkage)
 3. `scp scripts/cfo_supervisor.sh user@machine:~/`
 4. Generate DEVHUBDB_PAT (GitHub classic token, `repo` scope)
