@@ -2,7 +2,8 @@
   "private": true,
   "scripts": {
     "build": "../../tiger-web build",
-    "dev": "../../tiger-web dev"
+    "dev": "../../tiger-web dev",
+    "test": "npx tsx test.ts"
   },
   "devDependencies": {
     "tsx": "^4",
