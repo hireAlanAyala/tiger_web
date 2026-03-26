@@ -640,9 +640,14 @@ fn run_fuzzers_prepare_tasks(tasks: *Tasks, shell: *Shell, gh_token: ?[]const u8
 
             // Fuzz an independent clone of the repository, so that CFO and the fuzzer could be on
             // different branches (to fuzz PRs and releases).
-            break :commit try run_fuzzers_prepare_repository(shell, .{
+            // Skip gracefully if the branch doesn't exist yet — release is only
+            // created when we cut a release, not during active development.
+            break :commit run_fuzzers_prepare_repository(shell, .{
                 .branch = @tagName(branch),
-            });
+            }) catch |err| {
+                log.info("skipping branch '{s}': {}", .{ @tagName(branch), err });
+                continue;
+            };
         };
 
         // Only add fuzzers that also exist on the branch we are fuzzing.
