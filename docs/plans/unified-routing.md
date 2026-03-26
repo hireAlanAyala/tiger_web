@@ -1,6 +1,12 @@
 # Plan: Unified Annotation Routing — One Source of Truth
 
-## Status: Ready to implement
+## Status: Implemented
+
+All steps complete except:
+- Step 3 (remove handlers tuple): kept — PrefetchCache type construction needs it
+- Step 5 (build.zig scan dependency): not added — generated files committed,
+  CI freshness check instead (TB pattern)
+- Verification #6 (sidecar end-to-end): blocked on integration test suite
 
 ### History
 1. Scanner was extended to emit `routes.generated.zig` from `// match` annotations
