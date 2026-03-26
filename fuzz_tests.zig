@@ -44,6 +44,8 @@ const Fuzzers = .{
     .replay = @import("replay_fuzz.zig"),
     .sidecar = @import("sidecar_fuzz.zig"),
     .row_format = @import("row_format_fuzz.zig"),
+    // A fuzzer that intentionally fails, to test fuzzing infrastructure itself
+    .canary = {},
     // Quickly run all fuzzers as a smoke test
     .smoke = {},
 };
@@ -59,6 +61,15 @@ const CLIArgs = struct {
 };
 
 pub fn main() !void {
+    fuzz.limit_ram();
+
+    var gpa_allocator: std.heap.GeneralPurposeAllocator(.{}) = .{};
+    const gpa = gpa_allocator.allocator();
+    defer {
+        // Leak detection — catches fuzzers that allocate without freeing.
+        if (gpa_allocator.deinit() == .leak) @panic("memory leak detected in fuzzer");
+    }
+
     var args = std.process.args();
     const cli_args = flags.parse(&args, CLIArgs);
 
@@ -66,17 +77,18 @@ pub fn main() !void {
         .smoke => {
             assert(cli_args.seed == null);
             assert(cli_args.events_max == null);
-            try main_smoke();
+            try main_smoke(gpa);
         },
-        else => try main_single(cli_args),
+        else => try main_single(gpa, cli_args),
     }
 }
 
-fn main_smoke() !void {
+fn main_smoke(gpa: std.mem.Allocator) !void {
     var timer_all = try std.time.Timer.start();
     inline for (comptime std.enums.values(FuzzersEnum)) |fuzzer| {
         const events_max: ?usize = switch (fuzzer) {
             .smoke => continue,
+            .canary => continue,
             .state_machine => 10_000,
             .replay => 5_000,
             .sidecar => 5_000,
@@ -84,7 +96,7 @@ fn main_smoke() !void {
         };
 
         var timer_single = try std.time.Timer.start();
-        try @field(Fuzzers, @tagName(fuzzer)).main(std.heap.page_allocator, .{
+        try @field(Fuzzers, @tagName(fuzzer)).main(gpa, .{
             .seed = 123,
             .events_max = events_max,
         });
@@ -99,7 +111,7 @@ fn main_smoke() !void {
     log.info("done in {}", .{std.fmt.fmtDuration(timer_all.lap())});
 }
 
-fn main_single(cli_args: CLIArgs) !void {
+fn main_single(gpa: std.mem.Allocator, cli_args: CLIArgs) !void {
     assert(cli_args.fuzzer != .smoke);
 
     const seed = cli_args.seed orelse std.crypto.random.int(u64);
@@ -108,7 +120,14 @@ fn main_single(cli_args: CLIArgs) !void {
     var timer = try std.time.Timer.start();
     switch (cli_args.fuzzer) {
         .smoke => unreachable,
-        inline else => |fuzzer| try @field(Fuzzers, @tagName(fuzzer)).main(std.heap.page_allocator, .{
+        .canary => {
+            // Intentionally fails ~1% of seeds. Tests fuzzing infrastructure
+            // (CI failure handling, seed reporting). Matches TB's canary.
+            if (seed % 100 == 0) {
+                std.process.exit(1);
+            }
+        },
+        inline else => |fuzzer| try @field(Fuzzers, @tagName(fuzzer)).main(gpa, .{
             .seed = seed,
             .events_max = cli_args.events_max,
         }),

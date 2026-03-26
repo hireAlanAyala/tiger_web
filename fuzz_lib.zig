@@ -1,6 +1,7 @@
 //! Shared utilities for fuzz tests.
 
 const std = @import("std");
+const builtin = @import("builtin");
 const assert = std.debug.assert;
 const PRNG = @import("framework/lib.zig").prng;
 
@@ -8,6 +9,21 @@ pub const FuzzArgs = struct {
     seed: u64,
     events_max: ?usize,
 };
+
+const GiB = 1024 * 1024 * 1024;
+
+/// Cap virtual address space so a leaking fuzzer OOMs fast instead of
+/// swapping the machine. Matches TigerBeetle's testing/fuzz.zig.
+pub fn limit_ram() void {
+    if (builtin.target.os.tag != .linux) return;
+
+    std.posix.setrlimit(.AS, .{
+        .cur = 20 * GiB,
+        .max = 20 * GiB,
+    }) catch |err| {
+        std.log.scoped(.fuzz).warn("failed to setrlimit address space: {}", .{err});
+    };
+}
 
 /// Return a weight distribution for use with `PRNG.enum_weighted`.
 ///
