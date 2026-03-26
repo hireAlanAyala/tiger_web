@@ -13,7 +13,7 @@
 //! by handler-specific tests and storage round-trip tests.
 //!
 //! We trust the configured database to store and return data correctly.
-//! See docs/plans/db-configuration.md.
+//! See decisions/storage-ownership.md.
 //!
 //! This file is separate from state_machine.zig so that files importing
 //! the SM module (protocol, sidecar) don't transitively pull

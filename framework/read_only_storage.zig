@@ -28,7 +28,7 @@ pub fn assertReadView(comptime Storage: type) void {
     if (!@hasDecl(Storage, "ReadView")) {
         @compileError(@typeName(Storage) ++ " must export pub const ReadView — " ++
             "a type exposing only read methods for the prefetch phase. " ++
-            "See docs/plans/db-configuration.md.");
+            "See decisions/storage-ownership.md.");
     }
 }
 

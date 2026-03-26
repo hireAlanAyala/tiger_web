@@ -198,7 +198,7 @@ pub fn translate(method: http.Method, path: []const u8, body: []const u8) ?Messa
 // These functions own the handler dispatch logic.
 // =====================================================================
 
-// ReadOnlyStorage enforcement is now via Storage.ReadView — see db-configuration.md.
+// ReadOnlyStorage enforcement is now via Storage.ReadView — see decisions/storage-ownership.md.
 
 /// Phase 1: dispatch to handler.prefetch() via ReadOnlyStorage.
 /// Returns the handler's Prefetch result wrapped in the PrefetchCache union.
