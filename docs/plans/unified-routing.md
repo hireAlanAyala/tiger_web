@@ -75,7 +75,7 @@ pub fn route(method: t.http.Method, raw_path: []const u8, body: []const u8) ?t.M
 ```zig
 // [route] .get_product
 // match GET /products/:id
-pub fn route(params: t.RouteParams, body: []const u8) ?t.Message {
+pub fn route(params: t.RouteParams, path: []const u8, body: []const u8) ?t.Message {
     const id = t.stdx.parse_uuid(params.get("id") orelse return null) orelse return null;
     // ... body validation ...
 }
@@ -85,9 +85,38 @@ pub fn route(params: t.RouteParams, body: []const u8) ?t.Message {
 - `route_pattern` deleted — framework matches pattern from annotation
 - `match_route` call deleted — framework already matched, passes extracted params
 - `method` param removed — framework verified method before calling
-- `raw_path` param removed — framework extracted params, handler doesn't need raw path
 - `params` param added — pre-extracted by framework, matches TypeScript `req.params`
+- `path` stays — full path including query string, for handlers that need query
+  param access (e.g., `list_products` checks `?q=`). Matches TypeScript `req.path`.
 - `body` stays — handler parses JSON body for POST/PUT payloads
+
+## Gaps and findings from exploration
+
+### Query string access
+`list_products` and `search_products` use `raw_path` for query string access
+(`?q=` disambiguation). The simplified `route(params, body)` signature drops
+`raw_path`. Fix: use `route(params, path, body)` — `path` is the full path
+including query string, matching TypeScript's `req.path`. Only 2 of 24
+handlers use it; the other 22 ignore it with `_ = path`.
+
+### Handlers tuple is routing-only
+The prefetch/handle/render dispatch in `app.zig` uses direct `@import` in
+switch arms (lines 214-338), NOT the handlers tuple. The tuple is only used
+by `translate()` (line 169). Removing it is safe — the switch statements
+are independent.
+
+### No external references to route constants
+`route_method`/`route_pattern` are only referenced in:
+- `app.zig` translate() (lines 171-175) — being replaced
+- `annotation_scanner.zig` cross-validation (lines 1926-1976) — remove when
+  constants are removed
+No sim.zig, codec.zig, or test file references. Clean removal.
+
+### Scanner already cross-validates
+The scanner (lines 1926-1976) already checks that `route_method` constants
+match `// match` annotations. This was designed in anticipation of
+unification. Remove this validation when constants are removed — the
+annotations become the only source, no cross-check needed.
 
 ## Implementation steps
 
