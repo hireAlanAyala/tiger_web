@@ -1108,6 +1108,13 @@ fn emit_manifest(
             @tagName(ann.phase), ann.operation, ann.file, ann.line, if (ann.has_body) "true" else "false",
         });
 
+        // Include route match for translate (route) phase annotations.
+        if (ann.route_match) |rm| {
+            try w.print(", \"route_match\": {{ \"method\": \"{s}\", \"pattern\": \"{s}\" }}", .{
+                @tagName(rm.method), rm.pattern,
+            });
+        }
+
         // Include statuses for execute (handle) phase annotations.
         if (ann.phase == .execute) {
             for (op_statuses) |os| {

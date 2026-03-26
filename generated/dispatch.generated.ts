@@ -141,6 +141,70 @@ const renderHandlers: Record<string, Function> = {
   'create_order': createOrder.render,
 };
 
+// --- Route matching ---
+// Generated from // match directives. Mirrors framework/parse.zig match_route().
+// Method + pattern matching with :param extraction into req.params.
+
+interface RouteTableEntry {
+  operation: string;
+  method: string;
+  segments: string[];  // pre-split pattern segments (without leading /)
+}
+
+const routeTable: RouteTableEntry[] = [
+  { operation: 'get_collection', method: 'get', segments: ['collections', ':id'] },
+  { operation: 'cancel_order', method: 'post', segments: ['orders', ':id', 'cancel'] },
+  { operation: 'get_product', method: 'get', segments: ['products', ':id'] },
+  { operation: 'get_product_inventory', method: 'get', segments: ['products', ':id', 'inventory'] },
+  { operation: 'list_products', method: 'get', segments: ['products'] },
+  { operation: 'create_product', method: 'post', segments: ['products'] },
+  { operation: 'create_collection', method: 'post', segments: ['collections'] },
+  { operation: 'page_load_login', method: 'get', segments: ['login'] },
+  { operation: 'request_login_code', method: 'post', segments: ['login', 'request'] },
+  { operation: 'list_orders', method: 'get', segments: ['orders'] },
+  { operation: 'remove_collection_member', method: 'delete', segments: ['collections', ':id', 'members', ':sub_id'] },
+  { operation: 'logout', method: 'post', segments: ['logout'] },
+  { operation: 'add_collection_member', method: 'post', segments: ['collections', ':id', 'members'] },
+  { operation: 'delete_product', method: 'delete', segments: ['products', ':id'] },
+  { operation: 'search_products', method: 'get', segments: ['products', 'search'] },
+  { operation: 'list_collections', method: 'get', segments: ['collections'] },
+  { operation: 'delete_collection', method: 'delete', segments: ['collections', ':id'] },
+  { operation: 'update_product', method: 'put', segments: ['products', ':id'] },
+  { operation: 'page_load_dashboard', method: 'get', segments: [] },
+  { operation: 'get_order', method: 'get', segments: ['orders', ':id'] },
+  { operation: 'transfer_inventory', method: 'post', segments: ['products', ':id', 'transfer-inventory', ':sub_id'] },
+  { operation: 'verify_login_code', method: 'post', segments: ['login', 'verify'] },
+  { operation: 'complete_order', method: 'post', segments: ['orders', ':id', 'complete'] },
+  { operation: 'create_order', method: 'post', segments: ['orders'] },
+];
+
+// Match a request path against a pattern, extracting :param values.
+// Returns params object or null if no match. Port of framework/parse.zig match_route().
+function matchRoute(path: string, entry: RouteTableEntry): Record<string, string> | null {
+  if (path.length === 0 || path[0] !== '/') return null;
+
+  // Root pattern matches root path only.
+  if (entry.segments.length === 0) {
+    return path === '/' ? {} : null;
+  }
+
+  const pathSegs = path.slice(1).split('/');
+  if (pathSegs.length !== entry.segments.length) return null;
+
+  const params: Record<string, string> = {};
+  for (let i = 0; i < entry.segments.length; i++) {
+    const pat = entry.segments[i];
+    const val = pathSegs[i];
+    if (pat.startsWith(':')) {
+      if (val.length === 0) return null;
+      params[pat.slice(1)] = val;
+    } else {
+      if (pat !== val) return null;
+    }
+  }
+  return params;
+}
+
 // --- Binary protocol ---
 // Wire format: [4-byte BE length][u8 message_tag][payload]
 // Three round trips per request:
@@ -210,17 +274,35 @@ const server = net.createServer((conn) => {
       const body = _decoder.decode(frame.subarray(pos, pos + bodyLen));
 
       const methods = ['', 'get', 'post', 'put', 'delete'];
-      const req = { method: methods[method] || 'get', path, body, params: {} };
+      const methodStr = methods[method] || 'get';
 
-      // Try each route handler.
-      let result: any = null;
-      for (const handler of Object.values(routeHandlers)) {
-        const r = handler(req);
-        if (r !== null) { result = r; break; }
+      // Route matching — filter by method, then match pattern with param extraction.
+      // Mirrors framework/parse.zig match_route() + app.zig translate() dispatch.
+      let matchedEntry: RouteTableEntry | null = null;
+      let matchedParams: Record<string, string> = {};
+      for (const entry of routeTable) {
+        if (entry.method !== methodStr) continue;
+        const params = matchRoute(path, entry);
+        if (params !== null) {
+          matchedEntry = entry;
+          matchedParams = params;
+          break;
+        }
       }
 
-      if (!result) {
+      if (!matchedEntry) {
         // Not found: [tag][found=0]
+        sendFrame(conn, new Uint8Array([MessageTag.route_prefetch_response, 0]));
+        return;
+      }
+
+      // Call the route handler with populated params.
+      const req = { method: methodStr, path, body, params: matchedParams };
+      const routeHandler = routeHandlers[matchedEntry.operation];
+      const result: any = routeHandler ? routeHandler(req) : null;
+
+      if (!result) {
+        // Handler declined (e.g., additional validation failed).
         sendFrame(conn, new Uint8Array([MessageTag.route_prefetch_response, 0]));
         return;
       }
