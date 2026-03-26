@@ -152,31 +152,57 @@ pub var sidecar: ?SidecarClient = null;
 /// request doesn't map to a valid operation.
 ///
 /// Tries all handler route functions. Fast-skips via route_method/route_pattern
-/// (comptime-asserted on every handler), then calls route() for the full match.
-/// Runtime assert catches duplicate matches — pair assertion with the scanner's
-/// duplicate route pattern check.
+/// Route dispatch using the generated route table (single source of truth).
+/// The scanner generates routes.generated.zig from // match annotations.
+/// Pattern matching happens here (comptime-inlined). Handlers are called
+/// for additional validation (body parsing, field checking).
+/// Runtime assert catches duplicate matches — pair assertion with the
+/// generated table's comptime duplicate check.
 pub fn translate(method: http.Method, path: []const u8, body: []const u8) ?Message {
     if (sidecar) |*client| return client.translate(method, path, body);
 
     const parse = @import("framework/parse.zig");
+    const gen = @import("generated/routes.generated.zig");
 
     var result: ?Message = null;
-    inline for (handlers) |H| {
-        comptime {
-            assert(@hasDecl(H, "route_method"));
-            assert(@hasDecl(H, "route_pattern"));
-        }
-
-        const skip = method != H.route_method or parse.match_route(path, H.route_pattern) == null;
-
-        if (!skip) {
-            if (H.route(method, path, body)) |msg| {
-                assert(result == null); // duplicate route match
-                result = msg;
+    inline for (gen.routes) |route| {
+        if (method == route.method) {
+            if (parse.match_route(path, route.pattern) != null) {
+                // Look up handler module by operation and call route().
+                const H = comptime handler_for_operation(route.operation);
+                if (H.route(method, path, body)) |msg| {
+                    assert(result == null); // duplicate route match
+                    result = msg;
+                }
             }
         }
     }
     return result;
+}
+
+/// Comptime lookup: map Operation → handler module from the handlers tuple.
+/// Matches by route_method + route_pattern against the generated route table.
+/// Will be simplified when handlers drop route_method/route_pattern constants
+/// in favor of a direct operation declaration.
+fn handler_for_operation(comptime op: message.Operation) type {
+    @setEvalBranchQuota(10_000);
+    const gen = @import("generated/routes.generated.zig");
+    // Find the route entry for this operation.
+    const route = comptime for (gen.routes) |r| {
+        if (r.operation == op) break r;
+    } else @compileError("no route for operation: " ++ @tagName(op));
+
+    // Find the handler whose route_method + route_pattern match.
+    inline for (handlers) |H| {
+        if (comptime @hasDecl(H, "route_method") and @hasDecl(H, "route_pattern")) {
+            if (H.route_method == route.method and
+                std.mem.eql(u8, H.route_pattern, route.pattern))
+            {
+                return H;
+            }
+        }
+    }
+    @compileError("no handler module for operation: " ++ @tagName(op));
 }
 
 // =====================================================================

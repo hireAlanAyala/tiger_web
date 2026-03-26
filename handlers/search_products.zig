@@ -9,15 +9,15 @@ pub const Prefetch = struct { products: ?t.BoundedList(t.ProductRow, t.list_max)
 pub const Context = t.HandlerContext(Prefetch, t.Operation.EventType(.search_products), t.Identity, Status);
 
 pub const route_method = t.http.Method.get;
-pub const route_pattern = "/products";
+pub const route_pattern = "/products/search";
 
 // [route] .search_products
-// match GET /products
+// match GET /products/search
 pub fn route(method: t.http.Method, raw_path: []const u8, body: []const u8) ?t.Message {
     _ = method; _ = body;
     if (t.match_route(raw_path, route_pattern) == null) return null;
 
-    // Require ?q= query param (without it, list_products handles this path).
+    // Extract ?q= query param from the full path.
     const query_sep = std.mem.indexOf(u8, raw_path, "?");
     const query_string = if (query_sep) |q| raw_path[q + 1 ..] else "";
     const q = t.parse.query_param(query_string, "q") orelse return null;
