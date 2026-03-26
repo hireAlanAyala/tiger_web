@@ -51,7 +51,10 @@ comptime {
     // Assert: every Operation has at least one route entry.
     // If a handler file exists without a // match annotation, this catches it.
     for (enums.values(message.Operation)) |op| {
-        if (op == .root) continue; // sentinel
+        // .root is the zero-valued sentinel in message.Operation — it's not
+        // a real operation and has no handler. If more sentinels are added,
+        // they must be listed here.
+        if (op == .root) continue;
         var found = false;
         for (routes) |r| {
             if (r.operation == op) { found = true; break; }

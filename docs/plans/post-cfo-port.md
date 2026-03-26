@@ -38,10 +38,11 @@ We should match this pattern: `zig build ci -- <mode>`.
 #### CI modes (matching TB's pattern)
 
 **`zig build ci -- test` (default):**
+- `zig build scan` — regenerate routes.generated.zig + manifest.json
+- `git diff --exit-code generated/` — freshness check (committed files must match)
 - `zig build test` — sim tests (27 scenarios + PRNG fuzz)
 - `zig build unit-test` — unit tests
 - `zig build fuzz -- smoke` — all 4 fuzzers, small event counts
-- `zig build scan` — annotation scanner
 
 **`zig build ci -- fuzz`:**
 - `zig build fuzz -- smoke`

@@ -1319,7 +1319,10 @@ fn emit_routes_zig(
         \\    // Assert: every Operation has at least one route entry.
         \\    // If a handler file exists without a // match annotation, this catches it.
         \\    for (enums.values(message.Operation)) |op| {
-        \\        if (op == .root) continue; // sentinel
+        \\        // .root is the zero-valued sentinel in message.Operation — it's not
+        \\        // a real operation and has no handler. If more sentinels are added,
+        \\        // they must be listed here.
+        \\        if (op == .root) continue;
         \\        var found = false;
         \\        for (routes) |r| {
         \\            if (r.operation == op) { found = true; break; }
@@ -1511,6 +1514,62 @@ test "match: leading whitespace" {
     const result = parse_match_directive("  // match GET /products", "//");
     try std.testing.expect(result != null);
     try std.testing.expectEqual(result.?.method, .get);
+}
+
+// --- parse_query_directive tests ---
+
+test "query: valid name" {
+    const result = parse_query_directive("// query q", "//");
+    try std.testing.expect(result != null);
+    try std.testing.expect(std.mem.eql(u8, result.?, "q"));
+}
+
+test "query: underscore name" {
+    const result = parse_query_directive("// query page_size", "//");
+    try std.testing.expect(result != null);
+    try std.testing.expect(std.mem.eql(u8, result.?, "page_size"));
+}
+
+test "query: leading whitespace" {
+    const result = parse_query_directive("  // query q", "//");
+    try std.testing.expect(result != null);
+    try std.testing.expect(std.mem.eql(u8, result.?, "q"));
+}
+
+test "query: trailing whitespace" {
+    const result = parse_query_directive("// query q  ", "//");
+    try std.testing.expect(result != null);
+    try std.testing.expect(std.mem.eql(u8, result.?, "q"));
+}
+
+test "query: python comment prefix" {
+    const result = parse_query_directive("# query q", "#");
+    try std.testing.expect(result != null);
+    try std.testing.expect(std.mem.eql(u8, result.?, "q"));
+}
+
+test "query: rejects empty name" {
+    try std.testing.expect(parse_query_directive("// query ", "//") == null);
+}
+
+test "query: rejects hyphenated name" {
+    try std.testing.expect(parse_query_directive("// query q-name", "//") == null);
+}
+
+test "query: rejects dotted name" {
+    try std.testing.expect(parse_query_directive("// query q.name", "//") == null);
+}
+
+test "query: rejects non-query comment" {
+    try std.testing.expect(parse_query_directive("// some comment", "//") == null);
+}
+
+test "query: rejects match directive" {
+    try std.testing.expect(parse_query_directive("// match GET /products", "//") == null);
+}
+
+test "query: rejects wrong prefix" {
+    try std.testing.expect(parse_query_directive("# query q", "//") == null);
 }
 
 // --- validate_route_pattern tests ---

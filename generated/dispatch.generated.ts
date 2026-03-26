@@ -265,6 +265,7 @@ const server = net.createServer((conn) => {
       // matching how the Zig pipeline merges path + query params into RouteParams.
       const queryIdx = path.indexOf('?');
       const queryString = queryIdx >= 0 ? path.slice(queryIdx + 1) : '';
+      const queryParams = new URLSearchParams(queryString); // parsed once, reused
 
       let result: any = null;
       for (const entry of routeTable) {
@@ -275,7 +276,7 @@ const server = net.createServer((conn) => {
         // Merge path params + query params (from // query annotations).
         const params = { ...pathParams };
         for (const qname of entry.query_params) {
-          const qval = new URLSearchParams(queryString).get(qname);
+          const qval = queryParams.get(qname);
           if (qval !== null) params[qname] = qval;
         }
 

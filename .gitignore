@@ -8,7 +8,8 @@ zig/
 *.db-shm
 *.wal
 *.o
-generated/
+# generated/ is committed — scanner outputs are checked for freshness in CI.
+# TB pattern: generate, commit, CI verifies `git diff --exit-code`.
 node_modules/
 **/node_modules/
 package-lock.json
