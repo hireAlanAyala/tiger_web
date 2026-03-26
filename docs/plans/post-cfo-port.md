@@ -98,6 +98,29 @@ when we build the devhub viewer.
 TB builds docs and link-checks them in smoke mode. We'd add this
 when we have documentation to build.
 
+**Readme generation / freshness checks:**
+TB's ci.zig runs `client_readmes.test_freshness` to verify that
+generated client READMEs are up to date. If we generate any docs
+from code (e.g., handler API docs, sidecar protocol docs), add a
+freshness check here to catch stale generated files.
+
+**Docker image:**
+TB ships `ghcr.io/tigerbeetle/tigerbeetle` — a single binary in a
+container. Their CI verifies `latest` tag matches the release tag
+and the container prints the correct version.
+
+Our Docker image would be the framework + runtime (Zig, SQLite,
+compiled server, sidecar runtime). Users add their handlers:
+`FROM tiger-web:latest` + `COPY handlers/ /app/handlers/`.
+Add when we're ready to ship — not before the framework is stable.
+When added, port TB's docker digest verification pattern.
+
+**`--example=X` filter for ci.zig:**
+TB's ci.zig supports `--language=X` to test a single client. We
+deferred this because TB's flags.zig requires enums with >= 2
+variants. When we add a second example project, add the `Example`
+enum and `--example` CLI arg.
+
 ### `devhub` — after ci
 TB's devhub builds the dashboard that visualizes CFO seed data, benchmark
 results, and kcov coverage. Deployed to GitHub Pages. This is what makes
