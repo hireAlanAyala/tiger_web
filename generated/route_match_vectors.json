@@ -1,0 +1,20 @@
+{
+  "_comment": "Route matching test vectors — generated from framework/parse.zig tests. Shared across all sidecar language implementations. If match_route changes, update these vectors and re-verify every language.",
+  "match": [
+    { "path": "/", "pattern": "/", "params": {} },
+    { "path": "/products", "pattern": "/products", "params": {} },
+    { "path": "/products/abc123", "pattern": "/products/:id", "params": { "id": "abc123" } },
+    { "path": "/products/abc/transfer_inventory/def", "pattern": "/products/:id/transfer_inventory/:sub_id", "params": { "id": "abc", "sub_id": "def" } },
+    { "path": "/orders/abc123/complete", "pattern": "/orders/:id/complete", "params": { "id": "abc123" } },
+    { "path": "/login/verify", "pattern": "/login/verify", "params": {} },
+    { "path": "/login/code", "pattern": "/login/code", "params": {} },
+    { "path": "/products/abc123/inventory", "pattern": "/products/:id/inventory", "params": { "id": "abc123" } }
+  ],
+  "no_match": [
+    { "path": "/products", "pattern": "/", "_reason": "root rejects non-root" },
+    { "path": "/orders", "pattern": "/products", "_reason": "literal rejects wrong segment" },
+    { "path": "/products/abc/extra", "pattern": "/products/:id", "_reason": "rejects extra segments" },
+    { "path": "/products", "pattern": "/products/:id", "_reason": "rejects too few segments" },
+    { "path": "", "pattern": "/products", "_reason": "rejects empty path" }
+  ]
+}

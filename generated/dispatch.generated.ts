@@ -142,68 +142,44 @@ const renderHandlers: Record<string, Function> = {
 };
 
 // --- Route matching ---
-// Generated from // match directives. Mirrors framework/parse.zig match_route().
-// Method + pattern matching with :param extraction into req.params.
+// Generated route table from // match directives. matchRoute() imported from
+// routing.ts — shared framework utility, port of framework/parse.zig match_route().
+// Verified by cross-language test vectors (route_match_vectors.json).
+
+import { matchRoute } from './routing.ts';
 
 interface RouteTableEntry {
   operation: string;
   method: string;
-  segments: string[];  // pre-split pattern segments (without leading /)
+  pattern: string;
 }
 
 const routeTable: RouteTableEntry[] = [
-  { operation: 'get_collection', method: 'get', segments: ['collections', ':id'] },
-  { operation: 'cancel_order', method: 'post', segments: ['orders', ':id', 'cancel'] },
-  { operation: 'get_product', method: 'get', segments: ['products', ':id'] },
-  { operation: 'get_product_inventory', method: 'get', segments: ['products', ':id', 'inventory'] },
-  { operation: 'list_products', method: 'get', segments: ['products'] },
-  { operation: 'create_product', method: 'post', segments: ['products'] },
-  { operation: 'create_collection', method: 'post', segments: ['collections'] },
-  { operation: 'page_load_login', method: 'get', segments: ['login'] },
-  { operation: 'request_login_code', method: 'post', segments: ['login', 'request'] },
-  { operation: 'list_orders', method: 'get', segments: ['orders'] },
-  { operation: 'remove_collection_member', method: 'delete', segments: ['collections', ':id', 'members', ':sub_id'] },
-  { operation: 'logout', method: 'post', segments: ['logout'] },
-  { operation: 'add_collection_member', method: 'post', segments: ['collections', ':id', 'members'] },
-  { operation: 'delete_product', method: 'delete', segments: ['products', ':id'] },
-  { operation: 'search_products', method: 'get', segments: ['products', 'search'] },
-  { operation: 'list_collections', method: 'get', segments: ['collections'] },
-  { operation: 'delete_collection', method: 'delete', segments: ['collections', ':id'] },
-  { operation: 'update_product', method: 'put', segments: ['products', ':id'] },
-  { operation: 'page_load_dashboard', method: 'get', segments: [] },
-  { operation: 'get_order', method: 'get', segments: ['orders', ':id'] },
-  { operation: 'transfer_inventory', method: 'post', segments: ['products', ':id', 'transfer-inventory', ':sub_id'] },
-  { operation: 'verify_login_code', method: 'post', segments: ['login', 'verify'] },
-  { operation: 'complete_order', method: 'post', segments: ['orders', ':id', 'complete'] },
-  { operation: 'create_order', method: 'post', segments: ['orders'] },
+  { operation: 'get_collection', method: 'get', pattern: '/collections/:id' },
+  { operation: 'cancel_order', method: 'post', pattern: '/orders/:id/cancel' },
+  { operation: 'get_product', method: 'get', pattern: '/products/:id' },
+  { operation: 'get_product_inventory', method: 'get', pattern: '/products/:id/inventory' },
+  { operation: 'list_products', method: 'get', pattern: '/products' },
+  { operation: 'create_product', method: 'post', pattern: '/products' },
+  { operation: 'create_collection', method: 'post', pattern: '/collections' },
+  { operation: 'page_load_login', method: 'get', pattern: '/login' },
+  { operation: 'request_login_code', method: 'post', pattern: '/login/request' },
+  { operation: 'list_orders', method: 'get', pattern: '/orders' },
+  { operation: 'remove_collection_member', method: 'delete', pattern: '/collections/:id/members/:sub_id' },
+  { operation: 'logout', method: 'post', pattern: '/logout' },
+  { operation: 'add_collection_member', method: 'post', pattern: '/collections/:id/members' },
+  { operation: 'delete_product', method: 'delete', pattern: '/products/:id' },
+  { operation: 'search_products', method: 'get', pattern: '/products/search' },
+  { operation: 'list_collections', method: 'get', pattern: '/collections' },
+  { operation: 'delete_collection', method: 'delete', pattern: '/collections/:id' },
+  { operation: 'update_product', method: 'put', pattern: '/products/:id' },
+  { operation: 'page_load_dashboard', method: 'get', pattern: '/' },
+  { operation: 'get_order', method: 'get', pattern: '/orders/:id' },
+  { operation: 'transfer_inventory', method: 'post', pattern: '/products/:id/transfer-inventory/:sub_id' },
+  { operation: 'verify_login_code', method: 'post', pattern: '/login/verify' },
+  { operation: 'complete_order', method: 'post', pattern: '/orders/:id/complete' },
+  { operation: 'create_order', method: 'post', pattern: '/orders' },
 ];
-
-// Match a request path against a pattern, extracting :param values.
-// Returns params object or null if no match. Port of framework/parse.zig match_route().
-function matchRoute(path: string, entry: RouteTableEntry): Record<string, string> | null {
-  if (path.length === 0 || path[0] !== '/') return null;
-
-  // Root pattern matches root path only.
-  if (entry.segments.length === 0) {
-    return path === '/' ? {} : null;
-  }
-
-  const pathSegs = path.slice(1).split('/');
-  if (pathSegs.length !== entry.segments.length) return null;
-
-  const params: Record<string, string> = {};
-  for (let i = 0; i < entry.segments.length; i++) {
-    const pat = entry.segments[i];
-    const val = pathSegs[i];
-    if (pat.startsWith(':')) {
-      if (val.length === 0) return null;
-      params[pat.slice(1)] = val;
-    } else {
-      if (pat !== val) return null;
-    }
-  }
-  return params;
-}
 
 // --- Binary protocol ---
 // Wire format: [4-byte BE length][u8 message_tag][payload]
@@ -278,11 +254,12 @@ const server = net.createServer((conn) => {
 
       // Route matching — filter by method, then match pattern with param extraction.
       // Mirrors framework/parse.zig match_route() + app.zig translate() dispatch.
+      // matchRoute handles query string stripping (path?q=x → path).
       let matchedEntry: RouteTableEntry | null = null;
       let matchedParams: Record<string, string> = {};
       for (const entry of routeTable) {
         if (entry.method !== methodStr) continue;
-        const params = matchRoute(path, entry);
+        const params = matchRoute(path, entry.pattern);
         if (params !== null) {
           matchedEntry = entry;
           matchedParams = params;

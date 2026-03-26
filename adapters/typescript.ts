@@ -151,50 +151,26 @@ for (const ann of manifest.annotations) {
   }
 }
 
-// Generate route table and matchRoute function.
+// Generate route table. matchRoute is imported from routing.ts (shared module,
+// verified by cross-language test vectors in route_match_vectors.json).
 out += `// --- Route matching ---
-// Generated from // match directives. Mirrors framework/parse.zig match_route().
-// Method + pattern matching with :param extraction into req.params.
+// Generated route table from // match directives. matchRoute() imported from
+// routing.ts — shared framework utility, port of framework/parse.zig match_route().
+// Verified by cross-language test vectors (route_match_vectors.json).
+
+import { matchRoute } from './routing.ts';
 
 interface RouteTableEntry {
   operation: string;
   method: string;
-  segments: string[];  // pre-split pattern segments (without leading /)
+  pattern: string;
 }
 
 const routeTable: RouteTableEntry[] = [\n`;
 for (const r of routeTable) {
-  const segments = r.pattern === "/" ? [] : r.pattern.slice(1).split("/");
-  out += `  { operation: '${r.operation}', method: '${r.method}', segments: [${segments.map(s => `'${s}'`).join(', ')}] },\n`;
+  out += `  { operation: '${r.operation}', method: '${r.method}', pattern: '${r.pattern}' },\n`;
 }
 out += `];
-
-// Match a request path against a pattern, extracting :param values.
-// Returns params object or null if no match. Port of framework/parse.zig match_route().
-function matchRoute(path: string, entry: RouteTableEntry): Record<string, string> | null {
-  if (path.length === 0 || path[0] !== '/') return null;
-
-  // Root pattern matches root path only.
-  if (entry.segments.length === 0) {
-    return path === '/' ? {} : null;
-  }
-
-  const pathSegs = path.slice(1).split('/');
-  if (pathSegs.length !== entry.segments.length) return null;
-
-  const params: Record<string, string> = {};
-  for (let i = 0; i < entry.segments.length; i++) {
-    const pat = entry.segments[i];
-    const val = pathSegs[i];
-    if (pat.startsWith(':')) {
-      if (val.length === 0) return null;
-      params[pat.slice(1)] = val;
-    } else {
-      if (pat !== val) return null;
-    }
-  }
-  return params;
-}
 
 `;
 
@@ -272,11 +248,12 @@ const server = net.createServer((conn) => {
 
       // Route matching — filter by method, then match pattern with param extraction.
       // Mirrors framework/parse.zig match_route() + app.zig translate() dispatch.
+      // matchRoute handles query string stripping (path?q=x → path).
       let matchedEntry: RouteTableEntry | null = null;
       let matchedParams: Record<string, string> = {};
       for (const entry of routeTable) {
         if (entry.method !== methodStr) continue;
-        const params = matchRoute(path, entry);
+        const params = matchRoute(path, entry.pattern);
         if (params !== null) {
           matchedEntry = entry;
           matchedParams = params;
