@@ -836,12 +836,12 @@ fn run_fuzzers_start_fuzzer(shell: *Shell, options: struct {
 
     assert(try shell.dir_exists(".git") or shell.file_exists(".git"));
 
-    // DevHub displays `zig build ...` invocation which you can paste in your shell directly.
+    // DevHub displays `./zig/zig build ...` invocation which you can paste in your shell directly.
     // But CFO actually builds and execs in two separate steps such that:
     // - build time is excluded from overall runtime,
     // - the exit status of the fuzzer process can be inspected, to determine if OOM happened.
     args.clear();
-    args.push_slice(&.{ "zig", "build" });
+    args.push_slice(&.{ "./zig/zig", "build" });
     args.push_slice(switch (options.fuzzer) {
         inline else => |f| comptime f.args_run(),
     });
