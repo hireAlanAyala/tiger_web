@@ -69,6 +69,16 @@ comptime {
             @compileError("route " ++ r.pattern ++ " has too many params (path + query)");
         }
     }
+
+    // Assert: Method enum values match the cross-language contract
+    // (method_vectors.json). If someone adds/reorders enum variants,
+    // this fires — update method_vectors.json and re-verify all languages.
+    const assert = @import("std").debug.assert;
+    assert(@intFromEnum(http.Method.get) == 0);
+    assert(@intFromEnum(http.Method.put) == 1);
+    assert(@intFromEnum(http.Method.post) == 2);
+    assert(@intFromEnum(http.Method.delete) == 3);
+    assert(@typeInfo(http.Method).@"enum".fields.len == 4);
 }
 
 // Shared route patterns are allowed — handlers disambiguate at runtime

@@ -75,5 +75,18 @@ for (const v of vectors.no_match) {
   assert(result !== null, "root with empty query string should match /");
 }
 
+// --- Method enum mapping (cross-language contract) ---
+// Verify the method_vectors.json matches what the dispatch uses.
+{
+  const methodVectors = JSON.parse(
+    readFileSync(new URL("./method_vectors.json", import.meta.url), "utf-8"),
+  );
+  const expectedMethods = ["get", "put", "post", "delete"];
+  assert(
+    JSON.stringify(methodVectors.methods) === JSON.stringify(expectedMethods),
+    `method vectors mismatch: got ${JSON.stringify(methodVectors.methods)}, expected ${JSON.stringify(expectedMethods)}`,
+  );
+}
+
 console.log(`${passed} passed, ${failed} failed`);
 if (failed > 0) process.exit(1);

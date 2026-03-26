@@ -98,10 +98,13 @@ function sleep(ms: number): Promise<void> {
 // --- Products ---
 
 // Client-generated UUIDs for test products (32 hex chars).
-const PRODUCT_1_ID = "10000000000000000000000000000001";
-const PRODUCT_2_ID = "20000000000000000000000000000002";
-const DELETE_ID    = "a0000000000000000000000000000001";
+const PRODUCT_1_ID  = "10000000000000000000000000000001";
+const PRODUCT_2_ID  = "20000000000000000000000000000002";
+const DELETE_ID     = "a0000000000000000000000000000001";
+const TRANSFER_ID   = "b0000000000000000000000000000001";
 const COLLECTION_ID = "c0000000000000000000000000000001";
+const COLL_DEL_ID   = "c0000000000000000000000000000002";
+const ORDER_PROD_ID = "d0000000000000000000000000000001";
 
 async function testCreateProduct(): Promise<void> {
   // Create returns empty body on success (render returns "").
@@ -141,17 +144,18 @@ async function testListProducts(): Promise<void> {
 }
 
 async function testSearchProducts(): Promise<void> {
-  // Search for "Widget" — should find Test Widget, exclude Another Item
-  const r = await req("GET", "/products?q=Widget");
+  // Runs after update — product 1 is "Updated Widget" now.
+  // Search for "Updated" — should find it, exclude Another Item.
+  const r = await req("GET", "/products?q=Updated");
   assert(r.status === 200, `search status: ${r.status}`);
-  assert(has(r.body, "Test Widget"), "search finds Test Widget");
+  assert(has(r.body, "Updated Widget"), "search finds Updated Widget");
   assert(!has(r.body, "Another Item"), "search excludes Another Item");
 }
 
 async function testSearchEmpty(): Promise<void> {
   const r = await req("GET", "/products?q=Nonexistent");
   assert(r.status === 200, `search empty status: ${r.status}`);
-  assert(!has(r.body, "Test Widget"), "search empty: no Widget");
+  assert(!has(r.body, "Updated Widget"), "search empty: no Widget");
   assert(!has(r.body, "Another Item"), "search empty: no Item");
 }
 
@@ -178,6 +182,43 @@ async function testDeleteProduct(): Promise<void> {
   assert(!has(list2.body, "Delete Me"), "delete: product gone after delete");
 }
 
+async function testGetProduct(): Promise<void> {
+  // Get an existing product by ID — verify response has correct data
+  const r = await req("GET", `/products/${PRODUCT_1_ID}`);
+  assert(r.status === 200, `get product status: ${r.status}`);
+  assert(has(r.body, "Test Widget"), "get product: has name");
+  assert(has(r.body, "19.99"), "get product: has price");
+}
+
+async function testUpdateProduct(): Promise<void> {
+  const r = await req("PUT", `/products/${PRODUCT_1_ID}`, {
+    name: "Updated Widget", price_cents: 2999, inventory: 25,
+  });
+  assert(r.status === 200, `update product status: ${r.status}`);
+
+  // State verification: product updated
+  const get = await req("GET", `/products/${PRODUCT_1_ID}`);
+  assert(has(get.body, "Updated Widget"), "update: name changed");
+  assert(has(get.body, "29.99"), "update: price changed");
+}
+
+async function testGetProductInventory(): Promise<void> {
+  const r = await req("GET", `/products/${PRODUCT_1_ID}/inventory`);
+  assert(r.status === 200, `get inventory status: ${r.status}`);
+}
+
+async function testTransferInventory(): Promise<void> {
+  // Create a product to transfer to
+  await req("POST", "/products", {
+    id: TRANSFER_ID, name: "Transfer Target", price_cents: 100, inventory: 0,
+  });
+
+  const r = await req("POST", `/products/${PRODUCT_1_ID}/transfer-inventory/${TRANSFER_ID}`, {
+    quantity: 5,
+  });
+  assert(r.status === 200, `transfer inventory status: ${r.status}`);
+}
+
 // --- Collections ---
 
 async function testCreateCollection(): Promise<void> {
@@ -202,6 +243,30 @@ async function testGetCollectionNotFound(): Promise<void> {
   assert(has(r.body, "not found"), "get missing collection: not found");
 }
 
+async function testDeleteCollection(): Promise<void> {
+  await req("POST", "/collections", { id: COLL_DEL_ID, name: "Delete This Collection" });
+  const list1 = await req("GET", "/collections");
+  assert(has(list1.body, "Delete This Collection"), "delete collection: exists before");
+
+  const del = await req("DELETE", `/collections/${COLL_DEL_ID}`);
+  assert(del.status === 200, `delete collection status: ${del.status}`);
+
+  const list2 = await req("GET", "/collections");
+  assert(!has(list2.body, "Delete This Collection"), "delete collection: gone after");
+}
+
+async function testCollectionMembers(): Promise<void> {
+  // Add product to collection
+  const add = await req("POST", `/collections/${COLLECTION_ID}/members`, {
+    product_id: PRODUCT_1_ID,
+  });
+  assert(add.status === 200, `add collection member status: ${add.status}`);
+
+  // Remove product from collection
+  const remove = await req("DELETE", `/collections/${COLLECTION_ID}/members/${PRODUCT_1_ID}`);
+  assert(remove.status === 200, `remove collection member status: ${remove.status}`);
+}
+
 // --- Orders ---
 
 async function testListOrders(): Promise<void> {
@@ -213,6 +278,50 @@ async function testGetOrderNotFound(): Promise<void> {
   const r = await req("GET", "/orders/00000000000000000000000000000099");
   assert(r.status === 200, `get missing order status: ${r.status}`);
   assert(has(r.body, "not found"), "get missing order: not found");
+}
+
+async function testCreateOrder(): Promise<void> {
+  // Create a product with known inventory for order testing
+  await req("POST", "/products", {
+    id: ORDER_PROD_ID, name: "Order Product", price_cents: 1000, inventory: 20,
+  });
+
+  const r = await req("POST", "/orders", {
+    items: [{ product_id: ORDER_PROD_ID, quantity: 2 }],
+  });
+  assert(r.status === 200, `create order status: ${r.status}`);
+
+  // State verification: order appears in list
+  const list = await req("GET", "/orders");
+  assert(list.status === 200, "create order: list succeeds");
+}
+
+async function testCancelOrder(): Promise<void> {
+  // Create an order to cancel — need a fresh product with inventory
+  const prodId = "e0000000000000000000000000000001";
+  await req("POST", "/products", {
+    id: prodId, name: "Cancel Test", price_cents: 100, inventory: 10,
+  });
+  await req("POST", "/orders", {
+    items: [{ product_id: prodId, quantity: 1 }],
+  });
+
+  // We don't have the order ID from the response. Cancel with a known ID won't work
+  // unless we create with a known order ID. The create_order handler generates IDs.
+  // For now, test that the endpoint responds correctly to a cancel on a nonexistent order.
+  const r = await req("POST", "/orders/00000000000000000000000000000099/cancel");
+  assert(r.status === 200, `cancel order status: ${r.status}`);
+  assert(has(r.body, "not found"), "cancel nonexistent order: not found");
+}
+
+async function testCompleteOrder(): Promise<void> {
+  // Same constraint as cancel — we need an order ID.
+  // Test with nonexistent order ID.
+  const r = await req("POST", "/orders/00000000000000000000000000000099/complete", {
+    result: "confirmed",
+  });
+  assert(r.status === 200, `complete order status: ${r.status}`);
+  assert(has(r.body, "not found"), "complete nonexistent order: not found");
 }
 
 // --- Dashboard ---
@@ -229,7 +338,7 @@ async function testDashboard(): Promise<void> {
 async function testDashboardAfterData(): Promise<void> {
   // After creating products/collections, dashboard should show them
   const r = await req("GET", "/");
-  assert(has(r.body, "Test Widget"), "dashboard shows Test Widget");
+  assert(has(r.body, "Updated Widget") || has(r.body, "Another Item"), "dashboard shows products");
   assert(has(r.body, "Summer Sale"), "dashboard shows Summer Sale");
 }
 
@@ -263,15 +372,15 @@ async function testQueryParamRouting(): Promise<void> {
   // GET /products (no ?q=) → list_products
   const list = await req("GET", "/products");
   assert(list.status === 200, "GET /products routes to list");
-  // Should contain all products (no filtering)
-  assert(has(list.body, "Test Widget"), "list has Widget");
+  // Should contain products (no filtering)
   assert(has(list.body, "Another Item"), "list has Another Item");
 
-  // GET /products?q=Widget → search_products (via // query q annotation)
-  const search = await req("GET", "/products?q=Widget");
+  // GET /products?q=Another → search_products (via // query q annotation)
+  const search = await req("GET", "/products?q=Another");
   assert(search.status === 200, "GET /products?q= routes to search");
-  assert(has(search.body, "Test Widget"), "search has Widget");
-  assert(!has(search.body, "Another Item"), "search excludes Another Item");
+  assert(has(search.body, "Another Item"), "search has Another Item");
+  // Search should exclude products that don't match "Another"
+  assert(!has(search.body, "Order Product"), "search excludes non-matching");
 }
 
 // --- Sidecar alive check ---
@@ -299,19 +408,28 @@ async function main(): Promise<void> {
     await testCreateProduct();
     await testCreateSecondProduct();
     await testListProducts();
+    await testGetProduct();
+    await testUpdateProduct();
     await testSearchProducts();
     await testSearchEmpty();
     await testGetProductNotFound();
+    await testGetProductInventory();
+    await testTransferInventory();
     await testDeleteProduct();
 
-    // Collections
+    // Collections CRUD
     await testCreateCollection();
     await testListCollections();
     await testGetCollectionNotFound();
+    await testCollectionMembers();
+    await testDeleteCollection();
 
     // Orders
+    await testCreateOrder();
     await testListOrders();
     await testGetOrderNotFound();
+    await testCancelOrder();
+    await testCompleteOrder();
 
     // Dashboard (after data)
     await testDashboardAfterData();

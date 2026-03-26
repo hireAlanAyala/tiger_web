@@ -250,8 +250,9 @@ const server = net.createServer((conn) => {
       const bodyLen = dv.getUint16(pos, false); pos += 2;
       const body = _decoder.decode(frame.subarray(pos, pos + bodyLen));
 
-      // Must match framework/http.zig Method enum order: get=0, put=1, post=2, delete=3.
-      const methods = ['get', 'put', 'post', 'delete'];
+      // Method enum mapping from cross-language contract (method_vectors.json).
+      // Verified by routing_test.ts. Index = @intFromEnum(http.Method) from Zig.
+      const methods = ["get","put","post","delete"];
       const methodStr = methods[method] || 'get';
 
       // Route matching — filter by method, then match pattern with param extraction.

@@ -1,0 +1,4 @@
+{
+  "_comment": "HTTP method enum mapping — shared between Zig (framework/http.zig Method enum) and all sidecar languages. Index = @intFromEnum(method). If the Zig enum changes, update this file and re-verify all languages.",
+  "methods": ["get", "put", "post", "delete"]
+}
