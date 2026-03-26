@@ -1,5 +1,7 @@
 # Plan: Framework-provided assert — dispatch catches, sidecar stays alive
 
+## Status: Implemented
+
 ## Context
 
 TB crashes on assertion failure — a database can't serve corrupt data.

@@ -320,7 +320,12 @@ const server = net.createServer((conn) => {
 
         const req = { method: methodStr, path, body, params };
         const routeHandler = routeHandlers[entry.operation];
-        const r = routeHandler ? routeHandler(req) : null;
+        let r: any = null;
+        try {
+          r = routeHandler ? routeHandler(req) : null;
+        } catch (e) {
+          console.error(\`[sidecar] \${entry.operation} route error:\`, e);
+        }
         if (r !== null) {
           result = r;
           break;
@@ -354,7 +359,14 @@ const server = net.createServer((conn) => {
         query: (sql: string, ...params: unknown[]) => ({ sql, params, mode: "query" as const }),
         queryAll: (sql: string, ...params: unknown[]) => ({ sql, params, mode: "queryAll" as const }),
       };
-      const queries: Record<string, any> = prefetchFn ? prefetchFn(prefetchMsg, db) : {};
+      let queries: Record<string, any> = {};
+      try {
+        queries = prefetchFn ? prefetchFn(prefetchMsg, db) : {};
+      } catch (e) {
+        console.error(\`[sidecar] \${routeOperation} prefetch error:\`, e);
+        sendFrame(conn, new Uint8Array([MessageTag.route_prefetch_response, 0]));
+        return;
+      }
 
       prefetchKeys = Object.keys(queries);
       prefetchModes = {};
@@ -407,7 +419,13 @@ const server = net.createServer((conn) => {
         },
       };
       const handleFn = handleHandlers[routeOperation];
-      const status: string = handleFn(ctx, db);
+      let status: string;
+      try {
+        status = handleFn(ctx, db);
+      } catch (e) {
+        console.error(\`[sidecar] \${routeOperation} handle error:\`, e);
+        status = "storage_error";
+      }
 
       // Render declarations (empty for now — render-with-db deferred).
       const renderDecls: SqlDeclaration[] = [];
@@ -432,7 +450,13 @@ const server = net.createServer((conn) => {
       const renderCtx = (conn as any)._renderCtx;
       const renderFn = renderHandlers[routeOperation];
 
-      const html: string = renderFn ? renderFn(renderCtx) : '';
+      let html: string;
+      try {
+        html = renderFn ? renderFn(renderCtx) : '';
+      } catch (e) {
+        console.error(\`[sidecar] \${routeOperation} render error:\`, e);
+        html = '<div class="error">Internal error</div>';
+      }
       const htmlBytes = _encoder.encode(html);
 
       // Build response: [tag][html_bytes]
