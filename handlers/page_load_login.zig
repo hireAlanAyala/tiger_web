@@ -7,14 +7,10 @@ pub const Prefetch = struct {};
 
 pub const Context = t.HandlerContext(Prefetch, t.Operation.EventType(.page_load_login), t.Identity, Status);
 
-pub const route_method = t.http.Method.get;
-pub const route_pattern = "/login";
-
 // [route] .page_load_login
 // match GET /login
-pub fn route(method: t.http.Method, raw_path: []const u8, body: []const u8) ?t.Message {
-    _ = method; _ = body;
-    if (t.match_route(raw_path, route_pattern) == null) return null;
+pub fn route(params: t.RouteParams, body: []const u8) ?t.Message {
+    _ = params; _ = body;
     return t.Message.init(.page_load_login, 0, 0, {});
 }
 

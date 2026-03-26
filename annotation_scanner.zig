@@ -62,10 +62,24 @@ const Phase = enum {
 };
 
 /// Parsed route match directive — `// match GET /products/:id`.
+/// Optional query param names — `// query q` extracts ?q= into params.
 const RouteMatch = struct {
     method: Method,
     pattern: []const u8,
     line: u32,
+    query_params: QueryParams = .{},
+
+    const max_query_params = 4;
+    const QueryParams = struct {
+        names: [max_query_params][]const u8 = .{&.{}} ** max_query_params,
+        len: u8 = 0,
+
+        fn add(self: *QueryParams, name: []const u8) void {
+            assert(self.len < max_query_params);
+            self.names[self.len] = name;
+            self.len += 1;
+        }
+    };
 
     /// HTTP methods recognized in match directives. Superset of
     /// framework's http.Method — the scanner accepts PATCH even though
@@ -76,6 +90,10 @@ const RouteMatch = struct {
     /// Free the duped pattern. Single free site for the single dupe site.
     fn deinit(self: RouteMatch, allocator: std.mem.Allocator) void {
         allocator.free(self.pattern);
+        // query param names are duped too
+        for (self.query_params.names[0..self.query_params.len]) |name| {
+            allocator.free(name);
+        }
     }
 };
 
@@ -233,6 +251,22 @@ fn parse_match_directive(line: []const u8, prefix: []const u8) ?struct { method:
     if (pattern_end == 0) return null;
 
     return .{ .method = method, .pattern = rest[0..pattern_end] };
+}
+
+/// Parse `// query <name>` directive. Returns the query param name or null.
+/// Name must be a non-empty alphanumeric identifier (same rules as :param names).
+fn parse_query_directive(line: []const u8, prefix: []const u8) ?[]const u8 {
+    const trimmed = std.mem.trimLeft(u8, line, " \t");
+    if (!std.mem.startsWith(u8, trimmed, prefix)) return null;
+    const after_prefix = std.mem.trimLeft(u8, trimmed[prefix.len..], " \t");
+    if (!std.mem.startsWith(u8, after_prefix, "query ")) return null;
+    const name = std.mem.trimRight(u8, std.mem.trimLeft(u8, after_prefix[6..], " \t"), " \t\r");
+    if (name.len == 0) return null;
+    // Validate: alphanumeric + underscore only.
+    for (name) |c| {
+        if (!std.ascii.isAlphanumeric(c) and c != '_') return null;
+    }
+    return name;
 }
 
 /// Validate a route pattern's structure. Returns an error message or null if valid.
@@ -582,6 +616,20 @@ fn scan_file_content(
                                 };
                             }
                             continue; // Stay in prev_annotation state, wait for function body.
+                        }
+
+                        // `// query <name>` — extract query param into RouteParams.
+                        // Only valid after `// match`. Multiple allowed.
+                        if (pending_match != null) {
+                            if (parse_query_directive(line, prefix)) |name| {
+                                if (pending_match.?.query_params.len >= RouteMatch.max_query_params) {
+                                    try stderr.print("error: {s}:{d}: too many query params (max {d})\n", .{ path, line_num, RouteMatch.max_query_params });
+                                    errors += 1;
+                                } else {
+                                    pending_match.?.query_params.add(try allocator.dupe(u8, name));
+                                }
+                                continue;
+                            }
                         }
                     }
 
@@ -1122,9 +1170,18 @@ fn emit_manifest(
 
         // Include route match for translate (route) phase annotations.
         if (ann.route_match) |rm| {
-            try w.print(", \"route_match\": {{ \"method\": \"{s}\", \"pattern\": \"{s}\" }}", .{
+            try w.print(", \"route_match\": {{ \"method\": \"{s}\", \"pattern\": \"{s}\"", .{
                 @tagName(rm.method), rm.pattern,
             });
+            if (rm.query_params.len > 0) {
+                try w.writeAll(", \"query_params\": [");
+                for (rm.query_params.names[0..rm.query_params.len], 0..) |name, qi| {
+                    if (qi > 0) try w.writeAll(", ");
+                    try w.print("\"{s}\"", .{name});
+                }
+                try w.writeAll("]");
+            }
+            try w.writeAll(" }");
         }
 
         // Include statuses for execute (handle) phase annotations.
@@ -1165,6 +1222,8 @@ fn emit_routes_zig(
         operation: []const u8,
         method: []const u8,
         pattern: []const u8,
+        file: []const u8,
+        query_params: RouteMatch.QueryParams,
     };
     var routes = std.ArrayList(RouteEntry).init(allocator);
     for (annotations) |ann| {
@@ -1174,6 +1233,8 @@ fn emit_routes_zig(
             .operation = ann.operation,
             .method = @tagName(rm.method),
             .pattern = rm.pattern,
+            .file = ann.file,
+            .query_params = rm.query_params,
         });
     }
 
@@ -1211,16 +1272,20 @@ fn emit_routes_zig(
         \\// Auto-generated by annotation scanner — do not edit.
         \\//
         \\// Comptime route table from // match directives. Single source of truth
-        \\// for Zig routing. Handlers no longer declare route_method/route_pattern.
+        \\// for Zig routing. Handlers declare routes via annotations only.
         \\// Sorted by specificity: literal segments before param, longer before shorter.
         \\
+        \\const std = @import("std");
         \\const message = @import("../message.zig");
         \\const http = @import("../framework/http.zig");
+        \\const parse = @import("../framework/parse.zig");
         \\
         \\pub const Route = struct {
         \\    operation: message.Operation,
         \\    method: http.Method,
         \\    pattern: []const u8,
+        \\    query_params: []const []const u8,
+        \\    handler: type,
         \\};
         \\
         \\pub const routes = [_]Route{
@@ -1228,9 +1293,15 @@ fn emit_routes_zig(
     );
 
     for (routes.items) |route| {
-        try w.print("    .{{ .operation = .{s}, .method = .{s}, .pattern = \"{s}\" }},\n", .{
+        try w.print("    .{{ .operation = .{s}, .method = .{s}, .pattern = \"{s}\", .query_params = &.{{", .{
             route.operation, route.method, route.pattern,
         });
+        for (route.query_params.names[0..route.query_params.len], 0..) |name, qi| {
+            if (qi > 0) try w.writeAll(", ");
+            try w.print("\"{s}\"", .{name});
+        }
+        // Handler module import — relative to generated/ directory.
+        try w.print("}}, .handler = @import(\"../{s}\") }},\n", .{route.file});
     }
 
     try w.writeAll(
@@ -1923,61 +1994,8 @@ test "integration: extracted handle statuses match declared Status enum" {
             }
         }
 
-        // Cross-check: if handler exports route_method/route_pattern consts,
-        // verify they match the // match annotation. Pair assertion: annotation
-        // is the scanner's source of truth, const is the compiler's. They must agree.
-        var ann_match: ?struct { method: []const u8, pattern: []const u8 } = null;
-        var match_lines = std.mem.splitScalar(u8, content, '\n');
-        while (match_lines.next()) |mline| {
-            if (parse_match_directive(mline, "//")) |m| {
-                ann_match = .{ .method = @tagName(m.method), .pattern = m.pattern };
-                break;
-            }
-        }
-
-        // Check route_method const matches annotation method.
-        const has_method_const = std.mem.indexOf(u8, content, "pub const route_method") != null;
-        const has_pattern_const = std.mem.indexOf(u8, content, "pub const route_pattern") != null;
-
-        if (has_method_const != has_pattern_const) {
-            std.debug.panic(
-                "handler {s}: has route_method but not route_pattern (or vice versa)",
-                .{entry.basename},
-            );
-        }
-
-        if (has_method_const and ann_match == null) {
-            std.debug.panic(
-                "handler {s}: exports route_method/route_pattern but has no // match annotation",
-                .{entry.basename},
-            );
-        }
-
-        if (has_method_const) {
-            const ann = ann_match.?;
-            // Verify method const matches annotation.
-            // e.g. "pub const route_method = t.http.Method.get;" must match "// match GET ..."
-            const method_line_start = std.mem.indexOf(u8, content, "pub const route_method").?;
-            const method_line_end = std.mem.indexOfPos(u8, content, method_line_start, ";").?;
-            const method_line = content[method_line_start..method_line_end];
-            if (std.mem.indexOf(u8, method_line, ann.method) == null) {
-                std.debug.panic(
-                    "handler {s}: route_method const doesn't match // match annotation method '{s}'",
-                    .{ entry.basename, ann.method },
-                );
-            }
-
-            // Verify pattern const matches annotation.
-            const pattern_line_start = std.mem.indexOf(u8, content, "pub const route_pattern").?;
-            const pattern_line_end = std.mem.indexOfPos(u8, content, pattern_line_start, ";").?;
-            const pattern_line = content[pattern_line_start..pattern_line_end];
-            if (std.mem.indexOf(u8, pattern_line, ann.pattern) == null) {
-                std.debug.panic(
-                    "handler {s}: route_pattern const doesn't match // match annotation pattern '{s}'",
-                    .{ entry.basename, ann.pattern },
-                );
-            }
-        }
+        // route_method/route_pattern constants removed — annotations are the
+        // single source of truth. Cross-validation no longer needed.
 
         checked += 1;
     }

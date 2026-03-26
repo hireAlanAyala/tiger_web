@@ -10,23 +10,14 @@ pub const Prefetch = struct {
 
 pub const Context = t.HandlerContext(Prefetch, t.Operation.EventType(.list_products), t.Identity, Status);
 
-pub const route_method = t.http.Method.get;
-pub const route_pattern = "/products";
-
 // [route] .list_products
 // match GET /products
-pub fn route(method: t.http.Method, raw_path: []const u8, body: []const u8) ?t.Message {
-    _ = method; _ = body;
-    if (t.match_route(raw_path, route_pattern) == null) return null;
-
-    // Reject if query string contains ?q= (handled by search_products).
-    // Both list_products and search_products share GET /products — this is
-    // correct REST design. Filtering a collection by query param is the same
-    // endpoint, not a sub-resource. Handler-level disambiguation is valid.
-    const query_sep = std.mem.indexOf(u8, raw_path, "?");
-    const query_string = if (query_sep) |q| raw_path[q + 1 ..] else "";
-    if (t.parse.query_param(query_string, "q") != null) return null;
-
+// query q
+pub fn route(params: t.RouteParams, body: []const u8) ?t.Message {
+    _ = body;
+    // Reject if ?q= is present — search_products handles filtered queries.
+    // Both share GET /products; disambiguation by query param presence.
+    if (params.get("q") != null) return null;
     return t.Message.init(.list_products, 0, 0, std.mem.zeroes(t.ListParams));
 }
 

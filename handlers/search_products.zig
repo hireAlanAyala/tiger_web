@@ -8,21 +8,13 @@ pub const Prefetch = struct { products: ?t.BoundedList(t.ProductRow, t.list_max)
 
 pub const Context = t.HandlerContext(Prefetch, t.Operation.EventType(.search_products), t.Identity, Status);
 
-pub const route_method = t.http.Method.get;
-pub const route_pattern = "/products";
-
 // [route] .search_products
 // match GET /products
-pub fn route(method: t.http.Method, raw_path: []const u8, body: []const u8) ?t.Message {
-    _ = method; _ = body;
-    if (t.match_route(raw_path, route_pattern) == null) return null;
-
-    // Require ?q= query param — without it, list_products handles this path.
-    const query_sep = std.mem.indexOf(u8, raw_path, "?");
-    const query_string = if (query_sep) |q| raw_path[q + 1 ..] else "";
-    const q = t.parse.query_param(query_string, "q") orelse return null;
+// query q
+pub fn route(params: t.RouteParams, body: []const u8) ?t.Message {
+    _ = body;
+    const q = params.get("q") orelse return null;
     if (q.len == 0 or q.len > @import("../message.zig").search_query_max) return null;
-
     var sq = std.mem.zeroes(t.SearchQuery);
     @memcpy(sq.query[0..q.len], q);
     sq.query_len = @intCast(q.len);

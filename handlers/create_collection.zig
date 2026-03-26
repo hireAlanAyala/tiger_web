@@ -7,14 +7,10 @@ pub const Prefetch = struct { existing: ?t.CollectionRow };
 
 pub const Context = t.HandlerContext(Prefetch, t.Operation.EventType(.create_collection), t.Identity, Status);
 
-pub const route_method = t.http.Method.post;
-pub const route_pattern = "/collections";
-
 // [route] .create_collection
 // match POST /collections
-pub fn route(method: t.http.Method, raw_path: []const u8, body: []const u8) ?t.Message {
-    _ = method;
-    if (t.match_route(raw_path, route_pattern) == null) return null;
+pub fn route(params: t.RouteParams, body: []const u8) ?t.Message {
+    _ = params;
     if (body.len == 0) return null;
     const col = parse_collection_json(body) orelse return null;
     if (col.id == 0) return null;

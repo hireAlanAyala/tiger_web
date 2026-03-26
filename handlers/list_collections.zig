@@ -7,15 +7,10 @@ pub const Prefetch = struct { collections: ?t.BoundedList(t.CollectionRow, t.lis
 
 pub const Context = t.HandlerContext(Prefetch, t.Operation.EventType(.list_collections), t.Identity, Status);
 
-pub const route_method = t.http.Method.get;
-pub const route_pattern = "/collections";
-
 // [route] .list_collections
 // match GET /collections
-pub fn route(method: t.http.Method, raw_path: []const u8, body: []const u8) ?t.Message {
-    _ = method;
-    _ = body;
-    if (t.match_route(raw_path, route_pattern) == null) return null;
+pub fn route(params: t.RouteParams, body: []const u8) ?t.Message {
+    _ = params; _ = body;
     return t.Message.init(.list_collections, 0, 0, std.mem.zeroes(t.ListParams));
 }
 

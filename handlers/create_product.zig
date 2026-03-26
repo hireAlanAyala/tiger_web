@@ -9,14 +9,10 @@ pub const Prefetch = struct {
 
 pub const Context = t.HandlerContext(Prefetch, t.Operation.EventType(.create_product), t.Identity, Status);
 
-pub const route_method = t.http.Method.post;
-pub const route_pattern = "/products";
-
 // [route] .create_product
 // match POST /products
-pub fn route(method: t.http.Method, raw_path: []const u8, body: []const u8) ?t.Message {
-    _ = method;
-    if (t.match_route(raw_path, route_pattern) == null) return null;
+pub fn route(params: t.RouteParams, body: []const u8) ?t.Message {
+    _ = params;
     if (body.len == 0) return null;
     const product = parse_product_json(body) orelse return null;
     if (product.id == 0) return null;

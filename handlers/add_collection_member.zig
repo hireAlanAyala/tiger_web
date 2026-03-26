@@ -12,17 +12,12 @@ pub const Prefetch = struct {
 
 pub const Context = t.HandlerContext(Prefetch, t.Operation.EventType(.add_collection_member), t.Identity, Status);
 
-pub const route_method = t.http.Method.post;
-pub const route_pattern = "/collections/:id/products/:sub_id";
-
 // [route] .add_collection_member
 // match POST /collections/:id/products/:sub_id
-pub fn route(method: t.http.Method, raw_path: []const u8, body: []const u8) ?t.Message {
-    _ = method;
+pub fn route(params: t.RouteParams, body: []const u8) ?t.Message {
     _ = body;
-    const params = t.match_route(raw_path, route_pattern) orelse return null;
-    const id = t.stdx.parse_uuid(params.get("id").?) orelse return null;
-    const sub_id = t.stdx.parse_uuid(params.get("sub_id").?) orelse return null;
+    const id = t.stdx.parse_uuid(params.get("id") orelse return null) orelse return null;
+    const sub_id = t.stdx.parse_uuid(params.get("sub_id") orelse return null) orelse return null;
     return t.Message.init(.add_collection_member, id, 0, sub_id);
 }
 

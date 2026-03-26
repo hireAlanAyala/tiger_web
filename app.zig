@@ -151,33 +151,40 @@ pub var sidecar: ?SidecarClient = null;
 /// Translate an HTTP request into a typed Message. Returns null if the
 /// request doesn't map to a valid operation.
 ///
-/// Tries all handler route functions. Fast-skips via route_method/route_pattern
-/// Route dispatch — fast-skip by method + pattern, then call handler route().
-/// Comptime assertions verify every handler has route_method and route_pattern.
-/// Runtime assert catches duplicate matches — pair assertion with the scanner's
-/// duplicate route pattern check.
-///
-/// The generated routes.generated.zig serves the TypeScript sidecar dispatch.
-/// Zig handlers use comptime constants directly — no indirection needed.
-/// The scanner validates that annotations and constants agree.
-pub fn translate(method: http.Method, path: []const u8, body: []const u8) ?Message {
-    if (sidecar) |*client| return client.translate(method, path, body);
+/// Route dispatch using the generated route table (single source of truth).
+/// The scanner generates routes.generated.zig from // match and // query
+/// annotations. Pattern matching + query param extraction happen here.
+/// Handlers receive pre-extracted params and body — no raw path matching.
+/// Runtime assert catches duplicate matches (two handlers both accepting).
+pub fn translate(method: http.Method, raw_path: []const u8, body: []const u8) ?Message {
+    if (sidecar) |*client| return client.translate(method, raw_path, body);
 
     const parse = @import("framework/parse.zig");
+    const gen = @import("generated/routes.generated.zig");
+
+    // Strip query string for pattern matching — handlers get query params via RouteParams.
+    const query_sep = std.mem.indexOfScalar(u8, raw_path, '?');
+    const path = if (query_sep) |q| raw_path[0..q] else raw_path;
+    const query_string = if (query_sep) |q| raw_path[q + 1 ..] else "";
 
     var result: ?Message = null;
-    inline for (handlers) |H| {
-        comptime {
-            assert(@hasDecl(H, "route_method"));
-            assert(@hasDecl(H, "route_pattern"));
-        }
+    inline for (gen.routes) |route| {
+        if (method == route.method) {
+            if (parse.match_route(path, route.pattern)) |path_params| {
+                // Merge path params + query params into one RouteParams.
+                var params = path_params;
+                inline for (route.query_params) |qname| {
+                    if (parse.query_param(query_string, qname)) |qval| {
+                        params.keys[params.len] = qname;
+                        params.values[params.len] = qval;
+                        params.len += 1;
+                    }
+                }
 
-        const skip = method != H.route_method or parse.match_route(path, H.route_pattern) == null;
-
-        if (!skip) {
-            if (H.route(method, path, body)) |msg| {
-                assert(result == null); // duplicate route match
-                result = msg;
+                if (route.handler.route(params, body)) |msg| {
+                    assert(result == null); // duplicate route match
+                    result = msg;
+                }
             }
         }
     }

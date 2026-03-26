@@ -7,14 +7,10 @@ pub const Prefetch = struct { orders: ?t.BoundedList(t.OrderRow, t.list_max) };
 
 pub const Context = t.HandlerContext(Prefetch, t.Operation.EventType(.list_orders), t.Identity, Status);
 
-pub const route_method = t.http.Method.get;
-pub const route_pattern = "/orders";
-
 // [route] .list_orders
 // match GET /orders
-pub fn route(method: t.http.Method, raw_path: []const u8, body: []const u8) ?t.Message {
-    _ = method; _ = body;
-    if (t.match_route(raw_path, route_pattern) == null) return null;
+pub fn route(params: t.RouteParams, body: []const u8) ?t.Message {
+    _ = params; _ = body;
     return t.Message.init(.list_orders, 0, 0, std.mem.zeroes(t.ListParams));
 }
 
