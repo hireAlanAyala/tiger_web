@@ -316,10 +316,17 @@ fn build_ci(
 
     if (all or mode == .fuzz) {
         build_ci_step(b, step_ci, &.{ "fuzz", "--", "smoke" });
-        // Per-commit deterministic fuzz: state_machine with a fixed seed.
-        // TB uses the commit SHA truncated to u64 — we use a fixed seed for now.
-        // TODO: resolve git rev-parse HEAD at build time and pass as seed.
-        build_ci_step(b, step_ci, &.{ "fuzz", "--", "state_machine", "42" });
+        // Per-commit deterministic fuzz: state_machine with commit SHA as seed.
+        // Same idea as TB's VOPR — every commit gets a unique fuzz pass.
+        // Convert first 8 hex chars of SHA to decimal u32 via printf.
+        const cmd = std.mem.join(b.allocator, " ", &.{
+            options.zig_exe, "build", "fuzz", "--", "state_machine",
+            "$(printf '%d' 0x$(git rev-parse HEAD | cut -c1-8))",
+        }) catch @panic("OOM");
+        const fuzz_seeded = b.addSystemCommand(&.{ "sh", "-c", cmd });
+        fuzz_seeded.has_side_effects = true;
+        fuzz_seeded.setName("fuzz state_machine <commit-sha>");
+        step_ci.dependOn(&fuzz_seeded.step);
     }
 
     if (default or all or mode == .clients) {
