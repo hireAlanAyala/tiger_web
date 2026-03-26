@@ -67,10 +67,22 @@ These are in the copied cfo.zig but inactive until we configure them:
 ## Build infrastructure (needed for ci subcommand)
 
 ### `-Dprint-exe` build option
-Needed by CFO to separate build time from fuzzer runtime. Copy TB's
-implementation from their build.zig. Also useful for ci if it needs
-to invoke executables directly.
+Done — ported in Phase 5.
 
 ### GitHub Actions workflow
 TB's `.github/workflows/ci.yml` calls `zig build ci -- test`. We need
 our own workflow that does the same with our ci subcommand.
+
+### Audit: vendored zig usage
+We vendor Zig at `./zig/zig` (downloaded via `zig/download.sh`). All
+build invocations must use `./zig/zig build`, never bare `zig build`.
+Audit every place we reference the zig binary:
+- `CLAUDE.md` quick reference commands
+- `scripts/cfo_supervisor.sh` (done — uses `./zig/zig`)
+- `scripts/cfo.zig` display command (done — uses `./zig/zig`)
+- CI workflow (when created)
+- Any Makefiles, shell scripts, or docs that invoke zig
+
+`ZIG_EXE` env var must be set to `./zig/zig` wherever Shell.zig is
+used — Shell.zig reads it at init and panics if it's null when
+`exec_zig` or CFO's build step is called.
