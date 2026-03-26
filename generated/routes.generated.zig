@@ -59,6 +59,16 @@ comptime {
         }
         if (!found) @compileError("no // match annotation for operation: " ++ @tagName(op));
     }
+
+    // Assert: path params + query params fit in RouteParams for every route.
+    const parse = @import("../framework/parse.zig");
+    for (routes) |r| {
+        const path_params = parse.count_params(r.pattern);
+        const total = path_params + r.query_params.len;
+        if (total > parse.max_route_params) {
+            @compileError("route " ++ r.pattern ++ " has too many params (path + query)");
+        }
+    }
 }
 
 // Shared route patterns are allowed — handlers disambiguate at runtime

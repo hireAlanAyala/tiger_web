@@ -129,7 +129,7 @@ pub fn parse_query_u32(s: []const u8) u32 {
 // =====================================================================
 
 /// Maximum route params (e.g. /orders/:id/items/:item_id = 2 params).
-const max_route_params = 4;
+pub const max_route_params = 4;
 
 /// Extracted route parameters — string slices into the original path.
 pub const RouteParams = struct {
@@ -147,7 +147,7 @@ pub const RouteParams = struct {
 };
 
 /// Count :param segments in a route pattern at comptime.
-fn count_params(comptime pattern: []const u8) comptime_int {
+pub fn count_params(comptime pattern: []const u8) comptime_int {
     var count: comptime_int = 0;
     var i: usize = 0;
     while (i < pattern.len) : (i += 1) {
