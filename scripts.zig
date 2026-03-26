@@ -40,7 +40,7 @@ const CLIArgs = union(enum) {
         \\
         \\  zig build scripts -- cfo [--budget=<duration>] [--refresh=<duration>] [--concurrency=<n>]
         \\
-        \\  zig build scripts -- ci <test|smoke>
+        \\  zig build scripts -- ci [--validate-release]
         \\
         \\Options:
         \\
