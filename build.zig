@@ -219,6 +219,13 @@ pub fn build(b: *std.Build) void {
     const adapter_test_step = b.step("test-adapter", "Run TypeScript adapter test");
     adapter_test_step.dependOn(&adapter_test_cmd.step);
 
+    // --- CI pipeline (zig build ci -- <mode>) ---
+    // Matches TB's pattern: build step that invokes other build steps as subprocesses.
+    // Modes: test (default), fuzz (commit-SHA seed), clients (example projects).
+    build_ci(b, scripts_exe, .{
+        .zig_exe = b.graph.zig_exe,
+    });
+
     // --- Benchmark (smoke mode as part of unit-test, real via bench step) ---
     const bench_smoke_options = b.addOptions();
     bench_smoke_options.addOption(bool, "benchmark", false);
@@ -252,6 +259,104 @@ pub fn build(b: *std.Build) void {
     bench_run.has_side_effects = true;
     const bench_step = b.step("bench", "Run state machine benchmark");
     bench_step.dependOn(&bench_run.step);
+}
+
+/// CI pipeline — ported from TigerBeetle's build.zig build_ci pattern.
+/// Invokes build steps as subprocesses so each has its own exit code.
+fn build_ci(
+    b: *std.Build,
+    scripts: *std.Build.Step.Compile,
+    options: struct { zig_exe: []const u8 },
+) void {
+    const step_ci = b.step("ci", "Run the full CI pipeline");
+
+    const CIMode = enum {
+        @"test", // Main test suite: scan, unit tests, sim tests, fuzz smoke.
+        fuzz, // Fuzz smoke + commit-SHA seeded fuzz run.
+        clients, // Example project tests (adapter + integration).
+        default, // test + clients.
+        all,
+    };
+
+    const mode: CIMode = if (b.args) |args| mode: {
+        if (args.len != 1) {
+            step_ci.dependOn(&b.addFail("ci: expected 1 argument (test|fuzz|clients)").step);
+            return;
+        }
+        if (std.meta.stringToEnum(CIMode, args[0])) |m| {
+            break :mode m;
+        } else {
+            step_ci.dependOn(&b.addFail("ci: unknown mode").step);
+            return;
+        }
+    } else .default;
+
+    const all = mode == .all;
+    const default = all or mode == .default;
+
+    if (default or mode == .@"test") {
+        // Scan annotations — regenerate routes + manifest.
+        build_ci_step(b, step_ci, &.{ "scan", "--", "handlers/",
+            "--routes-zig=generated/routes.generated.zig",
+            "--manifest=generated/manifest.json",
+        });
+        // Freshness check — committed generated files must match.
+        const freshness = b.addSystemCommand(&.{ "git", "diff", "--exit-code", "generated/" });
+        freshness.setName("freshness check: generated/");
+        step_ci.dependOn(&freshness.step);
+        // Unit tests.
+        build_ci_step(b, step_ci, &.{"unit-test"});
+        // Simulation tests.
+        build_ci_step(b, step_ci, &.{"test"});
+        // Fuzz smoke.
+        build_ci_step(b, step_ci, &.{ "fuzz", "--", "smoke" });
+        // Scripts help (verifies scripts compile).
+        build_ci_script(b, step_ci, scripts, &.{"--help"}, options.zig_exe);
+    }
+
+    if (all or mode == .fuzz) {
+        build_ci_step(b, step_ci, &.{ "fuzz", "--", "smoke" });
+        // Per-commit deterministic fuzz: state_machine with commit SHA as seed.
+        // Same idea as TB's VOPR with commit hash — every commit gets one fuzz pass.
+        const git_sha = b.option([]const u8, "git-commit", "Git commit SHA for seeded fuzz") orelse "HEAD";
+        build_ci_step(b, step_ci, &.{ "fuzz", "--", "state_machine", git_sha });
+    }
+
+    if (default or all or mode == .clients) {
+        // Adapter test (Level 1: binary protocol boundary).
+        build_ci_step(b, step_ci, &.{"test-adapter"});
+        // Example project integration test (Level 2: full handler logic).
+        build_ci_script(b, step_ci, scripts, &.{"ci"}, options.zig_exe);
+    }
+}
+
+/// Run a build step as a subprocess. Ported from TB's build_ci_step.
+fn build_ci_step(
+    b: *std.Build,
+    step_ci: *std.Build.Step,
+    command: []const []const u8,
+) void {
+    const system_command = b.addSystemCommand(&.{ b.graph.zig_exe, "build" });
+    for (command) |arg| system_command.addArg(arg);
+    const name = std.mem.join(b.allocator, " ", command) catch @panic("OOM");
+    system_command.setName(name);
+    system_command.has_side_effects = true;
+    step_ci.dependOn(&system_command.step);
+}
+
+/// Run the scripts executable with args. Ported from TB's build_ci_script.
+fn build_ci_script(
+    b: *std.Build,
+    step_ci: *std.Build.Step,
+    scripts: *std.Build.Step.Compile,
+    argv: []const []const u8,
+    zig_exe: []const u8,
+) void {
+    const run_artifact = b.addRunArtifact(scripts);
+    run_artifact.addArgs(argv);
+    run_artifact.setEnvironmentVariable("ZIG_EXE", zig_exe);
+    run_artifact.has_side_effects = true;
+    step_ci.dependOn(&run_artifact.step);
 }
 
 /// Ported from TigerBeetle's build.zig. When print=true, compiles the artifact
