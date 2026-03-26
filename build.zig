@@ -3,6 +3,7 @@ const std = @import("std");
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
+    const print_exe = b.option(bool, "print-exe", "Build tasks print the path of the executable") orelse false;
 
     // No framework module — all framework files imported via direct file
     // path (@import("framework/lib.zig")). This keeps everything in one
@@ -88,6 +89,36 @@ pub fn build(b: *std.Build) void {
     const fuzz_step = b.step("fuzz", "Run fuzz tests");
     fuzz_step.dependOn(&fuzz_cmd.step);
 
+    // --- Fuzz build-only step (used by CFO to build without running) ---
+    // With -Dprint-exe, prints the executable path to stdout (CFO captures this
+    // to spawn the binary directly, excluding build time from seed duration).
+    const fuzz_build_step = b.step("fuzz:build", "Build fuzz test binary");
+    fuzz_build_step.dependOn(print_or_install(b, fuzz_exe, print_exe));
+
+    // --- stdx module (for shell.zig and scripts.zig which use @import("stdx")) ---
+    // The main executable uses direct path imports (@import("framework/lib.zig").stdx).
+    // The scripts executable is a separate compilation unit with its own std_options,
+    // so it uses module wiring. This matches TB's pattern — see plan for trade-off doc.
+    const stdx_module = b.addModule("stdx", .{
+        .root_source_file = b.path("framework/stdx/stdx.zig"),
+    });
+
+    // --- Scripts executable (CFO and other automation) ---
+    const scripts_exe = b.addExecutable(.{
+        .name = "tiger-scripts",
+        .root_source_file = b.path("scripts.zig"),
+        .target = target,
+        .optimize = .Debug,
+    });
+    scripts_exe.root_module.addImport("stdx", stdx_module);
+    b.installArtifact(scripts_exe);
+
+    const scripts_cmd = b.addRunArtifact(scripts_exe);
+    scripts_cmd.step.dependOn(b.getInstallStep());
+    if (b.args) |args| scripts_cmd.addArgs(args);
+    const scripts_step = b.step("scripts", "Run automation scripts");
+    scripts_step.dependOn(&scripts_cmd.step);
+
     // --- Annotation scanner ---
     const scanner_exe = b.addExecutable(.{
         .name = "annotation-scanner",
@@ -140,7 +171,7 @@ pub fn build(b: *std.Build) void {
         "framework/tracer.zig",
         "framework/http.zig",
         "framework/marks.zig",
-        "framework/prng.zig",
+        // prng.zig now inside stdx/ — tested via stdx module wiring (Phase 5)
         "framework/time.zig",
         "framework/auth.zig",
         "framework/checksum.zig",
@@ -154,6 +185,23 @@ pub fn build(b: *std.Build) void {
         });
         unit_test_step.dependOn(&b.addRunArtifact(unit_test).step);
     }
+
+    // --- Shell + scripts tests (need stdx module wiring) ---
+    const shell_test = b.addTest(.{
+        .root_source_file = b.path("shell.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    shell_test.root_module.addImport("stdx", stdx_module);
+    unit_test_step.dependOn(&b.addRunArtifact(shell_test).step);
+
+    const scripts_test = b.addTest(.{
+        .root_source_file = b.path("scripts.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    scripts_test.root_module.addImport("stdx", stdx_module);
+    unit_test_step.dependOn(&b.addRunArtifact(scripts_test).step);
 
     // --- Adapter test (opt-in, requires npx tsx) ---
     const adapter_test_cmd = b.addSystemCommand(&.{ "npx", "-y", "tsx", "adapters/typescript_test.ts" });
@@ -189,4 +237,37 @@ pub fn build(b: *std.Build) void {
     bench_run.has_side_effects = true;
     const bench_step = b.step("bench", "Run state machine benchmark");
     bench_step.dependOn(&bench_run.step);
+}
+
+/// Ported from TigerBeetle's build.zig. When print=true, compiles the artifact
+/// and prints its path to stdout (used by CFO to spawn the binary directly,
+/// separating build time from fuzzer runtime). When print=false, installs normally.
+fn print_or_install(b: *std.Build, compile: *std.Build.Step.Compile, print: bool) *std.Build.Step {
+    const PrintStep = struct {
+        step: std.Build.Step,
+        compile: *std.Build.Step.Compile,
+
+        fn make(step: *std.Build.Step, _: std.Build.Step.MakeOptions) !void {
+            const print_step: *@This() = @fieldParentPtr("step", step);
+            const path = print_step.compile.getEmittedBin().getPath2(step.owner, step);
+            try std.io.getStdOut().writer().print("{s}\n", .{path});
+        }
+    };
+
+    if (print) {
+        const print_step = b.allocator.create(PrintStep) catch @panic("OOM");
+        print_step.* = .{
+            .step = std.Build.Step.init(.{
+                .id = .custom,
+                .name = "print exe",
+                .owner = b,
+                .makeFn = PrintStep.make,
+            }),
+            .compile = compile,
+        };
+        print_step.step.dependOn(&print_step.compile.step);
+        return &print_step.step;
+    } else {
+        return &b.addInstallArtifact(compile, .{}).step;
+    }
 }
