@@ -10,9 +10,32 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with: { node-version: '22' }
       - run: sudo apt-get install -y libsqlite3-dev
       - run: sh zig/download.sh
-      - run: cd examples/ecommerce-ts && npm install
-      - run: ./zig/zig build ci
+      - run: ./zig/zig build ci -- test
+
+  clients:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - { example: 'ecommerce-ts', language: 'node', version: '22' }
+    steps:
+      - uses: actions/checkout@v4
+      - run: sudo apt-get install -y libsqlite3-dev
+      - run: sh zig/download.sh
+
+      - if: matrix.language == 'node'
+        uses: actions/setup-node@v4
+        with: { node-version: '${{ matrix.version }}' }
+
+      - if: matrix.language == 'python'
+        uses: actions/setup-python@v4
+        with: { python-version: '${{ matrix.version }}' }
+
+      - run: cd examples/${{ matrix.example }} && npm install
+        if: matrix.language == 'node'
+      - run: cd examples/${{ matrix.example }} && pip install -r requirements.txt
+        if: matrix.language == 'python'
+
+      - run: ./zig/zig build ci -- clients
