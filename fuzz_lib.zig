@@ -3,7 +3,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const assert = std.debug.assert;
-const PRNG = @import("framework/lib.zig").prng;
+const PRNG = @import("stdx").PRNG;
 
 pub const FuzzArgs = struct {
     seed: u64,

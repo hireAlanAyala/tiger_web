@@ -2,7 +2,7 @@
 //! If this compiles, the handler's signatures pass comptime validation.
 
 const std = @import("std");
-const fw = @import("framework/lib.zig");
+const fw_handler = @import("framework/handler.zig");
 const message = @import("message.zig");
 const state_machine = @import("state_machine.zig");
 const get_product = @import("handlers/get_product.zig");
@@ -39,7 +39,7 @@ test "get_product route rejects other collections" {
 }
 
 test "get_product render not found" {
-    const Context = fw.handler.HandlerContext(
+    const Context = fw_handler.HandlerContext(
         get_product.Prefetch,
         message.Operation.EventType(.get_product),
         message.PrefetchIdentity,
@@ -63,7 +63,7 @@ test "get_product render not found" {
 }
 
 test "get_product render product card" {
-    const Context = fw.handler.HandlerContext(
+    const Context = fw_handler.HandlerContext(
         get_product.Prefetch,
         message.Operation.EventType(.get_product),
         message.PrefetchIdentity,

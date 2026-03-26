@@ -56,7 +56,7 @@ const assert = std.debug.assert;
 const Random = std.Random;
 const math = std.math;
 const Snap = stdx.Snap;
-const module_path = "src/stdx";
+const module_path = "framework/stdx";
 const snap = Snap.snap_fn(module_path);
 
 /// The default "skew" of the distribution.

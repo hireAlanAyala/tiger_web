@@ -15,7 +15,7 @@ const assert = std.debug.assert;
 const App = @import("app.zig");
 const message = @import("message.zig");
 const protocol = @import("protocol.zig");
-const auth = @import("framework/lib.zig").auth;
+const auth = @import("framework/auth.zig");
 
 const Storage = App.Storage;
 const SM = App.SM;

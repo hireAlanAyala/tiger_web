@@ -7,17 +7,18 @@
 //! each app defines its own prelude based on its domain types.
 
 const std = @import("std");
-const fw = @import("framework/lib.zig");
 const message = @import("message.zig");
 const sm = @import("state_machine.zig");
+const fw_parse = @import("framework/parse.zig");
+const fw_handler = @import("framework/handler.zig");
 
 // --- Framework ---
-pub const http = fw.http;
-pub const parse = fw.parse;
-pub const stdx = fw.stdx;
-pub const RouteParams = fw.parse.RouteParams;
-pub const match_route = fw.parse.match_route;
-pub const HandlerContext = fw.handler.HandlerContext;
+pub const http = @import("framework/http.zig");
+pub const parse = fw_parse;
+pub const stdx = @import("stdx");
+pub const RouteParams = fw_parse.RouteParams;
+pub const match_route = fw_parse.match_route;
+pub const HandlerContext = fw_handler.HandlerContext;
 
 // --- Domain types ---
 pub const Message = message.Message;
@@ -49,7 +50,7 @@ pub const OrderStatus = message.OrderStatus;
 
 // --- Storage ---
 pub const Storage = @import("storage.zig").SqliteStorage;
-pub const BoundedList = fw.stdx.BoundedList;
+pub const BoundedList = stdx.BoundedList;
 
 // --- Query row types ---
 //

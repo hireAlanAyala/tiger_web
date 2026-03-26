@@ -1,14 +1,14 @@
 const std = @import("std");
-const IO = @import("framework/lib.zig").io.IO;
+const stdx = @import("stdx");
+const IO = @import("framework/io.zig").IO;
 const App = @import("app.zig");
 const StateMachine = App.SM;
-const ServerType = @import("framework/lib.zig").server.ServerType;
-const TimeReal = @import("framework/lib.zig").time.TimeReal;
-const auth = @import("framework/lib.zig").auth;
-const flags = @import("framework/lib.zig").flags;
+const ServerType = @import("framework/server.zig").ServerType;
+const TimeReal = @import("framework/time.zig").TimeReal;
+const auth = @import("framework/auth.zig");
 
 const Server = ServerType(App, IO, App.Storage);
-const marks = @import("framework/lib.zig").marks;
+const marks = @import("framework/marks.zig");
 const log = marks.wrap_log(std.log.scoped(.main));
 
 /// Tick interval in nanoseconds (10ms).
@@ -36,7 +36,7 @@ pub const std_options: std.Options = .{
 
 pub fn main() !void {
     var args = std.process.args();
-    const cli = flags.parse(&args, CliArgs);
+    const cli = stdx.flags(&args, CliArgs);
 
     if (cli.log_trace and !cli.log_debug) {
         log.err("--log-debug must be provided when using --log-trace", .{});

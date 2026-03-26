@@ -1112,7 +1112,7 @@ pub inline fn branchless_select(comptime T: type, flag: bool, a: T, b: T) T {
     return if (flag) a else b;
 }
 
-const snap = Snap.snap_fn("src/stdx");
+const snap = Snap.snap_fn("framework/stdx");
 
 test fastrange {
     var prng = PRNG.from_seed(42);

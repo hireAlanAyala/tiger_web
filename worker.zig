@@ -1,5 +1,5 @@
 const std = @import("std");
-const auth = @import("framework/lib.zig").auth;
+const auth = @import("framework/auth.zig");
 const log = std.log.scoped(.worker);
 
 /// Worker process — polls the server for pending orders, simulates an

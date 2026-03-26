@@ -9,11 +9,11 @@ const std = @import("std");
 const assert = std.debug.assert;
 const message = @import("message.zig");
 const protocol = @import("protocol.zig");
-const wal_mod = @import("framework/lib.zig").wal;
+const wal_mod = @import("framework/wal.zig");
 const Storage = @import("storage.zig").SqliteStorage;
 const replay = @import("replay.zig");
 const FuzzArgs = @import("fuzz_lib.zig").FuzzArgs;
-const PRNG = @import("framework/lib.zig").prng;
+const PRNG = @import("stdx").PRNG;
 
 const Wal = wal_mod.WalType(message.Operation);
 

@@ -1,6 +1,6 @@
 const std = @import("std");
 const assert = std.debug.assert;
-const stdx = @import("stdx/stdx.zig");
+const stdx = @import("stdx");
 
 // =====================================================================
 // JSON field extractors — find known fields in a JSON object.

@@ -11,9 +11,9 @@
 
 const std = @import("std");
 const assert = std.debug.assert;
-const flags = @import("framework/lib.zig").flags;
-const wal_mod = @import("framework/lib.zig").wal;
-const cs = @import("framework/lib.zig").checksum;
+const stdx = @import("stdx");
+const wal_mod = @import("framework/wal.zig");
+const cs = @import("framework/checksum.zig");
 const message = @import("message.zig");
 const protocol = @import("protocol.zig");
 const Storage = @import("storage.zig").SqliteStorage;
@@ -91,7 +91,7 @@ const QueryArgs = struct {
 
 pub fn main() !void {
     var args = std.process.args();
-    const cli = flags.parse(&args, CliArgs);
+    const cli = stdx.flags(&args, CliArgs);
 
     switch (cli) {
         .verify => |v| verify(v.path),

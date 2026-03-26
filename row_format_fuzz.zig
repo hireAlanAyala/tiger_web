@@ -11,7 +11,7 @@ const std = @import("std");
 const assert = std.debug.assert;
 const protocol = @import("protocol.zig");
 const FuzzArgs = @import("fuzz_lib.zig").FuzzArgs;
-const PRNG = @import("framework/lib.zig").prng;
+const PRNG = @import("stdx").PRNG;
 
 const log = std.log.scoped(.fuzz);
 

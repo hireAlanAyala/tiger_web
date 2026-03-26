@@ -1,7 +1,7 @@
 const std = @import("std");
 const testing = std.testing;
 const message = @import("message.zig");
-const wal_mod = @import("framework/lib.zig").wal;
+const wal_mod = @import("framework/wal.zig");
 const Wal = wal_mod.WalType(message.Operation);
 const EntryHeader = wal_mod.EntryHeader;
 
@@ -164,7 +164,7 @@ test "WAL empty writes (read-only mutation)" {
 test "WAL seeded corruption recovery" {
     // Write entries, corrupt random bytes, verify recovery doesn't crash
     // and resumes from the last valid entry before corruption.
-    const PRNG = @import("framework/lib.zig").prng;
+    const PRNG = @import("stdx").PRNG;
     const iterations = 100;
     var prng = PRNG.from_seed(42);
 

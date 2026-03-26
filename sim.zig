@@ -8,17 +8,17 @@
 const std = @import("std");
 const assert = std.debug.assert;
 const message = @import("message.zig");
-const http = @import("framework/lib.zig").http;
+const http = @import("framework/http.zig");
 const state_machine = @import("state_machine.zig");
 const App = @import("app.zig");
 const Storage = App.Storage;
 const StateMachine = App.SM;
-const ServerType = @import("framework/lib.zig").server.ServerType;
-const ConnectionType = @import("framework/lib.zig").connection.ConnectionType;
-const marks = @import("framework/lib.zig").marks;
-const PRNG = @import("framework/lib.zig").prng;
-const TimeSim = @import("framework/lib.zig").time.TimeSim;
-const auth = @import("framework/lib.zig").auth;
+const ServerType = @import("framework/server.zig").ServerType;
+const ConnectionType = @import("framework/connection.zig").ConnectionType;
+const marks = @import("framework/marks.zig");
+const PRNG = @import("stdx").PRNG;
+const TimeSim = @import("framework/time.zig").TimeSim;
+const auth = @import("framework/auth.zig");
 
 // Silence framework log noise and cap address space.
 // Runs before all tests (declaration order in file).

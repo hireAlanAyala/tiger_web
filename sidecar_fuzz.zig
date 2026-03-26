@@ -15,7 +15,7 @@ const message = @import("message.zig");
 const protocol = @import("protocol.zig");
 const sidecar = @import("sidecar.zig");
 const FuzzArgs = @import("fuzz_lib.zig").FuzzArgs;
-const PRNG = @import("framework/lib.zig").prng;
+const PRNG = @import("stdx").PRNG;
 
 const Storage = @import("storage.zig").SqliteStorage;
 

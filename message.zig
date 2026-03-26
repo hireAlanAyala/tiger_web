@@ -1,7 +1,7 @@
 const std = @import("std");
 const assert = std.debug.assert;
-const stdx = @import("framework/lib.zig").stdx;
-const cs = @import("framework/lib.zig").checksum;
+const stdx = @import("stdx");
+const cs = @import("framework/checksum.zig");
 
 pub const maybe = stdx.maybe;
 

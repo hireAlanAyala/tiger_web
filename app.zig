@@ -9,10 +9,10 @@ const assert = std.debug.assert;
 const message = @import("message.zig");
 const protocol = @import("protocol.zig");
 const state_machine = @import("state_machine.zig");
-const http = @import("framework/lib.zig").http;
-const auth = @import("framework/lib.zig").auth;
-const marks = @import("framework/lib.zig").marks;
-const PRNG = @import("framework/lib.zig").prng;
+const http = @import("framework/http.zig");
+const auth = @import("framework/auth.zig");
+const marks = @import("framework/marks.zig");
+const PRNG = @import("stdx").PRNG;
 pub const SidecarClient = @import("sidecar.zig").SidecarClient;
 
 const log = marks.wrap_log(std.log.scoped(.app));
@@ -114,7 +114,7 @@ pub fn HandlersType(comptime StorageParam: type) type {
             return dispatch_prefetch(ro, msg);
         }
 
-        pub const FwCtx = @import("framework/lib.zig").handler.FrameworkCtx(message.PrefetchIdentity);
+        pub const FwCtx = @import("framework/handler.zig").FrameworkCtx(message.PrefetchIdentity);
 
         pub fn handler_execute(
             cache: PrefetchCache,
@@ -142,7 +142,7 @@ pub fn StateMachineType(comptime StorageParam: type) type {
 pub const Storage = @import("storage.zig").SqliteStorage;
 pub const SM = StateMachineType(Storage);
 
-pub const Wal = @import("framework/lib.zig").wal.WalType(Operation);
+pub const Wal = @import("framework/wal.zig").WalType(Operation);
 
 /// Optional sidecar client — when set, translate delegates to the
 /// external process instead of the Zig-native handlers.
@@ -158,7 +158,7 @@ pub var sidecar: ?SidecarClient = null;
 pub fn translate(method: http.Method, path: []const u8, body: []const u8) ?Message {
     if (sidecar) |*client| return client.translate(method, path, body);
 
-    const parse = @import("framework/lib.zig").parse;
+    const parse = @import("framework/parse.zig");
 
     var result: ?Message = null;
     inline for (handlers) |H| {
@@ -388,8 +388,8 @@ fn render_one(
 var render_scratch_buf: [http.send_buf_max]u8 = undefined;
 
 
-const http_response = @import("framework/lib.zig").http_response;
-const sse = @import("framework/lib.zig").sse;
+const http_response = @import("framework/http_response.zig");
+const sse = @import("framework/sse.zig");
 
 pub fn commit_and_encode(
     comptime StorageParam: type,

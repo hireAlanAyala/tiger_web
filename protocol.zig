@@ -95,7 +95,7 @@ comptime {
 
     // WAL entry worst case: header(64) + writes(writes_max × max_write_entry).
     // Must fit in wal.entry_max (the server's scratch buffer).
-    const wal = @import("framework/lib.zig").wal;
+    const wal = @import("framework/wal.zig");
     const max_wal_entry = @sizeOf(wal.EntryHeader) + writes_max * max_write_entry;
     assert(wal.entry_max >= max_wal_entry);
 

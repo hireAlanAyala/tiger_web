@@ -348,7 +348,7 @@ fn hexdump(bytes: []const u8, writer: std.io.AnyWriter) !void {
 }
 
 test hexdump {
-    const snap = Snap.snap_fn("./src/stdx");
+    const snap = Snap.snap_fn("./framework/stdx");
 
     try snap(@src(),
         \\68 65 6c 6c 6f 2c 20 77  6f 72 6c 64 0a 00 01 02

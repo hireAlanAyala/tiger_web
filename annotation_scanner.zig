@@ -79,7 +79,7 @@ const RouteMatch = struct {
     }
 };
 
-const http = @import("framework/lib.zig").http;
+const http = @import("framework/http.zig");
 comptime {
     // Every framework HTTP method must exist in RouteMatch.Method.
     // If the framework adds a method, the scanner must recognize it.

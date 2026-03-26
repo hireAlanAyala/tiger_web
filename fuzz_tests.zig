@@ -11,7 +11,7 @@
 
 const std = @import("std");
 const assert = std.debug.assert;
-const flags = @import("framework/lib.zig").flags;
+const stdx = @import("stdx");
 const fuzz = @import("fuzz_lib.zig");
 
 const log = std.log.scoped(.fuzz);
@@ -71,7 +71,7 @@ pub fn main() !void {
     }
 
     var args = std.process.args();
-    const cli_args = flags.parse(&args, CLIArgs);
+    const cli_args = stdx.flags(&args, CLIArgs);
 
     switch (cli_args.fuzzer) {
         .smoke => {

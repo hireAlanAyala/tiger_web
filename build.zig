@@ -5,11 +5,12 @@ pub fn build(b: *std.Build) void {
     const optimize = b.standardOptimizeOption(.{});
     const print_exe = b.option(bool, "print-exe", "Build tasks print the path of the executable") orelse false;
 
-    // No framework module — all framework files imported via direct file
-    // path (@import("framework/lib.zig")). This keeps everything in one
-    // compilation unit so std_options in the root controls logging for
-    // ALL code including framework internals. Matches TigerBeetle: one
-    // compilation unit, root owns log config.
+    // stdx module — all compilation units use @import("stdx"), matching TB's pattern.
+    // Each compilation unit has its own std_options (root owns log config), but stdx
+    // is shared via module wiring so @src().file paths resolve correctly for Snap tests.
+    const stdx_module = b.addModule("stdx", .{
+        .root_source_file = b.path("framework/stdx/stdx.zig"),
+    });
 
     // --- Main executable ---
     const exe = b.addExecutable(.{
@@ -18,6 +19,7 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
+    exe.root_module.addImport("stdx", stdx_module);
     exe.linkSystemLibrary("sqlite3");
     exe.linkLibC();
     b.installArtifact(exe);
@@ -35,6 +37,7 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
+    worker_exe.root_module.addImport("stdx", stdx_module);
     b.installArtifact(worker_exe);
 
     const worker_cmd = b.addRunArtifact(worker_exe);
@@ -50,6 +53,7 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
+    replay_exe.root_module.addImport("stdx", stdx_module);
     replay_exe.linkSystemLibrary("sqlite3");
     replay_exe.linkLibC();
     b.installArtifact(replay_exe);
@@ -66,9 +70,11 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
+    sim_tests.root_module.addImport("stdx", stdx_module);
     sim_tests.linkSystemLibrary("sqlite3");
     sim_tests.linkLibC();
     const run_sim_tests = b.addRunArtifact(sim_tests);
+    run_sim_tests.setEnvironmentVariable("ZIG_EXE", b.graph.zig_exe);
     const test_step = b.step("test", "Run simulation tests");
     test_step.dependOn(&run_sim_tests.step);
 
@@ -79,6 +85,7 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
+    fuzz_exe.root_module.addImport("stdx", stdx_module);
     fuzz_exe.linkSystemLibrary("sqlite3");
     fuzz_exe.linkLibC();
     b.installArtifact(fuzz_exe);
@@ -94,14 +101,6 @@ pub fn build(b: *std.Build) void {
     // to spawn the binary directly, excluding build time from seed duration).
     const fuzz_build_step = b.step("fuzz:build", "Build fuzz test binary");
     fuzz_build_step.dependOn(print_or_install(b, fuzz_exe, print_exe));
-
-    // --- stdx module (for shell.zig and scripts.zig which use @import("stdx")) ---
-    // The main executable uses direct path imports (@import("framework/lib.zig").stdx).
-    // The scripts executable is a separate compilation unit with its own std_options,
-    // so it uses module wiring. This matches TB's pattern — see plan for trade-off doc.
-    const stdx_module = b.addModule("stdx", .{
-        .root_source_file = b.path("framework/stdx/stdx.zig"),
-    });
 
     // --- Scripts executable (CFO and other automation) ---
     const scripts_exe = b.addExecutable(.{
@@ -126,6 +125,7 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
+    scanner_exe.root_module.addImport("stdx", stdx_module);
     b.installArtifact(scanner_exe);
 
     const scanner_cmd = b.addRunArtifact(scanner_exe);
@@ -150,7 +150,9 @@ pub fn build(b: *std.Build) void {
             .target = target,
             .optimize = optimize,
         });
+        unit_test.root_module.addImport("stdx", stdx_module);
         const run_unit_test = b.addRunArtifact(unit_test);
+        run_unit_test.setEnvironmentVariable("ZIG_EXE", b.graph.zig_exe);
         unit_test_step.dependOn(&run_unit_test.step);
     }
 
@@ -161,9 +163,12 @@ pub fn build(b: *std.Build) void {
             .target = target,
             .optimize = optimize,
         });
+        unit_test.root_module.addImport("stdx", stdx_module);
         unit_test.linkSystemLibrary("sqlite3");
         unit_test.linkLibC();
-        unit_test_step.dependOn(&b.addRunArtifact(unit_test).step);
+        const run_ut = b.addRunArtifact(unit_test);
+        run_ut.setEnvironmentVariable("ZIG_EXE", b.graph.zig_exe);
+        unit_test_step.dependOn(&run_ut.step);
     }
 
     // Framework unit tests.
@@ -171,7 +176,6 @@ pub fn build(b: *std.Build) void {
         "framework/tracer.zig",
         "framework/http.zig",
         "framework/marks.zig",
-        // prng.zig now inside stdx/ — tested via stdx module wiring (Phase 5)
         "framework/time.zig",
         "framework/auth.zig",
         "framework/checksum.zig",
@@ -183,17 +187,22 @@ pub fn build(b: *std.Build) void {
             .target = target,
             .optimize = optimize,
         });
-        unit_test_step.dependOn(&b.addRunArtifact(unit_test).step);
+        unit_test.root_module.addImport("stdx", stdx_module);
+        const run_fw_test = b.addRunArtifact(unit_test);
+        run_fw_test.setEnvironmentVariable("ZIG_EXE", b.graph.zig_exe);
+        unit_test_step.dependOn(&run_fw_test.step);
     }
 
-    // --- Shell + scripts tests (need stdx module wiring) ---
+    // Shell + scripts tests.
     const shell_test = b.addTest(.{
         .root_source_file = b.path("shell.zig"),
         .target = target,
         .optimize = optimize,
     });
     shell_test.root_module.addImport("stdx", stdx_module);
-    unit_test_step.dependOn(&b.addRunArtifact(shell_test).step);
+    const run_shell_test = b.addRunArtifact(shell_test);
+    run_shell_test.setEnvironmentVariable("ZIG_EXE", b.graph.zig_exe);
+    unit_test_step.dependOn(&run_shell_test.step);
 
     const scripts_test = b.addTest(.{
         .root_source_file = b.path("scripts.zig"),
@@ -201,7 +210,9 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
     scripts_test.root_module.addImport("stdx", stdx_module);
-    unit_test_step.dependOn(&b.addRunArtifact(scripts_test).step);
+    const run_scripts_test = b.addRunArtifact(scripts_test);
+    run_scripts_test.setEnvironmentVariable("ZIG_EXE", b.graph.zig_exe);
+    unit_test_step.dependOn(&run_scripts_test.step);
 
     // --- Adapter test (opt-in, requires npx tsx) ---
     const adapter_test_cmd = b.addSystemCommand(&.{ "npx", "-y", "tsx", "adapters/typescript_test.ts" });
@@ -217,10 +228,13 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
+    bench_smoke.root_module.addImport("stdx", stdx_module);
     bench_smoke.root_module.addOptions("bench_options", bench_smoke_options);
     bench_smoke.linkSystemLibrary("sqlite3");
     bench_smoke.linkLibC();
-    unit_test_step.dependOn(&b.addRunArtifact(bench_smoke).step);
+    const run_bench_smoke = b.addRunArtifact(bench_smoke);
+    run_bench_smoke.setEnvironmentVariable("ZIG_EXE", b.graph.zig_exe);
+    unit_test_step.dependOn(&run_bench_smoke.step);
 
     const bench_real_options = b.addOptions();
     bench_real_options.addOption(bool, "benchmark", true);
@@ -230,6 +244,7 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
+    bench_real.root_module.addImport("stdx", stdx_module);
     bench_real.root_module.addOptions("bench_options", bench_real_options);
     bench_real.linkSystemLibrary("sqlite3");
     bench_real.linkLibC();

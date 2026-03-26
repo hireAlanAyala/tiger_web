@@ -25,9 +25,9 @@ const assert = std.debug.assert;
 const message = @import("message.zig");
 const state_machine = @import("state_machine.zig");
 const StorageResult = state_machine.StorageResult;
-const stdx = @import("framework/lib.zig").stdx;
+const stdx = @import("stdx");
 const proto = @import("protocol.zig");
-const marks = @import("framework/lib.zig").marks;
+const marks = @import("framework/marks.zig");
 const log = marks.wrap_log(std.log.scoped(.storage));
 
 const c = @cImport({
@@ -1945,7 +1945,7 @@ test "typed: i64 round-trip" {
 // asserts field equality. Tests the bind_param ↔ read_column translation
 // boundary with random data. Not testing SQLite — testing our type mapping.
 
-const PRNG = @import("framework/lib.zig").prng;
+const PRNG = @import("stdx").PRNG;
 
 test "seeded: typed interface round-trip" {
     var s = try SqliteStorage.init(":memory:");
