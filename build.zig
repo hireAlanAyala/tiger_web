@@ -300,9 +300,11 @@ fn build_ci(
             "--routes-zig=generated/routes.generated.zig",
             "--manifest=generated/manifest.json",
         });
-        // Freshness check — committed generated files must match.
-        const freshness = b.addSystemCommand(&.{ "git", "diff", "--exit-code", "generated/" });
-        freshness.setName("freshness check: generated/");
+        // Freshness check — committed routes file must match scanner output.
+        // Only check routes.generated.zig (from Zig handlers). manifest.json
+        // is overwritten by both Zig and TypeScript scans — can't freshness check.
+        const freshness = b.addSystemCommand(&.{ "git", "diff", "--exit-code", "generated/routes.generated.zig" });
+        freshness.setName("freshness check: routes.generated.zig");
         step_ci.dependOn(&freshness.step);
         // Unit tests.
         build_ci_step(b, step_ci, &.{"unit-test"});
