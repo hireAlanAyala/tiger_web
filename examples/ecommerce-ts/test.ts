@@ -13,6 +13,7 @@ import { spawn, ChildProcess } from "child_process";
 import { unlinkSync, accessSync, mkdtempSync } from "fs";
 import { join } from "path";
 import { tmpdir } from "os";
+import { TestRunner } from "../../generated/testing.ts";
 
 const PORT = 3033;
 const BASE = `http://localhost:${PORT}`;
@@ -21,18 +22,12 @@ const SOCK = `/tmp/tiger-web-test-${process.pid}.sock`;
 const TMP = mkdtempSync(join(tmpdir(), "tiger-web-test-"));
 const DB = join(TMP, "test.db");
 
-let passed = 0;
-let failed = 0;
+const t = new TestRunner();
 let sidecar: ChildProcess | null = null;
 let server: ChildProcess | null = null;
 
 function assert(ok: boolean, msg: string): void {
-  if (ok) {
-    passed++;
-  } else {
-    failed++;
-    console.error(`FAIL: ${msg}`);
-  }
+  t.assert(ok, msg);
 }
 
 async function req(
@@ -446,15 +441,14 @@ async function main(): Promise<void> {
     // Sidecar health
     await testSidecarAlive();
 
-    console.log(`\n${passed} passed, ${failed} failed`);
+    t.done();
   } catch (err) {
     console.error("Test harness error:", err);
-    failed++;
+    t.failed++;
+    t.done();
   } finally {
     stopServer();
   }
-
-  if (failed > 0) process.exit(1);
 }
 
 main();
