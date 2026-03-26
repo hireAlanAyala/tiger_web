@@ -92,12 +92,40 @@ pub fn route(params: t.RouteParams, path: []const u8, body: []const u8) ?t.Messa
 
 ## Gaps and findings from exploration
 
-### Query string access
-`list_products` and `search_products` use `raw_path` for query string access
-(`?q=` disambiguation). The simplified `route(params, body)` signature drops
-`raw_path`. Fix: use `route(params, path, body)` — `path` is the full path
-including query string, matching TypeScript's `req.path`. Only 2 of 24
-handlers use it; the other 22 ignore it with `_ = path`.
+### Query string access — two-phase approach
+
+**Phase 1 (now):** `route(params, path, body)` — `path` is the full path
+including query string. 2 of 24 handlers use it for `?q=` disambiguation.
+The other 22 ignore it with `_ = path`. This works but the unused param
+on 92% of handlers is a code smell.
+
+**Phase 2 (future): `// query` annotation.** The scanner extracts query
+params the same way it extracts path params:
+
+```
+// [route] .search_products
+// match GET /products
+// query q
+```
+
+The framework populates `params.get("q")` from the query string — the
+handler doesn't know or care whether a param came from the path or the
+query string. `list_products` (no `// query` annotation) gets
+`params.get("q") == null`, so it handles the request. `search_products`
+(with `// query q`) gets the value, uses it.
+
+This eliminates the `path` parameter entirely. `route(params, body)` is
+the universal signature. The framework handles all URL parsing — path
+segments, query strings, everything.
+
+The `// query` annotation would need:
+- Scanner: parse `// query <name>` after `// match`, store in RouteMatch
+- Generated routes: include query param names per route
+- translate(): extract query params from raw_path, add to RouteParams
+- TypeScript dispatch: same — extract query params, add to req.params
+
+Defer to phase 2 — implement `(params, path, body)` now, migrate to
+`(params, body)` + `// query` when the pattern spreads beyond 2 handlers.
 
 ### Handlers tuple is routing-only
 The prefetch/handle/render dispatch in `app.zig` uses direct `@import` in
