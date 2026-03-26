@@ -15,7 +15,9 @@ import { join } from "path";
 import { tmpdir } from "os";
 import { TestRunner } from "../../generated/testing.ts";
 
-const PORT = 3033;
+// Dynamic port from PID to avoid conflicts when multiple test suites
+// run on the same machine (CI matrix, parallel local runs).
+const PORT = 3000 + (process.pid % 5000);
 const BASE = `http://localhost:${PORT}`;
 const PROJ = execSync("git rev-parse --show-toplevel", { encoding: "utf-8" }).trim();
 const SOCK = `/tmp/tiger-web-test-${process.pid}.sock`;

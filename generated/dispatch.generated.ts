@@ -8,137 +8,137 @@
 import * as net from 'net';
 import { unlinkSync } from 'fs';
 
-import * as getCollection from '../examples/ecommerce-ts/handlers/get_collection.ts';
+import * as addCollectionMember from '../examples/ecommerce-ts/handlers/add_collection_member.ts';
 import * as cancelOrder from '../examples/ecommerce-ts/handlers/cancel_order.ts';
+import * as completeOrder from '../examples/ecommerce-ts/handlers/complete_order.ts';
+import * as createCollection from '../examples/ecommerce-ts/handlers/create_collection.ts';
+import * as createOrder from '../examples/ecommerce-ts/handlers/create_order.ts';
+import * as createProduct from '../examples/ecommerce-ts/handlers/create_product.ts';
+import * as deleteCollection from '../examples/ecommerce-ts/handlers/delete_collection.ts';
+import * as deleteProduct from '../examples/ecommerce-ts/handlers/delete_product.ts';
+import * as getCollection from '../examples/ecommerce-ts/handlers/get_collection.ts';
+import * as getOrder from '../examples/ecommerce-ts/handlers/get_order.ts';
 import * as getProduct from '../examples/ecommerce-ts/handlers/get_product.ts';
 import * as getProductInventory from '../examples/ecommerce-ts/handlers/get_product_inventory.ts';
-import * as listProducts from '../examples/ecommerce-ts/handlers/list_products.ts';
-import * as createProduct from '../examples/ecommerce-ts/handlers/create_product.ts';
-import * as createCollection from '../examples/ecommerce-ts/handlers/create_collection.ts';
-import * as pageLoadLogin from '../examples/ecommerce-ts/handlers/page_load_login.ts';
-import * as requestLoginCode from '../examples/ecommerce-ts/handlers/request_login_code.ts';
-import * as listOrders from '../examples/ecommerce-ts/handlers/list_orders.ts';
-import * as removeCollectionMember from '../examples/ecommerce-ts/handlers/remove_collection_member.ts';
-import * as logout from '../examples/ecommerce-ts/handlers/logout.ts';
-import * as addCollectionMember from '../examples/ecommerce-ts/handlers/add_collection_member.ts';
-import * as deleteProduct from '../examples/ecommerce-ts/handlers/delete_product.ts';
-import * as searchProducts from '../examples/ecommerce-ts/handlers/search_products.ts';
 import * as listCollections from '../examples/ecommerce-ts/handlers/list_collections.ts';
-import * as deleteCollection from '../examples/ecommerce-ts/handlers/delete_collection.ts';
-import * as updateProduct from '../examples/ecommerce-ts/handlers/update_product.ts';
+import * as listOrders from '../examples/ecommerce-ts/handlers/list_orders.ts';
+import * as listProducts from '../examples/ecommerce-ts/handlers/list_products.ts';
+import * as logout from '../examples/ecommerce-ts/handlers/logout.ts';
 import * as pageLoadDashboard from '../examples/ecommerce-ts/handlers/page_load_dashboard.ts';
-import * as getOrder from '../examples/ecommerce-ts/handlers/get_order.ts';
+import * as pageLoadLogin from '../examples/ecommerce-ts/handlers/page_load_login.ts';
+import * as removeCollectionMember from '../examples/ecommerce-ts/handlers/remove_collection_member.ts';
+import * as requestLoginCode from '../examples/ecommerce-ts/handlers/request_login_code.ts';
+import * as searchProducts from '../examples/ecommerce-ts/handlers/search_products.ts';
 import * as transferInventory from '../examples/ecommerce-ts/handlers/transfer_inventory.ts';
+import * as updateProduct from '../examples/ecommerce-ts/handlers/update_product.ts';
 import * as verifyLoginCode from '../examples/ecommerce-ts/handlers/verify_login_code.ts';
-import * as completeOrder from '../examples/ecommerce-ts/handlers/complete_order.ts';
-import * as createOrder from '../examples/ecommerce-ts/handlers/create_order.ts';
 
 const routeHandlers: Record<string, Function> = {
-  'get_collection': getCollection.route,
+  'add_collection_member': addCollectionMember.route,
   'cancel_order': cancelOrder.route,
+  'complete_order': completeOrder.route,
+  'create_collection': createCollection.route,
+  'create_order': createOrder.route,
+  'create_product': createProduct.route,
+  'delete_collection': deleteCollection.route,
+  'delete_product': deleteProduct.route,
+  'get_collection': getCollection.route,
+  'get_order': getOrder.route,
   'get_product': getProduct.route,
   'get_product_inventory': getProductInventory.route,
-  'list_products': listProducts.route,
-  'create_product': createProduct.route,
-  'create_collection': createCollection.route,
-  'page_load_login': pageLoadLogin.route,
-  'request_login_code': requestLoginCode.route,
-  'list_orders': listOrders.route,
-  'remove_collection_member': removeCollectionMember.route,
-  'logout': logout.route,
-  'add_collection_member': addCollectionMember.route,
-  'delete_product': deleteProduct.route,
-  'search_products': searchProducts.route,
   'list_collections': listCollections.route,
-  'delete_collection': deleteCollection.route,
-  'update_product': updateProduct.route,
+  'list_orders': listOrders.route,
+  'list_products': listProducts.route,
+  'logout': logout.route,
   'page_load_dashboard': pageLoadDashboard.route,
-  'get_order': getOrder.route,
+  'page_load_login': pageLoadLogin.route,
+  'remove_collection_member': removeCollectionMember.route,
+  'request_login_code': requestLoginCode.route,
+  'search_products': searchProducts.route,
   'transfer_inventory': transferInventory.route,
+  'update_product': updateProduct.route,
   'verify_login_code': verifyLoginCode.route,
-  'complete_order': completeOrder.route,
-  'create_order': createOrder.route,
 };
 
 const prefetchHandlers: Record<string, Function> = {
-  'get_collection': getCollection.prefetch,
+  'add_collection_member': addCollectionMember.prefetch,
   'cancel_order': cancelOrder.prefetch,
+  'complete_order': completeOrder.prefetch,
+  'create_collection': createCollection.prefetch,
+  'create_order': createOrder.prefetch,
+  'create_product': createProduct.prefetch,
+  'delete_collection': deleteCollection.prefetch,
+  'delete_product': deleteProduct.prefetch,
+  'get_collection': getCollection.prefetch,
+  'get_order': getOrder.prefetch,
   'get_product': getProduct.prefetch,
   'get_product_inventory': getProductInventory.prefetch,
-  'list_products': listProducts.prefetch,
-  'create_product': createProduct.prefetch,
-  'create_collection': createCollection.prefetch,
-  'page_load_login': pageLoadLogin.prefetch,
-  'request_login_code': requestLoginCode.prefetch,
-  'list_orders': listOrders.prefetch,
-  'remove_collection_member': removeCollectionMember.prefetch,
-  'logout': logout.prefetch,
-  'add_collection_member': addCollectionMember.prefetch,
-  'delete_product': deleteProduct.prefetch,
-  'search_products': searchProducts.prefetch,
   'list_collections': listCollections.prefetch,
-  'delete_collection': deleteCollection.prefetch,
-  'update_product': updateProduct.prefetch,
+  'list_orders': listOrders.prefetch,
+  'list_products': listProducts.prefetch,
+  'logout': logout.prefetch,
   'page_load_dashboard': pageLoadDashboard.prefetch,
-  'get_order': getOrder.prefetch,
+  'page_load_login': pageLoadLogin.prefetch,
+  'remove_collection_member': removeCollectionMember.prefetch,
+  'request_login_code': requestLoginCode.prefetch,
+  'search_products': searchProducts.prefetch,
   'transfer_inventory': transferInventory.prefetch,
+  'update_product': updateProduct.prefetch,
   'verify_login_code': verifyLoginCode.prefetch,
-  'complete_order': completeOrder.prefetch,
-  'create_order': createOrder.prefetch,
 };
 
 const handleHandlers: Record<string, Function> = {
-  'get_collection': getCollection.handle,
+  'add_collection_member': addCollectionMember.handle,
   'cancel_order': cancelOrder.handle,
+  'complete_order': completeOrder.handle,
+  'create_collection': createCollection.handle,
+  'create_order': createOrder.handle,
+  'create_product': createProduct.handle,
+  'delete_collection': deleteCollection.handle,
+  'delete_product': deleteProduct.handle,
+  'get_collection': getCollection.handle,
+  'get_order': getOrder.handle,
   'get_product': getProduct.handle,
   'get_product_inventory': getProductInventory.handle,
-  'list_products': listProducts.handle,
-  'create_product': createProduct.handle,
-  'create_collection': createCollection.handle,
-  'page_load_login': pageLoadLogin.handle,
-  'request_login_code': requestLoginCode.handle,
-  'list_orders': listOrders.handle,
-  'remove_collection_member': removeCollectionMember.handle,
-  'logout': logout.handle,
-  'add_collection_member': addCollectionMember.handle,
-  'delete_product': deleteProduct.handle,
-  'search_products': searchProducts.handle,
   'list_collections': listCollections.handle,
-  'delete_collection': deleteCollection.handle,
-  'update_product': updateProduct.handle,
+  'list_orders': listOrders.handle,
+  'list_products': listProducts.handle,
+  'logout': logout.handle,
   'page_load_dashboard': pageLoadDashboard.handle,
-  'get_order': getOrder.handle,
+  'page_load_login': pageLoadLogin.handle,
+  'remove_collection_member': removeCollectionMember.handle,
+  'request_login_code': requestLoginCode.handle,
+  'search_products': searchProducts.handle,
   'transfer_inventory': transferInventory.handle,
+  'update_product': updateProduct.handle,
   'verify_login_code': verifyLoginCode.handle,
-  'complete_order': completeOrder.handle,
-  'create_order': createOrder.handle,
 };
 
 const renderHandlers: Record<string, Function> = {
-  'get_collection': getCollection.render,
+  'add_collection_member': addCollectionMember.render,
   'cancel_order': cancelOrder.render,
+  'complete_order': completeOrder.render,
+  'create_collection': createCollection.render,
+  'create_order': createOrder.render,
+  'create_product': createProduct.render,
+  'delete_collection': deleteCollection.render,
+  'delete_product': deleteProduct.render,
+  'get_collection': getCollection.render,
+  'get_order': getOrder.render,
   'get_product': getProduct.render,
   'get_product_inventory': getProductInventory.render,
-  'list_products': listProducts.render,
-  'create_product': createProduct.render,
-  'create_collection': createCollection.render,
-  'page_load_login': pageLoadLogin.render,
-  'request_login_code': requestLoginCode.render,
-  'list_orders': listOrders.render,
-  'remove_collection_member': removeCollectionMember.render,
-  'logout': logout.render,
-  'add_collection_member': addCollectionMember.render,
-  'delete_product': deleteProduct.render,
-  'search_products': searchProducts.render,
   'list_collections': listCollections.render,
-  'delete_collection': deleteCollection.render,
-  'update_product': updateProduct.render,
+  'list_orders': listOrders.render,
+  'list_products': listProducts.render,
+  'logout': logout.render,
   'page_load_dashboard': pageLoadDashboard.render,
-  'get_order': getOrder.render,
+  'page_load_login': pageLoadLogin.render,
+  'remove_collection_member': removeCollectionMember.render,
+  'request_login_code': requestLoginCode.render,
+  'search_products': searchProducts.render,
   'transfer_inventory': transferInventory.render,
+  'update_product': updateProduct.render,
   'verify_login_code': verifyLoginCode.render,
-  'complete_order': completeOrder.render,
-  'create_order': createOrder.render,
 };
 
 // --- Route matching ---
