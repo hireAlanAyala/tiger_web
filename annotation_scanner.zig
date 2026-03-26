@@ -771,6 +771,12 @@ pub fn main() !void {
     };
     defer dir.close();
 
+    // Strip trailing slash from scan_dir to avoid double-slash in paths.
+    const dir_name = if (scan_dir.len > 0 and scan_dir[scan_dir.len - 1] == '/')
+        scan_dir[0 .. scan_dir.len - 1]
+    else
+        scan_dir;
+
     var walker = try dir.walk(allocator);
     defer walker.deinit();
 
@@ -779,11 +785,6 @@ pub fn main() !void {
 
         const prefix = comment_prefix(entry.basename) orelse continue;
 
-        // Strip trailing slash from scan_dir to avoid double-slash in paths.
-        const dir_name = if (scan_dir.len > 0 and scan_dir[scan_dir.len - 1] == '/')
-            scan_dir[0 .. scan_dir.len - 1]
-        else
-            scan_dir;
         const path = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ dir_name, entry.path });
 
         const content = dir.readFileAlloc(allocator, entry.path, 1024 * 1024) catch |err| {
@@ -1280,10 +1281,8 @@ fn emit_routes_zig(
         \\// for Zig routing. Handlers declare routes via annotations only.
         \\// Sorted by specificity: literal segments before param, longer before shorter.
         \\
-        \\const std = @import("std");
         \\const message = @import("../message.zig");
         \\const http = @import("../framework/http.zig");
-        \\const parse = @import("../framework/parse.zig");
         \\
         \\pub const Route = struct {
         \\    operation: message.Operation,

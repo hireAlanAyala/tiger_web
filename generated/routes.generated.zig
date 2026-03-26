@@ -4,10 +4,8 @@
 // for Zig routing. Handlers declare routes via annotations only.
 // Sorted by specificity: literal segments before param, longer before shorter.
 
-const std = @import("std");
 const message = @import("../message.zig");
 const http = @import("../framework/http.zig");
-const parse = @import("../framework/parse.zig");
 
 pub const Route = struct {
     operation: message.Operation,
