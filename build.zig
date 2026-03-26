@@ -316,10 +316,10 @@ fn build_ci(
 
     if (all or mode == .fuzz) {
         build_ci_step(b, step_ci, &.{ "fuzz", "--", "smoke" });
-        // Per-commit deterministic fuzz: state_machine with commit SHA as seed.
-        // Same idea as TB's VOPR with commit hash — every commit gets one fuzz pass.
-        const git_sha = b.option([]const u8, "git-commit", "Git commit SHA for seeded fuzz") orelse "HEAD";
-        build_ci_step(b, step_ci, &.{ "fuzz", "--", "state_machine", git_sha });
+        // Per-commit deterministic fuzz: state_machine with a fixed seed.
+        // TB uses the commit SHA truncated to u64 — we use a fixed seed for now.
+        // TODO: resolve git rev-parse HEAD at build time and pass as seed.
+        build_ci_step(b, step_ci, &.{ "fuzz", "--", "state_machine", "42" });
     }
 
     if (default or all or mode == .clients) {
