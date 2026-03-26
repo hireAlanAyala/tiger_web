@@ -3,8 +3,9 @@
 ## Status: Implemented
 
 All steps complete except:
-- Step 3 (remove handlers tuple): kept — PrefetchCache type construction needs it
-- Step 5 (build.zig scan dependency): not added — generated files committed,
+- Step 3 (remove handlers tuple): not applicable — tuple serves PrefetchCache
+  type construction, a different concern from routing. Zig deduplicates @import.
+- Step 5 (build.zig scan dependency): not needed — generated files committed,
   CI freshness check instead (TB pattern)
 - Verification #6 (sidecar end-to-end): blocked on integration test suite
 
