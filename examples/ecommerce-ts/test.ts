@@ -5,16 +5,21 @@
 //
 // Usage: npx tsx test.ts
 //
-// Requires the sidecar + server to be running (test.sh handles this).
-// Tests run against http://localhost:${PORT} with a fresh :memory: database.
+// Self-contained: starts sidecar + server with --db pointing to a temp file,
+// runs tests, kills both processes. Never touches tiger_web.db.
 
 import { execSync } from "child_process";
 import { spawn, ChildProcess } from "child_process";
+import { unlinkSync, accessSync, mkdtempSync } from "fs";
+import { join } from "path";
+import { tmpdir } from "os";
 
-const PORT = 3033; // Avoid conflict with dev server on 3000
+const PORT = 3033;
 const BASE = `http://localhost:${PORT}`;
 const PROJ = execSync("git rev-parse --show-toplevel", { encoding: "utf-8" }).trim();
 const SOCK = `/tmp/tiger-web-test-${process.pid}.sock`;
+const TMP = mkdtempSync(join(tmpdir(), "tiger-web-test-"));
+const DB = join(TMP, "test.db");
 
 let passed = 0;
 let failed = 0;
@@ -40,64 +45,39 @@ async function req(
     headers: body ? { "Content-Type": "application/json" } : {},
     body: body ? JSON.stringify(body) : undefined,
   });
-  const text = await res.text();
-  return { status: res.status, body: text };
+  return { status: res.status, body: await res.text() };
 }
 
-function bodyContains(body: string, text: string): boolean {
+function has(body: string, text: string): boolean {
   return body.includes(text);
 }
 
 // --- Lifecycle ---
 
 async function startServer(): Promise<void> {
-  // Build the sidecar dispatch
   execSync("npm run build", { cwd: `${PROJ}/examples/ecommerce-ts`, stdio: "pipe" });
 
-  // Start sidecar
   sidecar = spawn("npx", ["tsx", `${PROJ}/generated/dispatch.generated.ts`, SOCK], {
     cwd: `${PROJ}/examples/ecommerce-ts`,
     stdio: "pipe",
   });
 
   // Wait for socket
-  await new Promise<void>((resolve) => {
-    const check = setInterval(() => {
-      try {
-        const fs = require("fs");
-        fs.accessSync(SOCK);
-        clearInterval(check);
-        resolve();
-      } catch {}
-    }, 100);
-  });
+  for (let i = 0; i < 50; i++) {
+    try { accessSync(SOCK); break; } catch { await sleep(100); }
+  }
 
-  // Build the Zig server if needed
   execSync(`${PROJ}/zig/zig build`, { cwd: PROJ, stdio: "pipe" });
 
-  // Delete stale database — tests need a fresh state.
-  // Server hardcodes "tiger_web.db" relative to cwd.
-  const fs = require("fs");
-  for (const ext of ["", "-wal", "-shm"]) {
-    try { fs.unlinkSync(`${PROJ}/tiger_web.db${ext}`); } catch {}
-  }
-  try { fs.unlinkSync(`${PROJ}/tiger_web.wal`); } catch {}
-
-  // Start server with fresh database
   server = spawn(
     `${PROJ}/zig-out/bin/tiger-web`,
-    [`--port=${PORT}`, `--sidecar=${SOCK}`],
+    [`--port=${PORT}`, `--sidecar=${SOCK}`, `--db=${DB}`],
     { cwd: PROJ, stdio: "pipe" },
   );
 
   // Wait for server ready
   for (let i = 0; i < 30; i++) {
-    try {
-      await fetch(`${BASE}/`);
-      return;
-    } catch {
-      await new Promise((r) => setTimeout(r, 200));
-    }
+    try { await fetch(`${BASE}/`); return; } catch { await sleep(200); }
   }
   throw new Error("Server failed to start");
 }
@@ -105,126 +85,205 @@ async function startServer(): Promise<void> {
 function stopServer(): void {
   if (server) { server.kill(); server = null; }
   if (sidecar) { sidecar.kill(); sidecar = null; }
-  try { require("fs").unlinkSync(SOCK); } catch {}
-  // Clean up test database
-  for (const f of ["tiger_web.db", "tiger_web.db-wal", "tiger_web.db-shm", "tiger_web.wal"]) {
-    try { require("fs").unlinkSync(`${PROJ}/${f}`); } catch {}
+  try { unlinkSync(SOCK); } catch {}
+  for (const f of [DB, DB + "-wal", DB + "-shm", join(TMP, "test.wal")]) {
+    try { unlinkSync(f); } catch {}
   }
 }
 
-// --- Tests ---
+function sleep(ms: number): Promise<void> {
+  return new Promise((r) => setTimeout(r, ms));
+}
 
-async function testProducts(): Promise<void> {
-  // Create product
-  const create = await req("POST", "/products", {
-    name: "Test Widget",
-    price_cents: 1999,
-    inventory: 50,
+// --- Products ---
+
+// Client-generated UUIDs for test products (32 hex chars).
+const PRODUCT_1_ID = "10000000000000000000000000000001";
+const PRODUCT_2_ID = "20000000000000000000000000000002";
+const DELETE_ID    = "a0000000000000000000000000000001";
+const COLLECTION_ID = "c0000000000000000000000000000001";
+
+async function testCreateProduct(): Promise<void> {
+  // Create returns empty body on success (render returns "").
+  // Verify state by querying the list.
+  const r = await req("POST", "/products", {
+    id: PRODUCT_1_ID, name: "Test Widget", price_cents: 1999, inventory: 50,
   });
-  assert(create.status === 200, `create product status: ${create.status}`);
-  assert(!bodyContains(create.body, "error"), `create product no error: ${create.body.slice(0, 100)}`);
+  assert(r.status === 200, `create product status: ${r.status}`);
+  assert(!has(r.body, "error"), "create product: no error in response");
 
-  // List products — should contain the created product
+  // State verification: product appears in list with correct data
   const list = await req("GET", "/products");
-  assert(list.status === 200, `list products status: ${list.status}`);
-  assert(bodyContains(list.body, "Test Widget"), "list products contains Test Widget");
-
-  // Create second product for search
-  await req("POST", "/products", {
-    name: "Another Item",
-    price_cents: 500,
-    inventory: 100,
-  });
-
-  // Search products — GET /products?q= (same endpoint, query param disambiguation)
-  const search = await req("GET", "/products?q=Widget");
-  assert(search.status === 200, `search status: ${search.status}`);
-  assert(bodyContains(search.body, "Test Widget"), "search finds Test Widget");
-
-  // Search with no results
-  const searchEmpty = await req("GET", "/products?q=Nonexistent");
-  assert(searchEmpty.status === 200, `search empty status: ${searchEmpty.status}`);
-  assert(!bodyContains(searchEmpty.body, "Test Widget"), "search empty doesn't find Widget");
-
-  // Get nonexistent product
-  const notFound = await req("GET", "/products/00000000000000000000000000000099");
-  assert(notFound.status === 200, `get missing product status: ${notFound.status}`);
-  assert(bodyContains(notFound.body, "not found"), "get missing product shows not found");
+  assert(has(list.body, "Test Widget"), "create product: visible in list");
+  assert(has(list.body, "19.99"), "create product: correct price in list");
 }
 
-async function testCollections(): Promise<void> {
-  // Create collection
-  const create = await req("POST", "/collections", {
-    name: "Summer Sale",
+async function testCreateSecondProduct(): Promise<void> {
+  const r = await req("POST", "/products", {
+    id: PRODUCT_2_ID, name: "Another Item", price_cents: 500, inventory: 100,
   });
-  assert(create.status === 200, `create collection status: ${create.status}`);
-  assert(!bodyContains(create.body, "error"), `create collection no error: ${create.body.slice(0, 100)}`);
+  assert(r.status === 200, `create second product status: ${r.status}`);
+  assert(!has(r.body, "error"), "create second: no error");
 
-  // List collections
+  // State verification: both products in list
+  const list = await req("GET", "/products");
+  assert(has(list.body, "Test Widget"), "second create: Widget still in list");
+  assert(has(list.body, "Another Item"), "second create: Another Item in list");
+}
+
+async function testListProducts(): Promise<void> {
+  const r = await req("GET", "/products");
+  assert(r.status === 200, `list products status: ${r.status}`);
+  assert(has(r.body, "Test Widget"), "list contains Test Widget");
+  assert(has(r.body, "Another Item"), "list contains Another Item");
+  assert(has(r.body, "19.99"), "list shows Widget price");
+  assert(has(r.body, "5.00"), "list shows Another Item price");
+}
+
+async function testSearchProducts(): Promise<void> {
+  // Search for "Widget" — should find Test Widget, exclude Another Item
+  const r = await req("GET", "/products?q=Widget");
+  assert(r.status === 200, `search status: ${r.status}`);
+  assert(has(r.body, "Test Widget"), "search finds Test Widget");
+  assert(!has(r.body, "Another Item"), "search excludes Another Item");
+}
+
+async function testSearchEmpty(): Promise<void> {
+  const r = await req("GET", "/products?q=Nonexistent");
+  assert(r.status === 200, `search empty status: ${r.status}`);
+  assert(!has(r.body, "Test Widget"), "search empty: no Widget");
+  assert(!has(r.body, "Another Item"), "search empty: no Item");
+}
+
+async function testGetProductNotFound(): Promise<void> {
+  const r = await req("GET", "/products/00000000000000000000000000000099");
+  assert(r.status === 200, `get missing product status: ${r.status}`);
+  assert(has(r.body, "not found"), "get missing product: not found");
+}
+
+async function testDeleteProduct(): Promise<void> {
+  // Create with known ID → verify exists → delete → verify gone.
+  await req("POST", "/products", {
+    id: DELETE_ID, name: "Delete Me", price_cents: 100, inventory: 1,
+  });
+  const list1 = await req("GET", "/products");
+  assert(has(list1.body, "Delete Me"), "delete: product exists before delete");
+
+  // Delete by known ID
+  const del = await req("DELETE", `/products/${DELETE_ID}`);
+  assert(del.status === 200, `delete product status: ${del.status}`);
+
+  // State verification: product gone from list
+  const list2 = await req("GET", "/products");
+  assert(!has(list2.body, "Delete Me"), "delete: product gone after delete");
+}
+
+// --- Collections ---
+
+async function testCreateCollection(): Promise<void> {
+  const r = await req("POST", "/collections", { id: COLLECTION_ID, name: "Summer Sale" });
+  assert(r.status === 200, `create collection status: ${r.status}`);
+  assert(!has(r.body, "error"), "create collection: no error");
+
+  // State verification: collection appears in list
   const list = await req("GET", "/collections");
-  assert(list.status === 200, `list collections status: ${list.status}`);
-  assert(bodyContains(list.body, "Summer Sale"), "list collections contains Summer Sale");
-
-  // Get nonexistent collection
-  const notFound = await req("GET", "/collections/00000000000000000000000000000099");
-  assert(notFound.status === 200, `get missing collection status: ${notFound.status}`);
-  assert(bodyContains(notFound.body, "not found"), "get missing collection shows not found");
+  assert(has(list.body, "Summer Sale"), "create collection: visible in list");
 }
 
-async function testOrders(): Promise<void> {
-  // Create a product first (orders need products)
-  await req("POST", "/products", {
-    name: "Order Test Product",
-    price_cents: 1000,
-    inventory: 10,
-  });
-
-  // List orders (should be empty initially)
-  const listEmpty = await req("GET", "/orders");
-  assert(listEmpty.status === 200, `list orders status: ${listEmpty.status}`);
-
-  // Get nonexistent order
-  const notFound = await req("GET", "/orders/00000000000000000000000000000099");
-  assert(notFound.status === 200, `get missing order status: ${notFound.status}`);
-  assert(bodyContains(notFound.body, "not found"), "get missing order shows not found");
+async function testListCollections(): Promise<void> {
+  const r = await req("GET", "/collections");
+  assert(r.status === 200, `list collections status: ${r.status}`);
+  assert(has(r.body, "Summer Sale"), "list collections contains Summer Sale");
 }
+
+async function testGetCollectionNotFound(): Promise<void> {
+  const r = await req("GET", "/collections/00000000000000000000000000000099");
+  assert(r.status === 200, `get missing collection status: ${r.status}`);
+  assert(has(r.body, "not found"), "get missing collection: not found");
+}
+
+// --- Orders ---
+
+async function testListOrders(): Promise<void> {
+  const r = await req("GET", "/orders");
+  assert(r.status === 200, `list orders status: ${r.status}`);
+}
+
+async function testGetOrderNotFound(): Promise<void> {
+  const r = await req("GET", "/orders/00000000000000000000000000000099");
+  assert(r.status === 200, `get missing order status: ${r.status}`);
+  assert(has(r.body, "not found"), "get missing order: not found");
+}
+
+// --- Dashboard ---
 
 async function testDashboard(): Promise<void> {
-  const dash = await req("GET", "/");
-  assert(dash.status === 200, `dashboard status: ${dash.status}`);
-  assert(bodyContains(dash.body, "Tiger Web"), "dashboard has title");
-  assert(bodyContains(dash.body, "Products"), "dashboard has Products section");
-  assert(bodyContains(dash.body, "Collections"), "dashboard has Collections section");
-  assert(bodyContains(dash.body, "Orders"), "dashboard has Orders section");
+  const r = await req("GET", "/");
+  assert(r.status === 200, `dashboard status: ${r.status}`);
+  assert(has(r.body, "Tiger Web"), "dashboard has title");
+  assert(has(r.body, "Products"), "dashboard has Products section");
+  assert(has(r.body, "Collections"), "dashboard has Collections section");
+  assert(has(r.body, "Orders"), "dashboard has Orders section");
 }
 
-async function testLogin(): Promise<void> {
-  // Login page
-  const login = await req("GET", "/login");
-  assert(login.status === 200, `login page status: ${login.status}`);
-
-  // Request login code (will fail without valid email handling, but should not crash)
-  const code = await req("POST", "/login/code", { email: "test@example.com" });
-  assert(code.status === 200, `request login code status: ${code.status}`);
-
-  // Logout (should succeed even without session)
-  const logout = await req("POST", "/logout");
-  assert(logout.status === 200, `logout status: ${logout.status}`);
+async function testDashboardAfterData(): Promise<void> {
+  // After creating products/collections, dashboard should show them
+  const r = await req("GET", "/");
+  assert(has(r.body, "Test Widget"), "dashboard shows Test Widget");
+  assert(has(r.body, "Summer Sale"), "dashboard shows Summer Sale");
 }
+
+// --- Login / Auth ---
+
+async function testLoginPage(): Promise<void> {
+  const r = await req("GET", "/login");
+  assert(r.status === 200, `login page status: ${r.status}`);
+}
+
+async function testRequestLoginCode(): Promise<void> {
+  const r = await req("POST", "/login/code", { email: "test@example.com" });
+  assert(r.status === 200, `request login code status: ${r.status}`);
+}
+
+async function testVerifyLoginCode(): Promise<void> {
+  const r = await req("POST", "/login/verify", {
+    email: "test@example.com", code: "000000",
+  });
+  assert(r.status === 200, `verify login code status: ${r.status}`);
+}
+
+async function testLogout(): Promise<void> {
+  const r = await req("POST", "/logout");
+  assert(r.status === 200, `logout status: ${r.status}`);
+}
+
+// --- Query param routing (// query annotation) ---
 
 async function testQueryParamRouting(): Promise<void> {
-  // GET /products — should route to list_products (no ?q=)
+  // GET /products (no ?q=) → list_products
   const list = await req("GET", "/products");
   assert(list.status === 200, "GET /products routes to list");
+  // Should contain all products (no filtering)
+  assert(has(list.body, "Test Widget"), "list has Widget");
+  assert(has(list.body, "Another Item"), "list has Another Item");
 
-  // GET /products?q=test — should route to search_products
-  const search = await req("GET", "/products?q=test");
-  assert(search.status === 200, "GET /products?q=test routes to search");
+  // GET /products?q=Widget → search_products (via // query q annotation)
+  const search = await req("GET", "/products?q=Widget");
+  assert(search.status === 200, "GET /products?q= routes to search");
+  assert(has(search.body, "Test Widget"), "search has Widget");
+  assert(!has(search.body, "Another Item"), "search excludes Another Item");
+}
 
-  // Verify list and search return different results — list shows all,
-  // search filters. Both use GET /products, disambiguated by ?q=.
-  assert(!bodyContains(list.body, "search"), "list doesn't contain search UI");
-  assert(bodyContains(search.body, "search"), "search contains search UI");
+// --- Sidecar alive check ---
+
+async function testSidecarAlive(): Promise<void> {
+  // After all tests, verify sidecar process is still running.
+  // If it crashed, requests went through the native Zig pipeline instead.
+  assert(sidecar !== null && !sidecar.killed, "sidecar process alive");
+  assert(server !== null && !server.killed, "server process alive");
+
+  // Verify by checking sidecar exitCode is null (still running)
+  assert(sidecar!.exitCode === null, "sidecar has not exited");
 }
 
 // --- Runner ---
@@ -233,12 +292,41 @@ async function main(): Promise<void> {
   try {
     await startServer();
 
+    // Dashboard (before data)
     await testDashboard();
-    await testProducts();
-    await testCollections();
-    await testOrders();
-    await testLogin();
+
+    // Products CRUD
+    await testCreateProduct();
+    await testCreateSecondProduct();
+    await testListProducts();
+    await testSearchProducts();
+    await testSearchEmpty();
+    await testGetProductNotFound();
+    await testDeleteProduct();
+
+    // Collections
+    await testCreateCollection();
+    await testListCollections();
+    await testGetCollectionNotFound();
+
+    // Orders
+    await testListOrders();
+    await testGetOrderNotFound();
+
+    // Dashboard (after data)
+    await testDashboardAfterData();
+
+    // Auth
+    await testLoginPage();
+    await testRequestLoginCode();
+    await testVerifyLoginCode();
+    await testLogout();
+
+    // Query param routing
     await testQueryParamRouting();
+
+    // Sidecar health
+    await testSidecarAlive();
 
     console.log(`\n${passed} passed, ${failed} failed`);
   } catch (err) {

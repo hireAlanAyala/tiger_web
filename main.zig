@@ -61,7 +61,7 @@ pub fn main() !void {
     var io = try IO.init();
     defer io.deinit();
 
-    var storage = try App.Storage.init("tiger_web.db");
+    var storage = try App.Storage.init(cli.db);
     defer storage.deinit();
     const sm_seed: u64 = @truncate(std.crypto.random.int(u128));
     var sm = StateMachine.init(&storage, cli.log_trace, sm_seed, secret_key);
@@ -103,4 +103,5 @@ const CliArgs = struct {
     log_debug: bool = false,
     log_trace: bool = false,
     sidecar: ?[]const u8 = null,
+    db: [:0]const u8 = "tiger_web.db",
 };
