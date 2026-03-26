@@ -86,3 +86,28 @@ Audit every place we reference the zig binary:
 `ZIG_EXE` env var must be set to `./zig/zig` wherever Shell.zig is
 used — Shell.zig reads it at init and panics if it's null when
 `exec_zig` or CFO's build step is called.
+
+## CFO deployment — 24/7 fuzzing VM
+
+The CFO code is ported but needs a machine running `cfo_supervisor.sh`
+continuously to actually fuzz. Without this, the infrastructure exists
+but produces no seeds.
+
+### Setup
+1. Provision a VM (Hetzner CX22 ~€4/mo, or Oracle free tier ARM)
+2. Install: git, C compiler (for sqlite3 linkage)
+3. `scp scripts/cfo_supervisor.sh user@machine:~/`
+4. Generate DEVHUBDB_PAT (GitHub classic token, `repo` scope)
+5. On the VM: `export DEVHUBDB_PAT=<token>`
+6. Run: `nohup sh cfo_supervisor.sh &` or create a systemd unit
+
+### Optional: GH_TOKEN for PR-branch fuzzing
+- Generate a second PAT (read-only, `repo` scope)
+- `export GH_TOKEN=<token>` on the VM
+- Add `fuzz` label to the GitHub repo
+- CFO automatically picks up labeled PRs
+
+### Monitoring
+Once devhub viewer is built, check `devhubdb/fuzzing/data.json` for
+seed accumulation. Until then: `gh api repos/hireAlanAyala/tiger-web-devhubdb/commits?per_page=5`
+to verify the CFO is pushing.
