@@ -801,6 +801,14 @@ fn run_fuzzers_prepare_repository(shell: *Shell, target: union(enum) {
         .pull_request => |pr| try shell.exec("git fetch origin refs/pull/{pr}/head", .{ .pr = pr }),
     }
     try shell.exec("git switch --detach FETCH_HEAD", .{});
+
+    // Ensure vendored Zig is downloaded in this working directory.
+    // The supervisor downloads Zig in the main checkout, but branch/PR
+    // working directories are separate clones that need their own copy.
+    if (!shell.file_exists("zig/zig")) {
+        try shell.exec("sh zig/download.sh", .{});
+    }
+
     return run_fuzzers_commit_info(shell);
 }
 
