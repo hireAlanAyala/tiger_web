@@ -443,13 +443,14 @@ async function main(): Promise<void> {
     // Sidecar health
     await testSidecarAlive();
 
-    t.done();
   } catch (err) {
     console.error("Test harness error:", err);
     t.failed++;
-    t.done();
   } finally {
     stopServer();
+    t.done(); // prints results, exits with code 1 on failures
+    // Force exit — child process handles keep Node alive otherwise.
+    process.exit(t.failed > 0 ? 1 : 0);
   }
 }
 
