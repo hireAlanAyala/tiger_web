@@ -3,10 +3,28 @@
 After the CFO port plan (Phases 1-8) completes, these are the capabilities
 we deleted or deferred that need to come back.
 
-## Scripts subcommands (deleted from scripts.zig)
+## Current priority: integration test suite + ci build step
 
-We deleted 5 subcommands from TB's scripts.zig. These are the ones we need
-and when.
+**Blocked on:** `examples/ecommerce-ts/test.ts` — the integration test suite
+that exercises all 24 handlers through the full sidecar pipeline. This is the
+foundation that makes the ci build step meaningful.
+
+**Sequence:**
+1. Write `examples/ecommerce-ts/test.ts` (full handler integration tests)
+2. Add `"test": "npx tsx test.ts"` to example `package.json`
+3. Implement `zig build ci` step in build.zig (matching TB's pattern)
+4. Add GitHub Actions workflow calling `./zig/zig build ci -- test`
+
+**Already done:**
+- `scripts/ci.zig` ported from TB (two-level testing: adapter + integration)
+- `dispatch.generated.ts` bug fixed (`'one'` → `'query'` prefetch mode)
+- Sidecar end-to-end pipeline verified working (server + sidecar + HTTP)
+- `build_ci_step` and `build_ci_script` helpers available from TB port
+
+## Scripts subcommands
+
+We deleted 5 subcommands from TB's scripts.zig. `ci` has been ported.
+The rest need to come back when needed.
 
 ### `ci` — immediately after plan
 
