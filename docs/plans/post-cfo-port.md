@@ -100,6 +100,28 @@ gets both levels — same as TB's `inline for (Languages)` pattern.
 - Level 1 + Level 2 for all example projects
 - Equivalent to TB's `zig build ci -- clients`
 
+#### Known CI gaps
+
+**manifest.json has two writers:**
+`zig build scan -- handlers/` writes Zig handler annotations.
+`npm run build` (via tiger-web build) writes TypeScript handler annotations.
+Both write to `generated/manifest.json`. Freshness check can't work on a
+file with two writers. Currently only `routes.generated.zig` is freshness-checked.
+Fix: per-target manifests (`manifest.zig.json`, `manifest.ts.json`) or
+treat manifest as intermediate (don't commit, generate at build time).
+
+**dispatch.generated.ts not freshness-checked:**
+The TypeScript dispatch is committed but not diffed in CI. Format regressions
+are caught by the adapter test (31 assertions), not by freshness. Add
+`git diff --exit-code generated/dispatch.generated.ts` after the TS build
+step in the clients job.
+
+**Orphan processes on CI kill:**
+Integration tests spawn sidecar + server child processes. The `finally` block
+cleans up on normal exit. But SIGKILL (CI timeout, job cancellation) skips
+`finally` — orphans remain. Fix: use process groups or a wrapper that traps
+signals, like TB's `cfo_supervisor.sh` pattern.
+
 #### Deferred CI features
 
 **`test:fmt` / `check` (smoke mode):**
