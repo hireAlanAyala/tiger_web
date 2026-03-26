@@ -37,26 +37,48 @@ We should match this pattern: `zig build ci -- <mode>`.
 - Linting / tidy checks
 - Doc building
 
-#### Example project testing (our equivalent of TB's client tests)
+#### Two levels of sidecar testing
 
-TB tests each client library (dotnet, go, rust, java, node, python) to
-verify the SDK works against the server. Our equivalent: test each
-example project in `examples/` to verify the sidecar SDK works.
+We are higher in the stack than TB. TB's client libraries are thin
+protocol wrappers — they serialize requests and deserialize responses.
+If the protocol doesn't change, the client doesn't break. Testing the
+adapter boundary is sufficient.
 
-Currently one: `examples/ecommerce-ts/`. Pattern:
-```zig
-const examples = .{ "ecommerce-ts" };
-inline for (examples) |example| {
-    // npm install, npm run build, npm test
-    build_ci_step(b, step_ci, .{"test-adapter"});
-}
-```
+Our sidecar runs **user-space business logic**. TypeScript handlers call
+framework APIs (storage queries, auth, WAL recording), receive binary
+row data, make decisions, and render HTML. A framework bug in
+`storage.zig`'s `query_raw`, a binary encoding change in `protocol.zig`,
+or a subtle change in how `WriteView` records WAL entries could cause
+handlers to return wrong data, silently corrupt state, or crash the
+sidecar. The adapter test only checks the binary protocol round-trips
+correctly — it doesn't exercise handler logic.
+
+This means we need two levels of testing, both on every commit:
+
+**Level 1: Adapter tests (protocol boundary)**
+- `zig build test-adapter` — runs `npx tsx adapters/typescript_test.ts`
+- Verifies: binary protocol encoding/decoding, type tag mapping, row
+  format round-trip, frame IO between Zig and TypeScript
+- Equivalent to TB's client library tests
+- Catches: protocol breaking changes, serde bugs, type mismatches
+
+**Level 2: Example integration tests (full handler logic)**
+- `cd examples/ecommerce-ts && npm test` — runs the full handler suite
+  against a real server with sidecar
+- Verifies: create product → query product → update product → create
+  order → verify inventory decremented → search → SSE updates → etc.
+- Catches: framework bugs that surface through user-space logic. A
+  change to `state_machine.zig`'s prefetch ordering, or `storage.zig`'s
+  prepared statement caching, or `auth.zig`'s session handling — any of
+  these can break handler behavior without touching TypeScript code.
+- **Must run on every commit** — framework changes are the primary risk,
+  and the diff won't show TypeScript files
 
 When we add more examples (e.g., `examples/ecommerce-python/`), each
-gets a CI entry — same as TB's `inline for (Languages)` pattern.
+gets both levels — same as TB's `inline for (Languages)` pattern.
 
 **`zig build ci -- clients` (future):**
-- Build + test all example projects
+- Level 1 + Level 2 for all example projects
 - Equivalent to TB's `zig build ci -- clients`
 
 #### Deferred CI features
