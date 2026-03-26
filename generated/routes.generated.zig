@@ -18,31 +18,47 @@ pub const Route = struct {
 };
 
 pub const routes = [_]Route{
-    .{ .operation = .add_collection_member, .method = .post, .pattern = "/collections/:id/products/:sub_id", .query_params = &.{}, .handler = @import("../handlers//add_collection_member.zig") },
-    .{ .operation = .remove_collection_member, .method = .delete, .pattern = "/collections/:id/products/:sub_id", .query_params = &.{}, .handler = @import("../handlers//remove_collection_member.zig") },
-    .{ .operation = .transfer_inventory, .method = .post, .pattern = "/products/:id/transfer-inventory/:sub_id", .query_params = &.{}, .handler = @import("../handlers//transfer_inventory.zig") },
-    .{ .operation = .cancel_order, .method = .post, .pattern = "/orders/:id/cancel", .query_params = &.{}, .handler = @import("../handlers//cancel_order.zig") },
-    .{ .operation = .complete_order, .method = .post, .pattern = "/orders/:id/complete", .query_params = &.{}, .handler = @import("../handlers//complete_order.zig") },
-    .{ .operation = .get_product_inventory, .method = .get, .pattern = "/products/:id/inventory", .query_params = &.{}, .handler = @import("../handlers//get_product_inventory.zig") },
-    .{ .operation = .request_login_code, .method = .post, .pattern = "/login/code", .query_params = &.{}, .handler = @import("../handlers//request_login_code.zig") },
-    .{ .operation = .verify_login_code, .method = .post, .pattern = "/login/verify", .query_params = &.{}, .handler = @import("../handlers//verify_login_code.zig") },
-    .{ .operation = .delete_collection, .method = .delete, .pattern = "/collections/:id", .query_params = &.{}, .handler = @import("../handlers//delete_collection.zig") },
-    .{ .operation = .delete_product, .method = .delete, .pattern = "/products/:id", .query_params = &.{}, .handler = @import("../handlers//delete_product.zig") },
-    .{ .operation = .get_collection, .method = .get, .pattern = "/collections/:id", .query_params = &.{}, .handler = @import("../handlers//get_collection.zig") },
-    .{ .operation = .get_order, .method = .get, .pattern = "/orders/:id", .query_params = &.{}, .handler = @import("../handlers//get_order.zig") },
-    .{ .operation = .get_product, .method = .get, .pattern = "/products/:id", .query_params = &.{}, .handler = @import("../handlers//get_product.zig") },
-    .{ .operation = .update_product, .method = .put, .pattern = "/products/:id", .query_params = &.{}, .handler = @import("../handlers//update_product.zig") },
-    .{ .operation = .create_collection, .method = .post, .pattern = "/collections", .query_params = &.{}, .handler = @import("../handlers//create_collection.zig") },
-    .{ .operation = .create_order, .method = .post, .pattern = "/orders", .query_params = &.{}, .handler = @import("../handlers//create_order.zig") },
-    .{ .operation = .create_product, .method = .post, .pattern = "/products", .query_params = &.{}, .handler = @import("../handlers//create_product.zig") },
-    .{ .operation = .list_collections, .method = .get, .pattern = "/collections", .query_params = &.{}, .handler = @import("../handlers//list_collections.zig") },
-    .{ .operation = .list_orders, .method = .get, .pattern = "/orders", .query_params = &.{}, .handler = @import("../handlers//list_orders.zig") },
-    .{ .operation = .list_products, .method = .get, .pattern = "/products", .query_params = &.{"q"}, .handler = @import("../handlers//list_products.zig") },
-    .{ .operation = .logout, .method = .post, .pattern = "/logout", .query_params = &.{}, .handler = @import("../handlers//logout.zig") },
-    .{ .operation = .page_load_login, .method = .get, .pattern = "/login", .query_params = &.{}, .handler = @import("../handlers//page_load_login.zig") },
-    .{ .operation = .search_products, .method = .get, .pattern = "/products", .query_params = &.{"q"}, .handler = @import("../handlers//search_products.zig") },
-    .{ .operation = .page_load_dashboard, .method = .get, .pattern = "/", .query_params = &.{}, .handler = @import("../handlers//page_load_dashboard.zig") },
+    .{ .operation = .add_collection_member, .method = .post, .pattern = "/collections/:id/products/:sub_id", .query_params = &.{}, .handler = @import("../handlers/add_collection_member.zig") },
+    .{ .operation = .remove_collection_member, .method = .delete, .pattern = "/collections/:id/products/:sub_id", .query_params = &.{}, .handler = @import("../handlers/remove_collection_member.zig") },
+    .{ .operation = .transfer_inventory, .method = .post, .pattern = "/products/:id/transfer-inventory/:sub_id", .query_params = &.{}, .handler = @import("../handlers/transfer_inventory.zig") },
+    .{ .operation = .cancel_order, .method = .post, .pattern = "/orders/:id/cancel", .query_params = &.{}, .handler = @import("../handlers/cancel_order.zig") },
+    .{ .operation = .complete_order, .method = .post, .pattern = "/orders/:id/complete", .query_params = &.{}, .handler = @import("../handlers/complete_order.zig") },
+    .{ .operation = .get_product_inventory, .method = .get, .pattern = "/products/:id/inventory", .query_params = &.{}, .handler = @import("../handlers/get_product_inventory.zig") },
+    .{ .operation = .request_login_code, .method = .post, .pattern = "/login/code", .query_params = &.{}, .handler = @import("../handlers/request_login_code.zig") },
+    .{ .operation = .verify_login_code, .method = .post, .pattern = "/login/verify", .query_params = &.{}, .handler = @import("../handlers/verify_login_code.zig") },
+    .{ .operation = .delete_collection, .method = .delete, .pattern = "/collections/:id", .query_params = &.{}, .handler = @import("../handlers/delete_collection.zig") },
+    .{ .operation = .delete_product, .method = .delete, .pattern = "/products/:id", .query_params = &.{}, .handler = @import("../handlers/delete_product.zig") },
+    .{ .operation = .get_collection, .method = .get, .pattern = "/collections/:id", .query_params = &.{}, .handler = @import("../handlers/get_collection.zig") },
+    .{ .operation = .get_order, .method = .get, .pattern = "/orders/:id", .query_params = &.{}, .handler = @import("../handlers/get_order.zig") },
+    .{ .operation = .get_product, .method = .get, .pattern = "/products/:id", .query_params = &.{}, .handler = @import("../handlers/get_product.zig") },
+    .{ .operation = .update_product, .method = .put, .pattern = "/products/:id", .query_params = &.{}, .handler = @import("../handlers/update_product.zig") },
+    .{ .operation = .create_collection, .method = .post, .pattern = "/collections", .query_params = &.{}, .handler = @import("../handlers/create_collection.zig") },
+    .{ .operation = .create_order, .method = .post, .pattern = "/orders", .query_params = &.{}, .handler = @import("../handlers/create_order.zig") },
+    .{ .operation = .create_product, .method = .post, .pattern = "/products", .query_params = &.{}, .handler = @import("../handlers/create_product.zig") },
+    .{ .operation = .list_collections, .method = .get, .pattern = "/collections", .query_params = &.{}, .handler = @import("../handlers/list_collections.zig") },
+    .{ .operation = .list_orders, .method = .get, .pattern = "/orders", .query_params = &.{}, .handler = @import("../handlers/list_orders.zig") },
+    .{ .operation = .list_products, .method = .get, .pattern = "/products", .query_params = &.{"q"}, .handler = @import("../handlers/list_products.zig") },
+    .{ .operation = .logout, .method = .post, .pattern = "/logout", .query_params = &.{}, .handler = @import("../handlers/logout.zig") },
+    .{ .operation = .page_load_login, .method = .get, .pattern = "/login", .query_params = &.{}, .handler = @import("../handlers/page_load_login.zig") },
+    .{ .operation = .search_products, .method = .get, .pattern = "/products", .query_params = &.{"q"}, .handler = @import("../handlers/search_products.zig") },
+    .{ .operation = .page_load_dashboard, .method = .get, .pattern = "/", .query_params = &.{}, .handler = @import("../handlers/page_load_dashboard.zig") },
 };
+
+// Comptime assertions — pair with scanner's validation.
+comptime {
+    const enums = @import("std").enums;
+
+    // Assert: every Operation has at least one route entry.
+    // If a handler file exists without a // match annotation, this catches it.
+    for (enums.values(message.Operation)) |op| {
+        if (op == .root) continue; // sentinel
+        var found = false;
+        for (routes) |r| {
+            if (r.operation == op) { found = true; break; }
+        }
+        if (!found) @compileError("no // match annotation for operation: " ++ @tagName(op));
+    }
+}
 
 // Shared route patterns are allowed — handlers disambiguate at runtime
 // (e.g., GET /products: list vs search based on ?q= query param).

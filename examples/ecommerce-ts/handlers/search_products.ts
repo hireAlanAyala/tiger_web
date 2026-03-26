@@ -3,9 +3,10 @@ import { esc, price } from "tiger-web";
 
 // [route] .search_products
 // match GET /products
+// query q
 export function route(req: RouteRequest): RouteResult | null {
-  // Require ?q= — without it, list_products handles GET /products.
-  const q = new URLSearchParams(req.path.split("?")[1] || "").get("q") || "";
+  // q is extracted by the framework from // query annotation into req.params.
+  const q = req.params.q || "";
   if (q.length === 0) return null;
   return { operation: "search_products", id: "0".repeat(32), body: { query: q } };
 }

@@ -17,7 +17,9 @@ pub const SidecarClient = @import("sidecar.zig").SidecarClient;
 
 const log = marks.wrap_log(std.log.scoped(.app));
 
-// All 24 handler modules — route functions aggregated in translate().
+// All 24 handler modules — used for PrefetchCache type construction
+// and prefetch/handle/render dispatch. Routing uses the generated route
+// table (generated/routes.generated.zig), not this tuple.
 const handlers = .{
     @import("handlers/get_product.zig"),
     @import("handlers/create_product.zig"),

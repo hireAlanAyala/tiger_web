@@ -3,10 +3,11 @@ import { esc, price } from "tiger-web";
 
 // [route] .list_products
 // match GET /products
+// query q
 export function route(req: RouteRequest): RouteResult | null {
-  // Reject if query string contains ?q= (handled by search_products).
-  // Both share GET /products — correct REST: filtering is the same endpoint.
-  if (req.path.includes("?q=")) return null;
+  // Reject if ?q= is present — search_products handles filtered queries.
+  // q is extracted by the framework from // query annotation into req.params.
+  if (req.params.q) return null;
   return { operation: "list_products", id: "0".repeat(32) };
 }
 

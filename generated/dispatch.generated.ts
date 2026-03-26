@@ -8,30 +8,30 @@
 import * as net from 'net';
 import { unlinkSync } from 'fs';
 
-import * as getCollection from '../examples/ecommerce-ts/handlers//get_collection.ts';
-import * as cancelOrder from '../examples/ecommerce-ts/handlers//cancel_order.ts';
-import * as getProduct from '../examples/ecommerce-ts/handlers//get_product.ts';
-import * as getProductInventory from '../examples/ecommerce-ts/handlers//get_product_inventory.ts';
-import * as listProducts from '../examples/ecommerce-ts/handlers//list_products.ts';
-import * as createProduct from '../examples/ecommerce-ts/handlers//create_product.ts';
-import * as createCollection from '../examples/ecommerce-ts/handlers//create_collection.ts';
-import * as pageLoadLogin from '../examples/ecommerce-ts/handlers//page_load_login.ts';
-import * as requestLoginCode from '../examples/ecommerce-ts/handlers//request_login_code.ts';
-import * as listOrders from '../examples/ecommerce-ts/handlers//list_orders.ts';
-import * as removeCollectionMember from '../examples/ecommerce-ts/handlers//remove_collection_member.ts';
-import * as logout from '../examples/ecommerce-ts/handlers//logout.ts';
-import * as addCollectionMember from '../examples/ecommerce-ts/handlers//add_collection_member.ts';
-import * as deleteProduct from '../examples/ecommerce-ts/handlers//delete_product.ts';
-import * as searchProducts from '../examples/ecommerce-ts/handlers//search_products.ts';
-import * as listCollections from '../examples/ecommerce-ts/handlers//list_collections.ts';
-import * as deleteCollection from '../examples/ecommerce-ts/handlers//delete_collection.ts';
-import * as updateProduct from '../examples/ecommerce-ts/handlers//update_product.ts';
-import * as pageLoadDashboard from '../examples/ecommerce-ts/handlers//page_load_dashboard.ts';
-import * as getOrder from '../examples/ecommerce-ts/handlers//get_order.ts';
-import * as transferInventory from '../examples/ecommerce-ts/handlers//transfer_inventory.ts';
-import * as verifyLoginCode from '../examples/ecommerce-ts/handlers//verify_login_code.ts';
-import * as completeOrder from '../examples/ecommerce-ts/handlers//complete_order.ts';
-import * as createOrder from '../examples/ecommerce-ts/handlers//create_order.ts';
+import * as getCollection from '../examples/ecommerce-ts/handlers/get_collection.ts';
+import * as cancelOrder from '../examples/ecommerce-ts/handlers/cancel_order.ts';
+import * as getProduct from '../examples/ecommerce-ts/handlers/get_product.ts';
+import * as getProductInventory from '../examples/ecommerce-ts/handlers/get_product_inventory.ts';
+import * as listProducts from '../examples/ecommerce-ts/handlers/list_products.ts';
+import * as createProduct from '../examples/ecommerce-ts/handlers/create_product.ts';
+import * as createCollection from '../examples/ecommerce-ts/handlers/create_collection.ts';
+import * as pageLoadLogin from '../examples/ecommerce-ts/handlers/page_load_login.ts';
+import * as requestLoginCode from '../examples/ecommerce-ts/handlers/request_login_code.ts';
+import * as listOrders from '../examples/ecommerce-ts/handlers/list_orders.ts';
+import * as removeCollectionMember from '../examples/ecommerce-ts/handlers/remove_collection_member.ts';
+import * as logout from '../examples/ecommerce-ts/handlers/logout.ts';
+import * as addCollectionMember from '../examples/ecommerce-ts/handlers/add_collection_member.ts';
+import * as deleteProduct from '../examples/ecommerce-ts/handlers/delete_product.ts';
+import * as searchProducts from '../examples/ecommerce-ts/handlers/search_products.ts';
+import * as listCollections from '../examples/ecommerce-ts/handlers/list_collections.ts';
+import * as deleteCollection from '../examples/ecommerce-ts/handlers/delete_collection.ts';
+import * as updateProduct from '../examples/ecommerce-ts/handlers/update_product.ts';
+import * as pageLoadDashboard from '../examples/ecommerce-ts/handlers/page_load_dashboard.ts';
+import * as getOrder from '../examples/ecommerce-ts/handlers/get_order.ts';
+import * as transferInventory from '../examples/ecommerce-ts/handlers/transfer_inventory.ts';
+import * as verifyLoginCode from '../examples/ecommerce-ts/handlers/verify_login_code.ts';
+import * as completeOrder from '../examples/ecommerce-ts/handlers/complete_order.ts';
+import * as createOrder from '../examples/ecommerce-ts/handlers/create_order.ts';
 
 const routeHandlers: Record<string, Function> = {
   'get_collection': getCollection.route,
@@ -152,33 +152,34 @@ interface RouteTableEntry {
   operation: string;
   method: string;
   pattern: string;
+  query_params: string[];
 }
 
 const routeTable: RouteTableEntry[] = [
-  { operation: 'remove_collection_member', method: 'delete', pattern: '/collections/:id/members/:sub_id' },
-  { operation: 'delete_collection', method: 'delete', pattern: '/collections/:id' },
-  { operation: 'delete_product', method: 'delete', pattern: '/products/:id' },
-  { operation: 'get_product_inventory', method: 'get', pattern: '/products/:id/inventory' },
-  { operation: 'get_collection', method: 'get', pattern: '/collections/:id' },
-  { operation: 'get_order', method: 'get', pattern: '/orders/:id' },
-  { operation: 'get_product', method: 'get', pattern: '/products/:id' },
-  { operation: 'list_collections', method: 'get', pattern: '/collections' },
-  { operation: 'list_orders', method: 'get', pattern: '/orders' },
-  { operation: 'list_products', method: 'get', pattern: '/products' },
-  { operation: 'page_load_login', method: 'get', pattern: '/login' },
-  { operation: 'search_products', method: 'get', pattern: '/products' },
-  { operation: 'page_load_dashboard', method: 'get', pattern: '/' },
-  { operation: 'transfer_inventory', method: 'post', pattern: '/products/:id/transfer-inventory/:sub_id' },
-  { operation: 'add_collection_member', method: 'post', pattern: '/collections/:id/members' },
-  { operation: 'cancel_order', method: 'post', pattern: '/orders/:id/cancel' },
-  { operation: 'complete_order', method: 'post', pattern: '/orders/:id/complete' },
-  { operation: 'request_login_code', method: 'post', pattern: '/login/request' },
-  { operation: 'verify_login_code', method: 'post', pattern: '/login/verify' },
-  { operation: 'create_collection', method: 'post', pattern: '/collections' },
-  { operation: 'create_order', method: 'post', pattern: '/orders' },
-  { operation: 'create_product', method: 'post', pattern: '/products' },
-  { operation: 'logout', method: 'post', pattern: '/logout' },
-  { operation: 'update_product', method: 'put', pattern: '/products/:id' },
+  { operation: 'remove_collection_member', method: 'delete', pattern: '/collections/:id/members/:sub_id', query_params: [] },
+  { operation: 'delete_collection', method: 'delete', pattern: '/collections/:id', query_params: [] },
+  { operation: 'delete_product', method: 'delete', pattern: '/products/:id', query_params: [] },
+  { operation: 'get_product_inventory', method: 'get', pattern: '/products/:id/inventory', query_params: [] },
+  { operation: 'get_collection', method: 'get', pattern: '/collections/:id', query_params: [] },
+  { operation: 'get_order', method: 'get', pattern: '/orders/:id', query_params: [] },
+  { operation: 'get_product', method: 'get', pattern: '/products/:id', query_params: [] },
+  { operation: 'list_collections', method: 'get', pattern: '/collections', query_params: [] },
+  { operation: 'list_orders', method: 'get', pattern: '/orders', query_params: [] },
+  { operation: 'list_products', method: 'get', pattern: '/products', query_params: ['q'] },
+  { operation: 'page_load_login', method: 'get', pattern: '/login', query_params: [] },
+  { operation: 'search_products', method: 'get', pattern: '/products', query_params: ['q'] },
+  { operation: 'page_load_dashboard', method: 'get', pattern: '/', query_params: [] },
+  { operation: 'transfer_inventory', method: 'post', pattern: '/products/:id/transfer-inventory/:sub_id', query_params: [] },
+  { operation: 'add_collection_member', method: 'post', pattern: '/collections/:id/members', query_params: [] },
+  { operation: 'cancel_order', method: 'post', pattern: '/orders/:id/cancel', query_params: [] },
+  { operation: 'complete_order', method: 'post', pattern: '/orders/:id/complete', query_params: [] },
+  { operation: 'request_login_code', method: 'post', pattern: '/login/request', query_params: [] },
+  { operation: 'verify_login_code', method: 'post', pattern: '/login/verify', query_params: [] },
+  { operation: 'create_collection', method: 'post', pattern: '/collections', query_params: [] },
+  { operation: 'create_order', method: 'post', pattern: '/orders', query_params: [] },
+  { operation: 'create_product', method: 'post', pattern: '/products', query_params: [] },
+  { operation: 'logout', method: 'post', pattern: '/logout', query_params: [] },
+  { operation: 'update_product', method: 'put', pattern: '/products/:id', query_params: [] },
 ];
 
 // --- Binary protocol ---
@@ -259,11 +260,24 @@ const server = net.createServer((conn) => {
       // Multiple operations can share a method+pattern (e.g., GET /products:
       // list_products vs search_products). Handlers disambiguate by query params
       // or body content. Try all matching routes; first handler to return non-null wins.
+      //
+      // Query params from // query annotations are extracted into req.params,
+      // matching how the Zig pipeline merges path + query params into RouteParams.
+      const queryIdx = path.indexOf('?');
+      const queryString = queryIdx >= 0 ? path.slice(queryIdx + 1) : '';
+
       let result: any = null;
       for (const entry of routeTable) {
         if (entry.method !== methodStr) continue;
-        const params = matchRoute(path, entry.pattern);
-        if (params === null) continue;
+        const pathParams = matchRoute(path, entry.pattern);
+        if (pathParams === null) continue;
+
+        // Merge path params + query params (from // query annotations).
+        const params = { ...pathParams };
+        for (const qname of entry.query_params) {
+          const qval = new URLSearchParams(queryString).get(qname);
+          if (qval !== null) params[qname] = qval;
+        }
 
         const req = { method: methodStr, path, body, params };
         const routeHandler = routeHandlers[entry.operation];

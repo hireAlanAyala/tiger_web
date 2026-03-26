@@ -779,7 +779,12 @@ pub fn main() !void {
 
         const prefix = comment_prefix(entry.basename) orelse continue;
 
-        const path = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ scan_dir, entry.path });
+        // Strip trailing slash from scan_dir to avoid double-slash in paths.
+        const dir_name = if (scan_dir.len > 0 and scan_dir[scan_dir.len - 1] == '/')
+            scan_dir[0 .. scan_dir.len - 1]
+        else
+            scan_dir;
+        const path = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ dir_name, entry.path });
 
         const content = dir.readFileAlloc(allocator, entry.path, 1024 * 1024) catch |err| {
             try stderr.print("error: cannot read '{s}': {}\n", .{ path, err });
@@ -1306,6 +1311,22 @@ fn emit_routes_zig(
 
     try w.writeAll(
         \\};
+        \\
+        \\// Comptime assertions — pair with scanner's validation.
+        \\comptime {
+        \\    const enums = @import("std").enums;
+        \\
+        \\    // Assert: every Operation has at least one route entry.
+        \\    // If a handler file exists without a // match annotation, this catches it.
+        \\    for (enums.values(message.Operation)) |op| {
+        \\        if (op == .root) continue; // sentinel
+        \\        var found = false;
+        \\        for (routes) |r| {
+        \\            if (r.operation == op) { found = true; break; }
+        \\        }
+        \\        if (!found) @compileError("no // match annotation for operation: " ++ @tagName(op));
+        \\    }
+        \\}
         \\
         \\// Shared route patterns are allowed — handlers disambiguate at runtime
         \\// (e.g., GET /products: list vs search based on ?q= query param).

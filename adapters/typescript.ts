@@ -24,7 +24,7 @@ interface ManifestAnnotation {
   operation: string;
   file: string;
   line: number;
-  route_match?: { method: string; pattern: string };
+  route_match?: { method: string; pattern: string; query_params?: string[] };
 }
 
 interface ResolvedAnnotation extends ManifestAnnotation {
@@ -139,7 +139,7 @@ for (const phase of phases) {
 }
 
 // Build route table from match directives.
-interface RouteEntry { operation: string; method: string; pattern: string; }
+interface RouteEntry { operation: string; method: string; pattern: string; query_params: string[]; }
 const routeTable: RouteEntry[] = [];
 for (const ann of manifest.annotations) {
   if (ann.phase === "translate" && ann.route_match) {
@@ -147,6 +147,7 @@ for (const ann of manifest.annotations) {
       operation: ann.operation,
       method: ann.route_match.method,
       pattern: ann.route_match.pattern,
+      query_params: ann.route_match.query_params || [],
     });
   }
 }
@@ -202,11 +203,15 @@ interface RouteTableEntry {
   operation: string;
   method: string;
   pattern: string;
+  query_params: string[];
 }
 
 const routeTable: RouteTableEntry[] = [\n`;
 for (const r of routeTable) {
-  out += `  { operation: '${r.operation}', method: '${r.method}', pattern: '${r.pattern}' },\n`;
+  const qp = r.query_params.length > 0
+    ? `[${r.query_params.map((q: string) => `'${q}'`).join(', ')}]`
+    : `[]`;
+  out += `  { operation: '${r.operation}', method: '${r.method}', pattern: '${r.pattern}', query_params: ${qp} },\n`;
 }
 out += `];
 
@@ -291,11 +296,24 @@ const server = net.createServer((conn) => {
       // Multiple operations can share a method+pattern (e.g., GET /products:
       // list_products vs search_products). Handlers disambiguate by query params
       // or body content. Try all matching routes; first handler to return non-null wins.
+      //
+      // Query params from // query annotations are extracted into req.params,
+      // matching how the Zig pipeline merges path + query params into RouteParams.
+      const queryIdx = path.indexOf('?');
+      const queryString = queryIdx >= 0 ? path.slice(queryIdx + 1) : '';
+
       let result: any = null;
       for (const entry of routeTable) {
         if (entry.method !== methodStr) continue;
-        const params = matchRoute(path, entry.pattern);
-        if (params === null) continue;
+        const pathParams = matchRoute(path, entry.pattern);
+        if (pathParams === null) continue;
+
+        // Merge path params + query params (from // query annotations).
+        const params = { ...pathParams };
+        for (const qname of entry.query_params) {
+          const qval = new URLSearchParams(queryString).get(qname);
+          if (qval !== null) params[qname] = qval;
+        }
 
         const req = { method: methodStr, path, body, params };
         const routeHandler = routeHandlers[entry.operation];
