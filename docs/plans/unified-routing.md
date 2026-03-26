@@ -124,8 +124,11 @@ The `// query` annotation would need:
 - translate(): extract query params from raw_path, add to RouteParams
 - TypeScript dispatch: same — extract query params, add to req.params
 
-Defer to phase 2 — implement `(params, path, body)` now, migrate to
-`(params, body)` + `// query` when the pattern spreads beyond 2 handlers.
+**Decision: implement `// query` now (phase 2), not `(params, path, body)`.**
+Always choose the most architecturally correct answer, not the quickest.
+The `path` param is a shim that exists because we didn't want to implement
+query extraction. 22 handlers writing `_ = path` is wrong — it means the
+API is wrong. Do it right: `route(params, body)` with `// query` annotations.
 
 ### Handlers tuple is routing-only
 The prefetch/handle/render dispatch in `app.zig` uses direct `@import` in
