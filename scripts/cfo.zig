@@ -102,6 +102,10 @@ const Fuzzer = enum {
     }
 
     fn capture_logs(fuzzer: Fuzzer) bool {
+        // Single-process deterministic fuzzers don't need log capture —
+        // the seed reproduces the exact crash. TB only captures logs for
+        // vortex (multi-process, non-reproducible interleaving).
+        // Enable when we add a multi-process fuzzer.
         _ = fuzzer;
         return false;
     }
