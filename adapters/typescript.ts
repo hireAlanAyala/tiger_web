@@ -279,7 +279,7 @@ const server = net.createServer((conn) => {
         if (pos >= frame.length) break;
         const { result: rowSet, offset: newPos } = readRowSet(dv, pos);
         pos = newPos;
-        if (prefetchModes[key] === 'one') {
+        if (prefetchModes[key] === 'query') {
           prefetched[key] = rowSet.rows.length > 0 ? rowSet.rows[0] : null;
         } else {
           prefetched[key] = rowSet.rows;
