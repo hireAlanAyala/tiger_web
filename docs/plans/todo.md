@@ -38,6 +38,21 @@ Possible Datastar serializer nesting or Content-Length truncation.
 
 ---
 
+# Storage boundary gaps (from audit)
+
+High priority:
+- Assert bind parameter count matches SQL placeholders (1 line)
+- Assert bind return codes `rc == SQLITE_OK` (~10 lines)
+
+Medium priority:
+- Assert column names match struct field names on first row (~15 lines)
+
+Low priority:
+- Retry cap on busy (storage can retry forever)
+- query/query_all error discrimination (interface change)
+- query_all truncation detection (documentation or comptime)
+- Write failure model: panics (TB) vs returned errors (web) — decide
+
 # Backlog
 
 - TS sidecar render: effects array instead of single string

@@ -6,7 +6,7 @@
 //! fault injection at the prefetch dispatch level.
 //!
 //! Does NOT validate domain correctness — that's a user-space concern.
-//! See docs/plans/storage-boundary.md.
+//! See decisions/storage-ownership.md.
 
 const std = @import("std");
 const assert = std.debug.assert;

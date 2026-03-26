@@ -10,7 +10,7 @@
 //!
 //! NOT responsibilities:
 //!   - Verifying SQL correctness against a reference model. We trust SQLite
-//!     to execute SQL correctly. See docs/plans/storage-boundary.md.
+//!     to execute SQL correctly. See decisions/storage-ownership.md.
 //!   - Domain logic. This file knows table schemas, not business rules.
 //!     Whether an inventory transfer preserves totals is the handler's
 //!     concern, not storage's.
@@ -1274,7 +1274,7 @@ pub const SqliteStorage = struct {
     ///   reordered. Name-based matching crashes immediately.
     /// - Handlers define flat row types shaped by their query (not by the
     ///   wire format). The SQL and the struct are the contract — the
-    ///   framework matches them. See docs/plans/storage-boundary.md.
+    ///   framework matches them. See decisions/storage-ownership.md.
     /// - This is sidecar-language-agnostic: every language maps query
     ///   results to structs by column name. The Zig framework does the same.
     fn build_column_mapping(comptime T: type, stmt: *c.sqlite3_stmt) ColumnMapping(T) {
