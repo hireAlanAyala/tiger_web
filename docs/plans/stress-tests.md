@@ -46,13 +46,11 @@ From todo: "Stressor: multi-tenant user."
 - Worker crashes mid-processing. Orders stay "pending" in storage. Worker restarts, re-polls, retries. Does the external API get double-called? Is the operation idempotent?
 - Worker is slower than mutation rate. Pending queue grows. Does the server's list query degrade? Does the polling response get larger?
 
-## 6. Prefetch read / handle write boundary
+## 6. ~~Prefetch read / handle write boundary~~ — DONE
 
-From todo: "assert prefetch cannot write data in sql" and "assert commit + handler cannot read data in sql."
-
-- Can the framework enforce at the SQL level that prefetch connections are read-only?
-- Can the framework detect a write in prefetch or a read in handle at test time?
-- Fuzz test: random SQL statements in prefetch, assert none modify data. Random SQL in handle, assert none read data.
+Scanner enforces prefetch SQL must be SELECT, handle SQL must be
+INSERT/UPDATE/DELETE. ReadView/WriteView enforce at runtime.
+annotation_scanner.zig validates at build time.
 
 ## 7. Storage retry limits
 

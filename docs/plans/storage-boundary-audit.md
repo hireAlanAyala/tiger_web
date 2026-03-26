@@ -91,16 +91,13 @@ and what's not. Based on responsibilities defined in `storage-boundary.md`.
 
 ### Gaps
 
-- **No assertion that prefetch doesn't write.** The doc says prefetch is
-  read-only, but nothing enforces it. A handler's prefetch function could
-  call `storage.execute("DELETE ...")` and it would succeed silently.
-  - **Fix:** This is already in todo.md ("assert prefetch cannot write data
-    in sql"). Could wrap the storage in a read-only view during prefetch
-    (compile-time or runtime).
+- ~~**No assertion that prefetch doesn't write.**~~ DONE. ReadView
+  enforces read-only at runtime. Scanner enforces prefetch SQL is
+  SELECT at build time.
 
-- **No assertion that execute/handle doesn't read.** Similarly, commit
-  handlers should only use prefetch cache, not issue new queries.
-  - **Fix:** Also in todo.md. Same approach — restricted storage view.
+- ~~**No assertion that execute/handle doesn't read.**~~ DONE. WriteView
+  only exposes execute(). Scanner enforces handle SQL is INSERT/UPDATE/DELETE
+  at build time.
 
 - **Handlers write through `apply_writes` dispatch, not directly.** Execute
   returns `ExecuteResult` with collected writes, and the dispatch loop applies
@@ -185,8 +182,8 @@ and what's not. Based on responsibilities defined in `storage-boundary.md`.
 | High | Assert bind parameter count matches SQL placeholders | 1 line |
 | High | Assert bind return codes (rc == SQLITE_OK) | ~10 lines |
 | Medium | Assert column names match struct field names | ~15 lines |
-| Medium | Read-only storage view for prefetch phase | Design needed |
-| Medium | Write fault injection in MemoryStorage | ~10 lines |
+| ~~Medium~~ | ~~Read-only storage view for prefetch phase~~ | DONE — ReadView/WriteView in storage.zig |
+| ~~Medium~~ | ~~Write fault injection in MemoryStorage~~ | N/A — MemoryStorage removed, faults at dispatch (app.zig) |
 | Low | Retry cap on busy | ~5 lines |
 | Low | query/query_all error discrimination | Interface change |
 | Low | query_all truncation detection | Documentation or comptime |

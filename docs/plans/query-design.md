@@ -119,7 +119,7 @@ TigerBeetle needs equivalence testing on every operation because a wrong financi
 
 **ORM integration**: The user never touches storage — that's the framework's value proposition. Adding an ORM contradicts the architecture. Rejected.
 
-**Drop MemoryStorage, use SQLite :memory: for all tests**: Simpler but loses PRNG-driven fault injection for busy/err paths. Deferred.
+**Drop MemoryStorage, use SQLite :memory: for all tests**: Done. Fault injection moved to dispatch level (app.zig), not storage level. PRNG-driven busy faults preserved.
 
 **AI-generated mocks from SQL**: The AI produces the same logic in two syntaxes, not two independent implementations. Same bug in both. Doesn't provide the equivalence testing benefit. Rejected.
 

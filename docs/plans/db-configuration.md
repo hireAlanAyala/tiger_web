@@ -262,12 +262,12 @@ its own methods. The framework treats it identically to any other db.
 - All handlers have pub const Context
 - resolve_credential/apply_auth_response made pub on SM
 
-### In Stash (27 compile errors, needs next session)
-- ReadView on SqliteStorage (written, needs MemoryStorage removal from fuzz/sim)
-- ReadView on MemoryStorage (written)
-- SM prefetch/commit using Handlers interface
-- enum support in read_column
-- undefined instead of zeroes in read_row_mapped
+### ~~In Stash~~ — COMPLETED
+- ReadView on SqliteStorage — done, WriteView added with WAL recording
+- MemoryStorage removed — fuzz/sim use SqliteStorage(:memory:)
+- SM prefetch/commit using Handlers interface — done
+- enum support in read_column — done
+- undefined instead of zeroes in read_row_mapped — done
 
 ## CommitResponse: Framework Envelope, Not Domain Data
 
@@ -298,10 +298,10 @@ MessageResponse.result (the domain tagged union) is deleted when all
 handlers are wired. Until then, both types coexist — the old SM uses
 MessageResponse, the new dispatch uses CommitResponse.
 
-### Not Started
-- Define CommitResponse (framework metadata only, no domain data)
-- Give all read-only handlers a handle() function
-- Fault injection at dispatch boundary
-- Switch sim/fuzz/benchmark from MemoryStorage to SqliteStorage(":memory:")
-- Delete old SM prefetch/execute dispatch (~800 lines)
-- Wire handler dispatch into server process_inbox
+### ~~Not Started~~ — ALL COMPLETED
+- PipelineResponse (CommitResponse) — framework metadata only, no domain data
+- All handlers have handle() (bodyless [handle] for read-only)
+- Fault injection at dispatch boundary (app.zig fault_prng/fault_busy_ratio)
+- MemoryStorage removed, all tests use SqliteStorage(:memory:)
+- Old SM dispatch deleted, handler dispatch via HandlersType
+- Handler dispatch wired into server process_inbox via commit_and_encode

@@ -1,4 +1,12 @@
-# Unified Handler API
+# Unified Handler API — COMPLETED
+
+All 24 Zig handlers and 24 TS handlers use annotation syntax.
+Scanner validates exhaustiveness, status coverage, SQL read/write,
+route patterns. `translate()` comptime-asserts route_method/route_pattern
+on every handler. Old codec dispatch, SM dispatch, render.zig deleted.
+`split_path` deleted (replaced by `match_route`).
+
+---
 
 Single user space spec for declaring operations. Annotations are the user-facing contract — same format, same scanner, same mental model for Zig and TypeScript. The scanner is the authority for discovery and exhaustiveness. But the generated Zig code is structured so the compiler does maximum validation after generation: type checking, signature matching, prefetch→handle→render data flow.
 

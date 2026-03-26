@@ -12,8 +12,7 @@
    Chained queries solved by syncing external data to local db via
    worker jobs.
 
-3. **Sim test update** — 84/85 passing. Remaining: interleaved writes
-   multi-connection SimIO issue (not a handler or framework issue).
+3. ~~**Sim test update**~~ — DONE. All 85/85 pass (`zig build test` exit 0).
 
 4. ~~**Codegen**~~ — DELETED. Hand-written SDK + cross-language tests.
 
@@ -21,6 +20,12 @@
    Remove session_action from HandleResult. Session changes via
    db.execute on a sessions table. Requires auth architecture change
    (cookie-based → sessions table). Only logout uses session_action.
+
+6. **Simulation testing** — `docs/plans/simulation-testing.md`
+   User-space domain verification via `[sim:*]` annotations.
+   Reference model, assert callbacks, invariants, shared predicates.
+   Phase 1: bolt onto fuzz.zig (Zig-native). Phase 2: scanner.
+   Phase 3: TS sidecar sim.
 
 ---
 
@@ -50,30 +55,13 @@ Fix: after matching the closing `"` of the field name, skip optional spaces befo
 
 ## 2: JSON string parser truncates values containing escaped quotes
 
-json_string_field finds the closing `"` with a bare indexOf — no escape handling. A value like `"name":"Widget \"Pro\""` parses as `Widget \`. The comment at codec.zig documents this. Since users type product names in the browser, a name containing a literal `"` gets silently truncated at the codec boundary.
+json_string_field finds the closing `"` with a bare indexOf — no escape handling. A value like `"name":"Widget \"Pro\""` parses as `Widget \`. Since users type product names in the browser, a name containing a literal `"` gets silently truncated at the parse boundary.
 
 Fix: walk the string byte-by-byte, skipping `\"` sequences when looking for the closing quote. Add tests: `{"name":"say \"hi\""}` should extract `say \"hi\"`.
 
 ## 3: Price parsing bug
 
-The price_cents on the created product came back as $0.09 instead of $9.99. Sent `"price_cents":999` but the response shows `price_cents:9`. The Datastar payload serializer might be nesting the JSON differently than codec.zig expects — or the curl Content-Length was wrong and the body got truncated.
-
-## 5: RESOLVED — render-owned refresh for SSE mutations
-
-Followups deleted. Render has db access for post-mutation queries.
-Handler owns the complete response. See decisions/render-db-access.md.
-
-## 6: RESOLVED — status exhaustiveness enforced by scanner
-
-Scanner extracts statuses from handle(), verifies render() handles each
-one explicitly. No generated types, no catch-all. Same check for all
-languages. See annotation_scanner.zig module doc.
-
-## 7: RESOLVED — raw SQL in prefetch
-
-Handlers call db.query/query_all with SQL directly. No ORM.
-See user-space.md for the declaration-based prefetch design.
-
+The price_cents on the created product came back as $0.09 instead of $9.99. Sent `"price_cents":999` but the response shows `price_cents:9`. The Datastar payload serializer might be nesting the JSON differently than the parser expects — or the curl Content-Length was wrong and the body got truncated.
 
 # Backlog
 - framework author debugging improved a lot, user space debugging should improve more at the compiler assertions
@@ -82,7 +70,6 @@ See user-space.md for the declaration-based prefetch design.
   Requires: TS adapter generates effects return type, dispatch sends effects over wire,
   framework delivers as multiple SSE events. Currently TS render returns `string`.
 - address todos scattered within the code
-- Domain logic should assert inputs and outputs to preserve business logic (progress: might be too to demo to new users)
 - Ensure the framework works on all operating systems (currently Linux only)
 - CI should run test-adapter
 - Add CI/CD with integration tests against the /examples repo
@@ -90,68 +77,22 @@ See user-space.md for the declaration-based prefetch design.
 - User-space spec: test worker, test returning SSE, test DB calls
 - Stressor: multi-tenant user
 - storage can retry forever on err, we should add an upper cap
-- assert prefetch cannot write data in sql
--- asert commit + handler cannot read data in sql
-- assert the user has atleast 1 assert inside of prefetch to validate the ctx
-- RESOLVED: render has db access, `then` killed, no multi-step needed
 - make sdk assert no panic in prod
 - boil all adapters+packaged addons into a plugin api
-- write vanilla html in render without a string  and the compiler turns it to datastar so theres no api to learn
+- write vanilla html in render without a string and the compiler turns it to datastar so theres no api to learn
 - add an opt in way for sse to fan out updates to all users for that page
 - the compiler/runtime should output to a file in dev so ai can read it on its own with tail
 - give users zig primitives in their pure functions,
-on compile chunk the user space by where zig is used,
-run a user space chunk,
-pass the result to zig as binary,
-run the zig after that chunk,
-If errors show it on compiler
-benefit: allows the language to have a uniform, assert, and other zig checks
-- ensure each annotation stage only gets enough db access to work correctly, and assert others dont have side -effects
-
-
-wal should track if request was in prod or local
-
-RESOLVED: compiler should force error handling in render — scanner enforces status exhaustiveness
+  on compile chunk the user space by where zig is used,
+  run a user space chunk,
+  pass the result to zig as binary,
+  run the zig after that chunk,
+  If errors show it on compiler
+  benefit: allows the language to have a uniform, assert, and other zig checks
+- wal should track if request was in prod or local
 
 ci ideas
 
   tiger init my-app
   tiger add operation get_product --read
   tiger add operation create_product --mutation
-
-## Framework audit primitives
-
-The framework exposes building blocks for users to write simulation tests
-with domain-specific oracles. Framework owns the harness, user owns the
-oracle. See `storage-boundary.md` for rationale.
-
-### Workload generator
-- PRNG-driven operation sequencer with user-configured weights
-- Swarm testing: random weights per seed, different seeds stress different mixes
-- `random_enum_weights` and `gen_random_message` exist internally in fuzz_lib/fuzz.zig
-- Need generic `WorkloadType(App)` that takes the user's operation enum
-
-### Auditor interface
-- Hook point where user plugs in their reference model
-- Shape: `on_commit(msg, resp)`, `at_capacity(op) bool`, `id_pools() IdPools`
-- `IdTracker` in fuzz.zig is the minimal version (IDs + capacity, no validation)
-- User auditor extends with domain state and assertions
-- Should be comptime-validated interface like `StateMachineType(Storage)`
-
-### Coverage tracking
-- `OperationCoverage` + `FeatureCoverage` exist internally in fuzz.zig
-- Need to be generic over user's operation enum
-- Feature coverage should be user-extensible
-
-### Richer fault injection
-- MemoryStorage currently does busy/err only
-- Add: latency variation, partial batch failures, transient-then-recover
-- Consider letting users bring their own MemoryStorage (just implement interface)
-
-### Delivery order
-1. Extract fuzz_lib utilities into framework/ (weights, FuzzArgs)
-2. Make OperationCoverage generic over any operation enum
-3. Define auditor interface as comptime contract
-4. Build WorkloadType(App) wiring generator + coverage + auditor
-5. Example auditor for ecommerce app in examples/
-6. Enrich fault injection

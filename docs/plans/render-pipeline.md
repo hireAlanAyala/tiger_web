@@ -1,4 +1,12 @@
-# Render Pipeline Design
+# Render Pipeline Design — COMPLETED
+
+All 7 steps implemented. `render.zig` deleted, `effects.zig` deleted,
+`to_legacy_response` deleted, `process_followups` deleted. Handlers own
+the full lifecycle. `http_response.zig` and `sse.zig` in framework/.
+`dispatch_render` in app.zig. Per-handler Status enums in handler files.
+Scanner enforces status exhaustiveness.
+
+---
 
 The last shim: replace `to_legacy_response` + `render.encode_response` with
 handler-owned render functions. After this, handlers own the full request

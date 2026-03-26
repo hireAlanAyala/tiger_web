@@ -1,5 +1,12 @@
 # Storage Boundary: Why We Depart from TigerBeetle
 
+> **Note (2026-03-25):** MemoryStorage has been removed. All tests use
+> SqliteStorage(:memory:). Fault injection moved to the dispatch level
+> (app.zig). The design rationale below is preserved as history — the
+> reasoning about where our bugs live and why the auditor is user-space
+> remains correct. References to MemoryStorage describe the original
+> design, not current implementation.
+
 ## We Sit a Layer Up
 
 TigerBeetle owns the full path from state machine to disk. It writes raw bytes
