@@ -2,9 +2,11 @@ import type { RouteRequest, RouteResult, PrefetchMessage, PrefetchDb, HandleCont
 import { esc, price } from "tiger-web";
 
 // [route] .search_products
-// match GET /products/search
+// match GET /products
 export function route(req: RouteRequest): RouteResult | null {
+  // Require ?q= — without it, list_products handles GET /products.
   const q = new URLSearchParams(req.path.split("?")[1] || "").get("q") || "";
+  if (q.length === 0) return null;
   return { operation: "search_products", id: "0".repeat(32), body: { query: q } };
 }
 

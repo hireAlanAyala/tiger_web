@@ -1,6 +1,29 @@
 # Plan: Unified Annotation Routing — One Source of Truth
 
-## Status: Planned
+## Status: Partially implemented, then revised
+
+### What was implemented
+- Scanner emits `routes.generated.zig` from `// match` annotations (Step 1)
+- Scanner emits `route_match` in manifest JSON
+- TypeScript sidecar uses generated route table with `matchRoute()` from shared module
+- Cross-language test vectors for route matching (22 cases)
+
+### What was reverted and why
+- `app.zig translate()` was changed to use the generated route table, then reverted
+  to the original handler-iteration pattern. Reason: the generated table can't handle
+  shared method+pattern routes (GET /products: list vs search). The Zig pipeline's
+  `inline for (handlers)` with `route()` disambiguation handles this correctly.
+- `search_products` URL was changed from `/products` to `/products/search`, then
+  reverted. Reason: `/products?q=widget` is correct REST — filtering a collection
+  by query param is the same endpoint, not a sub-resource.
+
+### Revised understanding
+The Zig handlers' `route_method`/`route_pattern` constants are the source of truth
+for the Zig pipeline. The `// match` annotations are the source of truth for the
+sidecar pipeline. The scanner validates both exist and can cross-check them. Full
+unification (removing constants, using only annotations) requires solving the shared
+pattern problem — either the generated table supports multiple handlers per pattern,
+or the Zig pipeline gets a different dispatch mechanism. Deferred.
 
 ## Context
 

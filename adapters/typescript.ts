@@ -185,15 +185,9 @@ routeTable.sort((a, b) => {
   return a.operation < b.operation ? -1 : 1;
 });
 
-// Detect duplicate routes: same method + pattern from different operations.
-for (let i = 0; i < routeTable.length - 1; i++) {
-  const a = routeTable[i];
-  const b = routeTable[i + 1];
-  if (a.method === b.method && a.pattern === b.pattern) {
-    console.error(`error: duplicate route: ${a.method.toUpperCase()} ${a.pattern} — ${a.operation} vs ${b.operation}`);
-    process.exit(1);
-  }
-}
+// Shared route patterns are allowed — handlers disambiguate at runtime
+// (e.g., GET /products: list vs search based on ?q= query param).
+// The dispatch tries all matching routes; first handler to return non-null wins.
 
 // Generate route table. matchRoute is imported from routing.ts (shared module,
 // verified by cross-language test vectors in route_match_vectors.json).
@@ -293,31 +287,26 @@ const server = net.createServer((conn) => {
       // Route matching — filter by method, then match pattern with param extraction.
       // Mirrors framework/parse.zig match_route() + app.zig translate() dispatch.
       // matchRoute handles query string stripping (path?q=x → path).
-      let matchedEntry: RouteTableEntry | null = null;
-      let matchedParams: Record<string, string> = {};
+      //
+      // Multiple operations can share a method+pattern (e.g., GET /products:
+      // list_products vs search_products). Handlers disambiguate by query params
+      // or body content. Try all matching routes; first handler to return non-null wins.
+      let result: any = null;
       for (const entry of routeTable) {
         if (entry.method !== methodStr) continue;
         const params = matchRoute(path, entry.pattern);
-        if (params !== null) {
-          matchedEntry = entry;
-          matchedParams = params;
+        if (params === null) continue;
+
+        const req = { method: methodStr, path, body, params };
+        const routeHandler = routeHandlers[entry.operation];
+        const r = routeHandler ? routeHandler(req) : null;
+        if (r !== null) {
+          result = r;
           break;
         }
       }
 
-      if (!matchedEntry) {
-        // Not found: [tag][found=0]
-        sendFrame(conn, new Uint8Array([MessageTag.route_prefetch_response, 0]));
-        return;
-      }
-
-      // Call the route handler with populated params.
-      const req = { method: methodStr, path, body, params: matchedParams };
-      const routeHandler = routeHandlers[matchedEntry.operation];
-      const result: any = routeHandler ? routeHandler(req) : null;
-
       if (!result) {
-        // Handler declined (e.g., additional validation failed).
         sendFrame(conn, new Uint8Array([MessageTag.route_prefetch_response, 0]));
         return;
       }

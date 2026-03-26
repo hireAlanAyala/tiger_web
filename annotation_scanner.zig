@@ -758,18 +758,21 @@ pub fn main() !void {
         }
     }
 
-    // Check for duplicate route patterns — two operations claiming the same URL.
+    // Check for shared route patterns — two operations claiming the same URL.
+    // This is valid when handlers disambiguate by query params or body content
+    // (e.g., GET /products: list_products vs search_products based on ?q=).
+    // Runtime assertion in translate() catches true duplicates (two handlers
+    // both claiming the same request). Warn here so developers are aware.
     for (annotations.items, 0..) |a, i| {
         const a_match = a.route_match orelse continue;
         for (annotations.items[i + 1 ..]) |b| {
             const b_match = b.route_match orelse continue;
             if (a_match.method == b_match.method and std.mem.eql(u8, a_match.pattern, b_match.pattern)) {
-                try stderr.print("error: duplicate route pattern {s} {s}\n  --> {s}:{d} (.{s})\n  --> {s}:{d} (.{s})\n", .{
+                try stderr.print("warning: shared route pattern {s} {s} — handlers must disambiguate\n  --> {s}:{d} (.{s})\n  --> {s}:{d} (.{s})\n", .{
                     @tagName(a_match.method), a_match.pattern,
                     a.file, a_match.line, a.operation,
                     b.file, b_match.line, b.operation,
                 });
-                errors += 1;
             }
         }
     }
@@ -1233,19 +1236,11 @@ fn emit_routes_zig(
     try w.writeAll(
         \\};
         \\
-        \\// Comptime pair assertions — validated independently of scanner.
-        \\comptime {
-        \\    const mem = @import("std").mem;
-        \\
-        \\    // Assert: no duplicate method + pattern.
-        \\    for (routes, 0..) |a, i| {
-        \\        for (routes[i + 1 ..]) |b| {
-        \\            if (a.method == b.method and mem.eql(u8, a.pattern, b.pattern)) {
-        \\                @compileError("duplicate route: " ++ @tagName(a.method) ++ " " ++ a.pattern);
-        \\            }
-        \\        }
-        \\    }
-        \\}
+        \\// Shared route patterns are allowed — handlers disambiguate at runtime
+        \\// (e.g., GET /products: list vs search based on ?q= query param).
+        \\// Runtime assertion in translate() catches true duplicates (two handlers
+        \\// both claiming the same request). This is correct REST design: filtering
+        \\// a collection by query param is the same endpoint, not a sub-resource.
         \\
     );
 

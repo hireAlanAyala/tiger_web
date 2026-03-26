@@ -159,7 +159,6 @@ const routeTable: RouteTableEntry[] = [
   { operation: 'delete_collection', method: 'delete', pattern: '/collections/:id' },
   { operation: 'delete_product', method: 'delete', pattern: '/products/:id' },
   { operation: 'get_product_inventory', method: 'get', pattern: '/products/:id/inventory' },
-  { operation: 'search_products', method: 'get', pattern: '/products/search' },
   { operation: 'get_collection', method: 'get', pattern: '/collections/:id' },
   { operation: 'get_order', method: 'get', pattern: '/orders/:id' },
   { operation: 'get_product', method: 'get', pattern: '/products/:id' },
@@ -167,6 +166,7 @@ const routeTable: RouteTableEntry[] = [
   { operation: 'list_orders', method: 'get', pattern: '/orders' },
   { operation: 'list_products', method: 'get', pattern: '/products' },
   { operation: 'page_load_login', method: 'get', pattern: '/login' },
+  { operation: 'search_products', method: 'get', pattern: '/products' },
   { operation: 'page_load_dashboard', method: 'get', pattern: '/' },
   { operation: 'transfer_inventory', method: 'post', pattern: '/products/:id/transfer-inventory/:sub_id' },
   { operation: 'add_collection_member', method: 'post', pattern: '/collections/:id/members' },
@@ -255,31 +255,26 @@ const server = net.createServer((conn) => {
       // Route matching — filter by method, then match pattern with param extraction.
       // Mirrors framework/parse.zig match_route() + app.zig translate() dispatch.
       // matchRoute handles query string stripping (path?q=x → path).
-      let matchedEntry: RouteTableEntry | null = null;
-      let matchedParams: Record<string, string> = {};
+      //
+      // Multiple operations can share a method+pattern (e.g., GET /products:
+      // list_products vs search_products). Handlers disambiguate by query params
+      // or body content. Try all matching routes; first handler to return non-null wins.
+      let result: any = null;
       for (const entry of routeTable) {
         if (entry.method !== methodStr) continue;
         const params = matchRoute(path, entry.pattern);
-        if (params !== null) {
-          matchedEntry = entry;
-          matchedParams = params;
+        if (params === null) continue;
+
+        const req = { method: methodStr, path, body, params };
+        const routeHandler = routeHandlers[entry.operation];
+        const r = routeHandler ? routeHandler(req) : null;
+        if (r !== null) {
+          result = r;
           break;
         }
       }
 
-      if (!matchedEntry) {
-        // Not found: [tag][found=0]
-        sendFrame(conn, new Uint8Array([MessageTag.route_prefetch_response, 0]));
-        return;
-      }
-
-      // Call the route handler with populated params.
-      const req = { method: methodStr, path, body, params: matchedParams };
-      const routeHandler = routeHandlers[matchedEntry.operation];
-      const result: any = routeHandler ? routeHandler(req) : null;
-
       if (!result) {
-        // Handler declined (e.g., additional validation failed).
         sendFrame(conn, new Uint8Array([MessageTag.route_prefetch_response, 0]));
         return;
       }

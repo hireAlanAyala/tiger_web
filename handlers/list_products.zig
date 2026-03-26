@@ -18,6 +18,15 @@ pub const route_pattern = "/products";
 pub fn route(method: t.http.Method, raw_path: []const u8, body: []const u8) ?t.Message {
     _ = method; _ = body;
     if (t.match_route(raw_path, route_pattern) == null) return null;
+
+    // Reject if query string contains ?q= (handled by search_products).
+    // Both list_products and search_products share GET /products — this is
+    // correct REST design. Filtering a collection by query param is the same
+    // endpoint, not a sub-resource. Handler-level disambiguation is valid.
+    const query_sep = std.mem.indexOf(u8, raw_path, "?");
+    const query_string = if (query_sep) |q| raw_path[q + 1 ..] else "";
+    if (t.parse.query_param(query_string, "q") != null) return null;
+
     return t.Message.init(.list_products, 0, 0, std.mem.zeroes(t.ListParams));
 }
 
