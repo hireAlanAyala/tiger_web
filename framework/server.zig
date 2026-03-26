@@ -1,6 +1,6 @@
 const std = @import("std");
 const assert = std.debug.assert;
-const stdx = @import("stdx.zig");
+const stdx = @import("stdx/stdx.zig");
 const http = @import("http.zig");
 const ConnectionType = @import("connection.zig").ConnectionType;
 const Time = @import("time.zig").Time;

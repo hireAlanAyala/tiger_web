@@ -1,6 +1,6 @@
 const std = @import("std");
 const assert = std.debug.assert;
-const stdx = @import("stdx.zig");
+const stdx = @import("stdx/stdx.zig");
 const http = @import("http.zig");
 const marks = @import("marks.zig");
 const log = marks.wrap_log(std.log.scoped(.connection));

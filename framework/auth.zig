@@ -1,6 +1,6 @@
 const std = @import("std");
 const assert = std.debug.assert;
-const stdx = @import("stdx.zig");
+const stdx = @import("stdx/stdx.zig");
 
 const HmacSha256 = std.crypto.auth.hmac.sha2.HmacSha256;
 
