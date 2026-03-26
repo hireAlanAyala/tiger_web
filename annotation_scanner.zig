@@ -1158,17 +1158,29 @@ fn has_name(ss: *const StatusSet, name: []const u8) bool {
 
 /// Write the annotation manifest as JSON.
 /// This is the contract between the scanner and language adapters.
+/// Annotations are sorted by file + line for deterministic output
+/// regardless of filesystem directory walk order.
 fn emit_manifest(
     allocator: std.mem.Allocator,
     out_path: []const u8,
     annotations: []const Annotation,
     op_statuses: []const OperationStatuses,
 ) !void {
+    // Sort for deterministic output — filesystem walk order varies.
+    const sorted = try allocator.dupe(Annotation, annotations);
+    std.mem.sort(Annotation, sorted, {}, struct {
+        fn less(_: void, a: Annotation, b: Annotation) bool {
+            const file_cmp = std.mem.order(u8, a.file, b.file);
+            if (file_cmp != .eq) return file_cmp == .lt;
+            return a.line < b.line;
+        }
+    }.less);
+
     var buf = std.ArrayList(u8).init(allocator);
     const w = buf.writer();
 
     try w.writeAll("{\n  \"annotations\": [\n");
-    for (annotations, 0..) |ann, i| {
+    for (sorted, 0..) |ann, i| {
         if (i > 0) try w.writeAll(",\n");
         try w.print("    {{ \"phase\": \"{s}\", \"operation\": \"{s}\", \"file\": \"{s}\", \"line\": {d}, \"has_body\": {s}", .{
             @tagName(ann.phase), ann.operation, ann.file, ann.line, if (ann.has_body) "true" else "false",
