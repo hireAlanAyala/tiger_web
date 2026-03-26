@@ -9,19 +9,72 @@ We deleted 5 subcommands from TB's scripts.zig. These are the ones we need
 and when.
 
 ### `ci` — immediately after plan
-TB's `scripts/ci.zig` orchestrates the full CI pipeline: smoke tests, unit
-tests, fuzz smoke, VOPR (commit-SHA-as-seed), client library tests, tidy
-checks. This is what their GitHub Actions calls (`zig build ci -- test`).
 
-We need our own version that runs:
-- `zig build unit-test`
-- `zig build test` (sim tests)
+TB's CI is a **build.zig step** (`zig build ci -- test`), not a scripts
+subcommand. The build step invokes other build steps as subprocesses via
+`build_ci_step` and `build_ci_script` helpers. `scripts/ci.zig` only
+handles client library testing — the orchestration lives in build.zig.
+
+We should match this pattern: `zig build ci -- <mode>`.
+
+#### CI modes (matching TB's pattern)
+
+**`zig build ci -- test` (default):**
+- `zig build test` — sim tests (27 scenarios + PRNG fuzz)
+- `zig build unit-test` — unit tests
+- `zig build fuzz -- smoke` — all 4 fuzzers, small event counts
+- `zig build scan` — annotation scanner
+
+**`zig build ci -- fuzz`:**
 - `zig build fuzz -- smoke`
-- `zig build scan -- handlers/` (annotation scanner)
+- `zig build fuzz -- state_machine <commit-sha>` — per-commit seed
+  (TB runs VOPR with commit SHA; we run state_machine with commit SHA.
+  Same idea: every commit gets one deterministic fuzz pass. The seed is
+  the commit hash truncated to u64, matching TB's parse_seed().)
 
-Copy TB's `scripts/ci.zig`, strip their test targets, wire ours. Add the
-`ci` variant back to scripts.zig CLIArgs. Then add a GitHub Actions workflow
-that calls `zig build scripts -- ci`.
+**`zig build ci -- smoke` (future):**
+- Formatting checks (zig fmt --check)
+- Linting / tidy checks
+- Doc building
+
+#### Example project testing (our equivalent of TB's client tests)
+
+TB tests each client library (dotnet, go, rust, java, node, python) to
+verify the SDK works against the server. Our equivalent: test each
+example project in `examples/` to verify the sidecar SDK works.
+
+Currently one: `examples/ecommerce-ts/`. Pattern:
+```zig
+const examples = .{ "ecommerce-ts" };
+inline for (examples) |example| {
+    // npm install, npm run build, npm test
+    build_ci_step(b, step_ci, .{"test-adapter"});
+}
+```
+
+When we add more examples (e.g., `examples/ecommerce-python/`), each
+gets a CI entry — same as TB's `inline for (Languages)` pattern.
+
+**`zig build ci -- clients` (future):**
+- Build + test all example projects
+- Equivalent to TB's `zig build ci -- clients`
+
+#### Deferred CI features
+
+**`test:fmt` / `check` (smoke mode):**
+TB runs `zig build test:fmt` (formatting check) and `zig build check`
+(compilation check without running) in smoke mode. We should add:
+- `zig fmt --check *.zig framework/*.zig` — formatting
+- Tidy checks (e.g., no `std.debug.print` in non-test code)
+
+**`devhub` / `devhub-dry-run`:**
+TB runs devhub (benchmarks + kcov + dashboard deploy) on main after
+merge. PRs run devhub-dry-run (same but no upload). We'd add this
+when we build the devhub viewer.
+
+**Doc building:**
+TB builds docs and link-checks them in smoke mode. We'd add this
+when we have documentation to build.
 
 ### `devhub` — after ci
 TB's devhub builds the dashboard that visualizes CFO seed data, benchmark
