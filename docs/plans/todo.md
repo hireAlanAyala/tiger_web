@@ -66,3 +66,4 @@ Low priority:
 - Compiler/runtime output file for AI consumption
 - WAL: track prod vs local origin
 - CLI scaffolding (`tiger init`, `tiger add operation`)
+- Marketing: fuzz test counter in repo, open-source counter program, coverage CLI with branching
