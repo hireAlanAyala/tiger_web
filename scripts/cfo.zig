@@ -320,14 +320,23 @@ fn run_fuzzers(
 
                     const term = try if (fuzzer_done) fuzzer.child.wait() else fuzzer.child.kill();
                     const term_adapted: enum { sigkill, sigterm, other } = term: {
-                        if (std.meta.eql(term, .{ .Signal = std.posix.SIG.KILL })) {
+                        const code_kill = 128 + std.posix.SIG.KILL;
+                        const code_term = 128 + std.posix.SIG.TERM;
+
+                        if (std.meta.eql(term, .{ .Signal = std.posix.SIG.KILL }) or
+                            std.meta.eql(term, .{ .Exited = @intCast(code_kill) }))
+                        {
                             // Something killed the fuzzer. This is likely OOM, so count this seed
                             // neither as a success, nor as a failure.
+                            // Check both .Signal and .Exited because processes under shell wrappers
+                            // or with signal handlers exit with 128+signal instead of .Signal.
                             break :term .sigkill;
                         }
 
                         if (iteration_last) {
-                            if (std.meta.eql(term, .{ .Signal = std.posix.SIG.TERM })) {
+                            if (std.meta.eql(term, .{ .Signal = std.posix.SIG.TERM }) or
+                                std.meta.eql(term, .{ .Exited = @intCast(code_term) }))
+                            {
                                 // We killed the fuzzer because our budgeted time is expired, but
                                 // the seed itself is indeterminate.
                                 break :term .sigterm;
