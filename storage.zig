@@ -1004,7 +1004,6 @@ pub const SqliteStorage = struct {
     /// SQL is comptime, so if it doesn't prepare, the schema and code disagree.
     pub fn query(self: *SqliteStorage, comptime T: type, comptime sql_str: [*:0]const u8, args: anytype) ?T {
         const stmt = self.prepare_and_bind(sql_str, args);
-        // Statement is cached — not finalized per call.
         assert(c.sqlite3_stmt_readonly(stmt) != 0); // query() called with a mutating statement
 
         if (step_result(stmt) != .row) return null;
@@ -1017,7 +1016,6 @@ pub const SqliteStorage = struct {
     /// for all subsequent rows — no per-row string comparisons.
     pub fn query_all(self: *SqliteStorage, comptime T: type, comptime max: usize, comptime sql_str: [*:0]const u8, args: anytype) ?BoundedList(T, max) {
         const stmt = self.prepare_and_bind(sql_str, args);
-        // Statement is cached — not finalized per call.
         assert(c.sqlite3_stmt_readonly(stmt) != 0); // query_all() called with a mutating statement
 
         var result = BoundedList(T, max){};
@@ -1039,7 +1037,6 @@ pub const SqliteStorage = struct {
     /// step error (busy/constraint). Prepare failure is an assert.
     pub fn execute(self: *SqliteStorage, comptime sql_str: [*:0]const u8, args: anytype) bool {
         const stmt = self.prepare_and_bind(sql_str, args);
-        // Statement is cached — not finalized per call.
         assert(c.sqlite3_stmt_readonly(stmt) == 0); // execute() called with a read-only statement
 
         return step_result(stmt) == .done;
@@ -1295,7 +1292,9 @@ pub const SqliteStorage = struct {
             const args_count = @typeInfo(@TypeOf(args)).@"struct".fields.len;
             assert(sql_param_count == args_count);
             assert(c.sqlite3_reset(cached) == c.SQLITE_OK);
-            assert(c.sqlite3_clear_bindings(cached) == c.SQLITE_OK);
+            // No sqlite3_clear_bindings — bind_params overwrites every
+            // parameter (param count assertion guarantees it). Clearing
+            // first would be redundant work.
             break :blk cached;
         } else blk: {
             // First call — prepare and cache.
