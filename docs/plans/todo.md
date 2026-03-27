@@ -53,6 +53,34 @@ Low priority:
 - query_all truncation detection (documentation or comptime)
 - Write failure model: panics (TB) vs returned errors (web) — decide
 
+## Sidecar: shared memory transport to replace Unix socket
+
+The sidecar is 3.9x slower than native Zig (13K vs 53K req/s). The
+cost is 3 Unix socket round trips per request (~5ms), not the
+TypeScript runtime. p50 goes from 2ms to 7ms — the socket overhead
+is the floor regardless of sidecar language.
+
+Sidecar handlers are pure functions: data in, data out. They can't
+hold state or corrupt memory. A buggy handler produces wrong HTML,
+not memory corruption — caught by tests, same as Zig handlers. Process
+isolation via socket buys nothing that testing doesn't already provide.
+
+Proposal: replace the Unix socket with shared memory (mmap) and a
+doorbell (eventfd/futex). The server writes request data into a shared
+ring buffer, signals the sidecar, the sidecar writes the response into
+the same buffer. Zero kernel round trips, zero serialization for
+fixed-size fields, zero copy.
+
+Expected result: sidecar throughput approaches native speed. The 5ms
+round trip overhead drops to ~0.1ms (futex wake + cache line transfer).
+
+This is a protocol-level change to `sidecar.zig` and
+`generated/dispatch.generated.ts`. The handler interface doesn't change.
+
+Measured data (i7-14700K, 128 connections, 100K requests):
+- Native Zig: 53,048 req/s, p50=2ms, p99=2ms
+- Sidecar (TypeScript, Unix socket): 13,642 req/s, p50=7ms, p99=22ms
+
 # Backlog
 
 - TS sidecar render: effects array instead of single string
