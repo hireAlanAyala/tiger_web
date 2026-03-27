@@ -123,6 +123,68 @@ eliminate any real disk reads. Reverted.
 | 10 | ~36,000 req/s | 0ms | 0ms | 3ms |
 | 128 | ~37,000 req/s | 3ms | 7ms | 8ms |
 
+## Architectural decisions resolved during implementation
+
+### Monotonic counters, not decrement-on-error
+
+The original design decremented `requests_sent` in error paths to
+"undo" a failed request. This created underflow risk, made state
+relationships hard to reason about, and required manual counter
+management in every callback. The root issue: the request lifecycle
+wasn't clean. A clean lifecycle has one path forward — dispatch → send
+→ recv → complete. Errors reconnect and go idle. `dispatch_all` on the
+next tick re-activates the connection with a fresh request. Counters
+only increment. The invariant is simple: `requests_completed <=
+requests_dispatched`, and the gap reflects lost requests.
+
+### Per-request state belongs on Connection, not LoadGen
+
+The first implementation stored `last_created_id` on the LoadGen
+struct. Multiple connections interleave via callbacks — connection A
+formats a request (sets last_created_id), connection B formats a
+request (overwrites last_created_id), connection A's response arrives
+(reads B's ID). The fix: `created_id` lives on the Connection. The
+connection that formats the request owns the ID through to completion.
+No shared mutable state between connections.
+
+### Stdout readiness signal, not stderr log parsing
+
+The first implementation parsed "listening on port N" from stderr logs
+with a retry loop. Two bugs: `readAll` on a pipe hangs when the port
+number is fewer bytes than the buffer size (the server never closes
+stdout), and the retry loop masked a missing readiness signal. The
+fix: server writes the port to stdout as a bare number + newline.
+Driver reads stdout with `read()` (returns on first data). One
+mechanism, deterministic.
+
+### Per-connection PRNG derived from parent, not XOR
+
+`seed ^ connection_index` produces correlated xoshiro256 sequences
+for seeds differing by one bit. The correct pattern (matching TB):
+create a parent PRNG from the seed, derive each connection's PRNG by
+consuming `parent_prng.int(u64)`. Independently distributed sequences.
+
+### Format fuzzer validates sizing, not comptime constants
+
+The first implementation had hand-calculated worst-case body sizes
+(`product_body_max = 114`) with comptime assertions that they fit in
+`send_buf_max`. These were parallel truth — if someone added a field
+to `fmt_create_product`, the constant wouldn't update and the
+assertion would still pass. The fuzzer (90,000 random inputs across
+all 9 operations) is the real validation. The runtime assert in
+`fmt_post` catches overflow. Together they prove the buffer never
+overflows without maintaining a second source of truth.
+
+### WAL buffer aliasing was a server bug, not a load test issue
+
+The load test's first POST request crashed the server with `@memcpy
+arguments alias`. The server's `wal_record_buf` pointed to the same
+buffer as `wal_scratch` — WriteView recorded SQL writes into the
+same memory that `append_writes` used to assemble the WAL entry.
+Fixed by adding a separate `wal_record_scratch` buffer. The load test
+proved its value before it finished — it found a real server bug that
+affected all mutations.
+
 ## Next optimization target
 
 Reduce memcpy in the response encoding path. The render scratch buffer
