@@ -327,13 +327,14 @@ pub const LoadGen = struct {
             .weights = weights,
         };
 
-        // Per-connection PRNG seeded from main seed XOR connection index.
-        // Each connection's workload is deterministic regardless of
-        // callback ordering. The XOR ensures non-overlapping sequences.
+        // Per-connection PRNG derived from a parent PRNG. Each connection
+        // gets an independently derived seed — not a predictable transform
+        // of the base seed. Matches TB's per-client seeding pattern.
+        var parent_prng = PRNG.from_seed(seed);
         for (&self.connections, 0..) |*conn, i| {
             conn.* = .{ .load = self };
             conn.index = @intCast(i);
-            conn.prng = PRNG.from_seed(seed ^ @as(u64, i));
+            conn.prng = PRNG.from_seed(parent_prng.int(u64));
         }
 
         return self;
@@ -1186,7 +1187,7 @@ test "format fuzzer" {
 
         inline for (@typeInfo(LoadOp).@"enum".fields) |field| {
             const op: LoadOp = @enumFromInt(field.value);
-            var conn = Connection{ .load = &gen_storage, .prng = PRNG.from_seed(seed ^ @as(u64, field.value)) };
+            var conn = Connection{ .load = &gen_storage, .prng = PRNG.from_seed(pool_prng.int(u64)) };
             const len = gen_storage.format_request(&conn, op);
 
             assert(len > 0);
