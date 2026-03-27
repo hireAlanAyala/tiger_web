@@ -54,6 +54,29 @@ Both approaches close the ergonomics gap with Laravel Queue while
 keeping the correctness advantages (one source of truth, visible state,
 deterministic transitions).
 
+### JSON API responses
+The only missing response primitive. Everything else is covered:
+
+| Need | How it works today |
+|---|---|
+| HTML page | Render returns HTML string |
+| HTML fragment | Render returns partial HTML (SSE/Datastar) |
+| Redirect | Render returns `<script>window.location='...'</script>` |
+| Empty response | Render returns `""` |
+| SSE streaming | Built in (`render.zig` handles `Connection: close`) |
+| JSON API | **Not supported** — render always returns HTML |
+
+JSON enables: mobile apps, SPAs, third-party integrations — all
+hitting the same handlers with the same state machine and fuzz coverage.
+
+Two approaches:
+- `// format json` annotation on render — explicit per-handler
+- `Accept: application/json` header detection — automatic, same handler
+  returns HTML or JSON based on what the client asks for
+
+Same handler logic, same state machine, same fuzz coverage —
+different serialization.
+
 ## Later
 
 ### CFO as a service
