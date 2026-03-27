@@ -37,15 +37,15 @@ npm run dev                 # start sidecar + server on port 3000
 
 ## Documentation Structure
 
-| Directory | What goes here | Lifespan |
-|---|---|---|
-| `docs/decisions/` | Why we chose X over Y. Written once when the decision is made. Referenced when someone asks "why is it this way?" | Permanent — delete only if the decision is reversed |
-| `docs/learning/` | What we discovered. Benchmark findings, profiling results, architectural lessons learned from implementation. Facts and data, not plans. | Permanent — the findings don't expire |
-| `docs/framework/` | How the framework works. Architecture, checklist, debugging guides. Reference material for developers building on the framework. | Permanent — updated as the framework evolves |
-| `docs/recipes/` | How to do X. Step-by-step patterns for specific tasks (live updates, SSE, etc). | Permanent |
-| `docs/plans/` | What we're going to build. Checklists, design proposals, roadmap. **Deleted after implementation.** Do not put findings or decisions here — they'll be lost. | Temporary — deleted when done |
+Three directories, two audiences:
 
-**Rule:** If it's a fact you learned or a decision you made, it goes in `learning/` or `decisions/`. If it's work to be done, it goes in `plans/`. Plans are disposable. Knowledge is not.
+| Directory | Audience | What goes here | Lifespan |
+|---|---|---|---|
+| `docs/internal/` | Framework developers | Architecture, decisions, findings, checklists, TB patterns. Everything needed to understand, maintain, and improve the framework itself. Decisions prefixed with `decision-`. | Permanent |
+| `docs/guide/` | Framework users | How to build apps on the framework. Recipes, patterns, tutorials. Written from the user's perspective, not the implementor's. | Permanent |
+| `docs/plans/` | Framework developers | What we're going to build. Checklists, design proposals, roadmap. **Deleted after implementation.** | Temporary |
+
+**Rule:** If you learned it or decided it, put it in `internal/`. If it teaches a user how to do something, put it in `guide/`. If it's work to be done, put it in `plans/`. Plans are disposable. Knowledge is not.
 
 ## Architecture
 

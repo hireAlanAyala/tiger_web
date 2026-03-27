@@ -20,34 +20,23 @@ Static site to visualize CFO seed data. Copy TB's 3-file pattern
 Automated devhubdb repo creation + PAT configuration. One command from
 zero to continuous fuzzing. See `docs/plans/devhub-setup.md`.
 
-### Annotation-driven workers
-Workers as framework primitives, not hand-written HTTP clients.
-Same annotation pattern as routes:
-```
-// [worker] .process_emails
-// poll GET /emails?status=pending
-// interval 5s
-```
-The framework generates the polling loop. The developer writes the
-handler. Database state is the queue — no Redis, no SQS. Delayed
-jobs via timestamp columns (`send_at`, `retry_at`). Queryable,
-auditable, survives crashes, fuzz-tested through the state machine.
+### Workers and crons
+Workers and crons as framework primitives, not hand-written HTTP clients.
+Two new annotations complete the set:
 
-Alternative or complement: `db.after()` sugar in the handle phase:
-```typescript
-db.after("5m", "send_confirmation", { order_id: ctx.id });
-db.after("24h", "expire_order", { order_id: ctx.id });
-```
+- `[worker]` — async function dispatched from handle via `worker.<name>(args)`.
+  Takes args in, returns data, framework delivers result to a completion
+  route. `_worker_queue` table is the queue — no Redis, no SQS.
+- `[cron]` — handle triggered by schedule instead of HTTP request.
+  Replaces `db.after()`/delayed dispatch with a simpler, more powerful
+  primitive: the developer writes the query that defines "what's due,"
+  the cron dispatches workers.
 
-Under the hood: `INSERT INTO _scheduled (operation, params, run_at, status)`.
-Framework owns the table. Worker polls `WHERE run_at <= now()`. Developer
-sees one line. Framework sees a database row. Fuzzer sees a write.
-No hidden state — the scheduled table is queryable, cancellable
-(`UPDATE SET status = 'cancelled'`), recorded in WAL, exercised by CFO.
+No delayed jobs in the queue. Delays are domain data — a `send_at`
+column in the developer's table, checked by a cron. Queryable,
+cancellable, visible, owned by the developer.
 
-Both approaches close the ergonomics gap with Laravel Queue while
-keeping the correctness advantages (one source of truth, visible state,
-deterministic transitions).
+See `docs/plans/worker.md` and `docs/plans/cron.md`.
 
 ### JSON API responses
 The only missing response primitive. Everything else is covered:

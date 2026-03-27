@@ -1,221 +1,300 @@
-# Worker — External IO Without Await
+# Worker — Async Dispatch for External IO and Heavy Compute
 
-The framework is single-threaded. External API calls (Stripe, Auth0,
-entitlements APIs) can't block the tick loop. The worker provides
-non-blocking external IO that fits into the prefetch/handle/render
-pipeline without async, await, promises, or callbacks.
+> **TODO:** Stop and ask TigerBeetle for critiques. This plan needs to
+> be refined.
 
-## Principle
+The state machine is deterministic, single-threaded, and never does IO.
+Real applications need side effects: charge payments, call external APIs,
+resize images, run ML models, fetch from remote databases, delegate
+compute to other machines. Workers are the boundary where side effects
+live — outside the state machine, outside the tick loop, outside
+determinism.
 
-**The tick model eliminates async/await.**
+## Implementation checklist
 
-The developer queues declarations. The framework resolves them across
-ticks and calls the next phase when everything is ready. The developer
-never sees pending state, never returns null, never manages retries.
+### 1. `_worker_queue` table
 
-## Worker in prefetch — declare what you need
+- [ ] Auto-create on server startup. Framework owns the schema.
+- [ ] Schema: `id` integer PK, `worker` text, `args` blob, `status`
+  text (`pending`/`dispatched`/`failed`), `attempts` integer default 0,
+  `created_at` integer, `dispatched_at` integer nullable.
+- [ ] Args use the sidecar binary row format — same serialization as
+  the protocol.
+- [ ] Three queries, same for any number of workers:
+  - Poll: `SELECT FROM _worker_queue WHERE worker = ? AND status = 'pending'`
+  - Claim: `UPDATE ... SET status = 'dispatched' WHERE id = (SELECT ... LIMIT 1) RETURNING *`
+  - Sweep: `UPDATE ... SET status = 'pending', attempts = attempts + 1 WHERE status = 'dispatched' AND dispatched_at < threshold`
 
-`worker.fetch` is the same pattern as `db.query` — a queued declaration.
-The framework resolves all of them before calling handle.
+### 2. Annotation scanner — `[worker]` phase
 
-```ts
-// [prefetch] .get_profile
-export function prefetch(db, worker, msg) {
-    db.query("local_user", "SELECT * FROM users WHERE id = :id", msg);
-    worker.fetch("auth_profile", "https://api.auth0.com/users/" + msg.id);
-}
-// handle gets ctx.data.local_user and ctx.data.auth_profile
-```
+- [ ] Add `worker` to the scanner's Phase enum.
+- [ ] Parse `[worker] .name` — operation name.
+- [ ] Parse `returns .operation` — completion route target.
+- [ ] Parse `interval Ns` — poll frequency. Default 5s.
+- [ ] Validate `returns` target exists as a registered route.
+- [ ] Validate argument types match between dispatch call and function
+  signature.
+- [ ] Collect all `[worker]` annotations globally into manifest.
 
-What happens per tick:
+### 3. Scanner enforcement — `ctx.worker_failed`
 
-```
-Tick 1:  framework runs prefetch
-         db.query("local_user") → immediate, resolved
-         worker.fetch("auth_profile") → starts request, pending
-         framework sees pending → skips, processes other connections
+- [ ] Identify completion handlers: any handle whose route is the
+  `returns` target of a worker.
+- [ ] Assert completion handler branches on `ctx.worker_failed`. Missing
+  branch is a build error.
+- [ ] Enforcement is in handle only. Render is not enforced.
 
-Tick 2:  worker.fetch("auth_profile") → checks cache, still pending → skip
+### 4. Codegen — `worker` object
 
-Tick N:  worker.fetch("auth_profile") → response arrived, resolved
-         all resolved → populates ctx.data → handle runs
-```
+- [ ] Generate one typed method per `[worker]` annotation.
+- [ ] Each method serializes args to binary and inserts into
+  `_worker_queue` with `status = 'pending'`.
+- [ ] The `worker` object is available in every handle. No imports.
+- [ ] Method signature matches the worker function's parameter types.
 
-The developer wrote two declarations. The framework handled resolution,
-retry, and aggregation. No null checks. No return value.
+### 5. Codegen — sidecar worker dispatch
 
-## Mixing local and external sources
+- [ ] Generate dispatch table: worker name → user function.
+- [ ] On pending rows from server: deserialize binary args, call user
+  function concurrently (fire all, let runtime handle parallelism).
+- [ ] On function return: POST result to the `returns` route as JSON
+  body with flat fields (no path params).
 
-```ts
-// [prefetch] .vendor_redirect
-export function prefetch(db, worker, msg) {
-    db.query("vendor", "SELECT * FROM vendors WHERE slug = :slug", msg);
-    db.query_all("pages", "SELECT * FROM vendor_pages");
-    worker.fetch("entitlements", "https://api.esm.com/entitlements");
-}
-// handle gets ctx.data.vendor, ctx.data.pages, ctx.data.entitlements
-```
+### 6. Server — polling and delivery
 
-`db.query` is immediate (local database). `worker.fetch` is async
-(external API). The developer doesn't distinguish between them.
-The framework resolves everything before calling handle.
+- [ ] Server polls `_worker_queue` for pending rows on tick interval.
+- [ ] Sends pending rows to sidecar over existing unix socket.
+- [ ] Marks rows as `dispatched` with `dispatched_at` timestamp.
+- [ ] On result POST from sidecar: route through normal pipeline
+  (prefetch → handle → render).
 
-## Multiple external calls
+### 7. Boundary assertions
 
-```ts
-// [prefetch] .dashboard
-export function prefetch(db, worker, msg) {
-    db.query_all("products", "SELECT * FROM products WHERE active = 1");
-    worker.fetch("weather", "https://api.weather.com/current");
-    worker.fetch("exchange", "https://api.forex.com/rates/usd");
-}
-```
+- [ ] On every worker result POST, assert before state machine:
+  - Worker name matches a known `[worker]` annotation.
+  - Completion route for this worker exists.
+  - Body shape conforms to expected schema.
+  - `_worker_queue` row exists, has status `dispatched`.
+  - Row ID matches, worker name matches row's worker field.
+- [ ] Reject all invalid results before prefetch runs.
 
-Both fetches start on tick 1. They resolve independently. The
-framework calls handle when all three are ready. No sequential
-waiting — both are in-flight concurrently.
+### 8. Failure handling
 
-## Post-commit external calls — worker polls, no callbacks
+- [ ] Sweep: periodic check for `dispatched` rows older than timeout
+  threshold. Reset to `pending`, increment `attempts`.
+- [ ] Max attempts: after threshold (default 3), mark `failed` instead
+  of `pending`.
+- [ ] Failure delivery: when row moves to `failed`, framework POSTs to
+  completion route with `ctx.worker_failed = true`.
+- [ ] Result: every dispatched worker eventually resolves — success or
+  failure. No stuck states.
 
-Handle commits state. The worker picks up pending work by polling
-the database and posts results back as HTTP requests. No callbacks,
-no `after_commit`, no hidden control flow in handle.
+### 9. `tiger-web queue` CLI
 
-```ts
-// [handle] .complete_order
-export function handle(ctx, db) {
-    if (!ctx.data.order) return "not_found";
-    db.execute(
-        "UPDATE orders SET status = 'confirmed', payment_status = 'pending' WHERE id = :id",
-        ctx.data.order
-    );
-    return "ok";
-    // Worker picks up payment_status = 'pending', calls Stripe, posts result back
-}
-```
+- [ ] Read `_worker_queue` table, deserialize binary args, display
+  readable output.
+- [ ] Flags: `--worker=name`, `--status=pending|dispatched|failed`,
+  `--id=N`.
+- [ ] Fallback debugging tool. Framework should log proactively when
+  sweep fires repeatedly or rows exceed max attempts.
 
-What happens:
+### 10. Worker boundary fuzzer
 
-```
-Tick 1:  handle queues SQL
-         framework drains queue → executes SQL → commits
-         render runs → CLIENT GETS RESPONSE IMMEDIATELY
-         payment_status = 'pending' in database
+- [ ] Generate malformed worker results via PRNG:
+  - Unknown worker names.
+  - Results for non-dispatched rows (pending, failed, absent).
+  - Mismatched row IDs.
+  - Malformed binary args (truncated, oversized, wrong type tags).
+  - Results for nonexistent completion routes.
+  - Duplicate results (same row ID twice).
+- [ ] Assert every malformed result is rejected before state machine.
+- [ ] PRNG-seeded, deterministic, matches existing fuzz infrastructure.
 
-Worker:  polls for WHERE payment_status = 'pending'
-         finds order → calls Stripe
-         success → POST /orders/:id/payment-result {status: "paid"}
-         failure → retries, eventually POST {status: "failed"}
+### 11. Auth
 
-Tick N:  payment-result handler commits payment_status = 'paid'
-```
+- [ ] Use same cookie model as any other client. Revisit when auth is
+  solidified.
 
-The client never waits for Stripe. The database is the coordination
-point between handle and worker. Handle writes intent (`pending`),
-worker fulfills it, posts result back as a new request.
+---
 
-This covers all post-commit external IO: payments, webhooks, email,
-SMS, inventory sync. The pattern is always the same:
-1. Handle commits a pending state
-2. Worker polls for pending work
-3. Worker calls external service
-4. Worker posts result back → handler commits final state
+## Design decisions
 
-No callbacks. No coupling between handle and external IO.
-The worker handles its own retries.
+These decisions are documented to prevent regression — each was
+explored and resolved during design. They are not implementation steps.
 
-## Failure handling
+### The flow
 
-### Worker fails in prefetch
+A user request arrives and the handle phase makes a decision. If that
+decision involves work that is slow, external, or side-effectful, the
+handle schedules a worker and the render phase responds to the user
+immediately with a loading state, notification, or preview. The user
+never waits for the external work to complete.
 
-If the external API times out or errors, the framework populates
-`ctx.data` with an error value for that key. Handle decides what
-to do:
+The worker is a separate process. It polls the server over HTTP for
+pending scheduled work, receives the function arguments the handle
+recorded, and runs the user's async function. When the work is done,
+the worker posts the result back to the server as a normal HTTP request.
 
-```ts
-export function handle(ctx, db) {
-    if (ctx.data.auth_profile.error) return "service_unavailable";
-    // ... normal logic ...
-}
-```
+That HTTP post enters the server like any other client request — full
+pipeline, same deterministic guarantees.
 
-The connection times out if the external API never responds
-(same as any connection timeout in the framework).
+### User syntax
 
-### Worker fails after commit
+**Dispatch:** `worker.process_image(ctx.params.id, ctx.body.url)` in
+handle. The `worker.` prefix makes the async boundary visible. No
+await — the handle has already made its decision.
 
-The client already has their response. The order is confirmed in the
-database. Stripe failed. The worker retries:
-
-```
-payment_status = 'pending'   → worker calls Stripe
-                             → success → posts 'paid'
-                             → failure → worker retries
-                             → keeps failing → posts 'failed'
-```
-
-The database is always the source of truth. External calls are
-eventually consistent. The framework doesn't undo commits — the
-worker handles its own retries.
-
-## Why await is never needed
-
-Await blocks the current execution context until the promise resolves.
-In a single-threaded server, that blocks everything.
-
-The declaration model replaces await entirely:
-
-| Traditional            | Declaration model                    |
-|------------------------|--------------------------------------|
-| `await fetch(...)`     | `worker.fetch("key", url)`           |
-| Promise.all([a, b])    | Two `worker.fetch` declarations      |
-| try/catch on await     | Check `ctx.data.key.error` in handle |
-| async/await chains     | Declarations, framework resolves     |
-| return null + retry    | Not needed — framework handles retry |
-
-The developer declares what data they need. The framework fetches it.
-No scheduling logic in user code.
-
-## No chaining in prefetch
-
-All prefetch declarations are independent. You can't use one result
-as input to another query. If external data is needed for a local
-query (e.g. external user ID → local profile lookup), sync the
-external data to your database via a worker job:
-
-```ts
-// Worker job syncs auth0 profiles to local db every 5 minutes
-// [prefetch] .sync_auth_profiles
-export function prefetch(db, worker, msg) {
-    worker.fetch("users", "https://api.auth0.com/users");
-}
-
-// [handle] .sync_auth_profiles
-export function handle(ctx, db) {
-    for (const user of ctx.data.users) {
-        db.execute("INSERT OR REPLACE INTO user_cache VALUES (:id, :ext_id)", user);
-    }
-    return "ok";
+**Define:**
+```typescript
+// [worker] .process_image
+// returns .image_complete
+// interval 5s
+export async function process_image(product_id: string, url: string) {
+  const processed = await imageService.resize(url);
+  return { url: processed.url };
 }
 ```
+Plain async function — args in, data out. No `post()`, no URLs, no
+HTTP knowledge. The framework delivers the return data to the `returns`
+route.
 
-Then other handlers query the local cache:
+**Complete:**
+```typescript
+// [route] POST /products/:id/image-complete
+// [prefetch] SELECT * FROM products WHERE id = :id
+// [handle] .image_complete
+export function handle(ctx: HandleContext, db: WriteDb) {
+  if (ctx.worker_failed) {
+    db.execute("UPDATE products SET image_status = 'failed' WHERE id = ?", ctx.params.id);
+    return "failed";
+  }
+  db.execute("UPDATE products SET thumbnail_url = ?, image_status = 'done' WHERE id = ?",
+    ctx.body.url, ctx.params.id);
+  return "ok";
+}
+```
+Scanner enforces the `ctx.worker_failed` branch. Handle returns a
+status. Render branches on the status — no special worker logic in
+render.
 
-```ts
-// [prefetch] .get_profile
-export function prefetch(db, msg) {
-    db.query("user", "SELECT * FROM user_cache WHERE id = :id", msg);
+### Full example — image upload flow
+
+```typescript
+// handlers/upload_image.ts
+
+// [route] POST /products/:id/image
+// [prefetch] SELECT * FROM products WHERE id = :id
+// [handle] .upload_image
+export function handle(ctx: HandleContext, db: WriteDb) {
+  db.execute("UPDATE products SET image_status = 'processing' WHERE id = ?", ctx.params.id);
+  worker.process_image(ctx.params.id, ctx.body.url);
+}
+// [render]
+export function render() {
+  return `<div class="processing">Processing your image...</div>`;
+}
+
+// [worker] .process_image
+// returns .image_complete
+// interval 5s
+export async function process_image(product_id: string, url: string) {
+  const processed = await imageService.resize(url);
+  return { url: processed.url };
+}
+
+// [route] POST /products/:id/image-complete
+// [prefetch] SELECT * FROM products WHERE id = :id
+// [handle] .image_complete
+export function handle(ctx: HandleContext, db: WriteDb) {
+  if (ctx.worker_failed) {
+    db.execute("UPDATE products SET image_status = 'failed' WHERE id = ?", ctx.params.id);
+    return "failed";
+  }
+  db.execute("UPDATE products SET thumbnail_url = ?, image_status = 'done' WHERE id = ?",
+    ctx.body.url, ctx.params.id);
+  return "ok";
+}
+// [render]
+export function render(ctx: RenderContext) {
+  if (ctx.result.image_status === "failed") {
+    return `<div class="error">Image processing failed. Try again.</div>`;
+  }
+  return `<img src="${ctx.result.thumbnail_url}" />`;
 }
 ```
 
-Prefetch stays simple — declarations only, no dependencies.
+### Why workers are reusable
 
-## Current state
+A `process_image` worker does not belong to the handler that defines
+it — any handle that needs an image processed can dispatch it. The
+scanner collects all `[worker]` annotations globally and generates one
+`worker` object with every method. Each worker maps to exactly one
+completion operation via `returns`. If two flows need different
+completions, those are two workers. Shared logic is the developer's
+problem.
 
-The worker exists as a separate process (`worker.zig`) that polls
-for pending orders via HTTP and posts completions back. It already
-implements the worker-polls pattern described above.
+### Why settings belong on the annotation
 
-`worker.fetch` in prefetch is the remaining target — integrating
-external IO into the handler pipeline so the developer declares
-what data they need and the framework resolves it across ticks.
+The handle decides what work to do and with what arguments. The worker
+decides how to do it. The only configurable knob is `interval`. The
+framework provides sensible defaults for everything else. If the same
+worker needs different operational profiles, that is two workers with
+different names.
+
+### Why the sidecar runs workers
+
+The sidecar is already a long-running process. Workers are functions in
+the sidecar language. The sidecar fires them concurrently — the
+language runtime handles parallelism (event loop, asyncio, goroutines).
+The framework does not manage concurrency.
+
+### Why completion routes use flat POST bodies
+
+The worker returns all data the completion handler needs as a flat
+object. No path params, no URL construction. The framework posts the
+return data as the request body. Prefetch binds from `ctx.body`.
+
+### Why `_worker_queue` instead of a traditional queue
+
+Atomic enqueueing (same transaction as handle's writes). Queryable.
+No infrastructure. Polling is already the architecture. Scaling is not
+a differentiator — the database is the bottleneck before the queue is.
+
+### Why the queue is binary, not JSON
+
+Same binary row format as the sidecar protocol. One serialization
+strategy. The server knows the layout at compile time. Boundary
+assertions become struct field checks, not string parsing. Debugging
+is through `tiger-web queue` CLI, not raw SQL.
+
+### Queue debugging is a fallback
+
+If the developer needs to debug the queue, the system may have already
+failed. The framework should surface stuck or failed state proactively
+through logging and the `ctx.worker_failed` completion path. Consider
+logging when the sweep fires repeatedly for the same row or when rows
+exceed max attempts.
+
+### Why parallelism preserves determinism
+
+Workers fire concurrently in the sidecar. Results post back as
+independent HTTP requests. The state machine handles each in arrival
+order through the deterministic pipeline. Non-determinism is contained
+in the sidecar. The state machine never depends on worker completion
+order.
+
+### Why this covers every external integration
+
+Every external interaction is: send something out, wait, get something
+back. The handle records intent, responds immediately. The worker does
+the external work. The worker returns the result. The state machine
+processes it. The framework makes it impossible to block a request on
+an external call.
+
+### Error handling philosophy
+
+The framework catches failures (sweep, max attempts, automatic failure
+delivery). The developer handles failures (state transition, user
+message). The scanner enforces that the handling exists. Not that the
+developer caught an error, but that they decided what happens when work
+fails.

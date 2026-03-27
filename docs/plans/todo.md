@@ -67,3 +67,37 @@ Low priority:
 - WAL: track prod vs local origin
 - CLI scaffolding (`tiger init`, `tiger add operation`)
 - Marketing: fuzz test counter in repo, open-source counter program, coverage CLI with branching
+- rotate github pad code, we leaked it in claude
+- figure out a webscraping + html assertion flow
+- figure out how to ingest large payloads from post like images etc, without passing the heavy data through the tick and passing a reference instead (local object storage, but auto hidden frm user)
+- add a way to inspect the start/stop time for all annotations/features and read trends so you can see when things are getting slow.
+- some things are tested against /examples for regression/performance we might want to isolate some of these tests into more user space agnostic code to protect them from example churn
+- worst case json allocation in message should probably be configurable in case a framework user needs to up the value
+
+# clean up
+- ensure we use cli/program defaults very carefully. i like no defaults or few defaults over heavy defaults
+- think about 10 years from now, what parts of the user space would have likely been violated? we should pull back a primitive for these.
+
+
+
+Theres a pattern of annotations needing settings
+[worker]
+interval 5s
+timeout 3m
+it's probably best to collapse this to
+[worker]
+settings: interval 5s, timeout 3m, etc..
+====
+So we can enforce settings sitting directly under the annotation and we can keep the space between annotation and function super tight
+
+
+Questions:
+how does our server shard compared to others if we cant handle traffic?
+is there a way that we could a come close to go lang throughput without more cores based on our simpplicity
+are we truly no allocation on hot path? what are the possible side effects to the framework users or end users? did this concept map cleanly to web servers
+❯ should we always recommend perf over providing an instrucmented perf command?                                                                                                                
+speculating how do we measure in throuput against laravel,rails,nextjs all connected to sqlite
+what might the throughput difference be if we gave up single-threaded for multi threaded
+document perf permanent docs
+
+Explore open source repos and see if they use ai
