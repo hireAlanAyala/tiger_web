@@ -161,9 +161,11 @@ first profile tells the whole story.
 
 | Connections | Throughput | p50 | p99 | p100 |
 |---|---|---|---|---|
-| 128 | ~53,000 req/s | 2ms | 2ms | 2ms |
+| 10 | 53,853 req/s | 0ms | 0ms | 0ms |
+| 50 | 54,219 req/s | 0ms | 1ms | 1ms |
+| 128 | 54,960 req/s | 2ms | 2ms | 2ms |
 
-Total improvement from original baseline: 30K → 53K (+74%).
+Total improvement from original baseline: 30K → 55K (+80%).
 
 ## Competitive position
 
@@ -177,9 +179,9 @@ WAL recording, and cookie signing. For context:
 | Express + PostgreSQL | ~8K |
 | Go + PostgreSQL | ~15K |
 | Go + SQLite (best libs) | ~15-30K |
-| **tiger-web + SQLite** | **53K** |
+| **tiger-web + SQLite** | **55K** |
 
-Roughly 2x Go + SQLite on the same workload. The advantages:
+Roughly 2-3x Go + SQLite on the same workload. The advantages:
 no CGo boundary (Zig calls SQLite C API directly), no GC pauses,
 statement cache is a comptime-indexed array (not a runtime hash map
 with mutex), and tick batching amortizes one transaction across 128
@@ -261,16 +263,84 @@ Fixed by adding a separate `wal_record_scratch` buffer. The load test
 proved its value before it finished — it found a real server bug that
 affected all mutations.
 
-## Next optimization target
+## memcpy at 25% — investigated, diminishing returns
 
-memcpy at ~18% of CPU is spread across dozens of call sites — HTTP
-parsing, SQLite row mapping, response encoding, header backfill, recv
-buffer shifts. No single memcpy site dominates. The response encoding
-copy (render scratch → send buffer) was initially assumed to be the
-main contributor, but perf callstack resolution couldn't confirm this
-in release builds. Further investigation needs debug-info-enabled
-profiling or manual instrumentation of specific copy sites.
+After both optimizations, the perf profile is flat. memcpy at 25% is
+the only item above 6%. Everything else is diffuse — no function above
+6%. The profile by library:
 
-The statement cache hash currently uses FNV-1a mod 256 which is
-collision-prone. Needs proper collision handling (open addressing or
-comptime collision detection) before the optimization is production-ready.
+| Component | CPU % |
+|---|---|
+| tiger-web (our code) | 56% |
+| SQLite | 34% |
+| libc | 9% |
+
+### What we tried
+
+Eliminated the render scratch → send_buf copy by rendering directly
+into `send_buf[header_reserve..]`. Result: no measurable throughput
+change (55K → 55.5K, within noise). The render body is a few hundred
+bytes — copying it is fast regardless.
+
+### Where the 25% actually goes
+
+The memcpy is spread across dozens of small copies, none dominant:
+- HTTP response header assembly (status line, Content-Type,
+  Content-Length, Connection, Cache-Control, Set-Cookie — each a
+  separate @memcpy of a string literal into hdr_buf)
+- Header backfill (hdr_buf → send_buf, right-aligned before body)
+- Cookie formatting (HMAC result → cookie header)
+- Recv buffer shift for keep-alive pipelining (leftover bytes shifted
+  to front after each response)
+- SQLite row mapping (column data → struct fields)
+- HTML rendering (string literals → render buffer)
+
+Each copy is 10-200 bytes. The total adds up to 25% across thousands
+of requests per tick, but no single copy is worth optimizing.
+
+### Why it's diminishing returns
+
+To reduce the 25%, you'd need to:
+
+**Build headers in-place instead of stack buffer → send_buf.** The
+current `backfill_headers` builds headers in a local `hdr_buf`, then
+copies right-aligned into `send_buf`. Building directly into send_buf
+would eliminate one copy but requires knowing the header length before
+writing (to compute the start offset). That means two passes or a
+maximum-size reservation — both add complexity for saving ~100 bytes
+of copy per response.
+
+**Eliminate the recv buffer shift.** Keep-alive pipelining shifts
+leftover bytes to the front of recv_buf after each request. Alternative:
+ring buffer or offset tracking. Adds complexity to the connection state
+machine — the current shift is simple and correct.
+
+**Reduce response size.** Smaller HTML = fewer bytes to copy. But the
+HTML is already minimal (no CSS framework, no JavaScript bundles). The
+server renders product cards, order lists, and status messages — a few
+hundred bytes each.
+
+### Conclusion
+
+55K req/s is the practical ceiling for this architecture. The remaining
+CPU is doing the server's job — parsing HTTP, querying SQLite, rendering
+HTML, assembling responses, managing connections. There's no waste left,
+just work.
+
+Further gains require architectural changes (multi-threaded, response
+streaming, zero-copy sendfile) that trade simplicity for throughput.
+The single-threaded model's value (no locks, no races, predictable
+performance) outweighs the marginal throughput gain.
+
+## Statement cache collision handling
+
+The FNV-1a hash mod 256 assigns comptime slots for cached statements.
+Collisions are detected at runtime via `sqlite3_sql()` — the function
+returns the original SQL text, which is compared against the requested
+SQL on every cache hit. If two strings hash to the same slot, the
+assertion fires on the first request that hits the second string.
+
+This is correct (catches all collisions) and fast (one string
+comparison per query, ~50ns). The 256 slots for ~35 strings give low
+collision probability, and the assertion catches any collision during
+development (all code paths are exercised by tests and load test).
