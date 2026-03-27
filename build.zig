@@ -46,6 +46,23 @@ pub fn build(b: *std.Build) void {
     const worker_step = b.step("run-worker", "Run the worker process");
     worker_step.dependOn(&worker_cmd.step);
 
+    // --- Load test ---
+    const load_exe = b.addExecutable(.{
+        .name = "tiger-load",
+        .root_source_file = b.path("load_driver.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    load_exe.root_module.addImport("stdx", stdx_module);
+    load_exe.linkLibC();
+    b.installArtifact(load_exe);
+
+    const load_cmd = b.addRunArtifact(load_exe);
+    load_cmd.step.dependOn(b.getInstallStep());
+    if (b.args) |args| load_cmd.addArgs(args);
+    const load_step = b.step("load", "Run HTTP load test");
+    load_step.dependOn(&load_cmd.step);
+
     // --- Replay tool ---
     const replay_exe = b.addExecutable(.{
         .name = "tiger-replay",
@@ -169,6 +186,20 @@ pub fn build(b: *std.Build) void {
         const run_ut = b.addRunArtifact(unit_test);
         run_ut.setEnvironmentVariable("ZIG_EXE", b.graph.zig_exe);
         unit_test_step.dependOn(&run_ut.step);
+    }
+
+    // Load gen tests (needs libc for posix sockets, no sqlite3).
+    {
+        const load_test = b.addTest(.{
+            .root_source_file = b.path("load_gen.zig"),
+            .target = target,
+            .optimize = optimize,
+        });
+        load_test.root_module.addImport("stdx", stdx_module);
+        load_test.linkLibC();
+        const run_load_test = b.addRunArtifact(load_test);
+        run_load_test.setEnvironmentVariable("ZIG_EXE", b.graph.zig_exe);
+        unit_test_step.dependOn(&run_load_test.step);
     }
 
     // Framework unit tests.
