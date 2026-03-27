@@ -38,8 +38,20 @@ handler. Database state is the queue — no Redis, no SQS. Delayed
 jobs via timestamp columns (`send_at`, `retry_at`). Queryable,
 auditable, survives crashes, fuzz-tested through the state machine.
 
-Closes the ergonomics gap with Laravel Queue while keeping the
-correctness advantages (one source of truth, visible state,
+Alternative or complement: `db.after()` sugar in the handle phase:
+```typescript
+db.after("5m", "send_confirmation", { order_id: ctx.id });
+db.after("24h", "expire_order", { order_id: ctx.id });
+```
+
+Under the hood: `INSERT INTO _scheduled (operation, params, run_at, status)`.
+Framework owns the table. Worker polls `WHERE run_at <= now()`. Developer
+sees one line. Framework sees a database row. Fuzzer sees a write.
+No hidden state — the scheduled table is queryable, cancellable
+(`UPDATE SET status = 'cancelled'`), recorded in WAL, exercised by CFO.
+
+Both approaches close the ergonomics gap with Laravel Queue while
+keeping the correctness advantages (one source of truth, visible state,
 deterministic transitions).
 
 ## Later
