@@ -93,8 +93,11 @@ comptime {
     }
 }
 
-/// Default operation weights — representative of a read-heavy web workload.
-const default_weights: PRNG.EnumWeightsType(LoadOp) = .{
+/// Operation weights — configurable via --ops CLI flag.
+/// Default: representative read-heavy web workload.
+pub const Weights = PRNG.EnumWeightsType(LoadOp);
+
+pub const default_weights: Weights = .{
     .create_product = 15,
     .get_product = 25,
     .list_products = 15,
@@ -104,6 +107,67 @@ const default_weights: PRNG.EnumWeightsType(LoadOp) = .{
     .create_order = 10,
     .get_order = 10,
     .list_orders = 5,
+};
+
+/// Custom weight parsing for the --ops CLI flag.
+/// Format: "create_product:30,list_products:50,create_order:20"
+/// Unspecified operations get weight 0 (disabled).
+/// Uses TB's parse_flag_value customization point.
+pub const OpsFlag = struct {
+    weights: Weights,
+
+    pub fn parse_flag_value(
+        value: []const u8,
+        diagnostic: *?[]const u8,
+    ) error{InvalidFlagValue}!OpsFlag {
+        var weights = std.mem.zeroes(Weights);
+        var pos: usize = 0;
+
+        while (pos < value.len) {
+            // Find operation name.
+            const colon = std.mem.indexOfPos(u8, value, pos, ":") orelse {
+                diagnostic.* = "expected 'operation:weight' format";
+                return error.InvalidFlagValue;
+            };
+            const name = value[pos..colon];
+
+            // Find weight value.
+            const comma = std.mem.indexOfPos(u8, value, colon + 1, ",") orelse value.len;
+            const weight_str = value[colon + 1 .. comma];
+
+            const weight = std.fmt.parseInt(u32, weight_str, 10) catch {
+                diagnostic.* = "weight must be a number";
+                return error.InvalidFlagValue;
+            };
+
+            // Match operation name.
+            var found = false;
+            inline for (@typeInfo(LoadOp).@"enum".fields) |field| {
+                if (std.mem.eql(u8, field.name, name)) {
+                    @field(weights, field.name) = weight;
+                    found = true;
+                }
+            }
+            if (!found) {
+                diagnostic.* = "unknown operation name";
+                return error.InvalidFlagValue;
+            }
+
+            pos = if (comma < value.len) comma + 1 else value.len;
+        }
+
+        // At least one operation must have non-zero weight.
+        var any_nonzero = false;
+        inline for (@typeInfo(LoadOp).@"enum".fields) |field| {
+            if (@field(weights, field.name) > 0) any_nonzero = true;
+        }
+        if (!any_nonzero) {
+            diagnostic.* = "at least one operation must have non-zero weight";
+            return error.InvalidFlagValue;
+        }
+
+        return .{ .weights = weights };
+    }
 };
 
 // --- Buffer sizes ---
@@ -130,6 +194,10 @@ pub const max_connections: u16 = 128;
 ///
 /// Owns all per-request context — the connection that formats the request
 /// also records its created ID and timing. No shared mutable state.
+///
+/// Per-connection PRNG — each connection's workload is deterministic
+/// given the seed + connection index. Callback ordering (kernel scheduling)
+/// does not affect PRNG sequences. Follows TB's per-client state pattern.
 const Connection = struct {
     fd: posix.fd_t = -1,
     send_buf: [send_buf_max]u8 = undefined,
@@ -147,6 +215,10 @@ const Connection = struct {
     created_id: u128 = 0,
     state: State = .idle,
     index: u16 = 0,
+    /// Per-connection PRNG — seeded from main seed XOR connection index.
+    /// Operation selection and payload generation are deterministic per
+    /// connection regardless of callback interleaving.
+    prng: PRNG = PRNG.from_seed(0),
     /// Back-pointer to the owning LoadGen. Set once at allocation time.
     load: *LoadGen,
 
@@ -165,7 +237,6 @@ const Connection = struct {
 /// with back-pointers set once at init time.
 pub const LoadGen = struct {
     io: *IO,
-    prng: PRNG,
     timer: std.time.Timer,
     stage: Stage,
     port: u16,
@@ -201,6 +272,7 @@ pub const LoadGen = struct {
     seed_count: u32,
     total_requests: u32,
     do_analysis: bool,
+    weights: Weights,
 
     const Stage = enum {
         seed,
@@ -221,6 +293,7 @@ pub const LoadGen = struct {
         seed: u64,
         seed_count: u32,
         do_analysis: bool,
+        weights: Weights,
     ) *LoadGen {
         assert(connections_count >= 1);
         assert(connections_count <= max_connections);
@@ -230,7 +303,6 @@ pub const LoadGen = struct {
         const self = allocator.create(LoadGen) catch @panic("OOM");
         self.* = .{
             .io = io,
-            .prng = PRNG.from_seed(seed),
             .timer = std.time.Timer.start() catch unreachable,
             .stage = .seed,
             .port = port,
@@ -252,11 +324,16 @@ pub const LoadGen = struct {
             .seed_count = seed_count,
             .total_requests = total_requests,
             .do_analysis = do_analysis,
+            .weights = weights,
         };
 
+        // Per-connection PRNG seeded from main seed XOR connection index.
+        // Each connection's workload is deterministic regardless of
+        // callback ordering. The XOR ensures non-overlapping sequences.
         for (&self.connections, 0..) |*conn, i| {
             conn.* = .{ .load = self };
             conn.index = @intCast(i);
+            conn.prng = PRNG.from_seed(seed ^ @as(u64, i));
         }
 
         return self;
@@ -275,11 +352,9 @@ pub const LoadGen = struct {
     /// Formalizes the relationship between counters, connection states,
     /// and ID pools. Follows TB's `defer self.invariants()` pattern.
     fn invariants(self: *const LoadGen) void {
-        // Counters are monotonic and ordered.
         assert(self.requests_completed <= self.requests_dispatched);
         assert(self.stage != .done);
 
-        // In-flight = dispatched - completed. Must equal busy connections.
         var busy: u64 = 0;
         for (self.connections[0..self.connections_count]) |*conn| {
             assert(conn.load == self);
@@ -296,13 +371,8 @@ pub const LoadGen = struct {
                 },
             }
         }
-        // In-flight requests = busy connections. A reconnected request
-        // is no longer in-flight (connection went idle), so dispatched -
-        // completed can exceed busy by the number of lost requests.
-        // Lost requests = reconnections during this phase.
         assert(self.requests_dispatched >= self.requests_completed + busy);
 
-        // Pool bounds.
         assert(self.product_count <= id_pool_capacity);
         assert(self.collection_count <= id_pool_capacity);
         assert(self.order_count <= id_pool_capacity);
@@ -327,8 +397,6 @@ pub const LoadGen = struct {
         self.run_event_loop();
 
         assert(self.requests_completed >= self.requests_target);
-        // Overshoot bounded by connections_count — pipelining may dispatch
-        // a few extra requests before the target is reached.
         assert(self.product_count >= self.seed_count);
         assert(self.collection_count >= self.seed_count / 5);
         stdout.print("seeded {d} products, {d} collections\n\n", .{
@@ -362,13 +430,6 @@ pub const LoadGen = struct {
         self.stage = .done;
     }
 
-    /// Event loop — runs IO, re-activates idle connections, checks invariants.
-    /// dispatch_all runs every tick so error-recovered connections get
-    /// re-dispatched without special handling in the error path.
-    ///
-    /// After the completion target is reached, drains all in-flight requests
-    /// before returning. This ensures no connection is mid-request when the
-    /// phase transitions and counters are reset.
     fn run_event_loop(self: *LoadGen) void {
         assert(self.stage != .done);
         const tick_ns: u64 = 10 * std.time.ns_per_ms;
@@ -378,9 +439,6 @@ pub const LoadGen = struct {
             self.dispatch_all();
             self.invariants();
         }
-        // Drain: wait for all in-flight requests to complete.
-        // on_response_complete won't dispatch new ones because
-        // requests_completed >= requests_target.
         while (self.busy_count() > 0) {
             self.io.run_for_ns(tick_ns);
         }
@@ -394,8 +452,6 @@ pub const LoadGen = struct {
         return count;
     }
 
-    /// Dispatch requests on all idle connections that haven't exceeded
-    /// the target. Called at the start of each phase and every tick.
     fn dispatch_all(self: *LoadGen) void {
         assert(self.stage != .done);
         for (self.connections[0..self.connections_count]) |*conn| {
@@ -412,10 +468,6 @@ pub const LoadGen = struct {
 
     // =================================================================
     // Connection management
-    //
-    // Connections use blocking connect (instant to localhost), then set
-    // O_NONBLOCK for async send/recv via the IO layer. No abstraction
-    // bypass — the IO layer only sees non-blocking fds after connect.
     // =================================================================
 
     fn open_connections(self: *LoadGen) void {
@@ -432,10 +484,6 @@ pub const LoadGen = struct {
 
         const addr = std.net.Address.initIp4(.{ 127, 0, 0, 1 }, self.port);
 
-        // Create a blocking socket. Connect to localhost completes in-kernel
-        // with no network RTT — blocking is correct here. No retry loop:
-        // the driver reads the port from the server's stdout readiness signal,
-        // which is written after bind + listen. The server is ready.
         const fd = posix.socket(posix.AF.INET, posix.SOCK.STREAM | posix.SOCK.CLOEXEC, 0) catch
             @panic("load: socket() failed");
 
@@ -444,7 +492,6 @@ pub const LoadGen = struct {
         posix.connect(fd, &addr.any, addr.getOsSockLen()) catch
             @panic("load: connect() failed — is the server running?");
 
-        // Set non-blocking for async IO after successful blocking connect.
         const current_flags = posix.fcntl(fd, posix.F.GETFL, 0) catch unreachable;
         const nonblock: u32 = @bitCast(linux.O{ .NONBLOCK = true });
         _ = posix.fcntl(fd, posix.F.SETFL, current_flags | nonblock) catch unreachable;
@@ -466,8 +513,6 @@ pub const LoadGen = struct {
         conn.state = .idle;
         conn.completion = .{};
         self.connect_one(conn);
-        // Connection is now idle. dispatch_all on next tick re-activates it.
-        // No counter manipulation — the dispatched request is lost.
     }
 
     fn close_connections(self: *LoadGen) void {
@@ -489,7 +534,7 @@ pub const LoadGen = struct {
         assert(conn.fd >= 0);
         assert(conn.load == self);
 
-        const op = self.select_operation();
+        const op = self.select_operation(conn);
         conn.current_op = op;
         conn.created_id = 0;
         const send_len = self.format_request(conn, op);
@@ -536,7 +581,9 @@ pub const LoadGen = struct {
         );
     }
 
-    fn select_operation(self: *LoadGen) LoadOp {
+    /// Select the next operation for this connection. Uses the connection's
+    /// own PRNG for deterministic per-connection workloads.
+    fn select_operation(self: *LoadGen, conn: *Connection) LoadOp {
         if (self.stage == .seed) {
             if (self.requests_dispatched < self.seed_count) {
                 return .create_product;
@@ -544,12 +591,10 @@ pub const LoadGen = struct {
             return .create_collection;
         }
 
-        // After seed phase, product pool is always populated.
         assert(self.product_count > 0);
 
-        const op = self.prng.enum_weighted(LoadOp, default_weights);
+        const op = conn.prng.enum_weighted(LoadOp, self.weights);
 
-        // Fall back to creates only when the specific pool is empty.
         return switch (op) {
             .get_collection => if (self.collection_count == 0) .create_collection else op,
             .get_order => if (self.order_count == 0) .create_order else op,
@@ -561,10 +606,6 @@ pub const LoadGen = struct {
 
     // =================================================================
     // IO callbacks
-    //
-    // Clean lifecycle: dispatch → send → recv → complete → dispatch.
-    // Error path: reconnect → idle. No counter manipulation.
-    // dispatch_all on next tick re-activates the connection.
     // =================================================================
 
     fn on_send(ctx: *anyopaque, result: i32) void {
@@ -573,9 +614,6 @@ pub const LoadGen = struct {
         assert(conn.state == .sending);
 
         if (result <= 0) {
-            // Send failed. Reconnect, go idle. The dispatched request
-            // is lost — it counts in requests_dispatched but will never
-            // complete. dispatch_all on next tick sends a fresh request.
             self.reconnect(conn);
             return;
         }
@@ -589,7 +627,6 @@ pub const LoadGen = struct {
             return;
         }
 
-        // Send complete — start receiving.
         conn.state = .receiving;
         conn.recv_len = 0;
         self.submit_recv(conn);
@@ -601,8 +638,6 @@ pub const LoadGen = struct {
         assert(conn.state == .receiving);
 
         if (result <= 0) {
-            // Peer closed or error. Reconnect, go idle. The dispatched
-            // request is lost. dispatch_all on next tick sends fresh.
             self.reconnect(conn);
             return;
         }
@@ -613,7 +648,7 @@ pub const LoadGen = struct {
 
         if (parse_response(conn.recv_buf[0..conn.recv_len]) == null) {
             if (conn.recv_len >= recv_buf_max) {
-                @panic("load: response exceeds recv buffer");
+                std.debug.panic("load: conn[{d}] response exceeds recv buffer", .{conn.index});
             }
             self.submit_recv(conn);
             return;
@@ -634,16 +669,11 @@ pub const LoadGen = struct {
         self.op_counts[op_index] += 1;
         self.requests_completed += 1;
 
-        // Track created entity IDs — assert, don't guard.
-        // For creates, fmt_create_* always sets created_id to prng | 1 >= 1.
-        // If created_id is 0 for a create, the format function has a bug.
         if (conn.current_op.is_create()) {
             assert(conn.created_id != 0);
             self.track_created_id(conn.current_op, conn.created_id);
         }
 
-        // Pipeline: immediately dispatch next request on this connection.
-        // If the target is reached, go idle and let the event loop exit.
         conn.state = .idle;
         if (self.requests_completed < self.requests_target) {
             self.dispatch_request(conn);
@@ -684,6 +714,7 @@ pub const LoadGen = struct {
     //
     // Created entity IDs are stored on the Connection (conn.created_id),
     // not on the LoadGen. Each connection owns its per-request state.
+    // Uses the connection's own PRNG for payload generation.
     //
     // Buffer sizing is validated by the format fuzzer (90,000 random
     // inputs across all 9 operations). No hand-calculated constants.
@@ -691,32 +722,32 @@ pub const LoadGen = struct {
 
     fn format_request(self: *LoadGen, conn: *Connection, op: LoadOp) usize {
         return switch (op) {
-            .create_product => self.fmt_create_product(conn),
-            .get_product => self.fmt_get_entity(&conn.send_buf, "/products/", self.product_ids[0..self.product_count]),
+            .create_product => fmt_create_product(conn),
+            .get_product => fmt_get_entity(conn, "/products/", self.product_ids[0..self.product_count]),
             .list_products => fmt_get(&conn.send_buf, "/products"),
-            .create_collection => self.fmt_create_collection(conn),
-            .get_collection => self.fmt_get_entity_or_list(&conn.send_buf, "/collections/", "/collections", self.collection_ids[0..self.collection_count]),
+            .create_collection => fmt_create_collection(conn),
+            .get_collection => fmt_get_entity_or_list(conn, "/collections/", "/collections", self.collection_ids[0..self.collection_count]),
             .list_collections => fmt_get(&conn.send_buf, "/collections"),
             .create_order => self.fmt_create_order(conn),
-            .get_order => self.fmt_get_entity_or_list(&conn.send_buf, "/orders/", "/orders", self.order_ids[0..self.order_count]),
+            .get_order => fmt_get_entity_or_list(conn, "/orders/", "/orders", self.order_ids[0..self.order_count]),
             .list_orders => fmt_get(&conn.send_buf, "/orders"),
         };
     }
 
-    fn fmt_create_product(self: *LoadGen, conn: *Connection) usize {
-        const id = self.prng.int(u128) | 1;
+    fn fmt_create_product(conn: *Connection) usize {
+        const id = conn.prng.int(u128) | 1;
         conn.created_id = id;
 
         var name_buf: [15]u8 = undefined;
         @memcpy(name_buf[0..7], "Product");
-        var hex_val = self.prng.int(u32);
+        var hex_val = conn.prng.int(u32);
         for (name_buf[7..15]) |*c| {
             c.* = "0123456789abcdef"[@intCast(hex_val & 0xf)];
             hex_val >>= 4;
         }
 
-        const price = self.prng.range_inclusive(u32, 100, 999_999);
-        const inventory = self.prng.range_inclusive(u32, 1, 10_000);
+        const price = conn.prng.range_inclusive(u32, 100, 999_999);
+        const inventory = conn.prng.range_inclusive(u32, 1, 10_000);
 
         var body_buf: [256]u8 = undefined;
         var pos: usize = 0;
@@ -750,13 +781,13 @@ pub const LoadGen = struct {
         return fmt_post(&conn.send_buf, "/products", body_buf[0..pos]);
     }
 
-    fn fmt_create_collection(self: *LoadGen, conn: *Connection) usize {
-        const id = self.prng.int(u128) | 1;
+    fn fmt_create_collection(conn: *Connection) usize {
+        const id = conn.prng.int(u128) | 1;
         conn.created_id = id;
 
         var name_buf: [16]u8 = undefined;
         @memcpy(name_buf[0..10], "Collection");
-        var hex_val = self.prng.int(u32);
+        var hex_val = conn.prng.int(u32);
         for (name_buf[10..16]) |*c| {
             c.* = "0123456789abcdef"[@intCast(hex_val & 0xf)];
             hex_val >>= 4;
@@ -783,12 +814,12 @@ pub const LoadGen = struct {
     }
 
     fn fmt_create_order(self: *LoadGen, conn: *Connection) usize {
-        const id = self.prng.int(u128) | 1;
+        const id = conn.prng.int(u128) | 1;
         conn.created_id = id;
 
         assert(self.product_count > 0);
 
-        const items_count = self.prng.range_inclusive(u8, 1, @intCast(@min(3, self.product_count)));
+        const items_count = conn.prng.range_inclusive(u8, 1, @intCast(@min(3, self.product_count)));
 
         var body_buf: [1024]u8 = undefined;
         var pos: usize = 0;
@@ -810,7 +841,7 @@ pub const LoadGen = struct {
                 pos += 1;
             }
 
-            var prod_idx = self.prng.int_inclusive(u32, self.product_count - 1);
+            var prod_idx = conn.prng.int_inclusive(u32, self.product_count - 1);
             for (used_indices[0..i]) |used| {
                 if (prod_idx == used) {
                     prod_idx = (prod_idx + 1) % self.product_count;
@@ -818,7 +849,7 @@ pub const LoadGen = struct {
             }
             used_indices[i] = prod_idx;
 
-            const qty = self.prng.range_inclusive(u32, 1, 5);
+            const qty = conn.prng.range_inclusive(u32, 1, 5);
 
             const item_pre = "{\"product_id\":\"";
             @memcpy(body_buf[pos..][0..item_pre.len], item_pre);
@@ -843,25 +874,20 @@ pub const LoadGen = struct {
         return fmt_post(&conn.send_buf, "/orders", body_buf[0..pos]);
     }
 
-    fn fmt_get_entity(self: *LoadGen, buf: *[send_buf_max]u8, path_prefix: []const u8, pool: []const u128) usize {
+    fn fmt_get_entity(conn: *Connection, path_prefix: []const u8, pool: []const u128) usize {
         assert(pool.len > 0);
-        const idx = self.prng.int_inclusive(usize, pool.len - 1);
-        return fmt_get_with_id(buf, path_prefix, pool[idx]);
+        const idx = conn.prng.int_inclusive(usize, pool.len - 1);
+        return fmt_get_with_id(&conn.send_buf, path_prefix, pool[idx]);
     }
 
-    fn fmt_get_entity_or_list(self: *LoadGen, buf: *[send_buf_max]u8, entity_prefix: []const u8, list_path: []const u8, pool: []const u128) usize {
-        if (pool.len == 0) return fmt_get(buf, list_path);
-        const idx = self.prng.int_inclusive(usize, pool.len - 1);
-        return fmt_get_with_id(buf, entity_prefix, pool[idx]);
+    fn fmt_get_entity_or_list(conn: *Connection, entity_prefix: []const u8, list_path: []const u8, pool: []const u128) usize {
+        if (pool.len == 0) return fmt_get(&conn.send_buf, list_path);
+        const idx = conn.prng.int_inclusive(usize, pool.len - 1);
+        return fmt_get_with_id(&conn.send_buf, entity_prefix, pool[idx]);
     }
 
     // =================================================================
     // HTTP formatting primitives
-    //
-    // All paths are string literals with known lengths. The assert at
-    // the end of each function is a postcondition paired with the
-    // format fuzzer's precondition (validates all inputs produce output
-    // within bounds). Together they prove the buffer never overflows.
     // =================================================================
 
     fn fmt_get(buf: *[send_buf_max]u8, path: []const u8) usize {
@@ -924,8 +950,6 @@ pub const LoadGen = struct {
     // HTTP response parsing
     // =================================================================
 
-    /// Parse a complete HTTP response. Returns total response length
-    /// if complete, null if more data is needed.
     fn parse_response(data: []const u8) ?usize {
         const header_end = std.mem.indexOf(u8, data, "\r\n\r\n") orelse return null;
         const headers = data[0..header_end];
@@ -1086,8 +1110,6 @@ pub const LoadGen = struct {
 // Histogram utilities
 // =================================================================
 
-/// Walk cumulative distribution to find the bucket at a given percentile.
-/// Matches TigerBeetle's print_percentiles_histogram pattern.
 fn percentile_from_histogram(
     histogram: *const [histogram_bucket_count]u64,
     total: u64,
@@ -1097,7 +1119,6 @@ fn percentile_from_histogram(
     assert(percentile <= 100);
     assert(total > 0);
 
-    // Ceiling division so p1 targets at least 1, not 0.
     const target = @divTrunc(total * percentile + 99, 100);
     var sum: u64 = 0;
     for (histogram, 0..) |bucket, i| {
@@ -1112,25 +1133,15 @@ fn percentile_from_histogram(
 // =================================================================
 
 // Format fuzzer — exercises all HTTP request formatters with random
-// PRNG seeds and asserts:
-//   1. Output fits in send_buf_max (no buffer overflow).
-//   2. Output is valid HTTP framing (starts with method, has \r\n\r\n).
-//   3. POST bodies have correct Content-Length matching actual body.
-//   4. Creates set a non-zero ID on the connection.
+// PRNG seeds and asserts buffer bounds, HTTP framing, Content-Length,
+// and created_id invariants.
 test "format fuzzer" {
     const iterations = 10_000;
 
     for (0..iterations) |seed| {
-        var prng = PRNG.from_seed(seed);
-
-        // Initialize LoadGen with safe defaults for the format test.
-        // format_request only reads prng + ID pools. Other fields
-        // (io, timer, stage) are not accessed by formatters but must
-        // be valid to avoid undefined behavior.
         var dummy_io: IO = undefined;
         var gen_storage: LoadGen = .{
             .io = &dummy_io,
-            .prng = prng,
             .timer = std.time.Timer.start() catch unreachable,
             .stage = .seed,
             .port = 0,
@@ -1152,28 +1163,30 @@ test "format fuzzer" {
             .seed_count = 0,
             .total_requests = 0,
             .do_analysis = false,
+            .weights = default_weights,
         };
 
-        // Seed product IDs (needed for get_product and create_order).
-        const n_products = prng.range_inclusive(u32, 1, 16);
+        // Seed ID pools with per-iteration PRNG.
+        var pool_prng = PRNG.from_seed(seed);
+        const n_products = pool_prng.range_inclusive(u32, 1, 16);
         for (0..n_products) |_| {
-            gen_storage.product_ids[gen_storage.product_count] = prng.int(u128) | 1;
+            gen_storage.product_ids[gen_storage.product_count] = pool_prng.int(u128) | 1;
             gen_storage.product_count += 1;
         }
-        const n_collections = prng.range_inclusive(u32, 1, 8);
+        const n_collections = pool_prng.range_inclusive(u32, 1, 8);
         for (0..n_collections) |_| {
-            gen_storage.collection_ids[gen_storage.collection_count] = prng.int(u128) | 1;
+            gen_storage.collection_ids[gen_storage.collection_count] = pool_prng.int(u128) | 1;
             gen_storage.collection_count += 1;
         }
-        const n_orders = prng.range_inclusive(u32, 1, 8);
+        const n_orders = pool_prng.range_inclusive(u32, 1, 8);
         for (0..n_orders) |_| {
-            gen_storage.order_ids[gen_storage.order_count] = prng.int(u128) | 1;
+            gen_storage.order_ids[gen_storage.order_count] = pool_prng.int(u128) | 1;
             gen_storage.order_count += 1;
         }
 
         inline for (@typeInfo(LoadOp).@"enum".fields) |field| {
             const op: LoadOp = @enumFromInt(field.value);
-            var conn = Connection{ .load = &gen_storage };
+            var conn = Connection{ .load = &gen_storage, .prng = PRNG.from_seed(seed ^ @as(u64, field.value)) };
             const len = gen_storage.format_request(&conn, op);
 
             assert(len > 0);
@@ -1183,7 +1196,6 @@ test "format fuzzer" {
 
             assert(std.mem.startsWith(u8, request, "GET ") or
                 std.mem.startsWith(u8, request, "POST "));
-
             assert(std.mem.indexOf(u8, request, "HTTP/1.1\r\n") != null);
 
             const header_end = std.mem.indexOf(u8, request, "\r\n\r\n");
@@ -1239,4 +1251,19 @@ test "parse_response no headers yet" {
 test "parse_response no content-length" {
     const response = "HTTP/1.1 200 OK\r\nConnection: close\r\n\r\n";
     try std.testing.expectEqual(@as(?usize, response.len), LoadGen.parse_response(response));
+}
+
+test "OpsFlag parse" {
+    var diag: ?[]const u8 = null;
+    const result = try OpsFlag.parse_flag_value("create_product:30,list_products:50", &diag);
+    try std.testing.expectEqual(@as(u32, 30), result.weights.create_product);
+    try std.testing.expectEqual(@as(u32, 50), result.weights.list_products);
+    try std.testing.expectEqual(@as(u32, 0), result.weights.get_product);
+}
+
+test "OpsFlag parse invalid" {
+    var diag: ?[]const u8 = null;
+    const result = OpsFlag.parse_flag_value("bogus:10", &diag);
+    try std.testing.expectEqual(result, error.InvalidFlagValue);
+    try std.testing.expect(diag != null);
 }
