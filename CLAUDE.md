@@ -33,6 +33,21 @@ npm run dev                 # start sidecar + server on port 3000
 ./zig/zig build fuzz -- --events-max=1000 state_machine  # with options
 ./zig/zig build fuzz -- smoke                      # all fuzzers, small event counts
 ./zig/zig build bench           # state machine benchmark (real measurements)
+
+# --- Load testing ---
+./zig/zig build load                         # default: 10 connections, 10K requests
+./zig/zig build load -Doptimize=ReleaseSafe  # release build for meaningful numbers
+./zig/zig build load -Doptimize=ReleaseSafe -- --connections=128 --requests=100000
+./zig/zig build load -- --port=3000          # against existing server
+./zig/zig build load -- --ops=create_product:80,list_products:20  # custom weights
+
+# --- Profiling (requires `perf` — sudo pacman -S perf) ---
+./zig/zig build -Doptimize=ReleaseSafe       # build with symbols
+zig-out/bin/tiger-web --port=0 --db=bench.db >port.txt 2>/dev/null &
+perf record -g --call-graph dwarf -p $! -o perf.data &
+zig-out/bin/tiger-load --port=$(cat port.txt) --connections=128 --requests=100000
+kill %2; kill %1                             # stop perf, stop server
+perf report -i perf.data --stdio --no-children -g none -s dso,symbol --percent-limit=0.5
 ```
 
 ## Documentation Structure
