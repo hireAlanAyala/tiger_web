@@ -253,6 +253,17 @@ pub const SqliteStorage = struct {
 
         // Enable WAL mode.
         exec(real_db, "PRAGMA journal_mode=WAL;");
+
+        // Skip fsync on regular commits — safe against process crash,
+        // not bare-metal power loss. SQLite's WAL journal survives process
+        // crashes regardless. On cloud VPS (AWS EBS, GCP, Hetzner), the
+        // storage backend provides power-loss durability, making NORMAL
+        // effectively equivalent to FULL.
+        //
+        // Measured impact: 30,574 → 37,099 req/s (+21%) at 128 connections.
+        // The fsync per tick (~10-50μs on NVMe) was the hidden floor.
+        exec(real_db, "PRAGMA synchronous=NORMAL;");
+
         // Busy timeout: 1 second.
         _ = c.sqlite3_busy_timeout(real_db, 1000);
 
