@@ -332,6 +332,51 @@ streaming, zero-copy sendfile) that trade simplicity for throughput.
 The single-threaded model's value (no locks, no races, predictable
 performance) outweighs the marginal throughput gain.
 
+## Potential improvement: scatter-gather IO
+
+The 25% memcpy exists because the server copies all response fragments
+into one contiguous send_buf before calling send(). The alternative:
+keep fragments as separate buffers and use writev/sendmsg to send them
+all in one syscall.
+
+```
+Current:  literal → hdr_buf → send_buf → send()
+                                 ↑
+          literal → render_buf ──┘
+
+Scatter:  iovec[0] → "HTTP/1.1 200 OK\r\n"     (rodata, no copy)
+          iovec[1] → "Content-Type: text/html"   (rodata, no copy)
+          iovec[2] → "Content-Length: 234\r\n"   (4 bytes formatted)
+          iovec[3] → rendered HTML               (already in render_buf)
+          writev() sends all fragments in one syscall
+```
+
+This eliminates the header assembly copy, the render copy, and the
+backfill pattern entirely. String literals are sent directly from
+rodata. The kernel coalesces the fragments into one TCP segment.
+
+Expected gain: 10-20% (55K → 60-65K). The CPU cost of memcpy scales
+linearly with HTML size — larger pages would see proportionally more
+benefit.
+
+**Cons:**
+- IO layer needs writev/sendmsg support (currently send only).
+- Partial write tracking changes from (buf, offset, len) to (iovec
+  array, current iovec index, current offset within iovec).
+- Connection state machine complexity increases.
+- Every handler's render interface and response encoding path change.
+- This is a new response encoding architecture, not a utility.
+
+**When to do it:** when 55K isn't enough and the application's HTML
+responses are large enough that the copy cost dominates. For the
+current workload (product cards at ~200 bytes), the per-response copy
+is ~20ns — the volume creates the cost, not the size. Larger pages
+(dashboards, reports) would benefit more.
+
+This is the same pattern Nginx uses for high-throughput static file
+serving (writev for headers + sendfile for body). The difference is
+we'd use writev for both headers and dynamic HTML.
+
 ## Statement cache collision handling
 
 The FNV-1a hash mod 256 assigns comptime slots for cached statements.
