@@ -77,7 +77,12 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
         connections_used: u32,
 
         wal: ?*Wal,
+        /// Assembly scratch — used by wal.append_writes to build the entry
+        /// (header + writes) before writing to disk.
         wal_scratch: [@import("wal.zig").entry_max]u8 = undefined,
+        /// Recording scratch — WriteView records SQL writes here during commit.
+        /// Separate from wal_scratch to avoid aliasing in append_writes.
+        wal_record_scratch: [@import("wal.zig").entry_max]u8 = undefined,
 
         tick_count: u32,
 
@@ -203,8 +208,11 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
             defer server.state_machine.commit_batch();
 
             // Enable WAL recording for native pipeline if WAL is active.
+            // Uses wal_record_scratch (not wal_scratch) — WriteView writes here,
+            // then append_writes assembles header + data into wal_scratch. The two
+            // buffers must not alias or @memcpy in append_writes panics.
             if (server.wal != null) {
-                server.state_machine.wal_record_buf = &server.wal_scratch;
+                server.state_machine.wal_record_buf = &server.wal_record_scratch;
             }
 
             for (server.connections) |*conn| {
