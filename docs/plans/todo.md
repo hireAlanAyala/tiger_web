@@ -71,11 +71,41 @@ ring buffer, signals the sidecar, the sidecar writes the response into
 the same buffer. Zero kernel round trips, zero serialization for
 fixed-size fields, zero copy.
 
-Expected result: sidecar throughput approaches native speed. The 5ms
-round trip overhead drops to ~0.1ms (futex wake + cache line transfer).
+Expected result: 13K → 35-45K req/s (from 3.9x slower to ~1.3-1.5x
+slower than native). The 5ms round trip overhead drops to ~0.1ms
+(futex wake + cache line transfer). Remaining gap is V8 computation
+time, not transport. The sidecar becomes nearly free in throughput
+terms — the developer experience tradeoff (TypeScript, instant
+rebuilds) costs ~30% instead of ~75%.
+
+Safety model: the server owns the shared memory region — creates it,
+maps it, controls the layout. The sidecar writes into designated
+response slots at known offsets with known sizes. Neither process
+touches the other's private memory.
+
+Why this is safer than sockets:
+- No frame parsing. Socket transport requires a frame parser that
+  could read past buffer bounds on malformed input (the WAL aliasing
+  bug was this class of problem). Shared memory has fixed-size slots
+  at comptime-known offsets. Nothing to parse, nothing to overflow.
+- Fixed layout via comptime, not process isolation via kernel. This
+  is the TigerBeetle model — trust the layout, verify with assertions,
+  fuzz the boundary.
+
+Crash recovery: if the sidecar crashes or writes garbage, the server's
+eventfd wait times out (same as socket disconnect today). The server
+zeros the shared region (it owns it), the sidecar restarts, re-maps
+the same region, resumes. Same recovery path as socket disconnect.
+
+Why process isolation via socket is unnecessary: sidecar handlers are
+pure functions. They can't hold state, can't corrupt memory, can't
+affect other requests. A buggy handler produces wrong HTML — caught
+by tests before shipping, same as Zig handlers.
 
 This is a protocol-level change to `sidecar.zig` and
 `generated/dispatch.generated.ts`. The handler interface doesn't change.
+Existing sidecar fuzz tests (10K protocol exchanges, 7 paths) cover
+the same data format — only the transport changes.
 
 Measured data (i7-14700K, 128 connections, 100K requests):
 - Native Zig: 53,048 req/s, p50=2ms, p99=2ms
