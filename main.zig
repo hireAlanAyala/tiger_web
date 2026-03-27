@@ -68,6 +68,15 @@ pub fn main() !void {
 
     const listen_fd = try IO.open_listener(address);
 
+    // When port=0, the OS assigns a free port. Read it back via getsockname.
+    // Used by load_driver.zig to spawn the server on an ephemeral port.
+    const actual_port: u16 = if (cli.port == 0) blk: {
+        var bound_addr = std.net.Address.initIp4(.{ 0, 0, 0, 0 }, 0);
+        var addr_len = bound_addr.getOsSockLen();
+        std.posix.getsockname(listen_fd, &bound_addr.any, &addr_len) catch unreachable;
+        break :blk bound_addr.getPort();
+    } else cli.port;
+
     var wal = App.Wal.init("tiger_web.wal");
     defer wal.deinit();
 
@@ -89,7 +98,16 @@ pub fn main() !void {
         log.info("sidecar={s}", .{path});
     }
 
-    log.info("listening on port {d}", .{cli.port});
+    log.info("listening on port {d}", .{actual_port});
+
+    // Readiness signal: write the port to stdout as a bare number + newline.
+    // This is the data channel — load_driver.zig reads it to know the server
+    // is bound and ready. Separate from the stderr log line which is for humans.
+    // Matches TigerBeetle's benchmark_driver pattern: stdout for machine-readable
+    // data, stderr for logs.
+    if (cli.port == 0) {
+        std.io.getStdOut().writer().print("{d}\n", .{actual_port}) catch {};
+    }
 
     // Main event loop. No signal handling — let the OS kill the process.
     while (true) {
