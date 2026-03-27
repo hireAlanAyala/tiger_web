@@ -367,6 +367,13 @@ benefit.
 - Every handler's render interface and response encoding path change.
 - This is a new response encoding architecture, not a utility.
 
+**Risk:** zero behavioral change if well tested. writev produces
+identical bytes on the wire — the HTTP client can't tell the
+difference. The only implementation risk is partial write bookkeeping
+(advancing through the iovec array). The single-threaded model means
+no concurrency risk. Existing sim tests and load test catch any
+framing bug immediately.
+
 **When to do it:** when 55K isn't enough and the application's HTML
 responses are large enough that the copy cost dominates. For the
 current workload (product cards at ~200 bytes), the per-response copy
