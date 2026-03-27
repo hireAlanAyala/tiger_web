@@ -25,6 +25,23 @@ No test code required. See `docs/plans/framework-fuzzer.md`.
 Automated devhubdb repo creation + PAT configuration. One command from
 zero to continuous fuzzing. See `docs/plans/devhub-setup.md`.
 
+### Annotation-driven workers
+Workers as framework primitives, not hand-written HTTP clients.
+Same annotation pattern as routes:
+```
+// [worker] .process_emails
+// poll GET /emails?status=pending
+// interval 5s
+```
+The framework generates the polling loop. The developer writes the
+handler. Database state is the queue — no Redis, no SQS. Delayed
+jobs via timestamp columns (`send_at`, `retry_at`). Queryable,
+auditable, survives crashes, fuzz-tested through the state machine.
+
+Closes the ergonomics gap with Laravel Queue while keeping the
+correctness advantages (one source of truth, visible state,
+deterministic transitions).
+
 ## Later
 
 ### CFO as a service
