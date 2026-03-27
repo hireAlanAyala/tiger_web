@@ -77,6 +77,17 @@ Two approaches:
 Same handler logic, same state machine, same fuzz coverage —
 different serialization.
 
+### File uploads
+User-generated content: profile avatars, product images, document
+attachments, CSV imports. Every CRUD app with user content needs this.
+
+### WebSockets
+Bidirectional real-time: chat, collaborative editing, multiplayer.
+SSE already covers server-push (live dashboards, notifications,
+real-time updates). WebSockets are for the cases where the client
+also sends real-time messages — not common in CRUD, but expected
+in modern apps.
+
 ## Later
 
 ### CFO as a service
