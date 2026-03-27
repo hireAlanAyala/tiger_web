@@ -16,6 +16,7 @@ const Shell = @import("shell.zig");
 
 const cfo = @import("./scripts/cfo.zig");
 const ci = @import("./scripts/ci.zig");
+const perf_script = @import("./scripts/perf.zig");
 
 pub fn log_fn(
     comptime message_level: std.log.Level,
@@ -32,6 +33,7 @@ pub const std_options: std.Options = .{ .logFn = log_fn };
 const CLIArgs = union(enum) {
     cfo: cfo.CLIArgs,
     ci: ci.CLIArgs,
+    perf: perf_script.CLIArgs,
 
     pub const help =
         \\Usage:
@@ -41,6 +43,8 @@ const CLIArgs = union(enum) {
         \\  zig build scripts -- cfo [--budget=<duration>] [--refresh=<duration>] [--concurrency=<n>]
         \\
         \\  zig build scripts -- ci [--validate-release]
+        \\
+        \\  zig build scripts -- perf [--connections=<n>] [--requests=<n>]
         \\
         \\Options:
         \\
@@ -70,5 +74,6 @@ pub fn main() !void {
     switch (cli_args) {
         .cfo => |args_cfo| try cfo.main(shell, gpa, args_cfo),
         .ci => |args_ci| try ci.main(shell, gpa, args_ci),
+        .perf => |args_perf| try perf_script.main(shell, gpa, args_perf),
     }
 }
