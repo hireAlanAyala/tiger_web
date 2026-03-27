@@ -62,7 +62,7 @@ pub const IO = struct {
         posix.setsockopt(fd, posix.IPPROTO.TCP, posix.TCP.NODELAY, &std.mem.toBytes(@as(c_int, 1))) catch {};
 
         try posix.bind(fd, &address.any, address.getOsSockLen());
-        try posix.listen(fd, 64);
+        try posix.listen(fd, 128);
 
         log.info("listener bound fd={d}", .{fd});
         return fd;
