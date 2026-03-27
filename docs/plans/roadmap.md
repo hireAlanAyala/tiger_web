@@ -16,11 +16,6 @@ Static site to visualize CFO seed data. Copy TB's 3-file pattern
 - Benchmark charts: performance regression detection over time (ApexCharts)
 - Deploy via GitHub Actions on main push
 
-### Framework fuzzer (`tiger-web fuzz`)
-Zero-config fuzzing for any handler app. The framework reads annotations,
-generates random valid requests, exercises the full sidecar pipeline.
-No test code required. See `docs/plans/framework-fuzzer.md`.
-
 ### devhub setup (`tiger-web setup --github`)
 Automated devhubdb repo creation + PAT configuration. One command from
 zero to continuous fuzzing. See `docs/plans/devhub-setup.md`.
@@ -92,7 +87,9 @@ in modern apps.
 
 ### CFO as a service
 Hosted continuous fuzzing for framework users. 1 vCPU per customer,
-~2,880 seeds/day, $5/mo. See `docs/plans/cfo-as-service.md`.
+~2,880 seeds/day, $5/mo. Includes the framework fuzzer (`tiger-web fuzz`)
+as the core addon — zero-config fuzzing from annotations, no test code
+required. See `docs/plans/cfo-as-service.md` and `docs/plans/framework-fuzzer.md`.
 
 ### CI improvements
 - `ci -- smoke` mode: `zig fmt --check`, tidy checks
