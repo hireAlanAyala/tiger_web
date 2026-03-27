@@ -35,6 +35,18 @@ npm run dev                 # start sidecar + server on port 3000
 ./zig/zig build bench           # state machine benchmark (real measurements)
 ```
 
+## Documentation Structure
+
+| Directory | What goes here | Lifespan |
+|---|---|---|
+| `docs/decisions/` | Why we chose X over Y. Written once when the decision is made. Referenced when someone asks "why is it this way?" | Permanent — delete only if the decision is reversed |
+| `docs/learning/` | What we discovered. Benchmark findings, profiling results, architectural lessons learned from implementation. Facts and data, not plans. | Permanent — the findings don't expire |
+| `docs/framework/` | How the framework works. Architecture, checklist, debugging guides. Reference material for developers building on the framework. | Permanent — updated as the framework evolves |
+| `docs/recipes/` | How to do X. Step-by-step patterns for specific tasks (live updates, SSE, etc). | Permanent |
+| `docs/plans/` | What we're going to build. Checklists, design proposals, roadmap. **Deleted after implementation.** Do not put findings or decisions here — they'll be lost. | Temporary — deleted when done |
+
+**Rule:** If it's a fact you learned or a decision you made, it goes in `learning/` or `decisions/`. If it's work to be done, it goes in `plans/`. Plans are disposable. Knowledge is not.
+
 ## Architecture
 
 Single-threaded event loop using epoll. No allocations after startup. Request pipeline with prefetch/execute split:
