@@ -26,15 +26,13 @@ pub fn main(shell: *Shell, gpa: std.mem.Allocator, cli_args: CLIArgs) !void {
 
     // Check perf is available.
     shell.exec("perf version", .{}) catch {
-        shell.echo("{ansi-red}error: perf is not installed. Install with: sudo pacman -S perf{ansi-reset}", .{});
+        shell.echo("error: perf is not installed. Install with: sudo pacman -S perf", .{});
         std.process.exit(1);
     };
 
     // Build server and load test in release mode.
-    // Use exec() not exec_zig() — the perf script runs standalone,
-    // not from a build step that sets ZIG_EXE.
     log.info("building release...", .{});
-    try shell.exec("./zig/zig build -Doptimize=ReleaseSafe", .{});
+    try shell.exec_zig("build -Doptimize=ReleaseSafe", .{});
 
     // Clean up stale files from previous runs.
     cleanup(shell);
@@ -105,7 +103,7 @@ pub fn main(shell: *Shell, gpa: std.mem.Allocator, cli_args: CLIArgs) !void {
     _ = posix.kill(server.id, posix.SIG.TERM) catch {};
     _ = server.wait() catch {};
 
-    // Print report. perf report writes to stderr, so capture and print.
+    // Print report. Capture stdout+stderr — perf report writes to both.
     shell.echo("\n=== CPU by library ===\n", .{});
     const dso_report = try shell.exec_stdout_stderr(
         "perf report -i perf.data --stdio --no-children -g none -s dso --percent-limit=1",
@@ -122,10 +120,19 @@ pub fn main(shell: *Shell, gpa: std.mem.Allocator, cli_args: CLIArgs) !void {
     if (sym_report[0].len > 0) shell.echo("{s}", .{sym_report[0]});
     if (sym_report[1].len > 0) shell.echo("{s}", .{sym_report[1]});
 
-    // Clean up after report.
+    // Clean up.
     cleanup(shell);
 }
 
 fn cleanup(shell: *Shell) void {
-    shell.exec("rm -f perf.data tiger_web_perf.db tiger_web_perf.db-wal tiger_web_perf.db-shm tiger_web.wal", .{}) catch {};
+    const files = [_][]const u8{
+        "perf.data",
+        "tiger_web_perf.db",
+        "tiger_web_perf.db-wal",
+        "tiger_web_perf.db-shm",
+        "tiger_web.wal",
+    };
+    for (files) |file| {
+        shell.cwd.deleteFile(file) catch {};
+    }
 }

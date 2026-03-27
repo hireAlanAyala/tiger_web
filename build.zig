@@ -131,6 +131,7 @@ pub fn build(b: *std.Build) void {
 
     const scripts_cmd = b.addRunArtifact(scripts_exe);
     scripts_cmd.step.dependOn(b.getInstallStep());
+    scripts_cmd.setEnvironmentVariable("ZIG_EXE", b.graph.zig_exe);
     if (b.args) |args| scripts_cmd.addArgs(args);
     const scripts_step = b.step("scripts", "Run automation scripts");
     scripts_step.dependOn(&scripts_cmd.step);
