@@ -102,6 +102,24 @@ pure functions. They can't hold state, can't corrupt memory, can't
 affect other requests. A buggy handler produces wrong HTML — caught
 by tests before shipping, same as Zig handlers.
 
+### Why shared memory, not embedded V8
+
+Embedding V8 (like Bun/Deno) would eliminate IPC entirely — handlers
+become function calls within the same process. But embedding a JS
+runtime is a massive dependency (Bun is 300K+ lines largely because
+of this), and it's JavaScript-only. A Go sidecar would need a
+different embedding, Python another.
+
+Shared memory is language agnostic. Any language that can mmap a file
+and read/write bytes at fixed offsets works — TypeScript, Go, Rust,
+Python, Java. The protocol is just bytes at known positions. The
+sidecar doesn't know the server is written in Zig. Write a Go sidecar,
+a Rust sidecar, a Python sidecar — they all map the same buffer, read
+the same offsets, write the same format.
+
+Shared memory gets 90% of the speed benefit of embedding with 1% of
+the complexity, and it works for every language.
+
 This is a protocol-level change to `sidecar.zig` and
 `generated/dispatch.generated.ts`. The handler interface doesn't change.
 Existing sidecar fuzz tests (10K protocol exchanges, 7 paths) cover
