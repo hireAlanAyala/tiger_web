@@ -2,40 +2,19 @@
 
 ## Done
 
+- CFO ported from TigerBeetle (Phases 1-7)
+- CFO running locally (4 cores, seeds pushing to devhubdb)
+- CFO found 8 real bugs on first run (fuzz dependency weights)
 - Integration test suite: 72 tests, all 24 handlers, full sidecar pipeline
-- `zig build ci` build step: test, fuzz, clients, default modes
-- GitHub Actions workflow: CI passes on push/PR
-- `scripts/ci.zig` ported from TB: two-level testing (adapter + integration)
-- `-Dprint-exe` build option
+- `zig build ci` build step: test, fuzz, clients, default modes — all pass
+- GitHub Actions CI: passes on push/PR
 - Unified annotation routing: `// match`, `// query`, generated routes table
 - Dispatch resilience: try/catch on all handler phases
 - Framework TestRunner: `generated/testing.ts`
-- Dispatch bugs fixed: prefetch mode `'one'`→`'query'`, method enum PUT/DELETE swap
-- devhubdb repo created: `hireAlanAyala/tiger-web-devhubdb`
+- Dispatch bugs found and fixed: prefetch mode, method enum, route matching
 - Cross-language contracts: route_match_vectors.json, method_vectors.json
-
-## Next: CFO deployment
-
-The CFO code is ported but needs a machine running `cfo_supervisor.sh`
-continuously to actually fuzz. Without this, the infrastructure exists
-but produces no seeds.
-
-### Machine sizing
-Our fuzzers are single-process, sub-minute. 2-4 vCPU is plenty.
-A 2-vCPU machine produces ~3,800 seeds/hour.
-
-### Setup
-1. Provision a VM (Hetzner CX22 ~€4/mo, or Oracle free tier ARM)
-2. Install: git, C compiler (for sqlite3 linkage)
-3. `scp scripts/cfo_supervisor.sh user@machine:~/`
-4. Generate DEVHUBDB_PAT (GitHub classic token, `repo` scope)
-5. `export DEVHUBDB_PAT=<token>`
-6. `nohup sh cfo_supervisor.sh &` or systemd unit
-
-### Optional: PR-branch fuzzing
-- Generate GH_TOKEN (read-only, `repo` scope)
-- `export GH_TOKEN=<token>` on the VM
-- Add `fuzz` label to GitHub repo
+- devhubdb repo live: `hireAlanAyala/tiger-web-devhubdb`
+- CFO gracefully skips missing release branch
 
 ## Known CI gaps
 
@@ -62,17 +41,35 @@ commands and any scripts.
 
 **devhub viewer:** Static site to visualize CFO seed data, benchmarks.
 Copy TB's `src/devhub/` (3 files: index.html, style.css, devhub.js).
+Two sections: fuzz runs table (seed records with repro commands) and
+metrics charts (benchmark regressions over time via ApexCharts).
 
 **Docker image:** Framework + runtime base image. Port TB's docker
 digest verification. Defer until framework is stable.
 
-**Release/changelog:** Not needed until we ship artifacts.
+**Release/changelog:** Not needed until we ship artifacts. Release
+branch will be created at first release cut — CFO skips gracefully
+until then.
 
 **`--example=X` filter:** Add when we have 2+ example projects
 (TB's flags.zig requires enums with >= 2 variants).
 
-## Plans
+## Plans (not yet implemented)
 
-- `docs/plans/framework-assert.md` — implemented (dispatch resilience)
-- `docs/decisions/annotation-routing.md` — implemented (unified routing)
-- `docs/decisions/import-strategy.md` — implemented (stdx module)
+- `docs/plans/framework-fuzzer.md` — `tiger-web fuzz`: zero-config
+  fuzzing for any handler app. Annotation-driven request generation.
+  Three phases: crash detection, entity tracking, auditor.
+
+- `docs/plans/cfo-as-service.md` — hosted continuous fuzzing for
+  framework users. 1 vCPU per customer, ~2,880 seeds/day, $5/mo.
+
+- `docs/plans/devhub-setup.md` — `tiger-web setup --github`: automated
+  devhubdb repo creation and PAT configuration.
+
+- `docs/plans/framework-assert.md` — implemented (dispatch resilience).
+  Could move to decisions/.
+
+## Decisions (implemented)
+
+- `docs/decisions/annotation-routing.md` — unified `// match` + `// query`
+- `docs/decisions/import-strategy.md` — stdx as build module, no lib.zig
