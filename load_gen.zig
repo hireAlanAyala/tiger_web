@@ -215,7 +215,7 @@ const Connection = struct {
     created_id: u128 = 0,
     state: State = .idle,
     index: u16 = 0,
-    /// Per-connection PRNG — seeded from main seed XOR connection index.
+    /// Per-connection PRNG — derived from a parent PRNG at init time.
     /// Operation selection and payload generation are deterministic per
     /// connection regardless of callback interleaving.
     prng: PRNG = PRNG.from_seed(0),
