@@ -1262,9 +1262,39 @@ test "OpsFlag parse" {
     try std.testing.expectEqual(@as(u32, 0), result.weights.get_product);
 }
 
-test "OpsFlag parse invalid" {
+test "OpsFlag parse single op" {
     var diag: ?[]const u8 = null;
-    const result = OpsFlag.parse_flag_value("bogus:10", &diag);
-    try std.testing.expectEqual(result, error.InvalidFlagValue);
+    const result = try OpsFlag.parse_flag_value("get_product:100", &diag);
+    try std.testing.expectEqual(@as(u32, 100), result.weights.get_product);
+    try std.testing.expectEqual(@as(u32, 0), result.weights.create_product);
+}
+
+test "OpsFlag parse duplicate overwrites" {
+    var diag: ?[]const u8 = null;
+    const result = try OpsFlag.parse_flag_value("create_product:10,create_product:99", &diag);
+    try std.testing.expectEqual(@as(u32, 99), result.weights.create_product);
+}
+
+test "OpsFlag parse unknown operation" {
+    var diag: ?[]const u8 = null;
+    try std.testing.expectError(error.InvalidFlagValue, OpsFlag.parse_flag_value("bogus:10", &diag));
+    try std.testing.expect(diag != null);
+}
+
+test "OpsFlag parse missing colon" {
+    var diag: ?[]const u8 = null;
+    try std.testing.expectError(error.InvalidFlagValue, OpsFlag.parse_flag_value("create_product", &diag));
+    try std.testing.expect(diag != null);
+}
+
+test "OpsFlag parse non-numeric weight" {
+    var diag: ?[]const u8 = null;
+    try std.testing.expectError(error.InvalidFlagValue, OpsFlag.parse_flag_value("create_product:abc", &diag));
+    try std.testing.expect(diag != null);
+}
+
+test "OpsFlag parse all zero weights" {
+    var diag: ?[]const u8 = null;
+    try std.testing.expectError(error.InvalidFlagValue, OpsFlag.parse_flag_value("create_product:0,list_products:0", &diag));
     try std.testing.expect(diag != null);
 }
