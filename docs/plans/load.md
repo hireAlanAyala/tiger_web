@@ -29,7 +29,7 @@ zig build load -- --analysis
 - [x] `--seed` — PRNG seed. Default 42.
 - [x] `--connections` — concurrent HTTP connections. Default 10.
 - [x] `--requests` — total requests to send. Default 10,000.
-- [ ] `--ops` — `operation:weight,operation:weight`. Default: fixed weights.
+- [x] `--ops` — `operation:weight,operation:weight`. Default: fixed weights.
 - [x] `--seed-count` — entities in seed phase. Default 1,000.
 - [x] `--port` — use existing server instead of starting one.
 - [ ] `--batch-delay` — not yet implemented. Will be added when needed.
@@ -156,13 +156,17 @@ zig build load -- --analysis
 - [x] `framework/io.zig` — listen backlog 64 → 128 to match
   max_connections.
 
+### 16. Per-connection PRNG
+
+- [x] Each connection's PRNG derived from parent PRNG at init time.
+- [x] Operation selection and payload generation use `conn.prng`.
+- [x] Deterministic per-connection workload regardless of callback
+  interleaving.
+
 ### Deferred
 
-- [ ] `--ops` flag for custom operation weights.
-- [ ] Per-connection PRNG for deterministic workload replay.
-- [ ] Connection index in assertion panic messages.
 - [ ] `--batch-delay` and `--print-batch-timings`.
-- [ ] `db empty` size (pre-seed measurement).
+- [ ] Rule 2: throughput plateau detection (requires multiple runs).
 
 ---
 
