@@ -53,6 +53,20 @@ Low priority:
 - query_all truncation detection (documentation or comptime)
 - Write failure model: panics (TB) vs returned errors (web) — decide
 
+## WAL filename derived from database path
+
+The application-level WAL filename is hardcoded to `tiger_web.wal`.
+Every server instance (dev, load test, perf script) writes to the same
+file, corrupting each other's replay chain.
+
+Fix: derive from `--db` path. `--db=tiger_web.db` → `tiger_web.db.wal`.
+Same convention as SQLite's own WAL (`tiger_web.db-wal`). The WAL
+file lives next to the database, obvious pairing, no conflicts.
+
+Change in `main.zig`: replace `"tiger_web.wal"` with
+`db_path ++ ".wal"`. Load test and perf script cleanup already
+delete the db file — the paired WAL deletes with it.
+
 ## Sidecar: shared memory transport to replace Unix socket
 
 The sidecar is 3.9x slower than native Zig (13K vs 53K req/s). The
@@ -149,6 +163,7 @@ Measured data (i7-14700K, 128 connections, 100K requests):
 - add a way to inspect the start/stop time for all annotations/features and read trends so you can see when things are getting slow.
 - some things are tested against /examples for regression/performance we might want to isolate some of these tests into more user space agnostic code to protect them from example churn
 - worst case json allocation in message should probably be configurable in case a framework user needs to up the value
+- is ci/cd tracking benchmarks/loadtest/perf?
 
 # clean up
 - ensure we use cli/program defaults very carefully. i like no defaults or few defaults over heavy defaults
@@ -168,12 +183,6 @@ So we can enforce settings sitting directly under the annotation and we can keep
 
 
 Questions:
-how does our server shard compared to others if we cant handle traffic?
-is there a way that we could a come close to go lang throughput without more cores based on our simpplicity
-are we truly no allocation on hot path? what are the possible side effects to the framework users or end users? did this concept map cleanly to web servers
-❯ should we always recommend perf over providing an instrucmented perf command?                                                                                                                
-speculating how do we measure in throuput against laravel,rails,nextjs all connected to sqlite
-what might the throughput difference be if we gave up single-threaded for multi threaded
-document perf permanent docs
-
 Explore open source repos and see if they use ai
+
+
