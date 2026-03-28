@@ -1430,11 +1430,17 @@ pub const SqliteStorage = struct {
             const col_type = c.sqlite3_column_type(stmt, col);
             assert(col_type == c.SQLITE_TEXT or col_type == c.SQLITE_NULL);
             const ptr_raw = c.sqlite3_column_text(stmt, col);
-            const len: usize = @intCast(c.sqlite3_column_bytes(stmt, col));
+            const raw_len: usize = @intCast(c.sqlite3_column_bytes(stmt, col));
             var arr: T = .{0} ** @typeInfo(T).array.len;
             if (ptr_raw) |ptr| {
                 const p: [*]const u8 = @ptrCast(ptr);
-                assert(len <= @typeInfo(T).array.len);
+                // Truncate if data exceeds field size. This happens when the
+                // database is modified directly (sqlite3 CLI, migration script)
+                // bypassing domain validation. Truncating and serving is better
+                // than crashing the server and dropping all connections.
+                // The handler's INSERT/UPDATE path validates lengths — this
+                // path only fires for externally corrupted data.
+                const len = @min(raw_len, @typeInfo(T).array.len);
                 @memcpy(arr[0..len], p[0..len]);
             }
             return arr;
