@@ -721,7 +721,32 @@ pub const Message = extern struct {
 };
 
 /// Maximum number of items returned in a single list response.
+/// Constrained by send_buf_max — the rendered HTML for list_max items
+/// must fit in one response. See comptime assertion below.
 pub const list_max = 50;
+
+/// Maximum rendered HTML size per row type. HTML escaping expands
+/// special characters up to 5x (& → &amp;). These are worst-case
+/// upper bounds used to prove list responses fit in send_buf_max.
+const html_escape_factor = 5;
+/// product card: tags(~200) + escaped_name + escaped_desc + uuid(32) + numbers(40)
+const product_card_rendered_max = 200 + product_name_max * html_escape_factor + product_description_max * html_escape_factor + 32 + 40;
+/// collection card: tags(~80) + escaped_name + uuid(32)
+const collection_card_rendered_max = 80 + collection_name_max * html_escape_factor + 32;
+/// order row: tags(~120) + uuid(32) + numbers(60) + status(20)
+const order_row_rendered_max = 232;
+
+comptime {
+    const http = @import("framework/http.zig");
+    const header_reserve = @import("framework/http_response.zig").header_reserve;
+    const response_body_max = http.send_buf_max - header_reserve;
+
+    // Worst case: list_products with list_max product cards.
+    // If this assertion fails, either reduce list_max or increase send_buf_max.
+    assert(list_max * product_card_rendered_max <= response_body_max);
+    assert(list_max * collection_card_rendered_max <= response_body_max);
+    assert(list_max * order_row_rendered_max <= response_body_max);
+}
 
 pub const ProductList = extern struct {
     items: [list_max]Product,

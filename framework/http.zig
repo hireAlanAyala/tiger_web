@@ -12,10 +12,11 @@ pub const body_max = 4096;
 pub const recv_buf_max = max_header_size + body_max;
 
 /// Maximum send buffer: HTTP response headers + body.
-/// Sized for render.zig's worst-case HTML page (page shell + dashboard_list_max
-/// cards each for products, collections, and orders, with full HTML/JS escape
-/// expansion). render.zig has a comptime assert that send_buf_max fits.
-pub const send_buf_max = 96 * 1024;
+/// Send buffer size per connection. Must accommodate the largest possible
+/// rendered response: list_max × worst-case escaped product card + headers.
+/// Comptime assertion in message.zig verifies list responses fit.
+/// 128 connections × 256KB = 32MB total — acceptable for a server process.
+pub const send_buf_max = 256 * 1024;
 
 pub const ParseResult = union(enum) {
     /// Not enough bytes to parse a complete request.
