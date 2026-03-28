@@ -155,6 +155,42 @@ data with PR branch measurements.
 - [ ] Dry-run on PRs
 - [ ] Secrets configuration (DEVHUBDB_PAT)
 
+## Before implementation
+
+- [ ] Review this plan through TigerBeetle's lens. Ask for critiques
+  on the metric selection, storage format, outlier detection algorithm,
+  and dashboard design. Refine before building.
+
+## What framework users get
+
+This is rare. Most web frameworks ship without any performance tooling:
+
+- **Rails, Django, Laravel** — no built-in benchmarking. Developers
+  use third-party tools (wrk, ab, k6) and have no framework-aware
+  profiling. Performance is an afterthought.
+- **Express, Fastify** — no benchmarking. Community benchmarks exist
+  but aren't part of the framework.
+- **actix-web, drogon** — community benchmarks (TechEmpower) but no
+  built-in load testing or regression tracking.
+- **TigerBeetle** — full devhub with benchmark tracking, but it's a
+  database, not a web framework.
+
+Tiger-web ships with:
+- `zig build load` — full-stack throughput/latency measurement
+- `zig build bench` — per-operation microsecond cost
+- `zig build scripts -- perf` — CPU profiling with perf
+- Benchmark tracking dashboard (this plan)
+
+No other web framework provides all four out of the box. A framework
+user can measure their app's performance, find bottlenecks, and track
+regressions without installing any external tools.
+
+This is a competitive advantage — not because the tools are complex,
+but because they're integrated. The load test knows the server's
+operations. The perf script builds release, starts the server, and
+produces a report. The dashboard tracks the same metrics across
+commits. The user doesn't assemble a toolchain — they use one.
+
 ## What this does NOT do
 
 - Does not fail CI on regression (noise > signal for hard thresholds)
