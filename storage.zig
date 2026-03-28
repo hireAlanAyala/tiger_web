@@ -1431,17 +1431,23 @@ pub const SqliteStorage = struct {
             assert(col_type == c.SQLITE_TEXT or col_type == c.SQLITE_NULL);
             const ptr_raw = c.sqlite3_column_text(stmt, col);
             const raw_len: usize = @intCast(c.sqlite3_column_bytes(stmt, col));
-            var arr: T = .{0} ** @typeInfo(T).array.len;
+            const field_max = @typeInfo(T).array.len;
+            var arr: T = .{0} ** field_max;
             if (ptr_raw) |ptr| {
                 const p: [*]const u8 = @ptrCast(ptr);
-                // Truncate if data exceeds field size. This happens when the
-                // database is modified directly (sqlite3 CLI, migration script)
-                // bypassing domain validation. Truncating and serving is better
-                // than crashing the server and dropping all connections.
-                // The handler's INSERT/UPDATE path validates lengths — this
-                // path only fires for externally corrupted data.
-                const len = @min(raw_len, @typeInfo(T).array.len);
-                @memcpy(arr[0..len], p[0..len]);
+                if (raw_len > field_max) {
+                    // Data exceeds field size — database was modified directly
+                    // (sqlite3 CLI, migration script) bypassing domain validation.
+                    // Truncate and warn instead of crashing the server.
+                    // The handler's INSERT/UPDATE path validates lengths — this
+                    // path only fires for externally corrupted data.
+                    log.warn("column {d}: text length {d} exceeds field max {d}, truncating", .{
+                        col, raw_len, field_max,
+                    });
+                    @memcpy(arr[0..field_max], p[0..field_max]);
+                } else {
+                    @memcpy(arr[0..raw_len], p[0..raw_len]);
+                }
             }
             return arr;
         } else if (@typeInfo(T) == .@"enum") {
