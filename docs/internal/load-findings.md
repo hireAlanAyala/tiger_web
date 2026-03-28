@@ -201,6 +201,46 @@ Single-threaded is an advantage: no locks, no race conditions, no
 deadlocks, no thread pool tuning. The server is simple because it
 doesn't share state. TigerBeetle made the same choice.
 
+## Load test design decisions
+
+These decisions are documented to prevent regression — each was
+explored and resolved during design.
+
+**Why localhost.** The server's ceiling does not change based on where
+the client is. Network latency adds to user-perceived latency but does
+not reduce server capacity. The load test gives an upper bound.
+
+**Why mixed workload, not sequential phases.** Web server traffic is
+concurrent — a GET and POST arrive on the same tick. Mixed workload
+with configurable weights (--ops) is the honest model. TB runs phases
+sequentially because their operations have strict ordering dependencies.
+
+**Why no validation.** The server always returns 200. Domain status is
+baked into HTML the load test cannot parse generically. The fuzzer
+exercises typed responses. The load test is outside the correctness
+boundary.
+
+**Why no auth.** Auth adds a fixed per-request HMAC cost regardless of
+what is being tested. Noise without information.
+
+**Why zero error budget.** Valid data, warmed server, localhost. If a
+request fails, it is the finding — the server broke under load.
+
+**Why keep-alive connections.** Opening a TCP connection per request
+measures handshake cost — noise that real browsers avoid.
+
+**Why PRNG payloads.** The bottleneck is the database. Product name
+content does not change INSERT cost. The load test measures throughput
+ceiling, not cache behavior.
+
+**Why seed count is independent of request count.** Dataset size and
+operation count are different questions. Small seed + many requests =
+hot-path test. Large seed + few requests = cold-path test.
+
+**Scaling analysis thresholds.** The thresholds (2x write/read ratio,
+10x p100/p99 ratio) follow from the architecture: single-threaded, one
+SQLite writer lock, fsync as the write floor.
+
 ## Architectural decisions resolved during implementation
 
 ### Monotonic counters, not decrement-on-error
