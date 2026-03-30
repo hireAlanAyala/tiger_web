@@ -482,6 +482,7 @@ pub fn parse_result_payload(payload: []const u8) ?ResultPayload {
 /// Parse a QUERY payload — sql + params.
 pub const QueryPayload = struct {
     sql: []const u8,
+    mode: QueryMode,
     params_buf: []const u8,
     param_count: u8,
 };
@@ -495,10 +496,14 @@ pub fn parse_query_payload(payload: []const u8) ?QueryPayload {
     const sql = payload[pos..][0..sql_len];
     pos += sql_len;
     if (pos >= payload.len) return null;
+    const mode = std.meta.intToEnum(QueryMode, payload[pos]) catch return null;
+    pos += 1;
+    if (pos >= payload.len) return null;
     const param_count = payload[pos];
     pos += 1;
     return .{
         .sql = sql,
+        .mode = mode,
         .params_buf = payload[pos..],
         .param_count = param_count,
     };
@@ -801,11 +806,13 @@ test "sidecar frame parse — QUERY" {
     const sql = "SELECT * ..";
     std.mem.writeInt(u16, buf[5..7], @intCast(sql.len), .big);
     @memcpy(buf[7..18], sql);
-    buf[18] = 0; // param_count = 0
-    const frame = parse_sidecar_frame(buf[0..19]) orelse unreachable;
+    buf[18] = @intFromEnum(QueryMode.query); // mode
+    buf[19] = 0; // param_count = 0
+    const frame = parse_sidecar_frame(buf[0..20]) orelse unreachable;
     try std.testing.expectEqual(CallTag.query, frame.tag);
     const query = parse_query_payload(frame.payload) orelse unreachable;
     try std.testing.expectEqualStrings("SELECT * ..", query.sql);
+    try std.testing.expectEqual(QueryMode.query, query.mode);
     try std.testing.expectEqual(@as(u8, 0), query.param_count);
 }
 

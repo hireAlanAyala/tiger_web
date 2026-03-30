@@ -166,7 +166,127 @@ pub const SidecarClient = struct {
     }
 
     // =================================================================
-    // RT1: Route
+    // CALL/RESULT exchange — dumb executor protocol
+    //
+    // Send a CALL frame, handle QUERY sub-protocol, return RESULT.
+    // This is the universal primitive for the new protocol.
+    // =================================================================
+
+    /// Result of a CALL/RESULT exchange.
+    pub const ExchangeResult = struct {
+        flag: protocol.ResultFlag,
+        /// RESULT payload after the flag byte. Aliases recv_buf —
+        /// consume before the next call_exchange.
+        data: []const u8,
+    };
+
+    /// Send a CALL, handle QUERY sub-protocol, return RESULT.
+    ///
+    /// When `allow_queries` is true, QUERY frames from the sidecar are
+    /// dispatched to storage (db.query). When false, QUERY frames are
+    /// a protocol violation — disconnect.
+    ///
+    /// `queries_max` bounds the QUERY loop. If the sidecar exceeds the
+    /// limit, the exchange fails.
+    pub fn call_exchange(
+        self: *SidecarClient,
+        function_name: []const u8,
+        args: []const u8,
+        storage: anytype,
+        comptime allow_queries: bool,
+        comptime queries_max: u32,
+    ) ?ExchangeResult {
+        if (self.fd == -1) {
+            self.try_reconnect();
+            if (self.fd == -1) return null;
+        }
+
+        // Build and send CALL frame.
+        const call_len = protocol.build_call(self.send_buf, 0, function_name, args) orelse {
+            log.warn("call: frame too large for {s}", .{function_name});
+            return null;
+        };
+        if (!protocol.write_frame(self.fd, self.send_buf[0..call_len])) {
+            self.handle_disconnect();
+            return null;
+        }
+
+        // Recv loop: handle QUERY frames until RESULT arrives.
+        var query_count: u32 = 0;
+        while (true) {
+            const frame = protocol.read_frame(self.fd, self.recv_buf) orelse {
+                self.handle_disconnect();
+                return null;
+            };
+
+            const parsed = protocol.parse_sidecar_frame(frame) orelse {
+                log.warn("call: invalid frame from sidecar", .{});
+                self.handle_disconnect();
+                return null;
+            };
+
+            switch (parsed.tag) {
+                .result => {
+                    const result = protocol.parse_result_payload(parsed.payload) orelse {
+                        log.warn("call: invalid RESULT payload", .{});
+                        self.handle_disconnect();
+                        return null;
+                    };
+                    return .{
+                        .flag = result.flag,
+                        .data = result.data,
+                    };
+                },
+                .query => {
+                    if (!allow_queries) {
+                        log.warn("call: QUERY received during no-query CALL {s}", .{function_name});
+                        self.handle_disconnect();
+                        return null;
+                    }
+
+                    if (query_count >= queries_max) {
+                        log.warn("call: exceeded max queries ({d}) for {s}", .{ queries_max, function_name });
+                        self.handle_disconnect();
+                        return null;
+                    }
+                    query_count += 1;
+
+                    const query = protocol.parse_query_payload(parsed.payload) orelse {
+                        log.warn("call: invalid QUERY payload", .{});
+                        self.handle_disconnect();
+                        return null;
+                    };
+
+                    // Execute SQL via storage ReadView, write row set
+                    // directly into send_buf after the 5-byte header.
+                    const row_set = storage.query_raw(
+                        query.sql,
+                        query.params_buf,
+                        query.param_count,
+                        query.mode,
+                        self.send_buf[5..],
+                    ) orelse blk: {
+                        // Query failed — send empty QUERY_RESULT.
+                        break :blk @as([]const u8, "");
+                    };
+
+                    // Build QUERY_RESULT header in the first 5 bytes.
+                    self.send_buf[0] = @intFromEnum(protocol.CallTag.query_result);
+                    std.mem.writeInt(u32, self.send_buf[1..5], parsed.request_id, .big);
+                    const qr_total = 5 + row_set.len;
+
+                    if (!protocol.write_frame(self.fd, self.send_buf[0..qr_total])) {
+                        self.handle_disconnect();
+                        return null;
+                    }
+                },
+                else => unreachable,
+            }
+        }
+    }
+
+    // =================================================================
+    // RT1: Route (legacy 3-RT protocol)
     // =================================================================
 
     /// Send route_request, receive route_prefetch_response.
