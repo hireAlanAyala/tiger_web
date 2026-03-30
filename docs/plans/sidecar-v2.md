@@ -5,16 +5,27 @@ one dependency chain. This plan covers the bottom-up sequence. Each
 phase builds correctly on the one below — no shims, no rework.
 
 ```
-Phase 1: Unify pipeline       (Handlers type parameter, remove two-path branching) ✓
-Phase 2: CALL/RESULT protocol  (dumb executor, QUERY sub-protocol)
+Phase 1: Unify pipeline       ✓ complete
+Phase 2: CALL/RESULT protocol  (in progress — Zig + TS done, server connection + integration test remain)
 Phase 3: Async prefetch        (callback-driven, serial pipeline, TB pattern)
 Phase 4: Workers               (see worker-v2.md)
 ```
 
-Phase order revised after Phase 1: protocol before async. Making the
-old 3-RT protocol async would be wasted work — Phase 2 replaces it
-entirely. Build the right protocol first (eliminates Phase 1's zeroed
-cache and cross-phase state awkwardness), then make it non-blocking.
+Phase order revised after Phase 1: protocol before async. Build the
+right protocol first, then make it non-blocking.
+
+### Phase 2 progress
+- ✓ Frame types: CALL, RESULT, QUERY (with query_id), QUERY_RESULT
+- ✓ State machine: call_submit / on_recv / run_to_completion
+- ✓ QueryFn with *anyopaque context (TB callback pattern)
+- ✓ Handlers sidecar branches wired to state machine
+- ✓ Sidecar holds state between CALLs (no pass-through)
+- ✓ WriteView.execute_raw for unified WAL recording
+- ✓ Zeroed cache pair assertion
+- ✓ TS runtime: async QUERY sub-protocol, Promise.all() via query_id Map
+- ✓ Handler .ts files: async prefetch with await db.query()
+- ✓ PrefetchDb type updated for Promise return
+- Remaining: server sidecar connection management, integration test, old code cleanup
 
 ## Design decisions
 
@@ -313,47 +324,19 @@ variants are zero-cost.
 
 ### Checklist
 
-- [ ] Route table lookup stays in the pipeline (server/SM). The
-  pipeline matches method + path → operation + params. Handlers
-  receives the matched operation, not raw HTTP.
-- [ ] Sidecar availability check in the pipeline, before Handlers.
-  The route table tags each operation as Zig or sidecar (comptime).
-  If the matched operation is sidecar and the sidecar is down,
-  return 503. Handlers never called — it assumes availability.
-  For pure-Zig apps, the check is eliminated by the compiler.
-- [ ] Add `handler_route` to the Handlers interface: takes matched
-  operation, route params, body, returns `?Message`. Runs the
-  user's value transformation function. Both Zig and sidecar
-  routes go through Handlers.
-- [ ] Generate one Handlers type from the annotation scanner. Per-
-  operation comptime switch dispatches to the right runtime: direct
-  function call for Zig handlers, 3-RT protocol for sidecar
-  handlers (current protocol, replaced in Phase 3).
-- [ ] Handlers interface provides: `handler_route(method, path, body)`,
-  `handler_prefetch(storage, msg)`,
-  `handler_execute(cache, msg, fw, db)`,
-  `handler_render(...)`. Associated type `Cache` — typed union for
-  Zig operations, sidecar state for sidecar operations.
-- [ ] Sidecar connection state lives on the Handlers type (or a field
-  accessible to it). One connection per sidecar runtime. Managed
-  by the server, accessible to Handlers at dispatch time.
-- [ ] Extract shared response encoding (cookie formatting, SSE
-  framing, HTML framing) from both pipeline functions into one
-  shared function. This is pure mechanical dedup — identical code
-  exists in both paths today.
-- [ ] Merge `commit_and_encode` and `sidecar_commit_and_encode` into
-  one pipeline function that calls Handlers generically.
-- [ ] `server.zig`: remove the `if (@hasDecl(App, "sidecar"))` branch.
-  One call to the pipeline. The Handlers dispatch handles routing
-  to the right runtime per-operation.
-- [ ] Connection state machine unchanged — connections are pure IO
-  machinery. Pipeline phase tracking stays in server/SM, not on
-  connections.
-- [ ] If all handlers are Zig, no sidecar socket is opened. Compiler
-  eliminates dead sidecar branches.
-- [ ] All existing tests pass — sim tests, fuzz tests, unit tests.
-  The unification is a refactor, not a behavior change.
-- [ ] Sidecar integration tests pass — same behavior, new plumbing.
+- [x] Route table lookup stays in the pipeline (server/SM).
+- [x] Add `handler_route` to the Handlers interface.
+- [x] Handlers interface provides: handler_route, handler_prefetch,
+  handler_execute, handler_render. Associated type Cache.
+- [x] Sidecar connection state on module-level var (runtime check).
+  Comptime elimination deferred to scanner-generated Handlers.
+- [x] Extract shared response encoding (encode_response).
+- [x] Merge commit_and_encode and sidecar_commit_and_encode.
+- [x] server.zig: removed sidecar branch and sidecar WAL branch.
+- [x] Connection state machine unchanged.
+- [x] All tests pass — unit, sim, fuzz smoke.
+- [ ] Sidecar availability check before Handlers — deferred to
+  server connection management (Phase 2 remaining).
 
 ### Phase 1 is a manual refactor
 
@@ -497,41 +480,30 @@ may span ticks (callback fires on epoll RESULT).
 
 ### Checklist
 
-- [ ] Define frame format: CALL, RESULT, QUERY, QUERY_RESULT.
-- [ ] Reimplement Handlers sidecar branches using CALL/RESULT frames.
-  Replace the 3-RT protocol. Eliminates zeroed cache and
-  stored_prefetch_len cross-phase state from Phase 1.
+- [x] Define frame format: CALL, RESULT, QUERY (with query_id),
+  QUERY_RESULT (echoes query_id). Enables Promise.all().
+- [x] Reimplement Handlers sidecar branches using CALL/RESULT state
+  machine (call_submit + on_recv + run_to_completion).
+- [x] QUERY sub-protocol: server executes SQL from QUERY frames via
+  QueryFn callback with *anyopaque context. Bounded by
+  comptime queries_max.
+- [x] Server rejects QUERY frames during handle CALLs — runtime null
+  check on query_fn (comptime→runtime tradeoff documented).
+- [x] Sidecar runtime (TypeScript): adapters/call_runtime.ts. Async
+  QUERY sub-protocol, Promise.all() via query_id Map. Reference
+  implementation — other languages reimplement the spec.
+- [x] Handler .ts files: async prefetch with await db.query().
 - [ ] Server accepts sidecar connection on unix socket (reverse of
   current — server listens, sidecar connects).
 - [ ] Server does not accept HTTP until sidecar is connected.
-- [ ] Serial pipeline means at most one CALL in-flight for request
-  handling (+ worker CALLs later in Phase 4). Request_id tracking
-  in bounded array.
-- [ ] QUERY sub-protocol: server executes SQL from QUERY frames
-  during prefetch/render CALLs. Returns QUERY_RESULT. Bounded:
-  comptime max queries per CALL.
-- [ ] Server rejects QUERY frames during handle CALLs — handle has
-  db.execute() only. Protocol-level invariant, asserted.
-- [ ] Sidecar reconnection: server gives hypervisor a bounded window.
-  Past threshold (comptime constant), server crashes.
-- [ ] Sidecar runtime (TypeScript): scan handlers, build function
-  registry, connect to server, loop: receive CALL → look up
-  function → call it → send RESULT. This is the reference
-  implementation — other languages reimplement the spec, not
-  share a binary. The spec is four frame types (CALL, RESULT,
-  QUERY, QUERY_RESULT), each is tag + request_id + length-prefixed
-  payload using the self-describing binary row format. Any language
-  that can read/write bytes on a unix socket can implement it.
-  No shared libraries, no FFI, no embedding. Per-language
-  reimplementation allows the most languages.
-- [ ] Remove: 3-RT exchange from `sidecar.zig`, manifest reading
-  from TS adapter, `generated/dispatch.generated.ts`, old protocol
-  frame types from `protocol.zig`.
+- [ ] Sidecar availability check before Handlers.
+- [ ] Sidecar reconnection: bounded window, crash past threshold.
+- [ ] Remove: 3-RT exchange from sidecar.zig, manifest reading
+  from TS adapter, dispatch.generated.ts, old protocol frame
+  types from protocol.zig.
+- [ ] Integration test: server + TS runtime end-to-end.
 - [ ] Update cross-language tests.
-- [ ] (Deferred) Extend SimIO to fault-inject on sidecar fd: partial
-  frames, disconnects mid-CALL, corrupted QUERY_RESULTs, dropped
-  RESULTs. Same infrastructure as TCP fault injection, aimed at the
-  unix socket. Blocked on protocol stabilization.
+- [ ] (Deferred) Extend SimIO to fault-inject on sidecar fd.
 
 ### User-space syntax
 
