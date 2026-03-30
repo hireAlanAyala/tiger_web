@@ -88,14 +88,14 @@ pub fn main() !void {
         Server.max_connections,
     });
     if (cli.log_debug) log.info("log_level=debug log_trace={}", .{cli.log_trace});
-    // Sidecar: connect to external unix socket process.
+    // Sidecar: listen on unix socket, wait for sidecar to connect.
+    // Server doesn't accept HTTP until the sidecar is connected.
     if (cli.sidecar) |path| {
         App.sidecar = App.SidecarClient.init(path);
-        if (!App.sidecar.?.connect()) {
-            log.err("failed to connect to sidecar at {s}", .{path});
+        if (!App.sidecar.?.listen_and_accept()) {
+            log.err("sidecar failed to connect on {s}", .{path});
             std.process.exit(1);
         }
-        log.info("sidecar={s}", .{path});
     }
 
     log.info("listening on port {d}", .{actual_port});

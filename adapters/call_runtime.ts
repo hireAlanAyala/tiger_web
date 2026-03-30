@@ -182,37 +182,28 @@ if (!socketPath) {
   process.exit(1);
 }
 
-// --- Socket setup ---
-// For now: sidecar listens, server connects (matches current server code).
-// Plan: reverse this — server listens, sidecar connects (task #12).
-// The CALL/RESULT exchange is direction-agnostic.
+// --- Connect to server ---
+// Server listens on the unix socket. Sidecar connects to it.
 
-import { unlinkSync } from "fs";
-try { unlinkSync(socketPath); } catch {}
-
-let conn: net.Socket;
 let pending = Buffer.alloc(0);
 
-const socketServer = net.createServer((socket) => {
-  console.log("[call_runtime] server connected");
-  conn = socket;
-
-  conn.on("data", (chunk: Buffer) => {
-    pending = Buffer.concat([pending, chunk]);
-    processFrames();
-  });
-
-  conn.on("error", (err: any) => {
-    console.error("[call_runtime] error:", err.message);
-  });
-
-  conn.on("close", () => {
-    console.log("[call_runtime] disconnected");
-  });
+const conn = net.createConnection(socketPath, () => {
+  console.log("[call_runtime] connected to", socketPath);
 });
 
-socketServer.listen(socketPath, () => {
-  console.log("[call_runtime] listening on", socketPath);
+conn.on("data", (chunk: Buffer) => {
+  pending = Buffer.concat([pending, chunk]);
+  processFrames();
+});
+
+conn.on("error", (err: any) => {
+  console.error("[call_runtime] error:", err.message);
+  process.exit(1);
+});
+
+conn.on("close", () => {
+  console.log("[call_runtime] disconnected");
+  process.exit(0);
 });
 
 // --- Frame processing ---
@@ -277,6 +268,10 @@ function handleQueryResult(frame: Uint8Array): void {
   pendingQueries.delete(queryId);
 
   if (rowSetData.length === 0) {
+    resolve(null);
+  } else if (rowSetData.length < 6) {
+    // Too short for a valid row set (col_count(2) + at least one col + row_count(4))
+    console.error("[call_runtime] QUERY_RESULT too short:", rowSetData.length, "bytes");
     resolve(null);
   } else {
     const rowSetDv = new DataView(rowSetData.buffer, rowSetData.byteOffset, rowSetData.byteLength);

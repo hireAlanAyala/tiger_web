@@ -105,6 +105,72 @@ pub const SidecarClient = struct {
     // Connection management
     // =================================================================
 
+    /// Listen on the unix socket path and accept one sidecar connection.
+    /// Blocks until the sidecar connects. Used at startup — the server
+    /// doesn't accept HTTP until the sidecar is connected.
+    pub fn listen_and_accept(self: *SidecarClient) bool {
+        assert(self.fd == -1);
+        assert(self.path.len > 0);
+
+        // Remove stale socket file.
+        var unlink_path: [108]u8 = undefined;
+        @memcpy(unlink_path[0..self.path.len], self.path);
+        unlink_path[self.path.len] = 0;
+        std.posix.unlinkZ(@ptrCast(unlink_path[0 .. self.path.len + 1])) catch {};
+
+        const listen_fd = std.posix.socket(std.posix.AF.UNIX, std.posix.SOCK.STREAM, 0) catch |err| {
+            log.warn("socket: {}", .{err});
+            return false;
+        };
+
+        var addr: std.posix.sockaddr.un = .{ .path = undefined };
+        assert(self.path.len < addr.path.len);
+        @memcpy(addr.path[0..self.path.len], self.path);
+        addr.path[self.path.len] = 0;
+
+        std.posix.bind(listen_fd, @ptrCast(&addr), @sizeOf(std.posix.sockaddr.un)) catch |err| {
+            log.warn("bind: {}", .{err});
+            std.posix.close(listen_fd);
+            return false;
+        };
+
+        std.posix.listen(listen_fd, 1) catch |err| {
+            log.warn("listen: {}", .{err});
+            std.posix.close(listen_fd);
+            return false;
+        };
+
+        log.info("waiting for sidecar on {s}", .{self.path});
+
+        // Blocking accept — server waits for sidecar before starting.
+        const fd = std.posix.accept(listen_fd, null, null, 0) catch |err| {
+            log.warn("accept: {}", .{err});
+            std.posix.close(listen_fd);
+            return false;
+        };
+
+        // Close the listen fd — we only accept one sidecar connection.
+        std.posix.close(listen_fd);
+
+        const timeout: std.posix.timeval = .{ .sec = 5, .usec = 0 };
+        std.posix.setsockopt(fd, std.posix.SOL.SOCKET, std.posix.SO.RCVTIMEO, std.mem.asBytes(&timeout)) catch |err| {
+            log.warn("setsockopt RCVTIMEO: {}", .{err});
+            std.posix.close(fd);
+            return false;
+        };
+        std.posix.setsockopt(fd, std.posix.SOL.SOCKET, std.posix.SO.SNDTIMEO, std.mem.asBytes(&timeout)) catch |err| {
+            log.warn("setsockopt SNDTIMEO: {}", .{err});
+            std.posix.close(fd);
+            return false;
+        };
+
+        self.fd = fd;
+        log.info("sidecar connected", .{});
+        return true;
+    }
+
+    /// Legacy: connect TO the sidecar (old model — sidecar listens).
+    /// Kept for reconnection logic until fully migrated.
     pub fn connect(self: *SidecarClient) bool {
         assert(self.fd == -1);
         assert(self.path.len > 0);
