@@ -28,71 +28,12 @@ const ResultFlag = {
 
 const Methods = ["get", "put", "post", "delete"] as const;
 
-// --- Handler registry ---
+// --- Handler registry (generated) ---
+// Imports, modules, and route table are generated from the annotation
+// scanner's manifest.json. See generated/handlers.generated.ts.
 
-interface HandlerModule {
-  route?: (req: any) => any | null;
-  prefetch?: (msg: any, db: any) => any;
-  handle?: (ctx: any, db: any) => string;
-  render?: (ctx: any, db?: any) => string;
-}
-
-const handlers: Record<string, HandlerModule> = {};
-
-// Import all handler modules. The scanner will generate this list.
-// For now, import the ecommerce example handlers.
-import * as getProduct from "../examples/ecommerce-ts/handlers/get_product.ts";
-import * as createProduct from "../examples/ecommerce-ts/handlers/create_product.ts";
-import * as listProducts from "../examples/ecommerce-ts/handlers/list_products.ts";
-import * as updateProduct from "../examples/ecommerce-ts/handlers/update_product.ts";
-import * as deleteProduct from "../examples/ecommerce-ts/handlers/delete_product.ts";
-import * as getProductInventory from "../examples/ecommerce-ts/handlers/get_product_inventory.ts";
-import * as searchProducts from "../examples/ecommerce-ts/handlers/search_products.ts";
-import * as transferInventory from "../examples/ecommerce-ts/handlers/transfer_inventory.ts";
-import * as createCollection from "../examples/ecommerce-ts/handlers/create_collection.ts";
-import * as getCollection from "../examples/ecommerce-ts/handlers/get_collection.ts";
-import * as listCollections from "../examples/ecommerce-ts/handlers/list_collections.ts";
-import * as deleteCollection from "../examples/ecommerce-ts/handlers/delete_collection.ts";
-import * as addCollectionMember from "../examples/ecommerce-ts/handlers/add_collection_member.ts";
-import * as removeCollectionMember from "../examples/ecommerce-ts/handlers/remove_collection_member.ts";
-import * as createOrder from "../examples/ecommerce-ts/handlers/create_order.ts";
-import * as getOrder from "../examples/ecommerce-ts/handlers/get_order.ts";
-import * as listOrders from "../examples/ecommerce-ts/handlers/list_orders.ts";
-import * as completeOrder from "../examples/ecommerce-ts/handlers/complete_order.ts";
-import * as cancelOrder from "../examples/ecommerce-ts/handlers/cancel_order.ts";
-import * as pageLoadDashboard from "../examples/ecommerce-ts/handlers/page_load_dashboard.ts";
-import * as pageLoadLogin from "../examples/ecommerce-ts/handlers/page_load_login.ts";
-import * as requestLoginCode from "../examples/ecommerce-ts/handlers/request_login_code.ts";
-import * as verifyLoginCode from "../examples/ecommerce-ts/handlers/verify_login_code.ts";
-import * as logout from "../examples/ecommerce-ts/handlers/logout.ts";
-
-// Register by operation name — matches the function_name in CALL frames.
-const modules: Record<string, HandlerModule> = {
-  get_product: getProduct,
-  create_product: createProduct,
-  list_products: listProducts,
-  update_product: updateProduct,
-  delete_product: deleteProduct,
-  get_product_inventory: getProductInventory,
-  search_products: searchProducts,
-  transfer_inventory: transferInventory,
-  create_collection: createCollection,
-  get_collection: getCollection,
-  list_collections: listCollections,
-  delete_collection: deleteCollection,
-  add_collection_member: addCollectionMember,
-  remove_collection_member: removeCollectionMember,
-  create_order: createOrder,
-  get_order: getOrder,
-  list_orders: listOrders,
-  complete_order: completeOrder,
-  cancel_order: cancelOrder,
-  page_load_dashboard: pageLoadDashboard,
-  page_load_login: pageLoadLogin,
-  request_login_code: requestLoginCode,
-  verify_login_code: verifyLoginCode,
-  logout: logout,
-};
+import { modules, routeTable } from "../generated/handlers.generated.ts";
+import type { HandlerModule, RouteTableEntry } from "../generated/handlers.generated.ts";
 
 // --- Frame IO ---
 
@@ -337,35 +278,6 @@ function parseQueryParam(queryString: string, name: string): string | null {
   return params.get(name);
 }
 import { OperationValues } from "../generated/types.generated.ts";
-
-// Route table — inline for now. Scanner will generate this.
-interface RouteTableEntry { operation: string; method: string; pattern: string; query_params: string[]; }
-const routeTable: RouteTableEntry[] = [
-  { operation: 'remove_collection_member', method: 'delete', pattern: '/collections/:id/members/:sub_id', query_params: [] },
-  { operation: 'delete_collection', method: 'delete', pattern: '/collections/:id', query_params: [] },
-  { operation: 'delete_product', method: 'delete', pattern: '/products/:id', query_params: [] },
-  { operation: 'get_collection', method: 'get', pattern: '/collections/:id', query_params: [] },
-  { operation: 'get_order', method: 'get', pattern: '/orders/:id', query_params: [] },
-  { operation: 'get_product', method: 'get', pattern: '/products/:id', query_params: [] },
-  { operation: 'get_product_inventory', method: 'get', pattern: '/products/:id/inventory', query_params: [] },
-  { operation: 'list_collections', method: 'get', pattern: '/collections', query_params: [] },
-  { operation: 'list_orders', method: 'get', pattern: '/orders', query_params: [] },
-  { operation: 'list_products', method: 'get', pattern: '/products', query_params: [] },
-  { operation: 'page_load_dashboard', method: 'get', pattern: '/', query_params: [] },
-  { operation: 'page_load_login', method: 'get', pattern: '/login', query_params: [] },
-  { operation: 'search_products', method: 'get', pattern: '/products', query_params: ['q'] },
-  { operation: 'add_collection_member', method: 'post', pattern: '/collections/:id/members', query_params: [] },
-  { operation: 'cancel_order', method: 'post', pattern: '/orders/:id/cancel', query_params: [] },
-  { operation: 'complete_order', method: 'post', pattern: '/orders/:id/complete', query_params: [] },
-  { operation: 'create_collection', method: 'post', pattern: '/collections', query_params: [] },
-  { operation: 'create_order', method: 'post', pattern: '/orders', query_params: [] },
-  { operation: 'create_product', method: 'post', pattern: '/products', query_params: [] },
-  { operation: 'logout', method: 'post', pattern: '/logout', query_params: [] },
-  { operation: 'request_login_code', method: 'post', pattern: '/login/request', query_params: [] },
-  { operation: 'transfer_inventory', method: 'post', pattern: '/products/:id/transfer', query_params: [] },
-  { operation: 'verify_login_code', method: 'post', pattern: '/login/verify', query_params: [] },
-  { operation: 'update_product', method: 'put', pattern: '/products/:id', query_params: [] },
-];
 
 function dispatchRoute(requestId: number, args: Uint8Array): void {
   const dv = new DataView(args.buffer, args.byteOffset, args.byteLength);

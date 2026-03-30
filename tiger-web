@@ -10,7 +10,7 @@ case "$1" in
   build)
     cd "$FRAMEWORK_ROOT"
     ./zig/zig build scan -- "$EXAMPLE_REL/handlers/" --manifest=generated/manifest.json
-    PATH="$EXAMPLE_DIR/node_modules/.bin:$PATH" tsx adapters/typescript.ts generated/manifest.json generated/dispatch.generated.ts
+    PATH="$EXAMPLE_DIR/node_modules/.bin:$PATH" tsx adapters/typescript.ts generated/manifest.json generated/handlers.generated.ts
     ;;
   dev)
     "$0" build
