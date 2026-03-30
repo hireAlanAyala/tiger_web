@@ -850,6 +850,123 @@ test "parse rejects truncated frame" {
     try std.testing.expect(parse_sidecar_frame(&buf) == null);
 }
 
+test "cross-language CALL/RESULT vector — write to /tmp for TS reader" {
+    // Write known CALL/RESULT/QUERY/QUERY_RESULT frames to a file.
+    // The TS test reads the same file and verifies agreement.
+    //
+    // Layout: [u8 frame_count][frames: { u32 BE frame_len, frame_bytes }]
+    //
+    // Frame 0: CALL — request_id=1, name="prefetch", args=[op=0x14, id=0x01..0x10]
+    // Frame 1: RESULT — request_id=1, flag=success, data=[status_len=2, "ok", write_count=0]
+    // Frame 2: QUERY — request_id=1, query_id=7, sql="SELECT id FROM products WHERE id = ?1",
+    //          mode=query, param_count=1, param=[text, "test_value"]
+    // Frame 3: QUERY_RESULT — request_id=1, query_id=7, row_set=[1 col "id" integer, 1 row, value=42]
+
+    var file_buf: [4096]u8 = undefined;
+    var fpos: usize = 0;
+
+    // Frame count.
+    file_buf[fpos] = 4;
+    fpos += 1;
+
+    // Frame 0: CALL
+    {
+        var buf: [256]u8 = undefined;
+        var args: [17]u8 = undefined;
+        args[0] = 0x14; // operation
+        var i: usize = 0;
+        while (i < 16) : (i += 1) {
+            args[1 + i] = @intCast(i + 1); // id bytes 0x01..0x10
+        }
+        const len = build_call(&buf, 1, "prefetch", &args) orelse unreachable;
+        std.mem.writeInt(u32, file_buf[fpos..][0..4], @intCast(len), .big);
+        fpos += 4;
+        @memcpy(file_buf[fpos..][0..len], buf[0..len]);
+        fpos += len;
+    }
+
+    // Frame 1: RESULT
+    {
+        var buf: [256]u8 = undefined;
+        buf[0] = @intFromEnum(CallTag.result);
+        std.mem.writeInt(u32, buf[1..5], 1, .big); // request_id
+        buf[5] = @intFromEnum(ResultFlag.success); // flag
+        // data: [status_len: u16 BE][status_str][write_count: u8]
+        std.mem.writeInt(u16, buf[6..8], 2, .big); // status_len = 2
+        buf[8] = 'o';
+        buf[9] = 'k';
+        buf[10] = 0; // write_count = 0
+        const len: usize = 11;
+        std.mem.writeInt(u32, file_buf[fpos..][0..4], @intCast(len), .big);
+        fpos += 4;
+        @memcpy(file_buf[fpos..][0..len], buf[0..len]);
+        fpos += len;
+    }
+
+    // Frame 2: QUERY
+    {
+        var buf: [256]u8 = undefined;
+        buf[0] = @intFromEnum(CallTag.query);
+        std.mem.writeInt(u32, buf[1..5], 1, .big); // request_id
+        std.mem.writeInt(u16, buf[5..7], 7, .big); // query_id
+        const sql = "SELECT id FROM products WHERE id = ?1";
+        std.mem.writeInt(u16, buf[7..9], @intCast(sql.len), .big);
+        @memcpy(buf[9..][0..sql.len], sql);
+        var pos: usize = 9 + sql.len;
+        buf[pos] = @intFromEnum(QueryMode.query); // mode
+        pos += 1;
+        buf[pos] = 1; // param_count
+        pos += 1;
+        // param: text "test_value"
+        buf[pos] = @intFromEnum(TypeTag.text);
+        pos += 1;
+        const pval = "test_value";
+        std.mem.writeInt(u16, buf[pos..][0..2], @intCast(pval.len), .big);
+        pos += 2;
+        @memcpy(buf[pos..][0..pval.len], pval);
+        pos += pval.len;
+
+        std.mem.writeInt(u32, file_buf[fpos..][0..4], @intCast(pos), .big);
+        fpos += 4;
+        @memcpy(file_buf[fpos..][0..pos], buf[0..pos]);
+        fpos += pos;
+    }
+
+    // Frame 3: QUERY_RESULT
+    {
+        var buf: [256]u8 = undefined;
+        buf[0] = @intFromEnum(CallTag.query_result);
+        std.mem.writeInt(u32, buf[1..5], 1, .big); // request_id
+        std.mem.writeInt(u16, buf[5..7], 7, .big); // query_id
+        // row_set: 1 column "id" integer, 1 row, value=42
+        var pos: usize = 7;
+        const columns = [_]Column{.{ .type_tag = .integer, .name = "id" }};
+        pos = 7 + (write_row_set_header(buf[7..], &columns) orelse unreachable);
+        pos = pos + (write_row_count(buf[pos - 7 ..], 0, 1) orelse unreachable);
+
+        // Simpler: just write inline since offsets are tricky with slicing.
+        // Reset and build the row set in a separate buffer.
+        var rs_buf: [128]u8 = undefined;
+        var rs_pos = write_row_set_header(&rs_buf, &columns) orelse unreachable;
+        rs_pos = write_row_count(&rs_buf, rs_pos, 1) orelse unreachable;
+        rs_pos = write_value(&rs_buf, rs_pos, .{ .integer = 42 }) orelse unreachable;
+
+        // Now build QUERY_RESULT frame.
+        pos = 7;
+        @memcpy(buf[pos..][0..rs_pos], rs_buf[0..rs_pos]);
+        pos += rs_pos;
+
+        std.mem.writeInt(u32, file_buf[fpos..][0..4], @intCast(pos), .big);
+        fpos += 4;
+        @memcpy(file_buf[fpos..][0..pos], buf[0..pos]);
+        fpos += pos;
+    }
+
+    const file = std.fs.cwd().createFile("/tmp/tiger_call_test.bin", .{}) catch unreachable;
+    defer file.close();
+    file.writeAll(file_buf[0..fpos]) catch unreachable;
+}
+
 fn test_socketpair() [2]std.posix.fd_t {
     var fds: [2]std.posix.fd_t = undefined;
     const rc = std.c.socketpair(std.posix.AF.UNIX, std.posix.SOCK.STREAM, 0, &fds);
