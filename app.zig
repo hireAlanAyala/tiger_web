@@ -558,7 +558,7 @@ fn render_one(
 
 // Render scratch buffer — module-level, single-threaded. Used by the
 // full-page path to avoid aliasing between render output and send_buf.
-var render_scratch_buf: [http.send_buf_max]u8 = undefined;
+pub var render_scratch_buf: [http.send_buf_max]u8 = undefined;
 
 
 const http_response = @import("framework/http_response.zig");
@@ -607,7 +607,7 @@ pub const CommitResult = struct {
 
 /// Encode the HTTP response — shared by native and sidecar pipelines.
 /// Formats cookie header, wraps HTML in SSE framing or full-page headers.
-fn encode_response(
+pub fn encode_response(
     status: Status,
     html: []const u8,
     send_buf: []u8,

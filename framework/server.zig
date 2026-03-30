@@ -88,6 +88,12 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
         commit_connection: ?*Connection = null,
         /// The message being processed — stored across ticks for async.
         commit_msg: ?App.Message = null,
+        /// Pipeline response from handle stage — persists to render stage.
+        commit_pipeline_resp: ?StateMachine.PipelineResponse = null,
+        /// Prefetch cache — persists from prefetch to render.
+        commit_cache: ?App.HandlersType(Storage).Cache = null,
+        /// Auth identity — persists from prefetch to render.
+        commit_identity: ?@FieldType(StateMachine.CommitOutput, "identity") = null,
 
         /// Pipeline stage — serial, one request at a time (TB pattern).
         /// Guards process_inbox: if not .idle, no new pipeline starts.
@@ -216,26 +222,9 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
             // see the same timestamp.
             server.state_machine.set_time(server.time.realtime());
 
-            // Wrap all writes in a single transaction so the tick pays one
-            // fsync instead of one per write. Reads are unaffected (WAL mode).
-            // If we crash mid-tick, no responses have been sent yet (flush_outbox
-            // runs after process_inbox), so clients see a disconnect and retry.
-            //
-            // ASYNC NOTE: when the pipeline pends (.pending), this transaction
-            // commits empty (no writes yet — prefetch is read-only). Writes
-            // happen later in commit_dispatch/process_sidecar, which must
-            // start its own transaction. The commit_dispatch refactor moves
-            // begin/commit_batch to wrap the .handle → .commit stage specifically.
-            server.state_machine.begin_batch();
-            defer server.state_machine.commit_batch();
-
-            // Enable WAL recording for native pipeline if WAL is active.
-            // Uses wal_record_scratch (not wal_scratch) — WriteView writes here,
-            // then append_writes assembles header + data into wal_scratch. The two
-            // buffers must not alias or @memcpy in append_writes panics.
-            if (server.wal != null) {
-                server.state_machine.wal_record_buf = &server.wal_record_scratch;
-            }
+            // Transaction boundary moved to commit_dispatch (.handle stage).
+            // WAL recording enabled there too. process_inbox only does
+            // routing + pipeline start.
 
             for (server.connections) |*conn| {
                 if (conn.state != .ready) continue;
@@ -280,67 +269,150 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
                 server.commit_connection = conn;
                 server.commit_msg = msg;
 
-                // Prefetch. Three outcomes:
-                //   .complete — proceed to commit.
-                //   .busy — storage busy, retry next tick.
-                //   .pending — sidecar CALL in-flight, process_sidecar drives.
+                // Start the pipeline — commit_dispatch drives it.
                 server.state_machine.tracer.start(.prefetch);
-                switch (server.state_machine.prefetch(msg)) {
-                    .complete => {
-                        server.state_machine.tracer.stop(.prefetch, msg.operation);
+                server.commit_dispatch();
+            }
+        }
+
+        /// Pipeline state machine — drives prefetch → handle → commit →
+        /// render → encode. Called from process_inbox (start) and
+        /// process_sidecar (resume). TB's commit_dispatch pattern.
+        ///
+        /// Each stage either completes (advance to next) or pends (return).
+        /// For Zig handlers, all stages complete in one call — the loop
+        /// runs start to finish. For sidecar handlers, a stage may pend
+        /// waiting for a CALL RESULT. process_sidecar resumes.
+        fn commit_dispatch(server: *Server) void {
+            const sm = server.state_machine;
+            const conn = server.commit_connection.?;
+            const msg = server.commit_msg.?;
+
+            while (true) {
+                switch (server.commit_stage) {
+                    .idle => return,
+
+                    .prefetch => {
+                        switch (sm.prefetch(msg)) {
+                            .complete => {
+                                sm.tracer.stop(.prefetch, msg.operation);
+                                sm.tracer.start(.execute);
+                                server.commit_stage = .handle;
+                                continue;
+                            },
+                            .busy => {
+                                sm.tracer.cancel(.prefetch);
+                                server.pipeline_reset();
+                                return;
+                            },
+                            .pending => return, // process_sidecar drives
+                        }
                     },
-                    .busy => {
-                        server.state_machine.tracer.cancel(.prefetch);
-                        server.commit_stage = .idle;
-                        server.commit_connection = null;
-                        server.commit_msg = null;
+
+                    .handle => {
+                        // Commit: handle writes inside a transaction.
+                        // begin_batch wraps .handle → .commit. This is the
+                        // correct transaction boundary for async — writes
+                        // happen here, not in process_inbox.
+                        sm.begin_batch();
+
+                        if (server.wal != null) {
+                            sm.wal_record_buf = &server.wal_record_scratch;
+                        }
+
+                        const commit_output = sm.commit(msg);
+                        server.commit_pipeline_resp = commit_output.response;
+                        server.commit_cache = commit_output.cache;
+                        server.commit_identity = commit_output.identity;
+
+                        // WAL: log SQL writes.
+                        if (server.wal) |wal| {
+                            if (!wal.disabled and msg.operation.is_mutation()) {
+                                wal.append_writes(
+                                    msg.operation,
+                                    sm.now,
+                                    if (sm.wal_record_buf) |buf| buf[0..sm.wal_record_len] else "",
+                                    sm.wal_record_count,
+                                    &server.wal_scratch,
+                                );
+                                sm.wal_record_len = 0;
+                                sm.wal_record_count = 0;
+                            }
+                        }
+
+                        sm.commit_batch();
+
+                        server.commit_stage = .render;
                         continue;
                     },
-                    .pending => {
-                        // Sidecar CALL in-flight. Stay in .prefetch.
-                        // process_sidecar will drive on_recv → completion.
+
+                    .commit => {
+                        // Writes are handled inline in .handle above.
+                        // .commit stage is reserved for future use (async
+                        // handle where writes pend).
+                        unreachable;
+                    },
+
+                    .render => {
+                        const pipeline_resp = server.commit_pipeline_resp.?;
+                        const cache = server.commit_cache.?;
+                        const identity = server.commit_identity.?;
+
+                        const FwCtx = App.HandlersType(Storage).FwCtx;
+                        const fw = FwCtx{
+                            .identity = identity,
+                            .now = sm.now,
+                            .is_sse = conn.is_datastar_request,
+                        };
+
+                        const ro = Storage.ReadView.init(sm.storage);
+                        const html = App.HandlersType(Storage).handler_render(
+                            cache,
+                            msg.operation,
+                            pipeline_resp.status,
+                            fw,
+                            &App.render_scratch_buf,
+                            ro,
+                        );
+
+                        const commit_result = App.encode_response(
+                            pipeline_resp.status,
+                            html,
+                            &conn.send_buf,
+                            conn.is_datastar_request,
+                            pipeline_resp.session_action,
+                            pipeline_resp.user_id,
+                            pipeline_resp.is_authenticated,
+                            pipeline_resp.is_new_visitor,
+                            sm.secret_key,
+                        );
+
+                        sm.tracer.stop(.execute, msg.operation);
+                        sm.tracer.trace_log(msg.operation, commit_result.status, conn.fd);
+
+                        conn.set_response(commit_result.response.offset, commit_result.response.len);
+                        conn.keep_alive = commit_result.response.keep_alive;
+
+                        server.pipeline_reset();
                         return;
                     },
-                }
 
-                // Execute + render.
-                server.state_machine.tracer.start(.execute);
-                const commit_result = App.commit_and_encode(
-                    Storage,
-                    server.state_machine,
-                    msg,
-                    &conn.send_buf,
-                    conn.is_datastar_request,
-                    server.state_machine.secret_key,
-                );
-                server.state_machine.tracer.stop(.execute, msg.operation);
-                server.state_machine.tracer.trace_log(msg.operation, commit_result.status, conn.fd);
-
-                conn.set_response(commit_result.response.offset, commit_result.response.len);
-                conn.keep_alive = commit_result.response.keep_alive;
-
-                // Pipeline complete — release the slot.
-                server.commit_stage = .idle;
-                server.commit_connection = null;
-                server.commit_msg = null;
-
-                // WAL: log SQL writes after execute.
-                // Both native and sidecar writes go through WriteView recording.
-                if (server.wal) |wal| {
-                    if (!wal.disabled and msg.operation.is_mutation()) {
-                        const sm = server.state_machine;
-                        wal.append_writes(
-                            msg.operation,
-                            sm.now,
-                            if (sm.wal_record_buf) |buf| buf[0..sm.wal_record_len] else "",
-                            sm.wal_record_count,
-                            &server.wal_scratch,
-                        );
-                        sm.wal_record_len = 0;
-                        sm.wal_record_count = 0;
-                    }
+                    .encode => {
+                        // Encoding is handled inline in .render above.
+                        unreachable;
+                    },
                 }
             }
+        }
+
+        /// Reset the pipeline to idle. Called on completion, busy, or failure.
+        fn pipeline_reset(server: *Server) void {
+            server.commit_stage = .idle;
+            server.commit_connection = null;
+            server.commit_msg = null;
+            server.commit_pipeline_resp = null;
+            server.commit_cache = null;
+            server.commit_identity = null;
         }
 
         fn log_metrics(server: *Server) void {
