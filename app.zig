@@ -100,12 +100,28 @@ pub fn HandlersType(comptime StorageParam: type) type {
     return struct {
         pub const Cache = PrefetchCache;
 
-        /// Called by the SM's prefetch(). Wraps storage in its ReadView
-        /// (read-only) and dispatches to the handler's prefetch function.
-        /// Fault injection happens here — before the handler runs.
+        /// Called by the SM's prefetch(). Dispatches to native handler or
+        /// sidecar client. Fault injection for native path.
         pub fn handler_prefetch(storage: *StorageParam, msg: *const Message) ?PrefetchCache {
-            // Fault injection: return null (busy) based on PRNG.
-            // The handler never sees the fault. The SM sees null → retry.
+            if (sidecar) |*client| {
+                // Sidecar: execute prefetch SQL from RT1 declarations.
+                // RT1 already happened in handler_route (translate).
+                const ro = StorageParam.ReadView.init(storage);
+                const prefetch_len = client.execute_prefetch(ro) orelse return null;
+                client.stored_prefetch_len = prefetch_len;
+                // Return zeroed cache with the correct operation tag.
+                // The sidecar holds the real data — the cache is a placeholder
+                // to satisfy the type system. handler_execute ignores it for
+                // sidecar operations.
+                return switch (msg.operation) {
+                    .root => unreachable,
+                    inline else => |op| @unionInit(PrefetchCache, @tagName(op), std.mem.zeroes(
+                        @FieldType(PrefetchCache, @tagName(op)),
+                    )),
+                };
+            }
+
+            // Native: fault injection + dispatch.
             if (fault_prng) |prng| {
                 if (prng.chance(fault_busy_ratio)) {
                     log.mark.debug("storage: busy fault injected", .{});
@@ -124,6 +140,17 @@ pub fn HandlersType(comptime StorageParam: type) type {
             fw: FwCtx,
             db: anytype,
         ) state_machine.HandleResult {
+            if (sidecar) |*client| {
+                // Sidecar: RT2 — send prefetch results, receive handle response.
+                const status = client.send_prefetch_recv_handle(client.stored_prefetch_len) orelse
+                    return .{ .status = .storage_error };
+                // Execute writes through the WriteView so WAL recording works.
+                if (!client.execute_writes(db)) {
+                    return .{ .status = .storage_error };
+                }
+                return .{ .status = status };
+            }
+
             return dispatch_execute(cache, msg, fw, db);
         }
 
@@ -171,6 +198,10 @@ pub fn HandlersType(comptime StorageParam: type) type {
             render_buf: []u8,
             storage: anytype,
         ) []const u8 {
+            if (sidecar) |*client| {
+                return client.execute_render(storage) orelse "";
+            }
+
             return dispatch_render(cache, operation, status, fw, render_buf, storage);
         }
     };
@@ -505,86 +536,10 @@ fn encode_response(
     }
 }
 
-// =====================================================================
-// Sidecar pipeline — separate orchestration, shared building blocks
-//
-// The sidecar has its own pipeline because its execution model (3 wire
-// round trips) doesn't match the SM's phased dispatch (prefetch →
-// execute → render as separate local calls with typed PrefetchCache).
-//
-// Alternatives considered:
-//   A. Sidecar as Handlers backend (single pipeline) — rejected.
-//      Impedance mismatch: RT2 spans prefetch→execute. Requires dummy
-//      cache, stored state between SM calls, buffer aliasing.
-//   B. Sidecar bypass in commit_and_encode — rejected.
-//      Makes commit_and_encode two implementations.
-//   C. Generalize Cache to opaque bytes — rejected.
-//      PrefetchCache is union(Operation). The real problem is RT2
-//      spanning two SM phases, not the cache type.
-//
-// TigerBeetle has this pattern: real IO and simulated IO share building
-// blocks but have different orchestration. Same here.
-//
-// Both pipelines call the same building blocks: storage.begin/commit,
-// auth.resolve_credential, http_response encoding. The building blocks
-// are shared. The composition is per-path. Correctness proven by
-// cross-pipeline test (sidecar_test.zig).
-// =====================================================================
-
-/// Process an HTTP request through the sidecar pipeline.
-/// Called by the server when sidecar is active, instead of
-/// sm.prefetch() + commit_and_encode().
-///
-/// The server's begin_batch/commit_batch wraps the entire tick,
-/// so writes from execute_writes run inside the existing transaction.
-pub fn sidecar_commit_and_encode(
-    comptime StorageParam: type,
-    sm: *StateMachineType(StorageParam),
-    msg: Message,
-    send_buf: []u8,
-    is_datastar_request: bool,
-    secret_key: *const [auth.key_length]u8,
-) ?CommitResult {
-    const client = &sidecar.?;
-
-    // Auth: resolve credential → identity. Same building block as SM.prefetch().
-    sm.resolve_credential(msg);
-
-    // Phase 1: execute prefetch SQL declared by sidecar in RT1.
-    const ro = StorageParam.ReadView.init(sm.storage);
-    const prefetch_len = client.execute_prefetch(ro) orelse return null;
-
-    // Phase 2: RT2 — send prefetch results, receive handle result.
-    const status = client.send_prefetch_recv_handle(prefetch_len) orelse return null;
-
-    // Phase 3: execute writes inside the server's transaction.
-    // The server's begin_batch/commit_batch wraps the entire tick.
-    if (!client.execute_writes(sm.storage)) return null;
-
-    // Phase 4: RT3 — execute render SQL, receive HTML.
-    // Writes are visible via read-your-writes within the server's open
-    // transaction. The actual commit (commit_batch) runs after process_inbox
-    // returns. Render sees the correct data — not "post-commit" in the
-    // SQLite sense, but the writes have been applied.
-    const ro_post = StorageParam.ReadView.init(sm.storage);
-    const html = client.execute_render(ro_post) orelse return null;
-
-    // Encode HTTP response — shared with native pipeline.
-    const identity = sm.prefetch_identity orelse std.mem.zeroes(message.PrefetchIdentity);
-    defer sm.prefetch_identity = null;
-
-    return encode_response(
-        status,
-        html,
-        send_buf,
-        is_datastar_request,
-        message.SessionAction.none, // session_action deferred — session-as-writes replaces this
-        identity.user_id,
-        identity.is_authenticated != 0,
-        identity.is_new != 0,
-        secret_key,
-    );
-}
+// Sidecar pipeline removed — sidecar now goes through the same
+// HandlersType dispatch as native. See handler_prefetch, handler_execute,
+// handler_render sidecar branches. One pipeline: sm.prefetch() +
+// commit_and_encode().
 
 // =====================================================================
 // Tests

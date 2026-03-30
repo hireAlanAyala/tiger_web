@@ -179,6 +179,41 @@ pub const SqliteStorage = struct {
                 self.record_count += 1;
             }
         }
+
+        /// Execute a write statement from raw binary wire format (sidecar writes).
+        /// Same as execute() but takes runtime SQL + binary params instead of
+        /// comptime SQL + typed args. WAL recording is a memcpy — the wire
+        /// format IS the recording format.
+        pub fn execute_raw(self: *WriteView, sql: []const u8, params_buf: []const u8, param_count: u8) bool {
+            if (!self.storage.execute_raw(sql, params_buf, param_count)) {
+                return false;
+            }
+
+            // Record for WAL if buffer is set. The sidecar's binary format
+            // matches the WAL recording format exactly — just memcpy.
+            if (self.record_buf) |buf| {
+                var pos = self.record_pos;
+
+                // sql: [u16 BE sql_len][sql_bytes]
+                const entry_len = 2 + sql.len + 1 + params_buf.len;
+                if (pos + entry_len > buf.len) return true; // overflow — skip recording
+                std.mem.writeInt(u16, buf[pos..][0..2], @intCast(sql.len), .big);
+                pos += 2;
+                @memcpy(buf[pos..][0..sql.len], sql);
+                pos += sql.len;
+
+                // params: [u8 param_count][params...]
+                buf[pos] = param_count;
+                pos += 1;
+                @memcpy(buf[pos..][0..params_buf.len], params_buf);
+                pos += params_buf.len;
+
+                self.record_pos = pos;
+                self.record_count += 1;
+            }
+
+            return true;
+        }
     };
 
     /// Serialize a single param value into the WAL recording buffer.

@@ -27,8 +27,6 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
         assert(@hasDecl(App, "Wal"));
         assert(@hasDecl(App, "translate"));
         assert(@hasDecl(App, "commit_and_encode"));
-        // sidecar_commit_and_encode is optional — only required if App has a sidecar field.
-        if (@hasDecl(App, "sidecar")) assert(@hasDecl(App, "sidecar_commit_and_encode"));
 
         // Framework contracts on App types.
         // Status must have .ok — framework uses it for control flow (render vs close).
@@ -245,88 +243,48 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
                 conn.is_datastar_request = parsed.is_datastar_request;
                 msg.set_credential(parsed.identity_cookie);
 
-                if (@hasDecl(App, "sidecar") and App.sidecar != null) {
-                    // Sidecar pipeline — own orchestration, shared building blocks.
-                    // Prefetch, handle, and render happen inside the pipeline.
-                    server.state_machine.tracer.start(.execute);
-                    const result = App.sidecar_commit_and_encode(
-                        Storage,
-                        server.state_machine,
-                        msg,
-                        &conn.send_buf,
-                        conn.is_datastar_request,
-                        server.state_machine.secret_key,
-                    );
-                    if (result) |commit_result| {
-                        server.state_machine.tracer.stop(.execute, msg.operation);
-                        server.state_machine.tracer.trace_log(msg.operation, commit_result.status, conn.fd);
-                        conn.set_response(commit_result.response.offset, commit_result.response.len);
-                        conn.keep_alive = commit_result.response.keep_alive;
-                    } else {
-                        // Sidecar failure — the request WAS routed (translate
-                        // succeeded), but execution failed (socket error, bad
-                        // SQL, sidecar crash). Distinct from unmapped_response
-                        // which means no route matched.
-                        server.state_machine.tracer.cancel(.execute);
-                        log.warn("sidecar pipeline failed for {s} fd={d}", .{ @tagName(msg.operation), conn.fd });
-                        const resp = sidecar_error_response(conn);
-                        conn.set_response(resp.offset, resp.len);
-                        conn.keep_alive = false;
-                    }
-                } else {
-                    // Native pipeline — SM orchestrates prefetch → commit → render.
+                // Unified pipeline — SM orchestrates prefetch → commit → render.
+                // HandlersType dispatches to native handlers or sidecar client
+                // per-operation. One code path for both.
 
-                    // Prefetch. Storage busy → skip, retry next tick.
-                    server.state_machine.tracer.start(.prefetch);
-                    if (!server.state_machine.prefetch(msg)) {
-                        server.state_machine.tracer.cancel(.prefetch);
-                        continue;
-                    }
-                    server.state_machine.tracer.stop(.prefetch, msg.operation);
-
-                    // Execute + render.
-                    server.state_machine.tracer.start(.execute);
-                    const commit_result = App.commit_and_encode(
-                        Storage,
-                        server.state_machine,
-                        msg,
-                        &conn.send_buf,
-                        conn.is_datastar_request,
-                        server.state_machine.secret_key,
-                    );
-                    server.state_machine.tracer.stop(.execute, msg.operation);
-                    server.state_machine.tracer.trace_log(msg.operation, commit_result.status, conn.fd);
-
-                    conn.set_response(commit_result.response.offset, commit_result.response.len);
-                    conn.keep_alive = commit_result.response.keep_alive;
+                // Prefetch. Storage busy or sidecar failure → skip, retry next tick.
+                server.state_machine.tracer.start(.prefetch);
+                if (!server.state_machine.prefetch(msg)) {
+                    server.state_machine.tracer.cancel(.prefetch);
+                    continue;
                 }
+                server.state_machine.tracer.stop(.prefetch, msg.operation);
+
+                // Execute + render.
+                server.state_machine.tracer.start(.execute);
+                const commit_result = App.commit_and_encode(
+                    Storage,
+                    server.state_machine,
+                    msg,
+                    &conn.send_buf,
+                    conn.is_datastar_request,
+                    server.state_machine.secret_key,
+                );
+                server.state_machine.tracer.stop(.execute, msg.operation);
+                server.state_machine.tracer.trace_log(msg.operation, commit_result.status, conn.fd);
+
+                conn.set_response(commit_result.response.offset, commit_result.response.len);
+                conn.keep_alive = commit_result.response.keep_alive;
 
                 // WAL: log SQL writes after execute.
+                // Both native and sidecar writes go through WriteView recording.
                 if (server.wal) |wal| {
                     if (!wal.disabled and msg.operation.is_mutation()) {
                         const sm = server.state_machine;
-                        if (@hasDecl(App, "sidecar") and App.sidecar != null) {
-                            // Sidecar pipeline: writes are in client.handle_writes.
-                            const client = &App.sidecar.?;
-                            wal.append_writes(
-                                msg.operation,
-                                sm.now,
-                                client.handle_writes,
-                                client.handle_write_count,
-                                &server.wal_scratch,
-                            );
-                        } else {
-                            // Native pipeline: writes recorded by WriteView.
-                            wal.append_writes(
-                                msg.operation,
-                                sm.now,
-                                if (sm.wal_record_buf) |buf| buf[0..sm.wal_record_len] else "",
-                                sm.wal_record_count,
-                                &server.wal_scratch,
-                            );
-                            sm.wal_record_len = 0;
-                            sm.wal_record_count = 0;
-                        }
+                        wal.append_writes(
+                            msg.operation,
+                            sm.now,
+                            if (sm.wal_record_buf) |buf| buf[0..sm.wal_record_len] else "",
+                            sm.wal_record_count,
+                            &server.wal_scratch,
+                        );
+                        sm.wal_record_len = 0;
+                        sm.wal_record_count = 0;
                     }
                 }
             }
@@ -430,21 +388,6 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
                 "Connection: close\r\n" ++
                 "\r\n" ++
                 "invalid request\n";
-            @memcpy(conn.send_buf[0..response.len], response);
-            return .{ .offset = 0, .len = response.len };
-        }
-
-        /// Write an error response for sidecar pipeline failures.
-        /// Distinct from unmapped_response: the request WAS routed, but
-        /// execution failed (sidecar crash, bad SQL, socket error).
-        fn sidecar_error_response(conn: *Connection) struct { offset: u32, len: u32 } {
-            const response =
-                "HTTP/1.1 200 OK\r\n" ++
-                "Content-Type: text/plain\r\n" ++
-                "Content-Length: 14\r\n" ++
-                "Connection: close\r\n" ++
-                "\r\n" ++
-                "sidecar error\n";
             @memcpy(conn.send_buf[0..response.len], response);
             return .{ .offset = 0, .len = response.len };
         }

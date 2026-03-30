@@ -55,6 +55,9 @@ pub const SidecarClient = struct {
     handle_writes: []const u8 = "",
     handle_write_count: u8 = 0,
     html: []const u8 = "",
+    /// Prefetch result size — stored between handler_prefetch and
+    /// handler_execute so the pipeline can pass it across phases.
+    stored_prefetch_len: usize = 0,
 
     comptime {
         // Memory budget: send + recv + state allocated once at startup.
