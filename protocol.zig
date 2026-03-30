@@ -124,6 +124,7 @@ pub const TypeTag = enum(u8) {
 // Message tags — identify each frame in the 3-RT exchange
 // =====================================================================
 
+/// Legacy 3-RT message tags — removed in migration cleanup.
 pub const MessageTag = enum(u8) {
     route_request = 0x01,
     route_prefetch_response = 0x02,
@@ -131,6 +132,36 @@ pub const MessageTag = enum(u8) {
     handle_render_response = 0x04,
     render_results = 0x05,
     html_response = 0x06,
+};
+
+// =====================================================================
+// CALL/RESULT protocol — dumb executor model
+//
+// Four frame types. The server sends CALL, the sidecar runs a function
+// and returns RESULT. During execution, the sidecar can send QUERY
+// frames to request data from the server (db.query() in prefetch/render).
+//
+// Frame layout (all within a length-prefixed frame envelope):
+//   CALL:         [tag][request_id: u32 BE][name_len: u16 BE][name][args...]
+//   RESULT:       [tag][request_id: u32 BE][flag: u8][result...]
+//   QUERY:        [tag][request_id: u32 BE][sql_len: u16 BE][sql][param_count: u8][params...]
+//   QUERY_RESULT: [tag][request_id: u32 BE][row_set...]
+// =====================================================================
+
+pub const CallTag = enum(u8) {
+    call = 0x10,
+    result = 0x11,
+    query = 0x12,
+    query_result = 0x13,
+};
+
+/// Maximum function name length (e.g., "handle_create_product").
+pub const function_name_max = 128;
+
+/// RESULT flag byte — success or failure.
+pub const ResultFlag = enum(u8) {
+    success = 0x00,
+    failure = 0x01,
 };
 
 /// Query mode — single row or array.
@@ -364,6 +395,113 @@ fn send_exact(fd: std.posix.fd_t, bytes: []const u8) bool {
         sent += n;
     }
     return true;
+}
+
+// =====================================================================
+// CALL/RESULT frame builders — server-side
+// =====================================================================
+
+/// Build a CALL frame in buf. Returns the payload length.
+/// Layout: [tag: u8][request_id: u32 BE][name_len: u16 BE][name][args...]
+pub fn build_call(buf: []u8, request_id: u32, function_name: []const u8, args: []const u8) ?usize {
+    assert(function_name.len <= function_name_max);
+    const total = 1 + 4 + 2 + function_name.len + args.len;
+    if (total > buf.len) return null;
+    if (total > frame_max) return null;
+
+    var pos: usize = 0;
+    buf[pos] = @intFromEnum(CallTag.call);
+    pos += 1;
+    std.mem.writeInt(u32, buf[pos..][0..4], request_id, .big);
+    pos += 4;
+    std.mem.writeInt(u16, buf[pos..][0..2], @intCast(function_name.len), .big);
+    pos += 2;
+    @memcpy(buf[pos..][0..function_name.len], function_name);
+    pos += function_name.len;
+    if (args.len > 0) {
+        @memcpy(buf[pos..][0..args.len], args);
+        pos += args.len;
+    }
+    return pos;
+}
+
+/// Build a QUERY_RESULT frame in buf. Returns the payload length.
+/// Layout: [tag: u8][request_id: u32 BE][row_set...]
+pub fn build_query_result(buf: []u8, request_id: u32, row_set: []const u8) ?usize {
+    const total = 1 + 4 + row_set.len;
+    if (total > buf.len) return null;
+    if (total > frame_max) return null;
+
+    var pos: usize = 0;
+    buf[pos] = @intFromEnum(CallTag.query_result);
+    pos += 1;
+    std.mem.writeInt(u32, buf[pos..][0..4], request_id, .big);
+    pos += 4;
+    if (row_set.len > 0) {
+        @memcpy(buf[pos..][0..row_set.len], row_set);
+        pos += row_set.len;
+    }
+    return pos;
+}
+
+/// Parse a frame received from the sidecar. Returns the tag, request_id,
+/// and payload (everything after tag + request_id).
+pub const SidecarFrame = struct {
+    tag: CallTag,
+    request_id: u32,
+    payload: []const u8,
+};
+
+pub fn parse_sidecar_frame(frame: []const u8) ?SidecarFrame {
+    if (frame.len < 5) return null; // tag(1) + request_id(4)
+    const tag = std.meta.intToEnum(CallTag, frame[0]) catch return null;
+    if (tag != .result and tag != .query) return null; // sidecar only sends these
+    const request_id = std.mem.readInt(u32, frame[1..5], .big);
+    return .{
+        .tag = tag,
+        .request_id = request_id,
+        .payload = frame[5..],
+    };
+}
+
+/// Parse a RESULT payload — flag byte + result data.
+pub const ResultPayload = struct {
+    flag: ResultFlag,
+    data: []const u8,
+};
+
+pub fn parse_result_payload(payload: []const u8) ?ResultPayload {
+    if (payload.len < 1) return null;
+    const flag = std.meta.intToEnum(ResultFlag, payload[0]) catch return null;
+    return .{
+        .flag = flag,
+        .data = payload[1..],
+    };
+}
+
+/// Parse a QUERY payload — sql + params.
+pub const QueryPayload = struct {
+    sql: []const u8,
+    params_buf: []const u8,
+    param_count: u8,
+};
+
+pub fn parse_query_payload(payload: []const u8) ?QueryPayload {
+    var pos: usize = 0;
+    if (pos + 2 > payload.len) return null;
+    const sql_len = std.mem.readInt(u16, payload[pos..][0..2], .big);
+    pos += 2;
+    if (pos + sql_len > payload.len) return null;
+    const sql = payload[pos..][0..sql_len];
+    pos += sql_len;
+    if (pos >= payload.len) return null;
+    const param_count = payload[pos];
+    pos += 1;
+    return .{
+        .sql = sql,
+        .params_buf = payload[pos..],
+        .param_count = param_count,
+    };
 }
 
 // =====================================================================
@@ -610,6 +748,86 @@ test "cross-language enum vector — write operation/status mappings" {
     const file = std.fs.cwd().createFile("/tmp/tiger_enum_test.json", .{}) catch unreachable;
     defer file.close();
     file.writeAll(fbs.getWritten()) catch unreachable;
+}
+
+test "CALL frame build and parse round trip" {
+    var buf: [1024]u8 = undefined;
+    const len = build_call(&buf, 42, "handle_create_product", "args_data") orelse unreachable;
+    // Tag
+    try std.testing.expectEqual(@as(u8, @intFromEnum(CallTag.call)), buf[0]);
+    // Request ID
+    try std.testing.expectEqual(@as(u32, 42), std.mem.readInt(u32, buf[1..5], .big));
+    // Function name length
+    try std.testing.expectEqual(@as(u16, 21), std.mem.readInt(u16, buf[5..7], .big));
+    // Function name
+    try std.testing.expectEqualStrings("handle_create_product", buf[7..28]);
+    // Args
+    try std.testing.expectEqualStrings("args_data", buf[28..len]);
+}
+
+test "RESULT parse" {
+    const payload = [_]u8{@intFromEnum(ResultFlag.success)} ++ "result_data".*;
+    const result = parse_result_payload(&payload) orelse unreachable;
+    try std.testing.expectEqual(ResultFlag.success, result.flag);
+    try std.testing.expectEqualStrings("result_data", result.data);
+}
+
+test "RESULT parse — failure" {
+    const payload = [_]u8{@intFromEnum(ResultFlag.failure)};
+    const result = parse_result_payload(&payload) orelse unreachable;
+    try std.testing.expectEqual(ResultFlag.failure, result.flag);
+    try std.testing.expectEqual(@as(usize, 0), result.data.len);
+}
+
+test "sidecar frame parse — RESULT" {
+    var buf: [64]u8 = undefined;
+    buf[0] = @intFromEnum(CallTag.result);
+    std.mem.writeInt(u32, buf[1..5], 99, .big);
+    buf[5] = @intFromEnum(ResultFlag.success);
+    @memcpy(buf[6..10], "data");
+    const frame = parse_sidecar_frame(buf[0..10]) orelse unreachable;
+    try std.testing.expectEqual(CallTag.result, frame.tag);
+    try std.testing.expectEqual(@as(u32, 99), frame.request_id);
+    const result = parse_result_payload(frame.payload) orelse unreachable;
+    try std.testing.expectEqual(ResultFlag.success, result.flag);
+    try std.testing.expectEqualStrings("data", result.data);
+}
+
+test "sidecar frame parse — QUERY" {
+    var buf: [64]u8 = undefined;
+    buf[0] = @intFromEnum(CallTag.query);
+    std.mem.writeInt(u32, buf[1..5], 7, .big);
+    // sql_len = 11, sql = "SELECT * .."
+    const sql = "SELECT * ..";
+    std.mem.writeInt(u16, buf[5..7], @intCast(sql.len), .big);
+    @memcpy(buf[7..18], sql);
+    buf[18] = 0; // param_count = 0
+    const frame = parse_sidecar_frame(buf[0..19]) orelse unreachable;
+    try std.testing.expectEqual(CallTag.query, frame.tag);
+    const query = parse_query_payload(frame.payload) orelse unreachable;
+    try std.testing.expectEqualStrings("SELECT * ..", query.sql);
+    try std.testing.expectEqual(@as(u8, 0), query.param_count);
+}
+
+test "QUERY_RESULT frame build" {
+    var buf: [64]u8 = undefined;
+    const row_data = "row_set_bytes";
+    const len = build_query_result(&buf, 7, row_data) orelse unreachable;
+    try std.testing.expectEqual(@as(u8, @intFromEnum(CallTag.query_result)), buf[0]);
+    try std.testing.expectEqual(@as(u32, 7), std.mem.readInt(u32, buf[1..5], .big));
+    try std.testing.expectEqualStrings("row_set_bytes", buf[5..len]);
+}
+
+test "parse rejects invalid sidecar tag" {
+    var buf: [64]u8 = undefined;
+    buf[0] = @intFromEnum(CallTag.call); // server sends CALL, not sidecar
+    std.mem.writeInt(u32, buf[1..5], 1, .big);
+    try std.testing.expect(parse_sidecar_frame(buf[0..10]) == null);
+}
+
+test "parse rejects truncated frame" {
+    var buf: [3]u8 = undefined; // too short for tag + request_id
+    try std.testing.expect(parse_sidecar_frame(&buf) == null);
 }
 
 fn test_socketpair() [2]std.posix.fd_t {
