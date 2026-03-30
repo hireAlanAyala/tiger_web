@@ -324,16 +324,28 @@ pub fn HandlersType(comptime StorageParam: type) type {
             storage: anytype,
         ) []const u8 {
             if (sidecar) |*client| {
-                // Build render args: [operation: u8][status: u8]
-                const args = [_]u8{ @intFromEnum(operation), @intFromEnum(status) };
-
-                client.reset_call_state();
-                if (!client.call_submit("render", &args)) return "";
-                if (!client.run_to_completion(query_dispatch_fn, @ptrCast(storage.storage), protocol.queries_max)) return "";
-                defer client.reset_call_state();
-
-                if (client.result_flag == .failure) return "";
-                return client.copy_state(client.result_data);
+                // Idempotent: safe to call from both start and resume.
+                switch (client.call_state) {
+                    .complete => {
+                        defer client.reset_call_state();
+                        if (client.result_flag == .failure) return "";
+                        return client.copy_state(client.result_data);
+                    },
+                    .idle => {
+                        // First call: send CALL (non-blocking).
+                        const args = [_]u8{ @intFromEnum(operation), @intFromEnum(status) };
+                        if (!client.call_submit("render", &args)) return "";
+                        // Return empty — pending signal. commit_dispatch
+                        // checks is_sidecar_pending to distinguish from
+                        // a real empty render result.
+                        return "";
+                    },
+                    .receiving => return "", // still waiting
+                    .failed => {
+                        client.reset_call_state();
+                        return "";
+                    },
+                }
             }
 
             return dispatch_render(cache, operation, status, fw, render_buf, storage);

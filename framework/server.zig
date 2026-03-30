@@ -390,6 +390,12 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
                             ro,
                         );
 
+                        // Check if sidecar render CALL is pending.
+                        if (App.HandlersType(Storage).is_sidecar_pending()) {
+                            server.submit_sidecar_recv();
+                            return;
+                        }
+
                         const commit_result = App.encode_response(
                             pipeline_resp.status,
                             html,
