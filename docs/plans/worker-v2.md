@@ -206,6 +206,45 @@ reads locally, never reaches out.
 data locally. The WAL captures every mutation including synced data.
 No unbounded waits, no external dependencies in the hot path.
 
+### Separate connections for workers and requests
+
+Worker CALLs are long-running (minutes — external API calls).
+Request CALLs are short-lived (microseconds — sidecar handler
+returns immediately). Mixing them on one socket means a slow worker
+blocks all request processing.
+
+The sidecar accepts two connections from the server:
+- **Request connection** — serial pipeline, request_id=0, fast CALLs
+  (route, prefetch, handle, render).
+- **Worker connection** — concurrent, incrementing request_ids,
+  slow CALLs (worker functions). Multiple in-flight, matched by id.
+
+Each connection has its own SidecarClient with its own send_buf,
+recv_buf, and epoll completion. No multiplexing, no frame
+interleaving.
+
+**Why:** TB separates control plane from data plane. Request
+handling is data plane (fast, bounded). Worker dispatch is control
+plane (slow, unbounded). Don't mix them on the same connection.
+
+### WAL entry format for worker dispatches
+
+Worker dispatches are recorded in the WAL alongside SQL writes.
+A handle can do SQL writes AND dispatch a worker in the same
+transaction — both are in the same WAL entry.
+
+The WAL entry format gains a discriminator:
+- SQL writes: existing format `[sql_len][sql][param_count][params]`
+- Worker dispatches: `[marker][name_len][name][args_bytes]`
+
+The marker byte distinguishes worker dispatches from SQL writes
+in the entry's write list. On WAL replay, SQL writes replay as
+SQL, worker dispatches rebuild the pending dispatch index.
+
+**Why:** The WAL already records every committed mutation. Worker
+dispatches are mutations — "intent to do external work." Without
+WAL entries, the server loses track of pending work after a crash.
+
 ---
 
 ## Implementation checklist
