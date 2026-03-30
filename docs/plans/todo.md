@@ -98,6 +98,7 @@ if you need more.
 - is ci/cd tracking benchmarks/loadtest/perf?
 - annotation settings should start with @ so they're obvious special syntax
 - ensure all errors absorbed by the framework like, db, network, worker, etc. are logged correctly for debugging.
+- change prefetch from epoll to io_uring to 15x if a user uses a network db as the db interface postgres would go from 2k to 50k req/s
 
 # clean up
 - ensure we use cli/program defaults very carefully. i like no defaults or few defaults over heavy defaults

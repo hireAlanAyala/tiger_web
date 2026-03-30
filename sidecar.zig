@@ -1,25 +1,15 @@
-//! Unix socket client for the sidecar binary protocol.
+//! Sidecar client — CALL/RESULT protocol over unix socket.
 //!
-//! Three round trips per HTTP request:
-//!   RT1: route_request → route_prefetch_response
-//!   RT2: prefetch_results → handle_render_response
-//!   RT3: render_results → html_response
+//! Dumb executor model: server sends CALL frames, sidecar runs
+//! functions, returns RESULT frames. QUERY sub-protocol for
+//! db.query() in prefetch and render.
 //!
-//! The sidecar pipeline (app.sidecar_commit_and_encode) orchestrates
-//! calls to this client. The SM is NOT involved — the sidecar has its
-//! own pipeline with the same building blocks (transactions, auth, WAL).
+//! State machine: call_submit → on_recv (loop) → complete/failed.
+//! In Phase 2 (sync), run_to_completion drives the loop.
+//! In Phase 3 (async), epoll drives on_recv.
 //!
-//! Methods must be called in order:
-//!   translate → execute_prefetch → send_prefetch_recv_handle →
-//!   execute_writes → execute_render
-//! Per-request state is copied into state_buf (owned memory). Slices
-//! do not alias recv_buf — immune to call reordering.
-//!
-//! Sidecar failure at any point: close connection, return error to HTTP
-//! client, reconnect lazily on next request. No mid-exchange retry.
-//! No retry because: writes may have committed, re-running the handler
-//! against post-commit state produces different results. The operation
-//! either completed or it didn't. The client retries (TB pattern).
+//! Server listens on unix socket, sidecar connects. Connection
+//! established at startup before HTTP is accepted.
 
 const std = @import("std");
 const assert = std.debug.assert;
@@ -49,15 +39,11 @@ pub const SidecarClient = struct {
     // point into state_buf, not recv_buf. Immune to call reordering.
     state_buf: *[state_buf_max]u8,
     state_pos: usize = 0,
-    prefetch_decl: []const u8 = "",
-    render_decl: []const u8 = "",
-    handle_status: message.Status = .ok,
+    // Write execution state — shared between old and new protocol.
+    // handler_execute sets these from the RESULT payload, then calls
+    // execute_writes which reads them.
     handle_writes: []const u8 = "",
     handle_write_count: u8 = 0,
-    html: []const u8 = "",
-    /// Prefetch result size — stored between handler_prefetch and
-    /// handler_execute so the pipeline can pass it across phases.
-    stored_prefetch_len: usize = 0,
 
     // CALL/RESULT state machine fields — used by the new protocol.
     call_state: CallState = .idle,
@@ -232,12 +218,8 @@ pub const SidecarClient = struct {
 
     fn reset_request_state(self: *SidecarClient) void {
         self.state_pos = 0;
-        self.prefetch_decl = "";
-        self.render_decl = "";
-        self.handle_status = .ok;
         self.handle_writes = "";
         self.handle_write_count = 0;
-        self.html = "";
     }
 
     // =================================================================
@@ -425,166 +407,6 @@ pub const SidecarClient = struct {
     }
 
     // =================================================================
-    // RT1: Route (legacy 3-RT protocol)
-    // =================================================================
-
-    /// Send route_request, receive route_prefetch_response.
-    /// Stores prefetch declarations for execute_prefetch.
-    pub fn translate(
-        self: *SidecarClient,
-        method_val: http.Method,
-        path: []const u8,
-        body: []const u8,
-    ) ?message.Message {
-        if (self.fd == -1) self.try_reconnect();
-        if (self.fd == -1) return null;
-        self.reset_request_state();
-
-        // Build route_request: [tag][method][u16 path_len][path][u16 body_len][body]
-        var pos: usize = 0;
-        const buf = self.send_buf;
-
-        buf[pos] = @intFromEnum(protocol.MessageTag.route_request);
-        pos += 1;
-        buf[pos] = @intFromEnum(method_val);
-        pos += 1;
-        if (path.len > 0xFFFF) return null;
-        std.mem.writeInt(u16, buf[pos..][0..2], @intCast(path.len), .big);
-        pos += 2;
-        @memcpy(buf[pos..][0..path.len], path);
-        pos += path.len;
-        if (body.len > 0xFFFF) return null;
-        std.mem.writeInt(u16, buf[pos..][0..2], @intCast(body.len), .big);
-        pos += 2;
-        @memcpy(buf[pos..][0..body.len], body);
-        pos += body.len;
-
-        if (!protocol.write_frame(self.fd, buf[0..pos])) {
-            self.handle_disconnect();
-            return null;
-        }
-
-        // Receive: [tag][found][operation][u128 id BE][prefetch_declarations...]
-        const resp = protocol.read_frame(self.fd, self.recv_buf) orelse {
-            self.handle_disconnect();
-            return null;
-        };
-
-        if (resp.len < 3) { self.handle_disconnect(); return null; }
-        if (resp[0] != @intFromEnum(protocol.MessageTag.route_prefetch_response)) {
-            log.err("translate: unexpected tag {d}", .{resp[0]});
-            self.handle_disconnect();
-            return null;
-        }
-        if (resp[1] == 0) return null; // not found
-
-        const operation = std.meta.intToEnum(message.Operation, resp[2]) catch {
-            log.err("translate: unknown operation {d}", .{resp[2]});
-            self.handle_disconnect();
-            return null;
-        };
-
-        if (resp.len < 19) { self.handle_disconnect(); return null; }
-        const id = std.mem.readInt(u128, resp[3..19], .big);
-        self.prefetch_decl = self.copy_state(resp[19..]);
-
-        var msg = std.mem.zeroes(message.Message);
-        msg.operation = operation;
-        msg.id = id;
-        return msg;
-    }
-
-    // =================================================================
-    // RT2 send: Prefetch — execute declared SQL, build results frame
-    // =================================================================
-
-    /// Execute prefetch SQL declarations from RT1. Write row sets into
-    /// send_buf. Returns frame length, or null on error.
-    /// Consumes prefetch_decl (aliases recv_buf from RT1).
-    pub fn execute_prefetch(self: *SidecarClient, storage: anytype) ?usize {
-        const decl = self.prefetch_decl;
-        var buf = self.send_buf;
-        var pos: usize = 0;
-
-        buf[pos] = @intFromEnum(protocol.MessageTag.prefetch_results);
-        pos += 1;
-
-        if (decl.len == 0) return pos;
-
-        var iter = DeclIterator.init(decl) orelse return null;
-        while (iter.next()) |entry| {
-            const result = storage.query_raw(entry.sql, entry.params, entry.param_count, entry.mode, buf[pos..]);
-            if (result) |row_data| {
-                pos += row_data.len;
-            } else {
-                // Prefetch query failed — fail the entire request.
-                // A query failure means the SQL is bad (scanner bug) or
-                // the schema changed. Silent empty results would cause
-                // the handler to make wrong decisions.
-                return null;
-            }
-        }
-        if (!iter.valid) return null;
-
-        return pos;
-    }
-
-    // =================================================================
-    // RT2 recv: Handle — send prefetch results, receive handle response
-    // =================================================================
-
-    /// Send prefetch results, receive handle_render_response.
-    /// Stores status, writes, render declarations.
-    pub fn send_prefetch_recv_handle(self: *SidecarClient, prefetch_len: usize) ?message.Status {
-        if (!protocol.write_frame(self.fd, self.send_buf[0..prefetch_len])) {
-            self.handle_disconnect();
-            return null;
-        }
-
-        // Receive: [tag][status][u8 write_count][writes...][render_declarations...]
-        const resp = protocol.read_frame(self.fd, self.recv_buf) orelse {
-            self.handle_disconnect();
-            return null;
-        };
-
-        if (resp.len < 3) { self.handle_disconnect(); return null; }
-        if (resp[0] != @intFromEnum(protocol.MessageTag.handle_render_response)) {
-            log.err("handle: unexpected tag {d}", .{resp[0]});
-            self.handle_disconnect();
-            return null;
-        }
-
-        const status = std.meta.intToEnum(message.Status, resp[1]) catch {
-            log.err("handle: unknown status {d}", .{resp[1]});
-            self.handle_disconnect();
-            return null;
-        };
-        self.handle_status = status;
-
-        const write_count = resp[2];
-        if (write_count > protocol.writes_max) {
-            log.err("handle: write count {d} exceeds max {d}", .{ write_count, protocol.writes_max });
-            self.handle_disconnect();
-            return null;
-        }
-        self.handle_write_count = write_count;
-
-        // Scan past write entries to find render declarations.
-        var dpos: usize = 3;
-        const writes_start = dpos;
-        for (0..write_count) |_| {
-            dpos = skip_write_entry(resp, dpos) orelse {
-                self.handle_disconnect();
-                return null;
-            };
-        }
-
-        self.handle_writes = self.copy_state(resp[writes_start..dpos]);
-        self.render_decl = self.copy_state(resp[dpos..]);
-        return status;
-    }
-
-    // =================================================================
     // Execute writes
     // =================================================================
 
@@ -617,63 +439,6 @@ pub const SidecarClient = struct {
         }
         return true;
     }
-
-    // =================================================================
-    // RT3: Render — execute render SQL, send results, receive HTML
-    // =================================================================
-
-    /// Execute render SQL, send results, receive HTML.
-    /// Returns HTML slice (aliases recv_buf).
-    pub fn execute_render(self: *SidecarClient, storage: anytype) ?[]const u8 {
-        var buf = self.send_buf;
-        var pos: usize = 0;
-
-        buf[pos] = @intFromEnum(protocol.MessageTag.render_results);
-        pos += 1;
-
-        const decl = self.render_decl;
-        if (decl.len > 0) {
-            var iter = DeclIterator.init(decl) orelse return null;
-            while (iter.next()) |entry| {
-                const result = storage.query_raw(entry.sql, entry.params, entry.param_count, entry.mode, buf[pos..]);
-                if (result) |row_data| {
-                    pos += row_data.len;
-                } else {
-                    // Render query failed — write empty row set.
-                    // Unlike prefetch, render failure is non-fatal: the
-                    // handler renders an error or fallback for missing data.
-                    if (pos + 6 > buf.len) return null;
-                    std.mem.writeInt(u16, buf[pos..][0..2], 0, .big);
-                    pos += 2;
-                    std.mem.writeInt(u32, buf[pos..][0..4], 0, .big);
-                    pos += 4;
-                }
-            }
-            if (!iter.valid) return null;
-        }
-
-        if (!protocol.write_frame(self.fd, buf[0..pos])) {
-            self.handle_disconnect();
-            return null;
-        }
-
-        // Receive: [tag][html_bytes...]
-        const resp = protocol.read_frame(self.fd, self.recv_buf) orelse {
-            self.handle_disconnect();
-            return null;
-        };
-
-        if (resp.len < 1) { self.handle_disconnect(); return null; }
-        if (resp[0] != @intFromEnum(protocol.MessageTag.html_response)) {
-            log.err("render: unexpected tag {d}", .{resp[0]});
-            self.handle_disconnect();
-            return null;
-        }
-
-        self.html = self.copy_state(resp[1..]);
-        return self.html;
-    }
-
     // =================================================================
     // Binary format helpers — shared parsing for declarations/params
     // =================================================================
@@ -704,92 +469,4 @@ pub const SidecarClient = struct {
         return pos;
     }
 
-    /// Skip past one write entry: [u16 sql_len][sql][u8 param_count][params...]
-    fn skip_write_entry(data: []const u8, start: usize) ?usize {
-        var pos = start;
-        if (pos + 2 > data.len) return null;
-        const sql_len = std.mem.readInt(u16, data[pos..][0..2], .big);
-        pos += 2;
-        if (pos + sql_len > data.len) return null;
-        pos += sql_len;
-        if (pos >= data.len) return null;
-        const param_count = data[pos];
-        pos += 1;
-        return skip_params(data, pos, param_count);
-    }
-
-    /// Iterator over SQL declarations (prefetch or render).
-    /// Format: [u8 query_count][queries: { key, sql, mode, params }]
-    pub const DeclIterator = struct {
-        data: []const u8,
-        pos: usize,
-        remaining: u8,
-        valid: bool,
-
-        const Entry = struct {
-            sql: []const u8,
-            params: []const u8,
-            param_count: u8,
-            mode: protocol.QueryMode,
-        };
-
-        pub fn init(data: []const u8) ?DeclIterator {
-            if (data.len == 0) return null;
-            return .{
-                .data = data,
-                .pos = 1,
-                .remaining = data[0],
-                .valid = true,
-            };
-        }
-
-        pub fn next(self: *DeclIterator) ?Entry {
-            if (self.remaining == 0) return null;
-            self.remaining -= 1;
-
-            const d = self.data;
-            var p = self.pos;
-
-            // key: [u8 key_len][key_bytes] — skip, framework doesn't need it
-            if (p >= d.len) { self.valid = false; return null; }
-            const key_len = d[p];
-            p += 1;
-            if (p + key_len > d.len) { self.valid = false; return null; }
-            p += key_len;
-
-            // sql: [u16 BE sql_len][sql_bytes]
-            if (p + 2 > d.len) { self.valid = false; return null; }
-            const sql_len = std.mem.readInt(u16, d[p..][0..2], .big);
-            p += 2;
-            if (p + sql_len > d.len) { self.valid = false; return null; }
-            const sql = d[p..][0..sql_len];
-            p += sql_len;
-
-            // mode: [u8]
-            if (p >= d.len) { self.valid = false; return null; }
-            const mode = std.meta.intToEnum(protocol.QueryMode, d[p]) catch {
-                self.valid = false;
-                return null;
-            };
-            p += 1;
-
-            // params: [u8 param_count][params...]
-            if (p >= d.len) { self.valid = false; return null; }
-            const param_count = d[p];
-            p += 1;
-            const params_start = p;
-            p = skip_params(d, p, param_count) orelse {
-                self.valid = false;
-                return null;
-            };
-
-            self.pos = p;
-            return .{
-                .sql = sql,
-                .params = d[params_start..p],
-                .param_count = param_count,
-                .mode = mode,
-            };
-        }
-    };
 };

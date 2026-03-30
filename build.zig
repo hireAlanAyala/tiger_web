@@ -175,7 +175,7 @@ pub fn build(b: *std.Build) void {
     }
 
     // Modules that need sqlite3 + libc.
-    for ([_][]const u8{ "storage.zig", "replay.zig", "state_machine_test.zig", "sidecar.zig", "sidecar_test.zig" }) |mod| {
+    for ([_][]const u8{ "storage.zig", "replay.zig", "state_machine_test.zig", "sidecar.zig" }) |mod| {
         const unit_test = b.addTest(.{
             .root_source_file = b.path(mod),
             .target = target,
