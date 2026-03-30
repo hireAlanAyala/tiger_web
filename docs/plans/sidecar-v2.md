@@ -5,11 +5,16 @@ one dependency chain. This plan covers the bottom-up sequence. Each
 phase builds correctly on the one below — no shims, no rework.
 
 ```
-Phase 1: Unify pipeline      (Handlers type parameter, remove two-path branching)
-Phase 2: Async prefetch       (callback-driven, serial pipeline, TB pattern)
-Phase 3: CALL/RESULT protocol (dumb executor, QUERY sub-protocol)
-Phase 4: Workers              (see worker-v2.md)
+Phase 1: Unify pipeline       (Handlers type parameter, remove two-path branching) ✓
+Phase 2: CALL/RESULT protocol  (dumb executor, QUERY sub-protocol)
+Phase 3: Async prefetch        (callback-driven, serial pipeline, TB pattern)
+Phase 4: Workers               (see worker-v2.md)
 ```
+
+Phase order revised after Phase 1: protocol before async. Making the
+old 3-RT protocol async would be wasted work — Phase 2 replaces it
+entirely. Build the right protocol first (eliminates Phase 1's zeroed
+cache and cross-phase state awkwardness), then make it non-blocking.
 
 ## Design decisions
 
@@ -377,21 +382,23 @@ language support is complete. Phase 1 is one thing: restructure.
 
 ---
 
-## Phase 2: Async prefetch
+## Phase 2: CALL/RESULT protocol
 
-**Goal:** Prefetch takes a callback and returns void, matching
-TigerBeetle's pattern. The pipeline is serial — one request at a
-time. The async callback is for "don't block the tick loop on IO,"
-not for "run multiple pipelines concurrently."
+**Goal:** Replace the 3-RT sidecar protocol with the dumb executor
+model. The Handlers sidecar branches send CALL frames and receive
+RESULT frames. The QUERY sub-protocol enables `await db.query()` in
+prefetch and render. Eliminates Phase 1's zeroed cache and cross-
+phase state awkwardness.
 
-**Current state:** `state_machine.prefetch(msg)` returns `bool`.
-Synchronous. The server blocks until prefetch completes, then
-immediately calls commit.
+**Current state:** Handlers sidecar branches use the 3-RT protocol
+(from Phase 1). The sidecar process reads the manifest, has a
+dispatch table, understands routing. Cache is zeroed for sidecar
+operations. SidecarClient holds cross-phase state.
 
-**Target state:** `state_machine.prefetch(msg, callback)` returns
-`void`. The callback fires when prefetch is complete — immediately
-for ZigHandlers (SQLite is sync), later for SidecarHandlers (RESULT
-arrives on epoll).
+**Target state:** Handlers sidecar branches send CALL/RESULT frames.
+The sidecar process is a dumb function registry. Each phase is a
+separate CALL with explicit args — no zeroed cache, no cross-phase
+state. The server owns all knowledge.
 
 ### Serial pipeline model
 
@@ -473,32 +480,6 @@ may span ticks (callback fires on epoll RESULT).
 - Transaction model unchanged. `begin_batch` / `commit_batch` wraps
   the commit stage. One transaction, one request, same as today.
 
-### Throughput note
-
-Serial pipeline means the sidecar CALL latency directly impacts
-throughput — one request at a time, each waiting for the sidecar.
-This is the correct starting point. TB also commits one at a time.
-Pipelining (preparing request N+1 while committing N) is a future
-optimization, not a Phase 2 concern. Build correct first, optimize
-later.
-
----
-
-## Phase 3: CALL/RESULT protocol
-
-**Goal:** Replace the 3-RT sidecar protocol with the dumb executor
-model. SidecarHandlers sends CALL frames, receives RESULT frames.
-The QUERY sub-protocol enables `await db.query()` in prefetch and
-render.
-
-**Current state:** SidecarHandlers wraps the 3-RT protocol behind
-the Handlers interface (from Phase 1). The sidecar process reads the
-manifest, has a dispatch table, understands routing.
-
-**Target state:** SidecarHandlers sends CALL/RESULT frames. The
-sidecar process is a dumb function registry. The server owns all
-knowledge.
-
 ### Protocol frames
 
 | Frame | Direction | Fields |
@@ -517,8 +498,9 @@ knowledge.
 ### Checklist
 
 - [ ] Define frame format: CALL, RESULT, QUERY, QUERY_RESULT.
-- [ ] Reimplement SidecarHandlers using CALL/RESULT frames. Replace
-  the 3-RT protocol implementation from Phase 1.
+- [ ] Reimplement Handlers sidecar branches using CALL/RESULT frames.
+  Replace the 3-RT protocol. Eliminates zeroed cache and
+  stored_prefetch_len cross-phase state from Phase 1.
 - [ ] Server accepts sidecar connection on unix socket (reverse of
   current — server listens, sidecar connects).
 - [ ] Server does not accept HTTP until sidecar is connected.
@@ -603,9 +585,114 @@ tick N+4: process_inbox picks connection B
   ...
 ```
 
-For ZigHandlers, all stages complete in tick N (immediate callbacks).
-For SidecarHandlers, stages may span ticks. The server does IO work
+For Zig handlers, all stages complete in tick N (immediate callbacks).
+For sidecar handlers, stages may span ticks. The server does IO work
 (accept, recv, send, timeout) in every tick regardless.
+
+---
+
+## Phase 3: Async prefetch
+
+**Goal:** Prefetch takes a callback and returns void, matching
+TigerBeetle's pattern. The pipeline is serial — one request at a
+time. The async callback is for "don't block the tick loop on IO,"
+not for "run multiple pipelines concurrently."
+
+**Current state (after Phase 2):** Pipeline is synchronous — blocks
+on each CALL/RESULT exchange. CALL/RESULT protocol is in place.
+
+**Target state:** `state_machine.prefetch(msg, callback)` returns
+`void`. The callback fires when prefetch is complete — immediately
+for Zig handlers (SQLite is sync), later for sidecar handlers
+(RESULT arrives on epoll). Same pattern for handle and render.
+
+### Serial pipeline model
+
+One request in the pipeline at a time. Matching TigerBeetle:
+
+```
+process_inbox:
+  1. Pick ONE ready connection
+  2. prefetch(msg, callback) — may return immediately or pend
+  3. If pending: set commit_stage = .prefetch, return
+     (tick continues: accept, recv, send, timeout — but no new pipeline)
+  4. Callback fires (same tick for Zig, later tick for sidecar)
+  5. commit_stage advances: handle → commit → render → encode → send
+  6. Pipeline complete. commit_stage = .idle
+  7. Next tick: process_inbox picks next ready connection
+```
+
+The server tracks pipeline state with a `commit_stage` enum on the
+server (not the connection), matching TB's `replica.commit_stage`:
+
+```zig
+const CommitStage = enum {
+    idle,              // No request in pipeline
+    prefetch,          // Waiting for prefetch callback
+    handle,            // Waiting for handle callback (sidecar)
+    commit,            // Executing writes in transaction
+    render,            // Waiting for render callback (sidecar)
+    encode,            // Building HTTP response
+};
+```
+
+For Zig handlers, all stages complete in one tick (callbacks fire
+immediately). For sidecar handlers, prefetch/handle/render stages
+may span ticks (callback fires on epoll RESULT).
+
+### Checklist
+
+- [ ] Add `commit_stage: CommitStage` to the server. Initialized to
+  `.idle`. Guards against starting a new pipeline while one is
+  in-flight.
+- [ ] Add `commit_connection` to the server: tracks which connection
+  is currently in the pipeline. Set on pipeline start, cleared on
+  pipeline complete.
+- [ ] Change `StateMachine.prefetch` signature: take callback, return
+  void. Match TB's `prefetch(callback, op, ...)` pattern.
+- [ ] Store prefetch callback and state on the SM:
+  `prefetch_callback`, `prefetch_cache`, `prefetch_identity`.
+  One set of fields — one request at a time.
+- [ ] Zig handlers: handler_prefetch calls handler synchronously,
+  fires callback immediately. No behavior change.
+- [ ] Sidecar handlers: handler_prefetch sends CALL, stores callback,
+  returns. Callback fires on RESULT from epoll.
+- [ ] Server tick loop: `process_inbox` checks `commit_stage`. If not
+  `.idle`, skip pipeline dispatch — only do IO work (accept, recv,
+  send, timeout).
+- [ ] Pipeline resumes via callback: prefetch callback advances to
+  handle stage. Handle callback advances to commit. Commit
+  advances to render. Render callback advances to encode.
+- [ ] Busy/retry: if Zig handler storage is busy (current `null`
+  return), the callback fires with a busy signal. The connection
+  stays in `.ready`, `commit_stage` returns to `.idle`. Retried
+  next tick. Same behavior as today.
+- [ ] Ordering: FIFO. `process_inbox` picks the first `.ready`
+  connection. One at a time. No reordering.
+- [ ] All existing tests pass. For Zig handlers, callbacks fire
+  immediately — functionally identical to the current sync path.
+  Same tick, same order.
+
+### Design constraints
+
+- One request in the pipeline at a time. `commit_stage != .idle`
+  means no new pipeline starts. Matches TB.
+- Prefetch state on the SM, not per-connection. One set of fields.
+- The callback pattern matches TB: `prefetch(callback)` where the
+  callback receives `*StateMachine`.
+- Zig handlers' immediate callback produces identical timing to the
+  current synchronous path — same tick, same order, same results.
+- Transaction model unchanged. `begin_batch` / `commit_batch` wraps
+  the commit stage. One transaction, one request, same as today.
+
+### Throughput note
+
+Serial pipeline means the sidecar CALL latency directly impacts
+throughput — one request at a time, each waiting for the sidecar.
+This is the correct starting point. TB also commits one at a time.
+Pipelining (preparing request N+1 while committing N) is a future
+optimization, not a Phase 3 concern. Build correct first, optimize
+later.
 
 ---
 
@@ -633,15 +720,19 @@ in FIFO order like any other request.
 ## Dependency graph
 
 ```
-Phase 1 (unify pipeline — Handlers type parameter)
+Phase 1 (unify pipeline — Handlers type parameter) ✓
     ↓
-Phase 2 (async prefetch — serial, callback-driven)
+Phase 2 (CALL/RESULT protocol — dumb executor)
     ↓
-Phase 3 (CALL/RESULT protocol — dumb executor)
+Phase 3 (async prefetch — serial, callback-driven)
     ↓
 Phase 4 (workers — worker-v2.md)
 ```
 
+Phase order revised after Phase 1: protocol before async. The
+protocol eliminates Phase 1's temporary awkwardness (zeroed cache,
+cross-phase state). Async is then applied to the final protocol —
+no rework.
+
 Each phase builds on the one below. Each phase is independently
-testable — all existing tests pass after each phase. No phase
-requires forward knowledge of the one above.
+testable — all existing tests pass after each phase.
