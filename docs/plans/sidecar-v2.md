@@ -599,8 +599,11 @@ storage, no context pointers for resume.
 - [x] io.readable: epoll notification for sidecar fd.
 - [x] sidecar_recv_callback: drives on_recv, resumes commit_dispatch.
 - [x] Prefetch + render: async (QUERY sub-protocol, epoll-driven).
-- [x] Handle: sync (one round trip, no QUERY, microseconds).
-- [x] Route: sync (one round trip, no QUERY).
+- [x] Handle: sync — intentionally blocking. One round trip, no
+  QUERY sub-protocol, microseconds on unix socket. Making it async
+  would require splitting sm.commit (WriteView + WAL + response
+  building) for negligible latency gain.
+- [x] Route: sync — one round trip, no QUERY.
 - [x] Transaction boundary: begin/commit_batch wraps .handle stage.
 - [x] Time: set once per pipeline, not per tick.
 - [x] Invariant assertions at stage entry.
