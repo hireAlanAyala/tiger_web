@@ -7,7 +7,7 @@ phase builds correctly on the one below — no shims, no rework.
 ```
 Phase 1: Unify pipeline       ✓ complete
 Phase 2: CALL/RESULT protocol  ✓ complete
-Phase 3: Tests                 (elaborate later)
+Phase 3: Protocol fuzzer        (gate for async — prove boundary correctness)
 Phase 4: Async prefetch        (callback-driven, serial pipeline, TB pattern)
 Phase 5: Workers               (see worker-v2.md)
 ```
@@ -579,7 +579,52 @@ For sidecar handlers, stages may span ticks. The server does IO work
 
 ---
 
-## Phase 3: Async prefetch
+## Phase 3: Protocol fuzzer
+
+**Goal:** Prove the CALL/RESULT protocol boundary is correct under
+adversarial input before building async on top. This is a gate —
+don't start Phase 4 until the fuzzer runs clean.
+
+Rewrite `sidecar_fuzz.zig` for the CALL/RESULT protocol. The old
+fuzzer tests the 3-RT protocol (dead code). The new fuzzer exercises
+the state machine (`call_submit` / `on_recv`) with PRNG-driven
+malformed input.
+
+### What to fuzz
+
+- Malformed RESULT frames: truncated, wrong tag, invalid flag byte,
+  oversized payload, zero-length payload.
+- Malformed QUERY_RESULT frames: truncated row set, wrong query_id,
+  invalid type tags, oversized values.
+- Protocol violations: QUERY during no-query CALL, RESULT with
+  unknown request_id, duplicate RESULT for same CALL.
+- Disconnect mid-exchange: sidecar closes socket after CALL sent,
+  after QUERY sent, after partial RESULT.
+- Query count exceeded: more QUERY frames than queries_max.
+- Valid exchanges interleaved with malformed ones: verify the state
+  machine recovers to .idle after each failure.
+
+### Assertion targets
+
+- Every malformed input is rejected before reaching the state machine
+  (no handler code runs on bad data).
+- The state machine transitions to .failed on every error, never
+  .complete with corrupted data.
+- After failure, reset_call_state returns to .idle — the next CALL
+  can proceed.
+- No panics, no undefined behavior, no memory safety issues.
+
+### What to defer
+
+- SimIO sidecar fd fault injection — relevant for Phase 4 (async),
+  not Phase 3 (sync blocking).
+- Automated integration test — fuzzer is more valuable. Integration
+  tests verify happy paths. Fuzzers verify the boundary.
+- Cross-language vector tests — already done (call_test.ts).
+
+---
+
+## Phase 4: Async prefetch
 
 **Goal:** Prefetch takes a callback and returns void, matching
 TigerBeetle's pattern. The pipeline is serial — one request at a
@@ -684,7 +729,7 @@ later.
 
 ---
 
-## Phase 4: Workers
+## Phase 5: Workers
 
 Built on the CALL/RESULT protocol from Phase 3. See
 [worker-v2.md](worker-v2.md) for full design decisions, checklist,
@@ -708,11 +753,11 @@ in FIFO order like any other request.
 ## Dependency graph
 
 ```
-Phase 1 (unify pipeline — Handlers type parameter) ✓
+Phase 1 (unify pipeline) ✓
     ↓
-Phase 2 (CALL/RESULT protocol — dumb executor)
+Phase 2 (CALL/RESULT protocol) ✓
     ↓
-Phase 3 (tests — elaborate later)
+Phase 3 (protocol fuzzer — gate for async)
     ↓
 Phase 4 (async prefetch — serial, callback-driven)
     ↓
