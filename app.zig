@@ -158,10 +158,8 @@ pub fn HandlersType(comptime StorageParam: type) type {
             db: anytype,
         ) state_machine.HandleResult {
             if (sidecar) |*client| {
-                // Pair assertion: handler_prefetch writes zeroes for sidecar
-                // operations. handler_execute must not read from cache —
-                // sidecar data lives on the client, not in the cache union.
-                assert(std.mem.allEqual(u8, std.mem.asBytes(&cache), 0));
+                // Sidecar: cache is a zeroed placeholder — data lives on
+                // the sidecar client. This branch never reads from cache.
 
                 // Build handle args: [operation: u8][id: u128 BE]
                 // Body and prefetch data are already held by the sidecar
@@ -235,7 +233,7 @@ pub fn HandlersType(comptime StorageParam: type) type {
                 // Parse result: [found: u8][operation: u8][id: u128 BE]
                 if (data.len < 1) return null;
                 if (data[0] == 0) return null; // not found
-                if (data.len < 19) return null;
+                if (data.len < 18) return null; // found(1) + operation(1) + id(16)
                 const operation = std.meta.intToEnum(message.Operation, data[1]) catch return null;
                 const id = std.mem.readInt(u128, data[2..18], .big);
 

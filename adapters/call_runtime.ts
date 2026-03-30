@@ -198,7 +198,6 @@ const socketServer = net.createServer((socket) => {
   conn = socket;
 
   conn.on("data", (chunk: Buffer) => {
-    console.log(`[call_runtime] received ${chunk.length} bytes, first: 0x${chunk[0]?.toString(16)}`);
     pending = Buffer.concat([pending, chunk]);
     processFrames();
   });
@@ -232,10 +231,8 @@ const pendingQueries = new Map<number, (data: any) => void>();
 let nextQueryId = 0;
 
 function processFrames(): void {
-  console.log(`[call_runtime] processFrames: pending=${pending.length} bytes`);
   while (pending.length >= 4) {
     const frameLen = pending.readUInt32BE(0);
-    console.log(`[call_runtime] frameLen=${frameLen}, have=${pending.length - 4}`);
     if (pending.length < 4 + frameLen) break;
     const frame = new Uint8Array(
       pending.buffer,
@@ -245,7 +242,6 @@ function processFrames(): void {
     pending = pending.subarray(4 + frameLen);
 
     const tag = frame[0];
-    console.log(`[call_runtime] frame tag=0x${tag.toString(16)}, length=${frame.length}`);
 
     if (tag === CallTag.query_result) {
       // QUERY_RESULT — resolve the pending db.query() promise.
