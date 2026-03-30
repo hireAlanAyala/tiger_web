@@ -422,7 +422,7 @@ function dispatchRoute(requestId: number, args: Uint8Array): void {
 
   // Store per-request state from route.
   requestState.operation = matchedOp;
-  requestState.id = result.id || "";
+  requestState.id = (result.id || "").replace(/-/g, ""); // strip UUID hyphens
   requestState.body = typeof body === "string" && body.length > 0 ? JSON.parse(body) : {};
   requestState.params = result.params || {};
 
@@ -432,8 +432,9 @@ function dispatchRoute(requestId: number, args: Uint8Array): void {
   const resultDv = new DataView(resultBuf.buffer);
   resultBuf[0] = 1; // found
   resultBuf[1] = opValue;
-  // ID as u128 BE — parse hex string to 16 bytes.
-  const idHex = (result.id || "0".repeat(32)).padStart(32, "0");
+  // ID as u128 BE — parse hex string to 16 bytes. Strip hyphens
+  // (path params like :id come with UUID hyphens).
+  const idHex = (result.id || "0".repeat(32)).replace(/-/g, "").padStart(32, "0");
   for (let i = 0; i < 16; i++) {
     resultBuf[2 + i] = parseInt(idHex.substr(i * 2, 2), 16);
   }
