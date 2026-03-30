@@ -14,9 +14,9 @@ export function route(req: RouteRequest): RouteResult | null {
 }
 
 // [prefetch] .transfer_inventory
-export function prefetch(msg: PrefetchMessage, db: PrefetchDb) {
-  const source = db.query("SELECT id, name, description, price_cents, inventory, version, active FROM products WHERE id = ?1", msg.id);
-  const target = db.query("SELECT id, name, description, price_cents, inventory, version, active FROM products WHERE id = ?1", msg.body.target_id);
+export async function prefetch(msg: PrefetchMessage, db: PrefetchDb) {
+  const source = await db.query("SELECT id, name, description, price_cents, inventory, version, active FROM products WHERE id = ?1", msg.id);
+  const target = await db.query("SELECT id, name, description, price_cents, inventory, version, active FROM products WHERE id = ?1", msg.body.target_id);
   return { source, target };
 }
 

@@ -426,9 +426,9 @@ pub fn build_call(buf: []u8, request_id: u32, function_name: []const u8, args: [
 }
 
 /// Build a QUERY_RESULT frame in buf. Returns the payload length.
-/// Layout: [tag: u8][request_id: u32 BE][row_set...]
-pub fn build_query_result(buf: []u8, request_id: u32, row_set: []const u8) ?usize {
-    const total = 1 + 4 + row_set.len;
+/// Layout: [tag: u8][request_id: u32 BE][query_id: u16 BE][row_set...]
+pub fn build_query_result(buf: []u8, request_id: u32, query_id: u16, row_set: []const u8) ?usize {
+    const total = 1 + 4 + 2 + row_set.len;
     if (total > buf.len) return null;
     if (total > frame_max) return null;
 
@@ -437,6 +437,8 @@ pub fn build_query_result(buf: []u8, request_id: u32, row_set: []const u8) ?usiz
     pos += 1;
     std.mem.writeInt(u32, buf[pos..][0..4], request_id, .big);
     pos += 4;
+    std.mem.writeInt(u16, buf[pos..][0..2], query_id, .big);
+    pos += 2;
     if (row_set.len > 0) {
         @memcpy(buf[pos..][0..row_set.len], row_set);
         pos += row_set.len;
@@ -481,6 +483,7 @@ pub fn parse_result_payload(payload: []const u8) ?ResultPayload {
 
 /// Parse a QUERY payload — sql + params.
 pub const QueryPayload = struct {
+    query_id: u16,
     sql: []const u8,
     mode: QueryMode,
     params_buf: []const u8,
@@ -489,6 +492,11 @@ pub const QueryPayload = struct {
 
 pub fn parse_query_payload(payload: []const u8) ?QueryPayload {
     var pos: usize = 0;
+    // query_id: u16 BE — identifies this query within the CALL.
+    // Echoed in QUERY_RESULT for Promise.all() support.
+    if (pos + 2 > payload.len) return null;
+    const query_id = std.mem.readInt(u16, payload[pos..][0..2], .big);
+    pos += 2;
     if (pos + 2 > payload.len) return null;
     const sql_len = std.mem.readInt(u16, payload[pos..][0..2], .big);
     pos += 2;
@@ -502,6 +510,7 @@ pub fn parse_query_payload(payload: []const u8) ?QueryPayload {
     const param_count = payload[pos];
     pos += 1;
     return .{
+        .query_id = query_id,
         .sql = sql,
         .mode = mode,
         .params_buf = payload[pos..],
@@ -802,15 +811,18 @@ test "sidecar frame parse — QUERY" {
     var buf: [64]u8 = undefined;
     buf[0] = @intFromEnum(CallTag.query);
     std.mem.writeInt(u32, buf[1..5], 7, .big);
+    // query_id = 3
+    std.mem.writeInt(u16, buf[5..7], 3, .big);
     // sql_len = 11, sql = "SELECT * .."
     const sql = "SELECT * ..";
-    std.mem.writeInt(u16, buf[5..7], @intCast(sql.len), .big);
-    @memcpy(buf[7..18], sql);
-    buf[18] = @intFromEnum(QueryMode.query); // mode
-    buf[19] = 0; // param_count = 0
-    const frame = parse_sidecar_frame(buf[0..20]) orelse unreachable;
+    std.mem.writeInt(u16, buf[7..9], @intCast(sql.len), .big);
+    @memcpy(buf[9..20], sql);
+    buf[20] = @intFromEnum(QueryMode.query); // mode
+    buf[21] = 0; // param_count = 0
+    const frame = parse_sidecar_frame(buf[0..22]) orelse unreachable;
     try std.testing.expectEqual(CallTag.query, frame.tag);
     const query = parse_query_payload(frame.payload) orelse unreachable;
+    try std.testing.expectEqual(@as(u16, 3), query.query_id);
     try std.testing.expectEqualStrings("SELECT * ..", query.sql);
     try std.testing.expectEqual(QueryMode.query, query.mode);
     try std.testing.expectEqual(@as(u8, 0), query.param_count);
@@ -819,10 +831,11 @@ test "sidecar frame parse — QUERY" {
 test "QUERY_RESULT frame build" {
     var buf: [64]u8 = undefined;
     const row_data = "row_set_bytes";
-    const len = build_query_result(&buf, 7, row_data) orelse unreachable;
+    const len = build_query_result(&buf, 7, 42, row_data) orelse unreachable;
     try std.testing.expectEqual(@as(u8, @intFromEnum(CallTag.query_result)), buf[0]);
     try std.testing.expectEqual(@as(u32, 7), std.mem.readInt(u32, buf[1..5], .big));
-    try std.testing.expectEqualStrings("row_set_bytes", buf[5..len]);
+    try std.testing.expectEqual(@as(u16, 42), std.mem.readInt(u16, buf[5..7], .big));
+    try std.testing.expectEqualStrings("row_set_bytes", buf[7..len]);
 }
 
 test "parse rejects invalid sidecar tag" {

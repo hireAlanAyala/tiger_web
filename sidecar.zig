@@ -304,22 +304,23 @@ pub const SidecarClient = struct {
 
                 // Execute SQL via the caller's query function.
                 // Row set written directly into send_buf after the
-                // 5-byte QUERY_RESULT header.
+                // 7-byte QUERY_RESULT header (tag + request_id + query_id).
                 const row_set = query_fn.?(
                     query_ctx.?,
                     query.sql,
                     query.params_buf,
                     query.param_count,
                     query.mode,
-                    self.send_buf[5..],
+                    self.send_buf[7..],
                 ) orelse blk: {
                     break :blk @as([]const u8, "");
                 };
 
-                // Send QUERY_RESULT.
+                // Send QUERY_RESULT — echo query_id for Promise.all() matching.
                 self.send_buf[0] = @intFromEnum(protocol.CallTag.query_result);
                 std.mem.writeInt(u32, self.send_buf[1..5], parsed.request_id, .big);
-                const qr_total = 5 + row_set.len;
+                std.mem.writeInt(u16, self.send_buf[5..7], query.query_id, .big);
+                const qr_total = 7 + row_set.len;
 
                 if (!protocol.write_frame(self.fd, self.send_buf[0..qr_total])) {
                     self.handle_disconnect();

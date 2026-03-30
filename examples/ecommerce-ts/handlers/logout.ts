@@ -7,7 +7,7 @@ export function route(_req: RouteRequest): RouteResult | null {
 }
 
 // [prefetch] .logout
-export function prefetch(_msg: PrefetchMessage, _db: PrefetchDb) {
+export async function prefetch(_msg: PrefetchMessage, _db: PrefetchDb) {
   return {};
 }
 

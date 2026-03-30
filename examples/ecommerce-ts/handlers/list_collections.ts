@@ -8,8 +8,8 @@ export function route(_req: RouteRequest): RouteResult | null {
 }
 
 // [prefetch] .list_collections
-export function prefetch(_msg: PrefetchMessage, db: PrefetchDb) {
-  const collections = db.queryAll("SELECT id, name, active FROM collections WHERE active = 1 ORDER BY id LIMIT ?1", 50);
+export async function prefetch(_msg: PrefetchMessage, db: PrefetchDb) {
+  const collections = await db.queryAll("SELECT id, name, active FROM collections WHERE active = 1 ORDER BY id LIMIT ?1", 50);
   return { collections };
 }
 

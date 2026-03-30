@@ -7,8 +7,8 @@ export function route(req: RouteRequest): RouteResult | null {
 }
 
 // [prefetch] .remove_collection_member
-export function prefetch(msg: PrefetchMessage, db: PrefetchDb) {
-  const collection = db.query("SELECT id, name, active FROM collections WHERE id = ?1", msg.id);
+export async function prefetch(msg: PrefetchMessage, db: PrefetchDb) {
+  const collection = await db.query("SELECT id, name, active FROM collections WHERE id = ?1", msg.id);
   return { collection };
 }
 

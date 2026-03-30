@@ -12,8 +12,8 @@ export function route(req: RouteRequest): RouteResult | null {
 }
 
 // [prefetch] .list_products
-export function prefetch(_msg: PrefetchMessage, db: PrefetchDb) {
-  const products = db.queryAll("SELECT id, name, description, price_cents, inventory, version, active FROM products ORDER BY id LIMIT ?1", 50);
+export async function prefetch(_msg: PrefetchMessage, db: PrefetchDb) {
+  const products = await db.queryAll("SELECT id, name, description, price_cents, inventory, version, active FROM products ORDER BY id LIMIT ?1", 50);
   return { products };
 }
 

@@ -8,8 +8,8 @@ export function route(_req: RouteRequest): RouteResult | null {
 }
 
 // [prefetch] .list_orders
-export function prefetch(_msg: PrefetchMessage, db: PrefetchDb) {
-  const orders = db.queryAll("SELECT id, total_cents, items_len, status, timeout_at, payment_ref FROM orders ORDER BY id LIMIT ?1", 50);
+export async function prefetch(_msg: PrefetchMessage, db: PrefetchDb) {
+  const orders = await db.queryAll("SELECT id, total_cents, items_len, status, timeout_at, payment_ref FROM orders ORDER BY id LIMIT ?1", 50);
   return { orders };
 }
 

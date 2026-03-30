@@ -11,11 +11,11 @@ export function route(req: RouteRequest): RouteResult | null {
 }
 
 // [prefetch] .create_order
-export function prefetch(msg: PrefetchMessage, db: PrefetchDb) {
+export async function prefetch(msg: PrefetchMessage, db: PrefetchDb) {
   const items = msg.body.items as Array<{ product_id: string; quantity: number }>;
   const queries: Record<string, any> = {};
   for (let i = 0; i < items.length; i++) {
-    queries[`product_${i}`] = db.query(
+    queries[`product_${i}`] = await db.query(
       "SELECT id, name, description, price_cents, inventory, version, active FROM products WHERE id = ?1",
       items[i].product_id,
     );

@@ -8,10 +8,10 @@ export function route(_req: RouteRequest): RouteResult | null {
 }
 
 // [prefetch] .page_load_dashboard
-export function prefetch(_msg: PrefetchMessage, db: PrefetchDb) {
-  const products = db.queryAll("SELECT id, name, description, price_cents, inventory, version, active FROM products WHERE active = 1 ORDER BY id LIMIT ?1", 50);
-  const collections = db.queryAll("SELECT id, name, active FROM collections WHERE active = 1 ORDER BY id LIMIT ?1", 50);
-  const orders = db.queryAll("SELECT id, total_cents, items_len, status, timeout_at, payment_ref FROM orders ORDER BY id LIMIT ?1", 50);
+export async function prefetch(_msg: PrefetchMessage, db: PrefetchDb) {
+  const products = await db.queryAll("SELECT id, name, description, price_cents, inventory, version, active FROM products WHERE active = 1 ORDER BY id LIMIT ?1", 50);
+  const collections = await db.queryAll("SELECT id, name, active FROM collections WHERE active = 1 ORDER BY id LIMIT ?1", 50);
+  const orders = await db.queryAll("SELECT id, total_cents, items_len, status, timeout_at, payment_ref FROM orders ORDER BY id LIMIT ?1", 50);
   return { products, collections, orders };
 }
 

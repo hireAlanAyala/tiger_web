@@ -11,8 +11,8 @@ export function route(req: RouteRequest): RouteResult | null {
 }
 
 // [prefetch] .verify_login_code
-export function prefetch(msg: PrefetchMessage, db: PrefetchDb) {
-  const login_code = db.query("SELECT email, code, expires_at FROM login_codes WHERE email = ?1", msg.body.email);
+export async function prefetch(msg: PrefetchMessage, db: PrefetchDb) {
+  const login_code = await db.query("SELECT email, code, expires_at FROM login_codes WHERE email = ?1", msg.body.email);
   return { login_code };
 }
 

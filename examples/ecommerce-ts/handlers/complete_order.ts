@@ -15,8 +15,8 @@ export function route(req: RouteRequest): RouteResult | null {
 }
 
 // [prefetch] .complete_order
-export function prefetch(msg: PrefetchMessage, db: PrefetchDb) {
-  const order = db.query("SELECT id, total_cents, items_len, status, timeout_at, payment_ref FROM orders WHERE id = ?1", msg.id);
+export async function prefetch(msg: PrefetchMessage, db: PrefetchDb) {
+  const order = await db.query("SELECT id, total_cents, items_len, status, timeout_at, payment_ref FROM orders WHERE id = ?1", msg.id);
   return { order };
 }
 

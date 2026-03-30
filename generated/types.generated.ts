@@ -127,15 +127,15 @@ export interface PrefetchQuery {
   mode: "query" | "queryAll";
 }
 
-/** Read-only database for prefetch — records query declarations.
- *  db.query() and db.queryAll() don't execute SQL — they return
- *  declarations that the framework sends to the Zig storage layer.
- *  Only query and queryAll are available. No execute, no writes. */
+/** Read-only database for prefetch.
+ *  In the CALL/RESULT protocol, db.query() sends a QUERY frame to the
+ *  server and returns a Promise that resolves with the row data.
+ *  In the legacy 3-RT protocol, returns a declaration object. */
 export interface PrefetchDb {
   /** Single row or null. */
-  query(sql: string, ...params: unknown[]): PrefetchQuery;
+  query(sql: string, ...params: unknown[]): PrefetchQuery | Promise<any>;
   /** Array of rows. */
-  queryAll(sql: string, ...params: unknown[]): PrefetchQuery;
+  queryAll(sql: string, ...params: unknown[]): PrefetchQuery | Promise<any>;
 }
 
 /** Handle context — prefetched data + request body for the handle phase.

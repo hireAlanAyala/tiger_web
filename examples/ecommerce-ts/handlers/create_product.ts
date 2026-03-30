@@ -20,8 +20,8 @@ export function route(req: RouteRequest): RouteResult | null {
 }
 
 // [prefetch] .create_product
-export function prefetch(msg: PrefetchMessage, db: PrefetchDb) {
-  const existing = db.query("SELECT id FROM products WHERE id = ?1", msg.id);
+export async function prefetch(msg: PrefetchMessage, db: PrefetchDb) {
+  const existing = await db.query("SELECT id FROM products WHERE id = ?1", msg.id);
   return { existing };
 }
 

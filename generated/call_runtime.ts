@@ -122,13 +122,14 @@ function buildResult(
 
 function buildQuery(
   requestId: number,
+  queryId: number,
   sql: string,
   mode: number,
   params: unknown[],
 ): Uint8Array {
   const sqlBytes = _encoder.encode(sql);
-  // Estimate buffer size: tag(1) + req_id(4) + sql_len(2) + sql + mode(1) + param_count(1) + params
-  const buf = new Uint8Array(1 + 4 + 2 + sqlBytes.length + 1 + 1 + params.length * 20);
+  // tag(1) + req_id(4) + query_id(2) + sql_len(2) + sql + mode(1) + param_count(1) + params
+  const buf = new Uint8Array(1 + 4 + 2 + 2 + sqlBytes.length + 1 + 1 + params.length * 20);
   const dv = new DataView(buf.buffer);
   let pos = 0;
 
@@ -136,6 +137,8 @@ function buildQuery(
   pos += 1;
   dv.setUint32(pos, requestId, false);
   pos += 4;
+  dv.setUint16(pos, queryId, false);
+  pos += 2;
   dv.setUint16(pos, sqlBytes.length, false);
   pos += 2;
   buf.set(sqlBytes, pos);
@@ -215,7 +218,8 @@ conn.on("close", () => {
 // resumes. This is Node's async model working naturally.
 
 let handlerInProgress = false;
-let pendingQueryResolve: ((data: any) => void) | null = null;
+const pendingQueries = new Map<number, (data: any) => void>();
+let nextQueryId = 0;
 
 function processFrames(): void {
   while (pending.length >= 4) {
@@ -250,31 +254,26 @@ function processFrames(): void {
 }
 
 function handleQueryResult(frame: Uint8Array): void {
-  if (!pendingQueryResolve) {
-    console.error("[call_runtime] QUERY_RESULT with no pending query");
+  // Parse: [tag: u8][request_id: u32 BE][query_id: u16 BE][row_set...]
+  const dv = new DataView(frame.buffer, frame.byteOffset, frame.byteLength);
+  const queryId = dv.getUint16(5, false);
+  const rowSetData = frame.subarray(7); // skip tag + request_id + query_id
+
+  const resolve = pendingQueries.get(queryId);
+  if (!resolve) {
+    console.error("[call_runtime] QUERY_RESULT for unknown query_id:", queryId);
     conn.destroy();
     return;
   }
-
-  // Parse: [tag: u8][request_id: u32 BE][row_set...]
-  const dv = new DataView(frame.buffer, frame.byteOffset, frame.byteLength);
-  const rowSetData = frame.subarray(5); // skip tag + request_id
+  pendingQueries.delete(queryId);
 
   if (rowSetData.length === 0) {
-    // Empty result — query returned no data.
-    pendingQueryResolve(null);
+    resolve(null);
   } else {
-    // Parse row set using existing serde.
     const rowSetDv = new DataView(rowSetData.buffer, rowSetData.byteOffset, rowSetData.byteLength);
     const { result } = readRowSet(rowSetDv, 0);
-    // query mode: single row → return first row or null.
-    // queryAll mode: return all rows.
-    // The mode was sent in the QUERY frame — the server doesn't echo it.
-    // We store it alongside the promise resolve.
-    pendingQueryResolve(result);
+    resolve(result);
   }
-
-  pendingQueryResolve = null;
 }
 
 async function handleCall(frame: Uint8Array): Promise<void> {
@@ -572,33 +571,31 @@ async function dispatchRender(requestId: number, args: Uint8Array): Promise<void
 // awaits db.query() sequentially. Parallel queries via Promise.all()
 // would require multiple pending resolvers — not supported yet.
 
-let pendingQueryMode: number = QueryMode.query;
-
 async function queryServerAsync(
   requestId: number,
   sql: string,
   mode: number,
   params: unknown[],
 ): Promise<any> {
-  // Send QUERY frame.
-  const queryFrame = buildQuery(requestId, sql, mode, params);
+  // Assign a unique query_id for this QUERY. Enables Promise.all() —
+  // multiple queries in flight, each matched to its QUERY_RESULT.
+  const queryId = nextQueryId++;
+  if (nextQueryId > 0xFFFF) nextQueryId = 0; // wrap u16
+
+  // Send QUERY frame with query_id.
+  const queryFrame = buildQuery(requestId, queryId, sql, mode, params);
   sendFrame(conn, queryFrame);
 
-  // Store mode for handleQueryResult to use.
-  pendingQueryMode = mode;
-
-  // Wait for QUERY_RESULT.
+  // Wait for QUERY_RESULT with matching query_id.
   return new Promise<any>((resolve) => {
-    pendingQueryResolve = (rowSet) => {
+    pendingQueries.set(queryId, (rowSet) => {
       if (rowSet === null) {
         resolve(mode === QueryMode.queryAll ? [] : null);
       } else if (mode === QueryMode.query) {
-        // Single row: return first row or null.
         resolve(rowSet.rows.length > 0 ? rowSet.rows[0] : null);
       } else {
-        // All rows.
         resolve(rowSet.rows);
       }
-    };
+    });
   });
 }

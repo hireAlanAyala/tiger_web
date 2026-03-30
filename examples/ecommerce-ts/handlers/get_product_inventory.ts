@@ -7,8 +7,8 @@ export function route(req: RouteRequest): RouteResult | null {
 }
 
 // [prefetch] .get_product_inventory
-export function prefetch(msg: PrefetchMessage, db: PrefetchDb) {
-  const product = db.query("SELECT id, name, description, price_cents, inventory, version, active FROM products WHERE id = ?1", msg.id);
+export async function prefetch(msg: PrefetchMessage, db: PrefetchDb) {
+  const product = await db.query("SELECT id, name, description, price_cents, inventory, version, active FROM products WHERE id = ?1", msg.id);
   return { product };
 }
 

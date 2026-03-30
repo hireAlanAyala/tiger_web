@@ -10,7 +10,7 @@ export function route(req: RouteRequest): RouteResult | null {
 }
 
 // [prefetch] .request_login_code
-export function prefetch(_msg: PrefetchMessage, _db: PrefetchDb) {
+export async function prefetch(_msg: PrefetchMessage, _db: PrefetchDb) {
   return {};
 }
 
