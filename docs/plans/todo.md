@@ -14,6 +14,14 @@
    Remove session_action from HandleResult. Session changes via
    db.execute on a sessions table. Only logout uses session_action.
 
+4. **Non-blocking sidecar frame IO** — DEFERRED
+   `sidecar_recv_callback` calls `on_recv` which does blocking
+   `read_frame`/`write_frame` inside the epoll event loop. Works
+   for unix domain sockets (microseconds) but violates the principle
+   that IO callbacks must not block. Fix: make sidecar fd non-blocking,
+   handle EAGAIN/partial reads in a buffered frame reader, use the
+   IO layer's recv/send instead of read_frame/write_frame.
+
 ---
 
 # Tickets
