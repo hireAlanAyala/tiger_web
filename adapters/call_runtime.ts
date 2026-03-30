@@ -274,9 +274,14 @@ function handleQueryResult(frame: Uint8Array): void {
     console.error("[call_runtime] QUERY_RESULT too short:", rowSetData.length, "bytes");
     resolve(null);
   } else {
-    const rowSetDv = new DataView(rowSetData.buffer, rowSetData.byteOffset, rowSetData.byteLength);
-    const { result } = readRowSet(rowSetDv, 0);
-    resolve(result);
+    try {
+      const rowSetDv = new DataView(rowSetData.buffer, rowSetData.byteOffset, rowSetData.byteLength);
+      const { result } = readRowSet(rowSetDv, 0);
+      resolve(result);
+    } catch (e: any) {
+      console.error(`[call_runtime] QUERY_RESULT parse error: ${e.message}, dataLen=${rowSetData.length}, offset=${rowSetData.byteOffset}, bufLen=${rowSetData.buffer.byteLength}`);
+      resolve(null);
+    }
   }
 }
 
