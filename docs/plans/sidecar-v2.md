@@ -516,7 +516,14 @@ may span ticks (callback fires on epoll RESULT).
   Past threshold (comptime constant), server crashes.
 - [ ] Sidecar runtime (TypeScript): scan handlers, build function
   registry, connect to server, loop: receive CALL → look up
-  function → call it → send RESULT.
+  function → call it → send RESULT. This is the reference
+  implementation — other languages reimplement the spec, not
+  share a binary. The spec is four frame types (CALL, RESULT,
+  QUERY, QUERY_RESULT), each is tag + request_id + length-prefixed
+  payload using the self-describing binary row format. Any language
+  that can read/write bytes on a unix socket can implement it.
+  No shared libraries, no FFI, no embedding. Per-language
+  reimplementation allows the most languages.
 - [ ] Remove: 3-RT exchange from `sidecar.zig`, manifest reading
   from TS adapter, `generated/dispatch.generated.ts`, old protocol
   frame types from `protocol.zig`.
