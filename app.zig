@@ -141,6 +141,11 @@ pub fn HandlersType(comptime StorageParam: type) type {
             db: anytype,
         ) state_machine.HandleResult {
             if (sidecar) |*client| {
+                // Pair assertion: handler_prefetch writes zeroes for sidecar
+                // operations. handler_execute must not read from cache —
+                // sidecar data lives on the client, not in the cache union.
+                assert(std.mem.allEqual(u8, std.mem.asBytes(&cache), 0));
+
                 // Sidecar: RT2 — send prefetch results, receive handle response.
                 const status = client.send_prefetch_recv_handle(client.stored_prefetch_len) orelse
                     return .{ .status = .storage_error };
