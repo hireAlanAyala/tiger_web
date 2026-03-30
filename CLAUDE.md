@@ -4,7 +4,33 @@ Ecommerce HTTP server built in Zig, following TigerBeetle conventions.
 
 **Philosophy:** Build the foundation correctly, then ship confidently. Every layer trusts the one below it because every layer was built to be trusted. Infrastructure isn't overhead — it's the product. Assertions, comptime checks, and round-trip tests are guarantees that compound. Cut corners in the foundation and every layer above inherits the doubt.
 
-When faced with decisions always take the most correct approach never the simplest approach. We are shooting for safety and reliability
+When faced with decisions always take the most correct approach never the simplest approach. We are shooting for safety and reliability.
+
+## Design Principles (from TigerBeetle)
+
+TB's design goals, in order: **Safety > Performance > Developer Experience.**
+
+These six principles are the decision framework for every design
+choice. When evaluating options, check all six. If an option violates
+any principle, it needs a strong justification or it's rejected.
+
+| Principle | TB's words | What it means in practice |
+|---|---|---|
+| **Safety** | "It is far better to stop operating than to continue operating in an incorrect state." | Crash, don't corrupt. Assertions over error handling. The system must be provably correct, not hopefully correct. |
+| **Determinism** | "Same input, same output, same physical path. Supercharges randomized testing." | Any test failure reproducible by seed. No timing-dependent behavior. No kernel-managed non-determinism in the hot path. If sim tests can't exercise it deterministically, redesign it. |
+| **Boundedness** | "Put a limit on everything. All loops, all queues must have fixed upper bounds." | Static allocation. Comptime-known sizes. No unbounded waits, no unbounded queues, no dependencies on external timing. If it doesn't have a limit, it's a bug. |
+| **Fuzzable** | "Assertions are a force multiplier for discovering bugs by fuzzing." | Every code path reachable by PRNG-driven tests. If adding an option doubles the state space for marginal gain, reject it. Fewer paths tested thoroughly beats more paths tested shallowly. |
+| **Right primitive** | "Zero technical debt. Simplicity is the hardest revision." | Use the actual primitive, not an abstraction over it. Don't wrap futex in eventfd. Don't wrap `extern struct` in self-describing wire format. Don't send a network request for data you already have. The simplest correct implementation is usually the primitive itself. |
+| **Explicit** | "Be explicit. Minimize dependence on the compiler to do the right thing for you. Always motivate, always say why." | Typed layouts over dynamic discovery. Known schemas encoded in structs, not rediscovered at runtime. Code should state what it does — `futex_wake(&addr)` not an abstraction that hides the mechanism. |
+
+### Applying the principles
+
+When choosing between options:
+1. Check each option against all six principles
+2. If an option fails one, document why and what it costs
+3. If two options both pass, prefer the one with fewer moving parts
+4. Never trade safety or determinism for performance — TB's priority order is explicit
+5. "The best time to solve performance is in the design phase" — design for performance by choosing the right primitive, not by optimizing the wrong one
 
 ## Quick Reference
 

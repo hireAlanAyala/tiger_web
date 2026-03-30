@@ -1,0 +1,25 @@
+warning(main): SECRET_KEY not set — using development default (not safe for production)
+info(storage): storage initialized: tiger_web.db
+info(io): listener bound fd=7
+info(wal): created new WAL
+info(main): storage=sqlite wal=tiger_web.wal tick_interval=10ms connections=128
+info(main): log_level=debug log_trace=false
+info(sidecar): connected to /tmp/tiger_call_test.sock
+info(main): sidecar=/tmp/tiger_call_test.sock
+info(main): listening on port 45711
+info(tracer): gauge: connections_active=1
+info(tracer): gauge: connections_receiving=0
+info(tracer): gauge: connections_ready=0
+info(tracer): gauge: connections_sending=0
+info(tracer): gauge: connections_active=1
+info(tracer): gauge: connections_receiving=0
+info(tracer): gauge: connections_ready=0
+info(tracer): gauge: connections_sending=0
+info(tracer): gauge: connections_active=1
+info(tracer): gauge: connections_receiving=0
+info(tracer): gauge: connections_ready=0
+info(tracer): gauge: connections_sending=0
+info(tracer): gauge: connections_active=1
+info(tracer): gauge: connections_receiving=0
+info(tracer): gauge: connections_ready=0
+info(tracer): gauge: connections_sending=0

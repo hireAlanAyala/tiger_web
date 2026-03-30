@@ -66,3 +66,5 @@ From todo: "write vanilla html in render without a string and the compiler turns
 - Can the render function return plain HTML and the framework automatically wraps it for SSE delivery?
 - Does the developer need to know Datastar/htmx, or can the framework abstract it?
 - Test: render returns `<div id="product-list">...</div>`, framework figures out it's a partial swap targeting `#product-list`.
+
+# 9. websockets

@@ -10,7 +10,7 @@
 // Usage: npx tsx generated/call_runtime.ts <socket-path>
 
 import * as net from "net";
-import { readRowSet, writeParams, frame_max, QueryMode } from "./serde.ts";
+import { readRowSet, writeParams, frame_max, QueryMode } from "../generated/serde.ts";
 
 // --- Protocol constants (match protocol.zig) ---
 
@@ -182,28 +182,38 @@ if (!socketPath) {
   process.exit(1);
 }
 
-// --- Connect to server ---
-// The server listens, the sidecar connects. Reverse of the old protocol.
+// --- Socket setup ---
+// For now: sidecar listens, server connects (matches current server code).
+// Plan: reverse this — server listens, sidecar connects (task #12).
+// The CALL/RESULT exchange is direction-agnostic.
 
-const conn = net.createConnection(socketPath, () => {
-  console.log("[call_runtime] connected to", socketPath);
-});
+import { unlinkSync } from "fs";
+try { unlinkSync(socketPath); } catch {}
 
+let conn: net.Socket;
 let pending = Buffer.alloc(0);
 
-conn.on("data", (chunk: Buffer) => {
-  pending = Buffer.concat([pending, chunk]);
-  processFrames();
+const socketServer = net.createServer((socket) => {
+  console.log("[call_runtime] server connected");
+  conn = socket;
+
+  conn.on("data", (chunk: Buffer) => {
+    console.log(`[call_runtime] received ${chunk.length} bytes, first: 0x${chunk[0]?.toString(16)}`);
+    pending = Buffer.concat([pending, chunk]);
+    processFrames();
+  });
+
+  conn.on("error", (err: any) => {
+    console.error("[call_runtime] error:", err.message);
+  });
+
+  conn.on("close", () => {
+    console.log("[call_runtime] disconnected");
+  });
 });
 
-conn.on("error", (err) => {
-  console.error("[call_runtime] connection error:", err.message);
-  process.exit(1);
-});
-
-conn.on("close", () => {
-  console.log("[call_runtime] disconnected");
-  process.exit(0);
+socketServer.listen(socketPath, () => {
+  console.log("[call_runtime] listening on", socketPath);
 });
 
 // --- Frame processing ---
@@ -222,8 +232,10 @@ const pendingQueries = new Map<number, (data: any) => void>();
 let nextQueryId = 0;
 
 function processFrames(): void {
+  console.log(`[call_runtime] processFrames: pending=${pending.length} bytes`);
   while (pending.length >= 4) {
     const frameLen = pending.readUInt32BE(0);
+    console.log(`[call_runtime] frameLen=${frameLen}, have=${pending.length - 4}`);
     if (pending.length < 4 + frameLen) break;
     const frame = new Uint8Array(
       pending.buffer,
@@ -233,6 +245,7 @@ function processFrames(): void {
     pending = pending.subarray(4 + frameLen);
 
     const tag = frame[0];
+    console.log(`[call_runtime] frame tag=0x${tag.toString(16)}, length=${frame.length}`);
 
     if (tag === CallTag.query_result) {
       // QUERY_RESULT — resolve the pending db.query() promise.
@@ -315,15 +328,42 @@ async function handleCall(frame: Uint8Array): Promise<void> {
 // Args: [method: u8][path_len: u16 BE][path][body_len: u16 BE][body]
 // Result: [found: u8][operation: u8][id: u128 BE]
 
-import { matchRoute, parseQueryParam } from "./routing.ts";
-import { OperationValues } from "./types.generated.ts";
+import { matchRoute } from "../generated/routing.ts";
 
-// Route table — same as dispatch.generated.ts. Will be scanner-generated.
-import type { RouteTableEntry } from "./routing.ts";
+function parseQueryParam(queryString: string, name: string): string | null {
+  const params = new URLSearchParams(queryString);
+  return params.get(name);
+}
+import { OperationValues } from "../generated/types.generated.ts";
 
-// Import route table from the generated dispatch (temporary — shared source of truth).
-// TODO: scanner generates this directly into call_runtime.
-const routeTable: RouteTableEntry[] = (await import("./dispatch.generated.ts")).routeTable ?? [];
+// Route table — inline for now. Scanner will generate this.
+interface RouteTableEntry { operation: string; method: string; pattern: string; query_params: string[]; }
+const routeTable: RouteTableEntry[] = [
+  { operation: 'remove_collection_member', method: 'delete', pattern: '/collections/:id/members/:sub_id', query_params: [] },
+  { operation: 'delete_collection', method: 'delete', pattern: '/collections/:id', query_params: [] },
+  { operation: 'delete_product', method: 'delete', pattern: '/products/:id', query_params: [] },
+  { operation: 'get_collection', method: 'get', pattern: '/collections/:id', query_params: [] },
+  { operation: 'get_order', method: 'get', pattern: '/orders/:id', query_params: [] },
+  { operation: 'get_product', method: 'get', pattern: '/products/:id', query_params: [] },
+  { operation: 'get_product_inventory', method: 'get', pattern: '/products/:id/inventory', query_params: [] },
+  { operation: 'list_collections', method: 'get', pattern: '/collections', query_params: [] },
+  { operation: 'list_orders', method: 'get', pattern: '/orders', query_params: [] },
+  { operation: 'list_products', method: 'get', pattern: '/products', query_params: [] },
+  { operation: 'page_load_dashboard', method: 'get', pattern: '/', query_params: [] },
+  { operation: 'page_load_login', method: 'get', pattern: '/login', query_params: [] },
+  { operation: 'search_products', method: 'get', pattern: '/products', query_params: ['q'] },
+  { operation: 'add_collection_member', method: 'post', pattern: '/collections/:id/members', query_params: [] },
+  { operation: 'cancel_order', method: 'post', pattern: '/orders/:id/cancel', query_params: [] },
+  { operation: 'complete_order', method: 'post', pattern: '/orders/:id/complete', query_params: [] },
+  { operation: 'create_collection', method: 'post', pattern: '/collections', query_params: [] },
+  { operation: 'create_order', method: 'post', pattern: '/orders', query_params: [] },
+  { operation: 'create_product', method: 'post', pattern: '/products', query_params: [] },
+  { operation: 'logout', method: 'post', pattern: '/logout', query_params: [] },
+  { operation: 'request_login_code', method: 'post', pattern: '/login/request', query_params: [] },
+  { operation: 'transfer_inventory', method: 'post', pattern: '/products/:id/transfer', query_params: [] },
+  { operation: 'verify_login_code', method: 'post', pattern: '/login/verify', query_params: [] },
+  { operation: 'update_product', method: 'put', pattern: '/products/:id', query_params: [] },
+];
 
 function dispatchRoute(requestId: number, args: Uint8Array): void {
   const dv = new DataView(args.buffer, args.byteOffset, args.byteLength);
@@ -521,7 +561,7 @@ function dispatchHandle(requestId: number, _args: Uint8Array): void {
 // QUERY sub-protocol for db.query()
 // Result: raw HTML bytes
 
-import { StatusNames } from "./types.generated.ts";
+import { StatusNames } from "../generated/types.generated.ts";
 
 async function dispatchRender(requestId: number, args: Uint8Array): Promise<void> {
   const statusValue = args[1];

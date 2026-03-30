@@ -1,5 +1,12 @@
 //! State machine benchmark — measures prefetch/commit throughput per operation.
 //!
+//! Internal tool for framework developers. Detects regressions in core state
+//! machine logic cost. Framework users should use `tiger-web load` instead —
+//! it measures the full stack (HTTP, disk, connections) under realistic load.
+//!
+//! This benchmark bypasses HTTP, uses in-memory SQLite, and runs single-threaded.
+//! It answers "did the logic get slower?" not "how much can this server handle?"
+//!
 //! Runs against App.Storage with no fault injection, so measurements reflect
 //! pure decision logic cost. Use as a regression detector: if the numbers move,
 //! your code changed — not your environment.

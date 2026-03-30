@@ -92,7 +92,7 @@ pub const SidecarClient = struct {
 
     /// Copy data from recv_buf into state_buf. Returns a slice into
     /// state_buf that owns the data. Immune to recv_buf overwrites.
-    fn copy_state(self: *SidecarClient, data: []const u8) []const u8 {
+    pub fn copy_state(self: *SidecarClient, data: []const u8) []const u8 {
         if (data.len == 0) return "";
         const start = self.state_pos;
         assert(start + data.len <= self.state_buf.len);

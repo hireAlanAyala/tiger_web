@@ -1,6 +1,5 @@
 
 // [route] .page_load_dashboard
-// [path] get /post
 export function routePageLoadDashboard(req: Request): Route | null {
   if (req.method !== "get" || req.path !== "/") return null;
   return { operation: "page_load_dashboard", id: "0".repeat(32) };
