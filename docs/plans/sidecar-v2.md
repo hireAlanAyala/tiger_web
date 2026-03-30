@@ -811,3 +811,47 @@ Phase 6 (workers — worker-v2.md)
 
 Each phase builds on the one below. Each phase is independently
 testable — all existing tests pass after each phase.
+
+---
+
+## Future: pipelining (deferred)
+
+Prepare request N+1's prefetch while committing request N. Overlaps
+pipeline stages. ~3x throughput improvement for sidecar handlers
+(unix socket round trips dominate — three per request at ~50-100μs
+each).
+
+### Benchmark context
+
+Benchmarking with `hey -c 128` crashed the server — 128 concurrent
+connections hit the serial pipeline which processes one at a time.
+Connection pool fills up, connections timeout, server runs out of
+resources. The bottleneck is the serial pipeline draining slower
+than connections arrive. Use `hey -c 1` or `hey -c 4` for serial
+pipeline benchmarks.
+
+### Workbench estimates
+
+```
+┌─────────────────────────────────┬───────────────┬───────────────┐
+│              Setup              │    SQLite     │   Postgres    │
+├─────────────────────────────────┼───────────────┼───────────────┤
+│ epoll + sync prefetch           │ ~50K req/s    │ ~2K req/s     │
+├─────────────────────────────────┼───────────────┼───────────────┤
+│ epoll + async prefetch (done)   │ ~50K req/s    │ ~15-25K req/s │
+├─────────────────────────────────┼───────────────┼───────────────┤
+│ io_uring + async prefetch       │ ~55-60K req/s │ ~30-50K req/s │
+└─────────────────────────────────┴───────────────┴───────────────┘
+```
+
+Async prefetch (Phase 4) was the high-value change — 7-12x for
+network-bound storage (Postgres). Pipelining is incremental (~3x
+for sidecar). io_uring is a different axis (IO layer, not pipeline).
+
+### Server robustness
+
+The benchmark crash exposed a separate issue: the server doesn't
+handle connection pool exhaustion gracefully. Should reject new
+connections when the pool is full or pipeline queue is too deep,
+not crash. This is a framework robustness fix, independent of
+pipelining.
