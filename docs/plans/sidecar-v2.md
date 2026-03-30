@@ -425,52 +425,6 @@ For ZigHandlers, all stages complete in one tick (callbacks fire
 immediately). For SidecarHandlers, prefetch/handle/render stages
 may span ticks (callback fires on epoll RESULT).
 
-### Checklist
-
-- [ ] Add `commit_stage: CommitStage` to the server. Initialized to
-  `.idle`. Guards against starting a new pipeline while one is
-  in-flight.
-- [ ] Add `commit_connection` to the server: tracks which connection
-  is currently in the pipeline. Set on pipeline start, cleared on
-  pipeline complete.
-- [ ] Change `StateMachine.prefetch` signature: take callback, return
-  void. Match TB's `prefetch(callback, op, ...)` pattern.
-- [ ] Store prefetch callback and state on the SM:
-  `prefetch_callback`, `prefetch_cache`, `prefetch_identity`.
-  One set of fields — one request at a time.
-- [ ] ZigHandlers: `handler_prefetch` calls handler synchronously,
-  fires callback immediately. No behavior change from Phase 1.
-- [ ] SidecarHandlers: `handler_prefetch` sends 3-RT prefetch (still
-  old protocol in Phase 2), stores callback, returns. Callback
-  fires on socket response.
-- [ ] Server tick loop: `process_inbox` checks `commit_stage`. If not
-  `.idle`, skip pipeline dispatch — only do IO work (accept, recv,
-  send, timeout).
-- [ ] Pipeline resumes via callback: prefetch callback advances to
-  handle stage. Handle callback advances to commit. Commit
-  advances to render. Render callback advances to encode.
-- [ ] Busy/retry: if ZigHandlers' storage is busy (current `null`
-  return), the callback fires with a busy signal. The connection
-  stays in `.ready`, `commit_stage` returns to `.idle`. Retried
-  next tick. Same behavior as today.
-- [ ] Ordering: FIFO. `process_inbox` picks the first `.ready`
-  connection. One at a time. No reordering.
-- [ ] All existing tests pass. For ZigHandlers, callbacks fire
-  immediately — functionally identical to the current sync path.
-  Same tick, same order.
-
-### Design constraints
-
-- One request in the pipeline at a time. `commit_stage != .idle`
-  means no new pipeline starts. Matches TB.
-- Prefetch state on the SM, not per-connection. One set of fields.
-- The callback pattern matches TB: `prefetch(callback)` where the
-  callback receives `*StateMachine`.
-- ZigHandlers' immediate callback produces identical timing to the
-  current synchronous path — same tick, same order, same results.
-- Transaction model unchanged. `begin_batch` / `commit_batch` wraps
-  the commit stage. One transaction, one request, same as today.
-
 ### Protocol frames
 
 | Frame | Direction | Fields |
@@ -507,12 +461,11 @@ may span ticks (callback fires on epoll RESULT).
 - [x] Integration test: server + TS runtime end-to-end verified.
 - [x] Cross-language vector tests (call_test.ts).
 - [x] Remove: old 3-RT methods from sidecar.zig, sidecar_test.zig.
-- [ ] Sidecar availability check before Handlers — deferred.
+- [x] MessageTag removed from protocol.zig and serde.ts.
+- [x] dispatch.generated.ts deleted.
+- [ ] Sidecar availability check before Handlers — deferred (5b).
 - [ ] Sidecar reconnection: bounded window, crash past threshold —
   deferred (connect/try_reconnect kept, needs revision).
-- [ ] MessageTag removal — blocked on sidecar_fuzz.zig rewrite.
-- [ ] dispatch.generated.ts removal — blocked on scanner generating
-  call_runtime directly.
 - [ ] (Deferred) Extend SimIO to fault-inject on sidecar fd.
 
 ### User-space syntax
@@ -632,92 +585,26 @@ TigerBeetle's pattern. The pipeline is serial — one request at a
 time. The async callback is for "don't block the tick loop on IO,"
 not for "run multiple pipelines concurrently."
 
-**Current state (after Phase 2):** Pipeline is synchronous — blocks
-on each CALL/RESULT exchange. CALL/RESULT protocol is in place.
+### Implementation (complete)
 
-**Target state:** `state_machine.prefetch(msg, callback)` returns
-`void`. The callback fires when prefetch is complete — immediately
-for Zig handlers (SQLite is sync), later for sidecar handlers
-(RESULT arrives on epoll). Same pattern for handle and render.
+Used `commit_dispatch` (TB's stage-driven state machine) instead of
+the originally planned callback approach. Simpler — no callback
+storage, no context pointers for resume.
 
-### Serial pipeline model
-
-One request in the pipeline at a time. Matching TigerBeetle:
-
-```
-process_inbox:
-  1. Pick ONE ready connection
-  2. prefetch(msg, callback) — may return immediately or pend
-  3. If pending: set commit_stage = .prefetch, return
-     (tick continues: accept, recv, send, timeout — but no new pipeline)
-  4. Callback fires (same tick for Zig, later tick for sidecar)
-  5. commit_stage advances: handle → commit → render → encode → send
-  6. Pipeline complete. commit_stage = .idle
-  7. Next tick: process_inbox picks next ready connection
-```
-
-The server tracks pipeline state with a `commit_stage` enum on the
-server (not the connection), matching TB's `replica.commit_stage`:
-
-```zig
-const CommitStage = enum {
-    idle,              // No request in pipeline
-    prefetch,          // Waiting for prefetch callback
-    handle,            // Waiting for handle callback (sidecar)
-    commit,            // Executing writes in transaction
-    render,            // Waiting for render callback (sidecar)
-    encode,            // Building HTTP response
-};
-```
-
-For Zig handlers, all stages complete in one tick (callbacks fire
-immediately). For sidecar handlers, prefetch/handle/render stages
-may span ticks (callback fires on epoll RESULT).
-
-### Checklist
-
-- [ ] Add `commit_stage: CommitStage` to the server. Initialized to
-  `.idle`. Guards against starting a new pipeline while one is
-  in-flight.
-- [ ] Add `commit_connection` to the server: tracks which connection
-  is currently in the pipeline. Set on pipeline start, cleared on
-  pipeline complete.
-- [ ] Change `StateMachine.prefetch` signature: take callback, return
-  void. Match TB's `prefetch(callback, op, ...)` pattern.
-- [ ] Store prefetch callback and state on the SM:
-  `prefetch_callback`, `prefetch_cache`, `prefetch_identity`.
-  One set of fields — one request at a time.
-- [ ] Zig handlers: handler_prefetch calls handler synchronously,
-  fires callback immediately. No behavior change.
-- [ ] Sidecar handlers: handler_prefetch sends CALL, stores callback,
-  returns. Callback fires on RESULT from epoll.
-- [ ] Server tick loop: `process_inbox` checks `commit_stage`. If not
-  `.idle`, skip pipeline dispatch — only do IO work (accept, recv,
-  send, timeout).
-- [ ] Pipeline resumes via callback: prefetch callback advances to
-  handle stage. Handle callback advances to commit. Commit
-  advances to render. Render callback advances to encode.
-- [ ] Busy/retry: if Zig handler storage is busy (current `null`
-  return), the callback fires with a busy signal. The connection
-  stays in `.ready`, `commit_stage` returns to `.idle`. Retried
-  next tick. Same behavior as today.
-- [ ] Ordering: FIFO. `process_inbox` picks the first `.ready`
-  connection. One at a time. No reordering.
-- [ ] All existing tests pass. For Zig handlers, callbacks fire
-  immediately — functionally identical to the current sync path.
-  Same tick, same order.
-
-### Design constraints
-
-- One request in the pipeline at a time. `commit_stage != .idle`
-  means no new pipeline starts. Matches TB.
-- Prefetch state on the SM, not per-connection. One set of fields.
-- The callback pattern matches TB: `prefetch(callback)` where the
-  callback receives `*StateMachine`.
-- Zig handlers' immediate callback produces identical timing to the
-  current synchronous path — same tick, same order, same results.
-- Transaction model unchanged. `begin_batch` / `commit_batch` wraps
-  the commit stage. One transaction, one request, same as today.
+- [x] CommitStage enum on server: idle, prefetch, handle, render.
+- [x] commit_dispatch: stage loop, each stage completes or pends.
+- [x] PrefetchResult enum: complete/busy/pending.
+- [x] process_inbox: parse, translate, start pipeline via commit_dispatch.
+- [x] Idempotent handler_prefetch/handler_render: safe for resume.
+- [x] io.readable: epoll notification for sidecar fd.
+- [x] sidecar_recv_callback: drives on_recv, resumes commit_dispatch.
+- [x] Prefetch + render: async (QUERY sub-protocol, epoll-driven).
+- [x] Handle: sync (one round trip, no QUERY, microseconds).
+- [x] Route: sync (one round trip, no QUERY).
+- [x] Transaction boundary: begin/commit_batch wraps .handle stage.
+- [x] Time: set once per pipeline, not per tick.
+- [x] Invariant assertions at stage entry.
+- [x] Verified end-to-end with TS runtime.
 
 ### Throughput note
 
@@ -725,8 +612,7 @@ Serial pipeline means the sidecar CALL latency directly impacts
 throughput — one request at a time, each waiting for the sidecar.
 This is the correct starting point. TB also commits one at a time.
 Pipelining (preparing request N+1 while committing N) is a future
-optimization, not a Phase 3 concern. Build correct first, optimize
-later.
+optimization — see "Future: pipelining" section below.
 
 ---
 
