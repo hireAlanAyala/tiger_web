@@ -86,6 +86,8 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
         commit_stage: CommitStage = .idle,
         /// Which connection is currently in the pipeline.
         commit_connection: ?*Connection = null,
+        /// The message being processed — stored across ticks for async.
+        commit_msg: ?App.Message = null,
 
         /// Pipeline stage — serial, one request at a time (TB pattern).
         /// Guards process_inbox: if not .idle, no new pipeline starts.
@@ -273,7 +275,7 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
 
                 // Prefetch. Storage busy or sidecar failure → skip, retry next tick.
                 server.state_machine.tracer.start(.prefetch);
-                if (!server.state_machine.prefetch(msg)) {
+                if (server.state_machine.prefetch(msg) != .complete) {
                     server.state_machine.tracer.cancel(.prefetch);
                     server.commit_stage = .idle;
                     server.commit_connection = null;

@@ -207,16 +207,27 @@ pub fn StateMachineType(comptime Storage: type, comptime Handlers: type) type {
         /// Returns whether the message is valid input for the state machine.
 
         /// Phase 1: prefetch — dispatch to handler via Handlers interface.
-        /// Returns true if prefetch completed. Returns false if storage
-        /// is busy (handler returned null) — connection retries next tick.
-        pub fn prefetch(self: *StateMachine, msg: message.Message) bool {
+        pub const PrefetchResult = enum {
+            complete, // Prefetch done — proceed to commit.
+            busy,     // Storage busy — retry next tick.
+            pending,  // Sidecar CALL in-flight — process_sidecar drives completion.
+        };
+
+        /// Start prefetch. Returns .complete (proceed), .busy (retry),
+        /// or .pending (sidecar CALL sent, result arrives via on_recv).
+        pub fn prefetch(self: *StateMachine, msg: message.Message) PrefetchResult {
             assert(self.prefetch_cache == null);
 
             // Auth: resolve cookie credential → identity.
             self.resolve_credential(msg);
 
             self.prefetch_cache = Handlers.handler_prefetch(self.storage, &msg);
-            return self.prefetch_cache != null;
+            if (self.prefetch_cache != null) return .complete;
+
+            // Null means busy OR sidecar pending. Distinguish by checking
+            // the sidecar client state — if a CALL is in-flight, it's pending.
+            if (Handlers.is_sidecar_pending()) return .pending;
+            return .busy;
         }
 
         /// Set wall-clock time for this batch. Called by the server before

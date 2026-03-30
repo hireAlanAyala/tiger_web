@@ -100,6 +100,16 @@ pub fn HandlersType(comptime StorageParam: type) type {
     return struct {
         pub const Cache = PrefetchCache;
 
+        /// Check if the sidecar client has an in-flight CALL.
+        /// Used by sm.prefetch to distinguish busy (retry) from
+        /// pending (sidecar processing, process_sidecar will drive).
+        pub fn is_sidecar_pending() bool {
+            if (sidecar) |*client| {
+                return client.call_state == .receiving;
+            }
+            return false;
+        }
+
         /// Called by the SM's prefetch(). Dispatches to native handler or
         /// sidecar client. Fault injection for native path.
         pub fn handler_prefetch(storage: *StorageParam, msg: *const Message) ?PrefetchCache {
