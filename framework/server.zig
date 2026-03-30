@@ -14,7 +14,7 @@ const WalType = @import("wal.zig").WalType;
 ///
 /// App provides the domain types and functions:
 ///   Types: Message, Operation, Status
-///   Functions: translate, commit_and_encode
+///   Functions: translate, encode_response, HandlersType
 ///   Type constructors: StateMachineType(Storage), Wal
 ///
 /// This is the equivalent of TigerBeetle's Replica — it owns all connections,
@@ -26,7 +26,7 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
         assert(@hasDecl(App, "StateMachineType"));
         assert(@hasDecl(App, "Wal"));
         assert(@hasDecl(App, "translate"));
-        assert(@hasDecl(App, "commit_and_encode"));
+        assert(@hasDecl(App, "encode_response"));
 
         // Framework contracts on App types.
         // Status must have .ok — framework uses it for control flow (render vs close).
@@ -276,9 +276,9 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
             }
         }
 
-        /// Pipeline state machine — drives prefetch → handle → commit →
-        /// render → encode. Called from process_inbox (start) and
-        /// process_sidecar (resume). TB's commit_dispatch pattern.
+        /// Pipeline state machine — drives prefetch → handle → render.
+        /// Called from process_inbox (start) and process_sidecar (resume).
+        /// TB's commit_dispatch pattern.
         ///
         /// Each stage either completes (advance to next) or pends (return).
         /// For Zig handlers, all stages complete in one call — the loop
@@ -311,10 +311,12 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
                     },
 
                     .handle => {
+                        // Invariant: prefetch must have completed.
+                        assert(sm.prefetch_cache != null);
+                        // Invariant: handle result not yet produced.
+                        assert(server.commit_pipeline_resp == null);
+
                         // Commit: handle writes inside a transaction.
-                        // begin_batch wraps .handle → .commit. This is the
-                        // correct transaction boundary for async — writes
-                        // happen here, not in process_inbox.
                         sm.begin_batch();
 
                         if (server.wal != null) {
@@ -349,6 +351,16 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
 
 
                     .render => {
+                        // Render runs OUTSIDE the transaction (commit_batch
+                        // ran in .handle). This is correct: render reads
+                        // post-commit state. SQLite WAL mode allows reads
+                        // without a transaction.
+
+                        // Invariant: handle result must have been produced.
+                        assert(server.commit_pipeline_resp != null);
+                        assert(server.commit_cache != null);
+                        assert(server.commit_identity != null);
+
                         const pipeline_resp = server.commit_pipeline_resp.?;
                         const cache = server.commit_cache.?;
                         const identity = server.commit_identity.?;

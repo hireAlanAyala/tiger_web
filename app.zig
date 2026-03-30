@@ -114,20 +114,40 @@ pub fn HandlersType(comptime StorageParam: type) type {
         /// sidecar client. Fault injection for native path.
         pub fn handler_prefetch(storage: *StorageParam, msg: *const Message) ?PrefetchCache {
             if (sidecar) |*client| {
-                // Build prefetch args: [operation: u8][id: u128 BE]
-                var args: [1 + 16]u8 = undefined;
-                args[0] = @intFromEnum(msg.operation);
-                std.mem.writeInt(u128, args[1..17], msg.id, .big);
+                // Idempotent: safe to call from both start and resume.
+                // commit_dispatch may re-enter .prefetch after .pending.
+                switch (client.call_state) {
+                    .complete => {
+                        // Resume: sidecar exchange done. Build cache from result.
+                        defer client.reset_call_state();
+                        if (client.result_flag == .failure) return null;
+                    },
+                    .idle => {
+                        // First call: start the exchange.
+                        var args: [1 + 16]u8 = undefined;
+                        args[0] = @intFromEnum(msg.operation);
+                        std.mem.writeInt(u128, args[1..17], msg.id, .big);
 
-                client.reset_call_state();
-                if (!client.call_submit("prefetch", &args)) return null;
-                if (!client.run_to_completion(query_dispatch_fn, @ptrCast(storage), protocol.queries_max)) return null;
-                defer client.reset_call_state();
+                        if (!client.call_submit("prefetch", &args)) return null;
+                        if (!client.run_to_completion(query_dispatch_fn, @ptrCast(storage), protocol.queries_max)) return null;
+                        defer client.reset_call_state();
 
-                if (client.result_flag == .failure) return null;
+                        if (client.result_flag == .failure) return null;
+                    },
+                    .receiving => {
+                        // Still waiting for RESULT — process_sidecar hasn't
+                        // completed the exchange yet. Return null → .pending.
+                        return null;
+                    },
+                    .failed => {
+                        client.reset_call_state();
+                        return null;
+                    },
+                }
 
                 // Sidecar holds prefetch results internally.
-                // Return zeroed cache — handler_execute asserts it's zeroed.
+                // Return zeroed cache. Enforced by convention, not assertion.
+                // TODO: scanner-generated Handlers uses void Cache.
                 return switch (msg.operation) {
                     .root => unreachable,
                     inline else => |op| @unionInit(PrefetchCache, @tagName(op), std.mem.zeroes(
@@ -564,41 +584,9 @@ pub var render_scratch_buf: [http.send_buf_max]u8 = undefined;
 const http_response = @import("framework/http_response.zig");
 const sse = @import("framework/sse.zig");
 
-pub fn commit_and_encode(
-    comptime StorageParam: type,
-    sm: *StateMachineType(StorageParam),
-    msg: Message,
-    send_buf: []u8,
-    is_datastar_request: bool,
-    secret_key: *const [auth.key_length]u8,
-) CommitResult {
-    const commit_output = sm.commit(msg);
-    const pipeline_resp = commit_output.response;
-    const cache = commit_output.cache;
-
-    // Render: handler produces HTML into scratch buffer.
-    const FwCtx = HandlersType(StorageParam).FwCtx;
-    const fw = FwCtx{
-        .identity = commit_output.identity,
-        .now = sm.now,
-        .is_sse = is_datastar_request,
-    };
-    const ro = StorageParam.ReadView.init(sm.storage);
-    const html = HandlersType(StorageParam).handler_render(cache, msg.operation, pipeline_resp.status, fw, &render_scratch_buf, ro);
-
-    // Encode HTTP response — shared with sidecar pipeline.
-    return encode_response(
-        pipeline_resp.status,
-        html,
-        send_buf,
-        is_datastar_request,
-        pipeline_resp.session_action,
-        pipeline_resp.user_id,
-        pipeline_resp.is_authenticated,
-        pipeline_resp.is_new_visitor,
-        secret_key,
-    );
-}
+// commit_and_encode removed — inlined into server.commit_dispatch.
+// The pipeline stages (handle, render, encode) are now driven by the
+// server's stage-based state machine, not a single function call.
 
 pub const CommitResult = struct {
     status: Status,
