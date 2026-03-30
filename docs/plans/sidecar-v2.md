@@ -6,9 +6,10 @@ phase builds correctly on the one below — no shims, no rework.
 
 ```
 Phase 1: Unify pipeline       ✓ complete
-Phase 2: CALL/RESULT protocol  (in progress — Zig + TS done, server connection + integration test remain)
-Phase 3: Async prefetch        (callback-driven, serial pipeline, TB pattern)
-Phase 4: Workers               (see worker-v2.md)
+Phase 2: CALL/RESULT protocol  (in progress — cleanup remaining)
+Phase 3: Tests                 (elaborate later)
+Phase 4: Async prefetch        (callback-driven, serial pipeline, TB pattern)
+Phase 5: Workers               (see worker-v2.md)
 ```
 
 Phase order revised after Phase 1: protocol before async. Build the
@@ -708,15 +709,12 @@ Phase 1 (unify pipeline — Handlers type parameter) ✓
     ↓
 Phase 2 (CALL/RESULT protocol — dumb executor)
     ↓
-Phase 3 (async prefetch — serial, callback-driven)
+Phase 3 (tests — elaborate later)
     ↓
-Phase 4 (workers — worker-v2.md)
+Phase 4 (async prefetch — serial, callback-driven)
+    ↓
+Phase 5 (workers — worker-v2.md)
 ```
-
-Phase order revised after Phase 1: protocol before async. The
-protocol eliminates Phase 1's temporary awkwardness (zeroed cache,
-cross-phase state). Async is then applied to the final protocol —
-no rework.
 
 Each phase builds on the one below. Each phase is independently
 testable — all existing tests pass after each phase.
