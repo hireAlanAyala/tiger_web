@@ -15,9 +15,11 @@ case "$1" in
   dev)
     "$0" build
     cd "$EXAMPLE_DIR"
+    # Server starts first (listens on unix socket), sidecar connects.
+    # call_runtime.ts is the CALL/RESULT runtime (replaces dispatch.generated.ts).
     npx concurrently \
-      "tsx $FRAMEWORK_ROOT/generated/dispatch.generated.ts $SOCK" \
-      "sleep 1 && cd $FRAMEWORK_ROOT && ./zig/zig build run -- --sidecar=$SOCK"
+      "cd $FRAMEWORK_ROOT && ./zig/zig build run -- --sidecar=$SOCK" \
+      "sleep 2 && tsx $FRAMEWORK_ROOT/adapters/call_runtime.ts $SOCK"
     ;;
   *)
     echo "Usage: tiger-web <build|dev>"
