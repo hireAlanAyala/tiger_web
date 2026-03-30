@@ -204,6 +204,18 @@ conn.on("close", () => {
 });
 
 // --- Frame processing ---
+//
+// Two kinds of incoming frames:
+// - CALL: start an async handler (one at a time — serial pipeline)
+// - QUERY_RESULT: resolve a pending db.query() promise
+//
+// When a handler calls await db.query(), it sends a QUERY frame and
+// suspends. The event loop is free to read more socket data. When
+// QUERY_RESULT arrives, the pending promise resolves, the handler
+// resumes. This is Node's async model working naturally.
+
+let handlerInProgress = false;
+let pendingQueryResolve: ((data: any) => void) | null = null;
 
 function processFrames(): void {
   while (pending.length >= 4) {
@@ -215,23 +227,58 @@ function processFrames(): void {
       frameLen,
     );
     pending = pending.subarray(4 + frameLen);
-    handleFrame(frame);
+
+    const tag = frame[0];
+
+    if (tag === CallTag.query_result) {
+      // QUERY_RESULT — resolve the pending db.query() promise.
+      handleQueryResult(frame);
+    } else if (tag === CallTag.call) {
+      if (handlerInProgress) {
+        console.error("[call_runtime] CALL received while handler in progress");
+        conn.destroy();
+        return;
+      }
+      // Fire-and-forget — the async handler runs on the event loop.
+      handleCall(frame);
+    } else {
+      console.error("[call_runtime] unexpected tag:", tag);
+      conn.destroy();
+      return;
+    }
   }
 }
 
-function handleFrame(frame: Uint8Array): void {
-  if (frame.length < 7) {
-    console.error("[call_runtime] frame too short");
+function handleQueryResult(frame: Uint8Array): void {
+  if (!pendingQueryResolve) {
+    console.error("[call_runtime] QUERY_RESULT with no pending query");
     conn.destroy();
     return;
   }
 
-  const tag = frame[0];
-  if (tag !== CallTag.call) {
-    console.error("[call_runtime] unexpected tag:", tag);
-    conn.destroy();
-    return;
+  // Parse: [tag: u8][request_id: u32 BE][row_set...]
+  const dv = new DataView(frame.buffer, frame.byteOffset, frame.byteLength);
+  const rowSetData = frame.subarray(5); // skip tag + request_id
+
+  if (rowSetData.length === 0) {
+    // Empty result — query returned no data.
+    pendingQueryResolve(null);
+  } else {
+    // Parse row set using existing serde.
+    const rowSetDv = new DataView(rowSetData.buffer, rowSetData.byteOffset, rowSetData.byteLength);
+    const { result } = readRowSet(rowSetDv, 0);
+    // query mode: single row → return first row or null.
+    // queryAll mode: return all rows.
+    // The mode was sent in the QUERY frame — the server doesn't echo it.
+    // We store it alongside the promise resolve.
+    pendingQueryResolve(result);
   }
+
+  pendingQueryResolve = null;
+}
+
+async function handleCall(frame: Uint8Array): Promise<void> {
+  handlerInProgress = true;
 
   const dv = new DataView(frame.buffer, frame.byteOffset, frame.byteLength);
   const requestId = dv.getUint32(1, false);
@@ -240,37 +287,28 @@ function handleFrame(frame: Uint8Array): void {
   const args = frame.subarray(7 + nameLen);
 
   try {
-    dispatch(name, requestId, args, dv);
+    switch (name) {
+      case "route":
+        dispatchRoute(requestId, args);
+        break;
+      case "prefetch":
+        await dispatchPrefetch(requestId, args);
+        break;
+      case "handle":
+        dispatchHandle(requestId, args);
+        break;
+      case "render":
+        await dispatchRender(requestId, args);
+        break;
+      default:
+        console.error("[call_runtime] unknown function:", name);
+        sendFrame(conn, buildResult(requestId, ResultFlag.failure, new Uint8Array(0)));
+    }
   } catch (e: any) {
     console.error(`[call_runtime] ${name} error:`, e.message || e);
     sendFrame(conn, buildResult(requestId, ResultFlag.failure, new Uint8Array(0)));
-  }
-}
-
-// --- Dispatch ---
-
-function dispatch(
-  name: string,
-  requestId: number,
-  args: Uint8Array,
-  _dv: DataView,
-): void {
-  switch (name) {
-    case "route":
-      dispatchRoute(requestId, args);
-      break;
-    case "prefetch":
-      dispatchPrefetch(requestId, args);
-      break;
-    case "handle":
-      dispatchHandle(requestId, args);
-      break;
-    case "render":
-      dispatchRender(requestId, args);
-      break;
-    default:
-      console.error("[call_runtime] unknown function:", name);
-      sendFrame(conn, buildResult(requestId, ResultFlag.failure, new Uint8Array(0)));
+  } finally {
+    handlerInProgress = false;
   }
 }
 
@@ -367,11 +405,7 @@ function dispatchRoute(requestId: number, args: Uint8Array): void {
 // QUERY sub-protocol for db.query()
 // Result: empty (sidecar holds state)
 
-function dispatchPrefetch(requestId: number, args: Uint8Array): void {
-  const dv = new DataView(args.buffer, args.byteOffset, args.byteLength);
-  const _operation = args[0];
-  // ID from args — but we already have it from route.
-
+async function dispatchPrefetch(requestId: number, args: Uint8Array): Promise<void> {
   const mod = modules[requestState.operation];
   if (!mod?.prefetch) {
     sendFrame(conn, buildResult(requestId, ResultFlag.success, new Uint8Array(0)));
@@ -384,19 +418,19 @@ function dispatchPrefetch(requestId: number, args: Uint8Array): void {
     body: requestState.body,
   };
 
-  // db object with query/queryAll that send QUERY frames synchronously.
-  // In the CALL/RESULT model, these are blocking — the sidecar waits
-  // for QUERY_RESULT before continuing.
+  // db.query() sends QUERY frame, returns Promise that resolves when
+  // QUERY_RESULT arrives. The handler awaits it — Node's event loop
+  // processes socket data while the handler is suspended.
   const db = {
     query: (sql: string, ...params: unknown[]) => {
-      return queryServer(requestId, sql, QueryMode.query, params);
+      return queryServerAsync(requestId, sql, QueryMode.query, params);
     },
     queryAll: (sql: string, ...params: unknown[]) => {
-      return queryServer(requestId, sql, QueryMode.queryAll, params);
+      return queryServerAsync(requestId, sql, QueryMode.queryAll, params);
     },
   };
 
-  const prefetched = mod.prefetch(msg, db);
+  const prefetched = await mod.prefetch(msg, db);
   requestState.prefetched = prefetched || {};
 
   sendFrame(conn, buildResult(requestId, ResultFlag.success, new Uint8Array(0)));
@@ -490,23 +524,23 @@ function dispatchHandle(requestId: number, _args: Uint8Array): void {
 
 import { StatusNames } from "./types.generated.ts";
 
-function dispatchRender(requestId: number, args: Uint8Array): void {
-  const _operation = args[0];
+async function dispatchRender(requestId: number, args: Uint8Array): Promise<void> {
   const statusValue = args[1];
   const statusName = (StatusNames as any)[statusValue] || "ok";
 
   const mod = modules[requestState.operation];
   if (!mod?.render) {
     sendFrame(conn, buildResult(requestId, ResultFlag.success, new Uint8Array(0)));
+    resetRequestState();
     return;
   }
 
   const db = {
     query: (sql: string, ...params: unknown[]) => {
-      return queryServer(requestId, sql, QueryMode.query, params);
+      return queryServerAsync(requestId, sql, QueryMode.query, params);
     },
     queryAll: (sql: string, ...params: unknown[]) => {
-      return queryServer(requestId, sql, QueryMode.queryAll, params);
+      return queryServerAsync(requestId, sql, QueryMode.queryAll, params);
     },
   };
 
@@ -520,7 +554,7 @@ function dispatchRender(requestId: number, args: Uint8Array): void {
     is_sse: false,
   };
 
-  const html = mod.render(ctx, db) || "";
+  const html = (await mod.render(ctx, db)) || "";
   const htmlBytes = _encoder.encode(html);
 
   sendFrame(conn, buildResult(requestId, ResultFlag.success, htmlBytes));
@@ -530,29 +564,41 @@ function dispatchRender(requestId: number, args: Uint8Array): void {
 }
 
 // --- QUERY sub-protocol ---
-// Send QUERY frame, block until QUERY_RESULT arrives.
-// Synchronous from the handler's perspective.
+// Send QUERY frame, return Promise. The Promise resolves when
+// QUERY_RESULT arrives on the socket. The event loop processes
+// socket data while the handler is suspended.
+//
+// Serial pipeline: at most one pending QUERY at a time. The handler
+// awaits db.query() sequentially. Parallel queries via Promise.all()
+// would require multiple pending resolvers — not supported yet.
 
-function queryServer(
+let pendingQueryMode: number = QueryMode.query;
+
+async function queryServerAsync(
   requestId: number,
   sql: string,
   mode: number,
   params: unknown[],
-): any {
+): Promise<any> {
   // Send QUERY frame.
   const queryFrame = buildQuery(requestId, sql, mode, params);
   sendFrame(conn, queryFrame);
 
-  // Block until QUERY_RESULT arrives.
-  // In Node.js, this requires synchronous socket reads — which aren't
-  // natively supported. For the initial implementation, we use a
-  // synchronous read workaround.
-  //
-  // TODO: This needs to be async (await). The prefetch/render functions
-  // should be async, and db.query() returns a promise. The frame
-  // processing loop needs to handle interleaved QUERY_RESULT frames.
-  //
-  // For now, return a placeholder — the sync read problem needs to be
-  // solved before this works end-to-end.
-  throw new Error("QUERY sub-protocol requires async implementation — see TODO");
+  // Store mode for handleQueryResult to use.
+  pendingQueryMode = mode;
+
+  // Wait for QUERY_RESULT.
+  return new Promise<any>((resolve) => {
+    pendingQueryResolve = (rowSet) => {
+      if (rowSet === null) {
+        resolve(mode === QueryMode.queryAll ? [] : null);
+      } else if (mode === QueryMode.query) {
+        // Single row: return first row or null.
+        resolve(rowSet.rows.length > 0 ? rowSet.rows[0] : null);
+      } else {
+        // All rows.
+        resolve(rowSet.rows);
+      }
+    };
+  });
 }
