@@ -46,6 +46,7 @@ pub const SimIO = struct {
             accept,
             recv,
             send,
+            readable,
         };
     };
 
@@ -399,6 +400,17 @@ pub const SimIO = struct {
         self.enqueue(completion);
     }
 
+    /// Readability notification — not used in sim (no sidecar in sim mode).
+    /// Fires the callback immediately with 0 for test compatibility.
+    pub fn readable(self: *SimIO, _: fd_t, completion: *Completion, context: *anyopaque, callback: *const fn (*anyopaque, i32) void) void {
+        completion.* = .{
+            .operation = .readable,
+            .context = context,
+            .callback = callback,
+        };
+        self.enqueue(completion);
+    }
+
     pub fn recv(self: *SimIO, fd: fd_t, buffer: []u8, completion: *Completion, context: *anyopaque, callback: *const fn (*anyopaque, i32) void) void {
         assert(completion.operation == .none);
         assert(buffer.len > 0);
@@ -559,6 +571,10 @@ pub const SimIO = struct {
                 }
                 completion.callback(completion.context, -1);
             },
+            .readable => {
+                // No sidecar in sim mode — just fire the callback.
+                completion.callback(completion.context, 0);
+            },
             .none => unreachable,
         }
     }
@@ -570,6 +586,7 @@ pub const SimIO = struct {
             .accept => self.accept_fault_probability,
             .recv => self.recv_fault_probability,
             .send => self.send_fault_probability,
+            .readable => PRNG.Ratio.zero(), // no faults for readability
             .none => unreachable,
         };
         return self.prng.chance(probability);

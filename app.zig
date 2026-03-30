@@ -123,16 +123,18 @@ pub fn HandlersType(comptime StorageParam: type) type {
                         if (client.result_flag == .failure) return null;
                     },
                     .idle => {
-                        // First call: start the exchange.
+                        // First call: start the exchange (non-blocking).
+                        // call_submit sends the CALL frame. Returns without
+                        // waiting for RESULT. The server registers the sidecar
+                        // fd with epoll — the callback drives on_recv.
                         var args: [1 + 16]u8 = undefined;
                         args[0] = @intFromEnum(msg.operation);
                         std.mem.writeInt(u128, args[1..17], msg.id, .big);
 
                         if (!client.call_submit("prefetch", &args)) return null;
-                        if (!client.run_to_completion(query_dispatch_fn, @ptrCast(storage), protocol.queries_max)) return null;
-                        defer client.reset_call_state();
-
-                        if (client.result_flag == .failure) return null;
+                        // Don't call run_to_completion — return null for .pending.
+                        // The epoll callback will drive on_recv to completion.
+                        return null;
                     },
                     .receiving => {
                         // Still waiting for RESULT — process_sidecar hasn't
@@ -175,7 +177,7 @@ pub fn HandlersType(comptime StorageParam: type) type {
         /// a value type received via anytype — can't take its address for
         /// *anyopaque. StorageParam is a persistent pointer on the SM.
         /// ReadView is created fresh inside — it's a thin wrapper, free.
-        fn query_dispatch_fn(ctx: *anyopaque, sql: []const u8, params_buf: []const u8, param_count: u8, mode: protocol.QueryMode, out_buf: []u8) ?[]const u8 {
+        pub fn query_dispatch_fn(ctx: *anyopaque, sql: []const u8, params_buf: []const u8, param_count: u8, mode: protocol.QueryMode, out_buf: []u8) ?[]const u8 {
             const s: *StorageParam = @ptrCast(@alignCast(ctx));
             const ro = StorageParam.ReadView.init(s);
             return ro.query_raw(sql, params_buf, param_count, mode, out_buf);

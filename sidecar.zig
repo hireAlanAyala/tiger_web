@@ -20,6 +20,7 @@ const http = @import("framework/http.zig");
 const log = std.log.scoped(.sidecar);
 
 pub const SidecarClient = struct {
+    pub const max_queries_per_call = protocol.queries_max;
     // Sized to 3 × frame_max: each round trip copies at most one
     // frame's worth of data. Three round trips = 3 × frame_max.
     //   RT1: prefetch_decl ≤ frame_max
