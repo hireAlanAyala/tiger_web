@@ -59,11 +59,20 @@ pub const SidecarClient = struct {
     /// handler_execute so the pipeline can pass it across phases.
     stored_prefetch_len: usize = 0,
 
+    // CALL/RESULT state machine fields — used by the new protocol.
+    call_state: CallState = .idle,
+    call_query_count: u32 = 0,
+    result_flag: protocol.ResultFlag = .success,
+    result_data: []const u8 = "",
+    /// Prefetch result — stored between prefetch and handle phases.
+    /// The server passes this through opaquely. Aliases state_buf.
+    prefetch_result: []const u8 = "",
+
     comptime {
         // Memory budget: send + recv + state allocated once at startup.
         // send(256K) + recv(256K) + state(768K) ≈ 1.25MB.
         assert(protocol.frame_max + (protocol.frame_max + 4) + state_buf_max < 2 * 1024 * 1024);
-        assert(@sizeOf(SidecarClient) <= 128);
+        assert(@sizeOf(SidecarClient) <= 256);
     }
 
     pub fn init(path: []const u8) SidecarClient {
@@ -166,123 +175,179 @@ pub const SidecarClient = struct {
     }
 
     // =================================================================
-    // CALL/RESULT exchange — dumb executor protocol
+    // CALL/RESULT exchange — state machine for dumb executor protocol
     //
-    // Send a CALL frame, handle QUERY sub-protocol, return RESULT.
-    // This is the universal primitive for the new protocol.
+    // Structured as a state machine, not a blocking loop. In Phase 2
+    // (sync), run_to_completion() drives all transitions in one call.
+    // In Phase 3 (async), epoll drives transitions via on_recv().
+    // The state machine is the same — only the driver changes.
     // =================================================================
 
-    /// Result of a CALL/RESULT exchange.
-    pub const ExchangeResult = struct {
-        flag: protocol.ResultFlag,
-        /// RESULT payload after the flag byte. Aliases recv_buf —
-        /// consume before the next call_exchange.
-        data: []const u8,
+    pub const CallState = enum {
+        idle,          // No CALL in flight
+        receiving,     // CALL sent, waiting for frames from sidecar
+        complete,      // RESULT received — result_flag and result_data valid
+        failed,        // Protocol error or disconnect
     };
 
-    /// Send a CALL, handle QUERY sub-protocol, return RESULT.
-    ///
-    /// When `allow_queries` is true, QUERY frames from the sidecar are
-    /// dispatched to storage (db.query). When false, QUERY frames are
-    /// a protocol violation — disconnect.
-    ///
-    /// `queries_max` bounds the QUERY loop. If the sidecar exceeds the
-    /// limit, the exchange fails.
-    pub fn call_exchange(
-        self: *SidecarClient,
-        function_name: []const u8,
-        args: []const u8,
-        storage: anytype,
-        comptime allow_queries: bool,
-        comptime queries_max: u32,
-    ) ?ExchangeResult {
+    /// Submit a CALL frame. Transitions to .receiving.
+    /// Args are copied into send_buf by build_call.
+    pub fn call_submit(self: *SidecarClient, function_name: []const u8, args: []const u8) bool {
+        assert(self.call_state == .idle);
+
         if (self.fd == -1) {
             self.try_reconnect();
-            if (self.fd == -1) return null;
+            if (self.fd == -1) return false;
         }
 
-        // Build and send CALL frame.
-        const call_len = protocol.build_call(self.send_buf, 0, function_name, args) orelse {
+        const call_len = protocol.build_call(
+            self.send_buf,
+            0, // request_id — single in-flight for sync
+            function_name,
+            args,
+        ) orelse {
             log.warn("call: frame too large for {s}", .{function_name});
-            return null;
+            return false;
         };
+
         if (!protocol.write_frame(self.fd, self.send_buf[0..call_len])) {
             self.handle_disconnect();
-            return null;
+            return false;
         }
 
-        // Recv loop: handle QUERY frames until RESULT arrives.
-        var query_count: u32 = 0;
-        while (true) {
-            const frame = protocol.read_frame(self.fd, self.recv_buf) orelse {
-                self.handle_disconnect();
-                return null;
-            };
+        self.call_state = .receiving;
+        self.call_query_count = 0;
+        return true;
+    }
 
-            const parsed = protocol.parse_sidecar_frame(frame) orelse {
-                log.warn("call: invalid frame from sidecar", .{});
-                self.handle_disconnect();
-                return null;
-            };
+    /// Query dispatch function type. The context is an opaque pointer
+    /// to the storage ReadView (or whatever provides query_raw).
+    /// Same pattern as TB's IO callbacks — context + operation.
+    pub const QueryFn = *const fn (
+        context: *anyopaque,
+        sql: []const u8,
+        params_buf: []const u8,
+        param_count: u8,
+        mode: protocol.QueryMode,
+        out_buf: []u8,
+    ) ?[]const u8;
 
-            switch (parsed.tag) {
-                .result => {
-                    const result = protocol.parse_result_payload(parsed.payload) orelse {
-                        log.warn("call: invalid RESULT payload", .{});
-                        self.handle_disconnect();
-                        return null;
-                    };
-                    return .{
-                        .flag = result.flag,
-                        .data = result.data,
-                    };
-                },
-                .query => {
-                    if (!allow_queries) {
-                        log.warn("call: QUERY received during no-query CALL {s}", .{function_name});
-                        self.handle_disconnect();
-                        return null;
-                    }
+    /// Process one received frame. Called by the recv loop (sync) or
+    /// epoll handler (async). Returns the new state.
+    ///
+    /// On .query: executes SQL via query_fn(query_ctx), sends QUERY_RESULT.
+    /// On .result: stores result, transitions to .complete.
+    /// On error: transitions to .failed.
+    pub fn on_recv(
+        self: *SidecarClient,
+        query_fn: ?QueryFn,
+        query_ctx: ?*anyopaque,
+        comptime queries_max: u32,
+    ) CallState {
+        assert(self.call_state == .receiving);
 
-                    if (query_count >= queries_max) {
-                        log.warn("call: exceeded max queries ({d}) for {s}", .{ queries_max, function_name });
-                        self.handle_disconnect();
-                        return null;
-                    }
-                    query_count += 1;
+        const frame = protocol.read_frame(self.fd, self.recv_buf) orelse {
+            self.handle_disconnect();
+            self.call_state = .failed;
+            return .failed;
+        };
 
-                    const query = protocol.parse_query_payload(parsed.payload) orelse {
-                        log.warn("call: invalid QUERY payload", .{});
-                        self.handle_disconnect();
-                        return null;
-                    };
+        const parsed = protocol.parse_sidecar_frame(frame) orelse {
+            log.warn("call: invalid frame from sidecar", .{});
+            self.handle_disconnect();
+            self.call_state = .failed;
+            return .failed;
+        };
 
-                    // Execute SQL via storage ReadView, write row set
-                    // directly into send_buf after the 5-byte header.
-                    const row_set = storage.query_raw(
-                        query.sql,
-                        query.params_buf,
-                        query.param_count,
-                        query.mode,
-                        self.send_buf[5..],
-                    ) orelse blk: {
-                        // Query failed — send empty QUERY_RESULT.
-                        break :blk @as([]const u8, "");
-                    };
+        switch (parsed.tag) {
+            .result => {
+                const result = protocol.parse_result_payload(parsed.payload) orelse {
+                    log.warn("call: invalid RESULT payload", .{});
+                    self.handle_disconnect();
+                    self.call_state = .failed;
+                    return .failed;
+                };
+                self.result_flag = result.flag;
+                self.result_data = result.data;
+                self.call_state = .complete;
+                return .complete;
+            },
+            .query => {
+                if (query_fn == null) {
+                    log.warn("call: QUERY received during no-query CALL", .{});
+                    self.handle_disconnect();
+                    self.call_state = .failed;
+                    return .failed;
+                }
 
-                    // Build QUERY_RESULT header in the first 5 bytes.
-                    self.send_buf[0] = @intFromEnum(protocol.CallTag.query_result);
-                    std.mem.writeInt(u32, self.send_buf[1..5], parsed.request_id, .big);
-                    const qr_total = 5 + row_set.len;
+                if (self.call_query_count >= queries_max) {
+                    log.warn("call: exceeded max queries ({d})", .{queries_max});
+                    self.handle_disconnect();
+                    self.call_state = .failed;
+                    return .failed;
+                }
+                self.call_query_count += 1;
 
-                    if (!protocol.write_frame(self.fd, self.send_buf[0..qr_total])) {
-                        self.handle_disconnect();
-                        return null;
-                    }
-                },
-                else => unreachable,
-            }
+                const query = protocol.parse_query_payload(parsed.payload) orelse {
+                    log.warn("call: invalid QUERY payload", .{});
+                    self.handle_disconnect();
+                    self.call_state = .failed;
+                    return .failed;
+                };
+
+                // Execute SQL via the caller's query function.
+                // Row set written directly into send_buf after the
+                // 5-byte QUERY_RESULT header.
+                const row_set = query_fn.?(
+                    query_ctx.?,
+                    query.sql,
+                    query.params_buf,
+                    query.param_count,
+                    query.mode,
+                    self.send_buf[5..],
+                ) orelse blk: {
+                    break :blk @as([]const u8, "");
+                };
+
+                // Send QUERY_RESULT.
+                self.send_buf[0] = @intFromEnum(protocol.CallTag.query_result);
+                std.mem.writeInt(u32, self.send_buf[1..5], parsed.request_id, .big);
+                const qr_total = 5 + row_set.len;
+
+                if (!protocol.write_frame(self.fd, self.send_buf[0..qr_total])) {
+                    self.handle_disconnect();
+                    self.call_state = .failed;
+                    return .failed;
+                }
+
+                // Stay in .receiving — more frames expected.
+                return .receiving;
+            },
+            else => unreachable,
         }
+    }
+
+    /// Drive the state machine to completion. Blocking — used in Phase 2.
+    /// In Phase 3, this is replaced by epoll-driven on_recv() calls.
+    pub fn run_to_completion(
+        self: *SidecarClient,
+        query_fn: ?QueryFn,
+        query_ctx: ?*anyopaque,
+        comptime queries_max: u32,
+    ) bool {
+        assert(self.call_state == .receiving);
+        while (self.call_state == .receiving) {
+            _ = self.on_recv(query_fn, query_ctx, queries_max);
+        }
+        return self.call_state == .complete;
+    }
+
+    /// Reset call state between requests.
+    fn reset_call_state(self: *SidecarClient) void {
+        self.call_state = .idle;
+        self.call_query_count = 0;
+        self.result_flag = .success;
+        self.result_data = "";
     }
 
     // =================================================================
