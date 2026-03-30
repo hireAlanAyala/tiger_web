@@ -53,26 +53,27 @@ function has(body: string, text: string): boolean {
 
 async function startServer(): Promise<void> {
   execSync("npm run build", { cwd: `${PROJ}/examples/ecommerce-ts`, stdio: "pipe" });
-
-  sidecar = spawn("npx", ["tsx", `${PROJ}/generated/dispatch.generated.ts`, SOCK], {
-    cwd: `${PROJ}/examples/ecommerce-ts`,
-    stdio: "pipe",
-  });
-
-  // Wait for socket
-  for (let i = 0; i < 50; i++) {
-    try { accessSync(SOCK); break; } catch { await sleep(100); }
-  }
-
   execSync(`${PROJ}/zig/zig build`, { cwd: PROJ, stdio: "pipe" });
 
+  // Server starts first — listens on unix socket, waits for sidecar.
   server = spawn(
     `${PROJ}/zig-out/bin/tiger-web`,
     [`--port=${PORT}`, `--sidecar=${SOCK}`, `--db=${DB}`],
     { cwd: PROJ, stdio: "pipe" },
   );
 
-  // Wait for server ready
+  // Wait for socket to appear (server creates it via listen_and_accept).
+  for (let i = 0; i < 50; i++) {
+    try { accessSync(SOCK); break; } catch { await sleep(100); }
+  }
+
+  // Sidecar connects to the server's unix socket.
+  sidecar = spawn("npx", ["tsx", `${PROJ}/adapters/call_runtime.ts`, SOCK], {
+    cwd: `${PROJ}/examples/ecommerce-ts`,
+    stdio: "pipe",
+  });
+
+  // Wait for server ready (sidecar connects, server starts accepting HTTP).
   for (let i = 0; i < 30; i++) {
     try { await fetch(`${BASE}/`); return; } catch { await sleep(200); }
   }

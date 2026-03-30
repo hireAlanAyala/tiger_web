@@ -25,14 +25,7 @@ export const QueryMode = {
   queryAll: 0x01,
 } as const;
 
-export const MessageTag = {
-  route_request: 0x01,
-  route_prefetch_response: 0x02,
-  prefetch_results: 0x03,
-  handle_render_response: 0x04,
-  render_results: 0x05,
-  html_response: 0x06,
-} as const;
+// Legacy MessageTag removed — was only used by old 3-RT dispatch.
 
 // --- Row set reader (framework → sidecar) ---
 

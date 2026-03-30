@@ -125,7 +125,6 @@ pub const TypeTag = enum(u8) {
 // =====================================================================
 
 // Legacy MessageTag removed — was only used by old 3-RT protocol.
-// Old TS dispatch (serde.ts, dispatch.generated.ts) defines its own copy.
 
 // =====================================================================
 // CALL/RESULT protocol — dumb executor model
