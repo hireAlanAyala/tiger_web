@@ -93,7 +93,7 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
         /// Prefetch cache — persists from prefetch to render.
         commit_cache: ?App.HandlersType(Storage).Cache = null,
         /// Auth identity — persists from prefetch to render.
-        commit_identity: ?@FieldType(StateMachine.CommitOutput, "identity") = null,
+        commit_identity: ?StateMachine.CommitOutput.Identity = null,
 
         /// Pipeline stage — serial, one request at a time (TB pattern).
         /// Guards process_inbox: if not .idle, no new pipeline starts.
@@ -102,10 +102,8 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
         const CommitStage = enum {
             idle,     // No request in pipeline
             prefetch, // Waiting for prefetch result
-            handle,   // Waiting for handle result
-            commit,   // Executing writes in transaction (sync — owns begin/commit_batch)
-            render,   // Waiting for render result
-            encode,   // Building HTTP response
+            handle,   // Executing handle + writes in transaction
+            render,   // Executing render + encoding response
         };
 
         /// Log metrics every 10,000 ticks (~100s at 10ms/tick).
@@ -218,9 +216,12 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
         // --- Inbox: process ready requests ---
 
         fn process_inbox(server: *Server) void {
-            // Set wall-clock time for this batch — all operations in the tick
-            // see the same timestamp.
-            server.state_machine.set_time(server.time.realtime());
+            // Set wall-clock time — only when no pipeline is in-flight.
+            // A pending pipeline uses the time from when the request arrived,
+            // not when it resumes. Same as TB: time is per-prepare, not per-tick.
+            if (server.commit_stage == .idle) {
+                server.state_machine.set_time(server.time.realtime());
+            }
 
             // Transaction boundary moved to commit_dispatch (.handle stage).
             // WAL recording enabled there too. process_inbox only does
@@ -346,12 +347,6 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
                         continue;
                     },
 
-                    .commit => {
-                        // Writes are handled inline in .handle above.
-                        // .commit stage is reserved for future use (async
-                        // handle where writes pend).
-                        unreachable;
-                    },
 
                     .render => {
                         const pipeline_resp = server.commit_pipeline_resp.?;
@@ -397,10 +392,6 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
                         return;
                     },
 
-                    .encode => {
-                        // Encoding is handled inline in .render above.
-                        unreachable;
-                    },
                 }
             }
         }

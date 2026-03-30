@@ -270,9 +270,10 @@ pub fn StateMachineType(comptime Storage: type, comptime Handlers: type) type {
         /// The SM's job ends here. Cache ownership transfers to the caller
         /// so render can access prefetched data post-commit.
         pub const CommitOutput = struct {
+            pub const Identity = message.PrefetchIdentity;
             response: PipelineResponse,
             cache: Handlers.Cache,
-            identity: message.PrefetchIdentity,
+            identity: Identity,
         };
 
         /// Phase 2: commit — returns CommitOutput (response + cache for render).
