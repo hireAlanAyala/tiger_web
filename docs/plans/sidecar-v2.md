@@ -732,42 +732,68 @@ later.
 
 ## Phase 5: Scanner refactor
 
-**Goal:** The annotation scanner generates the Handlers type,
-call_runtime imports, and route table. Eliminates hand-written
-dispatch code and dead `dispatch.generated.ts`.
+Two parts: TS-side (done) and Zig-side (deferred).
 
-### What the scanner generates
+### Phase 5a: TS adapter generates CALL/RESULT data ✓
 
-- **Handlers type** with per-operation comptime switch. Zig handlers
-  dispatch directly, sidecar handlers dispatch via CALL/RESULT.
-  Cache type uses `void` for sidecar operations — comptime-enforced
-  invariant (no fields to read, no zeroed placeholder).
-- **call_runtime.ts imports** — handler module imports + route table.
-  Currently hardcoded in `adapters/call_runtime.ts`. Scanner knows
-  all handler files and their languages.
-- **Build step** stops generating `dispatch.generated.ts` (dead 3-RT
-  code). `npm run build` generates for CALL/RESULT only.
+- [x] TypeScript adapter generates handlers.generated.ts (imports,
+  modules registry, route table) from manifest.json.
+- [x] call_runtime.ts imports from generated file — no hardcoded
+  handler imports or route table.
+- [x] npm run build generates handlers.generated.ts, not old dispatch.
+- [x] dispatch.generated.ts deleted. Old adapter test deleted.
+- [x] MessageTag removed from serde.ts (no consumers).
+- [x] test.ts updated for new protocol direction.
 
-### What this enables
+### Phase 5b: Zig scanner generates Handlers type (deferred)
 
-- Comptime void Cache for sidecar operations (removes zeroed cache
-  convention).
-- Runtime `if (sidecar)` check replaced by comptime dispatch (no
-  branch for pure-Zig apps, no sidecar code compiled).
-- Mixed handlers for free — Zig and TS in the same app, each
-  operation dispatched to the right runtime at comptime.
-- Multiple sidecar runtimes — each language connects on its own
-  unix socket.
+**Goal:** The annotation scanner generates a Zig file that replaces
+the hand-written HandlersType in app.zig. Eliminates runtime sidecar
+checks and zeroed cache convention.
 
-### Checklist (to be refined when starting)
+**What changes:**
 
-- [ ] Scanner emits Handlers struct with comptime operation switch.
-- [ ] Cache union uses void for sidecar operations.
-- [ ] Scanner generates call_runtime.ts imports + route table.
-- [ ] npm run build generates for CALL/RESULT, not 3-RT.
-- [ ] Delete dispatch.generated.ts generation from typescript adapter.
+The scanner already generates `routes.generated.zig` (comptime route
+table). The same pattern generates `handlers.generated.zig`:
+
+- **PrefetchCache union** — typed Prefetch variants for Zig handlers,
+  `void` for sidecar handlers. Operation-specific at comptime.
+- **handler_prefetch/execute/render switches** — Zig operations call
+  handler functions directly, sidecar operations dispatch via
+  CALL/RESULT. No runtime `if (sidecar)` check.
+- **is_sidecar_operation(op)** — comptime function replacing runtime
+  is_sidecar_pending. Each operation is tagged Zig or sidecar at
+  compile time from file extension.
+
+**What this enables:**
+
+- Comptime void Cache — zeroed cache convention eliminated. The
+  invariant "sidecar handler_execute never reads cache" becomes
+  comptime-enforced (void has no fields to read).
+- Dead code elimination — pure-Zig apps compile zero sidecar code.
+  Pure-sidecar apps compile zero native dispatch. Mixed apps get
+  per-operation comptime dispatch.
+- Module-level `sidecar` var removed — sidecar connection state
+  moves to the generated Handlers type or the server.
+
+**Why deferred:**
+
+This is a deep refactor of the Zig compilation model. The scanner
+would generate a Zig file that replaces HandlersType in app.zig,
+including the PrefetchCache union with operation-specific types.
+Touches the core of how the framework binds to handlers.
+
+Does not block workers — workers can be built with the current
+runtime sidecar checks. The scanner-generated Handlers is
+architectural purity, not functional value.
+
+**Checklist (to be refined when starting):**
+
+- [ ] Scanner emits handlers.generated.zig with Handlers struct.
+- [ ] PrefetchCache uses void for sidecar operations.
 - [ ] Remove runtime `if (sidecar)` checks from HandlersType.
 - [ ] Remove module-level `sidecar` var from app.zig.
+- [ ] Sidecar connection state on Handlers or server.
 - [ ] Sidecar availability check in pipeline (comptime-tagged).
 
 ---
