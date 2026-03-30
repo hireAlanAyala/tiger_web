@@ -7,9 +7,10 @@ phase builds correctly on the one below — no shims, no rework.
 ```
 Phase 1: Unify pipeline       ✓ complete
 Phase 2: CALL/RESULT protocol  ✓ complete
-Phase 3: Protocol fuzzer        (gate for async — prove boundary correctness)
-Phase 4: Async prefetch        (callback-driven, serial pipeline, TB pattern)
-Phase 5: Workers               (see worker-v2.md)
+Phase 3: Protocol fuzzer       ✓ complete
+Phase 4: Async prefetch        ✓ complete (prefetch async, handle/render still blocking)
+Phase 5: Scanner refactor       (generate Handlers, void Cache, call_runtime imports)
+Phase 6: Workers               (see worker-v2.md)
 ```
 
 Phase order revised after Phase 1: protocol before async. Build the
@@ -729,7 +730,49 @@ later.
 
 ---
 
-## Phase 5: Workers
+## Phase 5: Scanner refactor
+
+**Goal:** The annotation scanner generates the Handlers type,
+call_runtime imports, and route table. Eliminates hand-written
+dispatch code and dead `dispatch.generated.ts`.
+
+### What the scanner generates
+
+- **Handlers type** with per-operation comptime switch. Zig handlers
+  dispatch directly, sidecar handlers dispatch via CALL/RESULT.
+  Cache type uses `void` for sidecar operations — comptime-enforced
+  invariant (no fields to read, no zeroed placeholder).
+- **call_runtime.ts imports** — handler module imports + route table.
+  Currently hardcoded in `adapters/call_runtime.ts`. Scanner knows
+  all handler files and their languages.
+- **Build step** stops generating `dispatch.generated.ts` (dead 3-RT
+  code). `npm run build` generates for CALL/RESULT only.
+
+### What this enables
+
+- Comptime void Cache for sidecar operations (removes zeroed cache
+  convention).
+- Runtime `if (sidecar)` check replaced by comptime dispatch (no
+  branch for pure-Zig apps, no sidecar code compiled).
+- Mixed handlers for free — Zig and TS in the same app, each
+  operation dispatched to the right runtime at comptime.
+- Multiple sidecar runtimes — each language connects on its own
+  unix socket.
+
+### Checklist (to be refined when starting)
+
+- [ ] Scanner emits Handlers struct with comptime operation switch.
+- [ ] Cache union uses void for sidecar operations.
+- [ ] Scanner generates call_runtime.ts imports + route table.
+- [ ] npm run build generates for CALL/RESULT, not 3-RT.
+- [ ] Delete dispatch.generated.ts generation from typescript adapter.
+- [ ] Remove runtime `if (sidecar)` checks from HandlersType.
+- [ ] Remove module-level `sidecar` var from app.zig.
+- [ ] Sidecar availability check in pipeline (comptime-tagged).
+
+---
+
+## Phase 6: Workers
 
 Built on the CALL/RESULT protocol from Phase 3. See
 [worker-v2.md](worker-v2.md) for full design decisions, checklist,
@@ -757,11 +800,13 @@ Phase 1 (unify pipeline) ✓
     ↓
 Phase 2 (CALL/RESULT protocol) ✓
     ↓
-Phase 3 (protocol fuzzer — gate for async)
+Phase 3 (protocol fuzzer) ✓
     ↓
-Phase 4 (async prefetch — serial, callback-driven)
+Phase 4 (async prefetch) ✓
     ↓
-Phase 5 (workers — worker-v2.md)
+Phase 5 (scanner refactor)
+    ↓
+Phase 6 (workers — worker-v2.md)
 ```
 
 Each phase builds on the one below. Each phase is independently
