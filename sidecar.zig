@@ -180,6 +180,13 @@ pub const SidecarClient = struct {
     // Structured as a state machine, not a blocking loop. In Phase 2
     // (sync), run_to_completion() drives all transitions in one call.
     // In Phase 3 (async), epoll drives transitions via on_recv().
+    //
+    // Tradeoff: the old call_exchange used comptime allow_queries to
+    // eliminate the QUERY branch at compile time for no-query CALLs.
+    // The state machine uses a runtime null check (query_fn == null)
+    // because function pointers can't be comptime. This is the price
+    // of storability — the QueryFn must be a field for async Phase 3.
+    // Same tradeoff TB makes with callback context pointers.
     // The state machine is the same — only the driver changes.
     // =================================================================
 

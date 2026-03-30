@@ -187,25 +187,12 @@ pub fn HandlersType(comptime StorageParam: type) type {
                 const write_data = data[2 + status_len + 1 ..];
 
                 // Execute writes through WriteView for WAL recording.
-                if (write_count > 0) {
-                    var wpos: usize = 0;
-                    for (0..write_count) |_| {
-                        if (wpos + 2 > write_data.len) return .{ .status = .storage_error };
-                        const sql_len = std.mem.readInt(u16, write_data[wpos..][0..2], .big);
-                        wpos += 2;
-                        if (wpos + sql_len > write_data.len) return .{ .status = .storage_error };
-                        const sql = write_data[wpos..][0..sql_len];
-                        wpos += sql_len;
-                        if (wpos >= write_data.len) return .{ .status = .storage_error };
-                        const param_count = write_data[wpos];
-                        wpos += 1;
-                        const params_start = wpos;
-                        wpos = SidecarClient.skip_params(write_data, wpos, param_count) orelse
-                            return .{ .status = .storage_error };
-                        if (!db.execute_raw(sql, write_data[params_start..wpos], param_count)) {
-                            return .{ .status = .storage_error };
-                        }
-                    }
+                // Reuse SidecarClient.execute_writes — same binary format
+                // as the 3-RT protocol. No duplicate parsing.
+                client.handle_writes = write_data;
+                client.handle_write_count = write_count;
+                if (!client.execute_writes(db)) {
+                    return .{ .status = .storage_error };
                 }
 
                 // Map status string to Status enum.
