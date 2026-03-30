@@ -141,7 +141,10 @@ pub fn HandlersType(comptime StorageParam: type) type {
 
         /// QUERY dispatch function for CALL/RESULT protocol.
         /// Wraps StorageParam.query_raw behind the QueryFn interface.
-        /// Context is *StorageParam — the SM's persistent storage pointer.
+        /// Context is *StorageParam (not *ReadView) because ReadView is
+        /// a value type received via anytype — can't take its address for
+        /// *anyopaque. StorageParam is a persistent pointer on the SM.
+        /// ReadView is created fresh inside — it's a thin wrapper, free.
         fn query_dispatch_fn(ctx: *anyopaque, sql: []const u8, params_buf: []const u8, param_count: u8, mode: protocol.QueryMode, out_buf: []u8) ?[]const u8 {
             const s: *StorageParam = @ptrCast(@alignCast(ctx));
             const ro = StorageParam.ReadView.init(s);
