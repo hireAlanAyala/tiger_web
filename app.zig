@@ -126,6 +126,53 @@ pub fn HandlersType(comptime StorageParam: type) type {
         ) state_machine.HandleResult {
             return dispatch_execute(cache, msg, fw, db);
         }
+
+        /// Route an HTTP request to a typed Message. Returns null if
+        /// the request doesn't map to a valid operation or the handler
+        /// rejects it. Sidecar operations delegate to the sidecar client.
+        pub fn handler_route(method: http.Method, raw_path: []const u8, body: []const u8) ?Message {
+            if (sidecar) |*client| return client.translate(method, raw_path, body);
+
+            const parse = @import("framework/parse.zig");
+            const gen = @import("generated/routes.generated.zig");
+
+            const query_sep = std.mem.indexOfScalar(u8, raw_path, '?');
+            const path = if (query_sep) |q| raw_path[0..q] else raw_path;
+            const query_string = if (query_sep) |q| raw_path[q + 1 ..] else "";
+
+            var result: ?Message = null;
+            inline for (gen.routes) |route| {
+                if (method == route.method) {
+                    if (parse.match_route(path, route.pattern)) |path_params| {
+                        var params = path_params;
+                        inline for (route.query_params) |qname| {
+                            if (parse.query_param(query_string, qname)) |qval| {
+                                params.keys[params.len] = qname;
+                                params.values[params.len] = qval;
+                                params.len += 1;
+                            }
+                        }
+
+                        if (route.handler.route(params, body)) |msg| {
+                            assert(result == null);
+                            result = msg;
+                        }
+                    }
+                }
+            }
+            return result;
+        }
+
+        pub fn handler_render(
+            cache: PrefetchCache,
+            operation: Operation,
+            status: message.Status,
+            fw: FwCtx,
+            render_buf: []u8,
+            storage: anytype,
+        ) []const u8 {
+            return dispatch_render(cache, operation, status, fw, render_buf, storage);
+        }
     };
 }
 
@@ -159,38 +206,7 @@ pub var sidecar: ?SidecarClient = null;
 /// Handlers receive pre-extracted params and body — no raw path matching.
 /// Runtime assert catches duplicate matches (two handlers both accepting).
 pub fn translate(method: http.Method, raw_path: []const u8, body: []const u8) ?Message {
-    if (sidecar) |*client| return client.translate(method, raw_path, body);
-
-    const parse = @import("framework/parse.zig");
-    const gen = @import("generated/routes.generated.zig");
-
-    // Strip query string for pattern matching — handlers get query params via RouteParams.
-    const query_sep = std.mem.indexOfScalar(u8, raw_path, '?');
-    const path = if (query_sep) |q| raw_path[0..q] else raw_path;
-    const query_string = if (query_sep) |q| raw_path[q + 1 ..] else "";
-
-    var result: ?Message = null;
-    inline for (gen.routes) |route| {
-        if (method == route.method) {
-            if (parse.match_route(path, route.pattern)) |path_params| {
-                // Merge path params + query params into one RouteParams.
-                var params = path_params;
-                inline for (route.query_params) |qname| {
-                    if (parse.query_param(query_string, qname)) |qval| {
-                        params.keys[params.len] = qname;
-                        params.values[params.len] = qval;
-                        params.len += 1;
-                    }
-                }
-
-                if (route.handler.route(params, body)) |msg| {
-                    assert(result == null); // duplicate route match
-                    result = msg;
-                }
-            }
-        }
-    }
-    return result;
+    return HandlersType(Storage).handler_route(method, raw_path, body);
 }
 
 // =====================================================================
@@ -417,67 +433,77 @@ pub fn commit_and_encode(
     const pipeline_resp = commit_output.response;
     const cache = commit_output.cache;
 
-    // Format cookie header from pipeline response.
-    const cookie_hdr = http_response.format_cookie_header(
-        pipeline_resp.session_action,
-        pipeline_resp.user_id,
-        pipeline_resp.is_authenticated,
-        pipeline_resp.is_new_visitor,
-        secret_key,
-    );
-    const set_cookie: ?[]const u8 = if (cookie_hdr.len > 0) cookie_hdr.slice() else null;
-
-    // Build framework context for render.
+    // Render: handler produces HTML into scratch buffer.
     const FwCtx = HandlersType(StorageParam).FwCtx;
     const fw = FwCtx{
         .identity = commit_output.identity,
         .now = sm.now,
         .is_sse = is_datastar_request,
     };
+    const ro = StorageParam.ReadView.init(sm.storage);
+    const html = HandlersType(StorageParam).handler_render(cache, msg.operation, pipeline_resp.status, fw, &render_scratch_buf, ro);
 
-    // Render: handler produces HTML, framework wraps it.
-    if (is_datastar_request) {
-        // SSE: headers + events written sequentially from offset 0.
-        // Render into scratch buffer to avoid aliasing — the SSE encoder
-        // prepends event framing before the content in send_buf, so rendering
-        // directly into send_buf would overlap with the encode destination.
-        var pos: usize = 0;
-        pos += sse.encode_headers(send_buf[pos..], set_cookie);
-
-        const ro = StorageParam.ReadView.init(sm.storage);
-        const html = dispatch_render(cache, msg.operation, pipeline_resp.status, fw, &render_scratch_buf, ro);
-
-        if (html.len > 0) {
-            pos += sse.encode_render_result(send_buf[pos..], html);
-        }
-
-        return .{
-            .status = pipeline_resp.status,
-            .response = .{ .offset = 0, .len = @intCast(pos), .keep_alive = false },
-        };
-    } else {
-        // Full page: render into scratch, copy to body position, backfill headers.
-        // Scratch buffer avoids aliasing — render may return a string literal
-        // (rodata) or a slice of the scratch buffer. Either way, one memcpy
-        // into send_buf is correct and non-overlapping.
-        const ro = StorageParam.ReadView.init(sm.storage);
-        const html = dispatch_render(cache, msg.operation, pipeline_resp.status, fw, &render_scratch_buf, ro);
-
-        if (html.len > 0) {
-            @memcpy(send_buf[http_response.header_reserve..][0..html.len], html);
-        }
-
-        return .{
-            .status = pipeline_resp.status,
-            .response = http_response.backfill_headers(send_buf, html.len, set_cookie),
-        };
-    }
+    // Encode HTTP response — shared with sidecar pipeline.
+    return encode_response(
+        pipeline_resp.status,
+        html,
+        send_buf,
+        is_datastar_request,
+        pipeline_resp.session_action,
+        pipeline_resp.user_id,
+        pipeline_resp.is_authenticated,
+        pipeline_resp.is_new_visitor,
+        secret_key,
+    );
 }
 
 pub const CommitResult = struct {
     status: Status,
     response: http_response.Response,
 };
+
+/// Encode the HTTP response — shared by native and sidecar pipelines.
+/// Formats cookie header, wraps HTML in SSE framing or full-page headers.
+fn encode_response(
+    status: Status,
+    html: []const u8,
+    send_buf: []u8,
+    is_datastar_request: bool,
+    session_action: message.SessionAction,
+    user_id: u128,
+    is_authenticated: bool,
+    is_new_visitor: bool,
+    secret_key: *const [auth.key_length]u8,
+) CommitResult {
+    const cookie_hdr = http_response.format_cookie_header(
+        session_action,
+        user_id,
+        is_authenticated,
+        is_new_visitor,
+        secret_key,
+    );
+    const set_cookie: ?[]const u8 = if (cookie_hdr.len > 0) cookie_hdr.slice() else null;
+
+    if (is_datastar_request) {
+        var pos: usize = 0;
+        pos += sse.encode_headers(send_buf[pos..], set_cookie);
+        if (html.len > 0) {
+            pos += sse.encode_render_result(send_buf[pos..], html);
+        }
+        return .{
+            .status = status,
+            .response = .{ .offset = 0, .len = @intCast(pos), .keep_alive = false },
+        };
+    } else {
+        if (html.len > 0) {
+            @memcpy(send_buf[http_response.header_reserve..][0..html.len], html);
+        }
+        return .{
+            .status = status,
+            .response = http_response.backfill_headers(send_buf, html.len, set_cookie),
+        };
+    }
+}
 
 // =====================================================================
 // Sidecar pipeline — separate orchestration, shared building blocks
@@ -543,39 +569,21 @@ pub fn sidecar_commit_and_encode(
     const ro_post = StorageParam.ReadView.init(sm.storage);
     const html = client.execute_render(ro_post) orelse return null;
 
-    // Phase 5: encode HTTP response — same as native path.
+    // Encode HTTP response — shared with native pipeline.
     const identity = sm.prefetch_identity orelse std.mem.zeroes(message.PrefetchIdentity);
     defer sm.prefetch_identity = null;
 
-    const is_auth = identity.is_authenticated != 0;
-    const cookie_hdr = http_response.format_cookie_header(
+    return encode_response(
+        status,
+        html,
+        send_buf,
+        is_datastar_request,
         message.SessionAction.none, // session_action deferred — session-as-writes replaces this
         identity.user_id,
-        is_auth,
+        identity.is_authenticated != 0,
         identity.is_new != 0,
         secret_key,
     );
-    const set_cookie: ?[]const u8 = if (cookie_hdr.len > 0) cookie_hdr.slice() else null;
-
-    if (is_datastar_request) {
-        var pos: usize = 0;
-        pos += sse.encode_headers(send_buf[pos..], set_cookie);
-        if (html.len > 0) {
-            pos += sse.encode_render_result(send_buf[pos..], html);
-        }
-        return .{
-            .status = status,
-            .response = .{ .offset = 0, .len = @intCast(pos), .keep_alive = false },
-        };
-    } else {
-        if (html.len > 0) {
-            @memcpy(send_buf[http_response.header_reserve..][0..html.len], html);
-        }
-        return .{
-            .status = status,
-            .response = http_response.backfill_headers(send_buf, html.len, set_cookie),
-        };
-    }
 }
 
 // =====================================================================
