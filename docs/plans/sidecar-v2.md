@@ -6,7 +6,7 @@ phase builds correctly on the one below — no shims, no rework.
 
 ```
 Phase 1: Unify pipeline       ✓ complete
-Phase 2: CALL/RESULT protocol  (in progress — cleanup remaining)
+Phase 2: CALL/RESULT protocol  ✓ complete
 Phase 3: Tests                 (elaborate later)
 Phase 4: Async prefetch        (callback-driven, serial pipeline, TB pattern)
 Phase 5: Workers               (see worker-v2.md)
@@ -26,12 +26,13 @@ right protocol first, then make it non-blocking.
 - ✓ TS runtime: async QUERY sub-protocol, Promise.all() via query_id Map
 - ✓ Handler .ts files: async prefetch with await db.query()
 - ✓ PrefetchDb type updated for Promise return
-- Remaining: server sidecar connection management, integration test, old code cleanup
+- ✓ Server listens, sidecar connects (listen_and_accept)
+- ✓ End-to-end verified: reads, writes, QUERY sub-protocol
+- ✓ Cross-language vector tests (call_test.ts)
+- ✓ Old 3-RT code deleted (-751 lines)
+- ✓ 5 bugs found and fixed during verification (all interface mismatches)
 - TODO: when scanner generates Handlers, sidecar Cache type should be
-  void — makes the "sidecar never reads from cache" invariant comptime-
-  enforced instead of convention-enforced. Requires scanner to know
-  which operations are sidecar (it does — file extensions). Blocked
-  on scanner-generated Handlers.
+  void — comptime enforcement instead of convention. Blocked on scanner.
 
 ## Design decisions
 
@@ -499,16 +500,18 @@ may span ticks (callback fires on epoll RESULT).
   QUERY sub-protocol, Promise.all() via query_id Map. Reference
   implementation — other languages reimplement the spec.
 - [x] Handler .ts files: async prefetch with await db.query().
-- [ ] Server accepts sidecar connection on unix socket (reverse of
-  current — server listens, sidecar connects).
-- [ ] Server does not accept HTTP until sidecar is connected.
-- [ ] Sidecar availability check before Handlers.
-- [ ] Sidecar reconnection: bounded window, crash past threshold.
-- [ ] Remove: 3-RT exchange from sidecar.zig, manifest reading
-  from TS adapter, dispatch.generated.ts, old protocol frame
-  types from protocol.zig.
-- [ ] Integration test: server + TS runtime end-to-end.
-- [ ] Update cross-language tests.
+- [x] Server accepts sidecar connection on unix socket
+  (listen_and_accept — server listens, sidecar connects).
+- [x] Server does not accept HTTP until sidecar is connected.
+- [x] Integration test: server + TS runtime end-to-end verified.
+- [x] Cross-language vector tests (call_test.ts).
+- [x] Remove: old 3-RT methods from sidecar.zig, sidecar_test.zig.
+- [ ] Sidecar availability check before Handlers — deferred.
+- [ ] Sidecar reconnection: bounded window, crash past threshold —
+  deferred (connect/try_reconnect kept, needs revision).
+- [ ] MessageTag removal — blocked on sidecar_fuzz.zig rewrite.
+- [ ] dispatch.generated.ts removal — blocked on scanner generating
+  call_runtime directly.
 - [ ] (Deferred) Extend SimIO to fault-inject on sidecar fd.
 
 ### User-space syntax
