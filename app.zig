@@ -160,6 +160,9 @@ pub fn HandlersType(comptime StorageParam: type) type {
             if (sidecar) |*client| {
                 // Sidecar: cache is a zeroed placeholder — data lives on
                 // the sidecar client. This branch never reads from cache.
+                // TODO: when scanner generates Handlers, sidecar Cache type
+                // can be void — the invariant becomes comptime-enforced
+                // (no fields to read) instead of convention-enforced.
 
                 // Build handle args: [operation: u8][id: u128 BE]
                 // Body and prefetch data are already held by the sidecar
