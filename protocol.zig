@@ -124,17 +124,8 @@ pub const TypeTag = enum(u8) {
 // Message tags — identify each frame in the 3-RT exchange
 // =====================================================================
 
-/// Legacy 3-RT message tags. Still referenced by sidecar_fuzz.zig
-/// and the old TS dispatch. Remove when those are rewritten for
-/// CALL/RESULT (Phase 3: tests).
-pub const MessageTag = enum(u8) {
-    route_request = 0x01,
-    route_prefetch_response = 0x02,
-    prefetch_results = 0x03,
-    handle_render_response = 0x04,
-    render_results = 0x05,
-    html_response = 0x06,
-};
+// Legacy MessageTag removed — was only used by old 3-RT protocol.
+// Old TS dispatch (serde.ts, dispatch.generated.ts) defines its own copy.
 
 // =====================================================================
 // CALL/RESULT protocol — dumb executor model
