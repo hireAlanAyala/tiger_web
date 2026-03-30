@@ -83,6 +83,22 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
         wal_record_scratch: [@import("wal.zig").entry_max]u8 = undefined,
 
         tick_count: u32,
+        commit_stage: CommitStage = .idle,
+        /// Which connection is currently in the pipeline.
+        commit_connection: ?*Connection = null,
+
+        /// Pipeline stage — serial, one request at a time (TB pattern).
+        /// Guards process_inbox: if not .idle, no new pipeline starts.
+        /// For Zig handlers, all stages complete in one tick (immediate).
+        /// For sidecar handlers, stages may span ticks (async in Phase 4).
+        const CommitStage = enum {
+            idle,     // No request in pipeline
+            prefetch, // Waiting for prefetch result
+            handle,   // Waiting for handle result
+            commit,   // Executing writes in transaction
+            render,   // Waiting for render result
+            encode,   // Building HTTP response
+        };
 
         /// Log metrics every 10,000 ticks (~100s at 10ms/tick).
         const metrics_interval_ticks = 10_000;
@@ -216,6 +232,10 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
             for (server.connections) |*conn| {
                 if (conn.state != .ready) continue;
 
+                // Serial pipeline: one request at a time.
+                // If a pipeline is in-flight, don't start another.
+                if (server.commit_stage != .idle) break;
+
                 // Re-parse HTTP from recv_buf. Deterministic — same bytes, same result.
                 const parsed = switch (http.parse_request(conn.recv_buf[0..conn.recv_pos])) {
                     .complete => |p| p,
@@ -226,6 +246,7 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
                 // Route through app codec.
                 var msg = App.translate(parsed.method, parsed.path, parsed.body) orelse {
                     log.mark.warn("unmapped request: {s} {s} fd={d}", .{ @tagName(parsed.method), parsed.path, conn.fd });
+                    // Not a pipeline — just an error response. Don't hold the stage.
                     // Valid HTTP frame but can't route it (unknown path, bad JSON,
                     // invalid UUID). Send a generic error — not a structured error
                     // enum. translate() is ?Message, not a error union, deliberately:
@@ -247,10 +268,15 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
                 // HandlersType dispatches to native handlers or sidecar client
                 // per-operation. One code path for both.
 
+                server.commit_stage = .prefetch;
+                server.commit_connection = conn;
+
                 // Prefetch. Storage busy or sidecar failure → skip, retry next tick.
                 server.state_machine.tracer.start(.prefetch);
                 if (!server.state_machine.prefetch(msg)) {
                     server.state_machine.tracer.cancel(.prefetch);
+                    server.commit_stage = .idle;
+                    server.commit_connection = null;
                     continue;
                 }
                 server.state_machine.tracer.stop(.prefetch, msg.operation);
@@ -270,6 +296,10 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
 
                 conn.set_response(commit_result.response.offset, commit_result.response.len);
                 conn.keep_alive = commit_result.response.keep_alive;
+
+                // Pipeline complete — release the slot.
+                server.commit_stage = .idle;
+                server.commit_connection = null;
 
                 // WAL: log SQL writes after execute.
                 // Both native and sidecar writes go through WriteView recording.
