@@ -97,7 +97,7 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
             idle,     // No request in pipeline
             prefetch, // Waiting for prefetch result
             handle,   // Waiting for handle result
-            commit,   // Executing writes in transaction
+            commit,   // Executing writes in transaction (sync — owns begin/commit_batch)
             render,   // Waiting for render result
             encode,   // Building HTTP response
         };
@@ -220,6 +220,12 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
             // fsync instead of one per write. Reads are unaffected (WAL mode).
             // If we crash mid-tick, no responses have been sent yet (flush_outbox
             // runs after process_inbox), so clients see a disconnect and retry.
+            //
+            // ASYNC NOTE: when the pipeline pends (.pending), this transaction
+            // commits empty (no writes yet — prefetch is read-only). Writes
+            // happen later in commit_dispatch/process_sidecar, which must
+            // start its own transaction. The commit_dispatch refactor moves
+            // begin/commit_batch to wrap the .handle → .commit stage specifically.
             server.state_machine.begin_batch();
             defer server.state_machine.commit_batch();
 
@@ -272,6 +278,7 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
 
                 server.commit_stage = .prefetch;
                 server.commit_connection = conn;
+                server.commit_msg = msg;
 
                 // Prefetch. Three outcomes:
                 //   .complete — proceed to commit.
@@ -286,12 +293,12 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
                         server.state_machine.tracer.cancel(.prefetch);
                         server.commit_stage = .idle;
                         server.commit_connection = null;
+                        server.commit_msg = null;
                         continue;
                     },
                     .pending => {
                         // Sidecar CALL in-flight. Stay in .prefetch.
                         // process_sidecar will drive on_recv → completion.
-                        server.commit_msg = msg;
                         return;
                     },
                 }
@@ -315,6 +322,7 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
                 // Pipeline complete — release the slot.
                 server.commit_stage = .idle;
                 server.commit_connection = null;
+                server.commit_msg = null;
 
                 // WAL: log SQL writes after execute.
                 // Both native and sidecar writes go through WriteView recording.

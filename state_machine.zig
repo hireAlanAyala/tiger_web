@@ -224,8 +224,12 @@ pub fn StateMachineType(comptime Storage: type, comptime Handlers: type) type {
             self.prefetch_cache = Handlers.handler_prefetch(self.storage, &msg);
             if (self.prefetch_cache != null) return .complete;
 
-            // Null means busy OR sidecar pending. Distinguish by checking
-            // the sidecar client state — if a CALL is in-flight, it's pending.
+            // Null means busy OR sidecar pending. Side-channel check:
+            // handler_prefetch returned null but the sidecar client has an
+            // in-flight CALL — the prefetch is pending, not busy.
+            // TODO: handler_prefetch should return a tagged type (complete/
+            // busy/pending) instead of ?Cache + side-channel. Requires
+            // changing the Handlers interface — deferred to scanner refactor.
             if (Handlers.is_sidecar_pending()) return .pending;
             return .busy;
         }

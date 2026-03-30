@@ -169,10 +169,11 @@ pub fn HandlersType(comptime StorageParam: type) type {
         ) state_machine.HandleResult {
             if (sidecar) |*client| {
                 // Sidecar: cache is a zeroed placeholder — data lives on
-                // the sidecar client. This branch never reads from cache.
-                // TODO: when scanner generates Handlers, sidecar Cache type
-                // can be void — the invariant becomes comptime-enforced
-                // (no fields to read) instead of convention-enforced.
+                // the sidecar client. This code path never reads from cache.
+                // Enforced by convention, not assertion (union tag + padding
+                // make byte-level zeroed checks infeasible).
+                // TODO: scanner-generated Handlers uses void Cache for
+                // sidecar operations — comptime enforcement.
 
                 // Build handle args: [operation: u8][id: u128 BE]
                 // Body and prefetch data are already held by the sidecar
@@ -203,8 +204,14 @@ pub fn HandlersType(comptime StorageParam: type) type {
                 client.handle_writes = write_data;
                 client.handle_write_count = write_count;
                 if (!client.execute_writes(db)) {
+                    client.handle_writes = "";
+                    client.handle_write_count = 0;
                     return .{ .status = .storage_error };
                 }
+                // Clear after use — handle_writes aliases recv_buf which
+                // is overwritten by the next CALL exchange (render).
+                client.handle_writes = "";
+                client.handle_write_count = 0;
 
                 // Map status string to Status enum.
                 const status = message.Status.from_string(status_str) orelse .storage_error;
