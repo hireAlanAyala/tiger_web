@@ -638,8 +638,8 @@ pub fn encode_response(
 
 // Sidecar pipeline removed — sidecar now goes through the same
 // HandlersType dispatch as native. See handler_prefetch, handler_execute,
-// handler_render sidecar branches. One pipeline: sm.prefetch() +
-// commit_and_encode().
+// handler_render sidecar branches. One pipeline driven by
+// server.commit_dispatch (stage-based state machine).
 
 // =====================================================================
 // Tests
