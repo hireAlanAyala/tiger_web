@@ -273,15 +273,28 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
                 server.commit_stage = .prefetch;
                 server.commit_connection = conn;
 
-                // Prefetch. Storage busy or sidecar failure → skip, retry next tick.
+                // Prefetch. Three outcomes:
+                //   .complete — proceed to commit.
+                //   .busy — storage busy, retry next tick.
+                //   .pending — sidecar CALL in-flight, process_sidecar drives.
                 server.state_machine.tracer.start(.prefetch);
-                if (server.state_machine.prefetch(msg) != .complete) {
-                    server.state_machine.tracer.cancel(.prefetch);
-                    server.commit_stage = .idle;
-                    server.commit_connection = null;
-                    continue;
+                switch (server.state_machine.prefetch(msg)) {
+                    .complete => {
+                        server.state_machine.tracer.stop(.prefetch, msg.operation);
+                    },
+                    .busy => {
+                        server.state_machine.tracer.cancel(.prefetch);
+                        server.commit_stage = .idle;
+                        server.commit_connection = null;
+                        continue;
+                    },
+                    .pending => {
+                        // Sidecar CALL in-flight. Stay in .prefetch.
+                        // process_sidecar will drive on_recv → completion.
+                        server.commit_msg = msg;
+                        return;
+                    },
                 }
-                server.state_machine.tracer.stop(.prefetch, msg.operation);
 
                 // Execute + render.
                 server.state_machine.tracer.start(.execute);
