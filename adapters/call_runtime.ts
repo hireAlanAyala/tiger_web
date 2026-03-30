@@ -129,7 +129,9 @@ function buildQuery(
 ): Uint8Array {
   const sqlBytes = _encoder.encode(sql);
   // tag(1) + req_id(4) + query_id(2) + sql_len(2) + sql + mode(1) + param_count(1) + params
-  const buf = new Uint8Array(1 + 4 + 2 + 2 + sqlBytes.length + 1 + 1 + params.length * 20);
+  // Param size: worst case is text/blob with up to cell_value_max bytes (1 + 2 + 4096).
+  // Use a generous estimate: 256 bytes per param covers most practical cases.
+  const buf = new Uint8Array(1 + 4 + 2 + 2 + sqlBytes.length + 1 + 1 + params.length * 256);
   const dv = new DataView(buf.buffer);
   let pos = 0;
 
@@ -225,11 +227,13 @@ function processFrames(): void {
   while (pending.length >= 4) {
     const frameLen = pending.readUInt32BE(0);
     if (pending.length < 4 + frameLen) break;
-    const frame = new Uint8Array(
-      pending.buffer,
+    // Copy frame data — must not alias pending buffer. When async
+    // handlers suspend (await db.query), more data arrives and
+    // Buffer.concat replaces the buffer. The old view would be stale.
+    const frame = new Uint8Array(pending.buffer.slice(
       pending.byteOffset + 4,
-      frameLen,
-    );
+      pending.byteOffset + 4 + frameLen,
+    ));
     pending = pending.subarray(4 + frameLen);
 
     const tag = frame[0];
@@ -279,7 +283,9 @@ function handleQueryResult(frame: Uint8Array): void {
       const { result } = readRowSet(rowSetDv, 0);
       resolve(result);
     } catch (e: any) {
-      console.error(`[call_runtime] QUERY_RESULT parse error: ${e.message}, dataLen=${rowSetData.length}, offset=${rowSetData.byteOffset}, bufLen=${rowSetData.buffer.byteLength}`);
+      const hex = Array.from(rowSetData.subarray(0, Math.min(32, rowSetData.length)))
+        .map(b => b.toString(16).padStart(2, '0')).join(' ');
+      console.error(`[call_runtime] QUERY_RESULT parse error: ${e.message}, len=${rowSetData.length}, hex=[${hex}]`);
       resolve(null);
     }
   }
