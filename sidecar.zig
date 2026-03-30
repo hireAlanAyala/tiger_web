@@ -343,7 +343,7 @@ pub const SidecarClient = struct {
     }
 
     /// Reset call state between requests.
-    fn reset_call_state(self: *SidecarClient) void {
+    pub fn reset_call_state(self: *SidecarClient) void {
         self.call_state = .idle;
         self.call_query_count = 0;
         self.result_flag = .success;

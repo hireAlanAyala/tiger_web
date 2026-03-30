@@ -104,15 +104,20 @@ pub fn HandlersType(comptime StorageParam: type) type {
         /// sidecar client. Fault injection for native path.
         pub fn handler_prefetch(storage: *StorageParam, msg: *const Message) ?PrefetchCache {
             if (sidecar) |*client| {
-                // Sidecar: execute prefetch SQL from RT1 declarations.
-                // RT1 already happened in handler_route (translate).
-                const ro = StorageParam.ReadView.init(storage);
-                const prefetch_len = client.execute_prefetch(ro) orelse return null;
-                client.stored_prefetch_len = prefetch_len;
-                // Return zeroed cache with the correct operation tag.
-                // The sidecar holds the real data — the cache is a placeholder
-                // to satisfy the type system. handler_execute ignores it for
-                // sidecar operations.
+                // Build prefetch args: [operation: u8][id: u128 BE]
+                var args: [1 + 16]u8 = undefined;
+                args[0] = @intFromEnum(msg.operation);
+                std.mem.writeInt(u128, args[1..17], msg.id, .big);
+
+                client.reset_call_state();
+                if (!client.call_submit("prefetch", &args)) return null;
+                if (!client.run_to_completion(query_dispatch_fn, @ptrCast(storage), protocol.queries_max)) return null;
+                defer client.reset_call_state();
+
+                if (client.result_flag == .failure) return null;
+
+                // Sidecar holds prefetch results internally.
+                // Return zeroed cache — handler_execute asserts it's zeroed.
                 return switch (msg.operation) {
                     .root => unreachable,
                     inline else => |op| @unionInit(PrefetchCache, @tagName(op), std.mem.zeroes(
@@ -134,6 +139,15 @@ pub fn HandlersType(comptime StorageParam: type) type {
 
         pub const FwCtx = @import("framework/handler.zig").FrameworkCtx(message.PrefetchIdentity);
 
+        /// QUERY dispatch function for CALL/RESULT protocol.
+        /// Wraps StorageParam.query_raw behind the QueryFn interface.
+        /// Context is *StorageParam — the SM's persistent storage pointer.
+        fn query_dispatch_fn(ctx: *anyopaque, sql: []const u8, params_buf: []const u8, param_count: u8, mode: protocol.QueryMode, out_buf: []u8) ?[]const u8 {
+            const s: *StorageParam = @ptrCast(@alignCast(ctx));
+            const ro = StorageParam.ReadView.init(s);
+            return ro.query_raw(sql, params_buf, param_count, mode, out_buf);
+        }
+
         pub fn handler_execute(
             cache: PrefetchCache,
             msg: Message,
@@ -146,13 +160,53 @@ pub fn HandlersType(comptime StorageParam: type) type {
                 // sidecar data lives on the client, not in the cache union.
                 assert(std.mem.allEqual(u8, std.mem.asBytes(&cache), 0));
 
-                // Sidecar: RT2 — send prefetch results, receive handle response.
-                const status = client.send_prefetch_recv_handle(client.stored_prefetch_len) orelse
-                    return .{ .status = .storage_error };
-                // Execute writes through the WriteView so WAL recording works.
-                if (!client.execute_writes(db)) {
-                    return .{ .status = .storage_error };
+                // Build handle args: [operation: u8][id: u128 BE]
+                // Body and prefetch data are already held by the sidecar
+                // from the route and prefetch CALLs.
+                var args: [1 + 16]u8 = undefined;
+                args[0] = @intFromEnum(msg.operation);
+                std.mem.writeInt(u128, args[1..17], msg.id, .big);
+
+                client.reset_call_state();
+                if (!client.call_submit("handle", &args)) return .{ .status = .storage_error };
+                if (!client.run_to_completion(null, null, 0)) return .{ .status = .storage_error };
+                defer client.reset_call_state();
+
+                if (client.result_flag == .failure) return .{ .status = .storage_error };
+                const data = client.result_data;
+
+                // Parse result: [status_len: u16 BE][status_str][write_count: u8][writes...]
+                if (data.len < 3) return .{ .status = .storage_error };
+                const status_len = std.mem.readInt(u16, data[0..2], .big);
+                if (2 + status_len + 1 > data.len) return .{ .status = .storage_error };
+                const status_str = data[2..][0..status_len];
+                const write_count = data[2 + status_len];
+                const write_data = data[2 + status_len + 1 ..];
+
+                // Execute writes through WriteView for WAL recording.
+                if (write_count > 0) {
+                    var wpos: usize = 0;
+                    for (0..write_count) |_| {
+                        if (wpos + 2 > write_data.len) return .{ .status = .storage_error };
+                        const sql_len = std.mem.readInt(u16, write_data[wpos..][0..2], .big);
+                        wpos += 2;
+                        if (wpos + sql_len > write_data.len) return .{ .status = .storage_error };
+                        const sql = write_data[wpos..][0..sql_len];
+                        wpos += sql_len;
+                        if (wpos >= write_data.len) return .{ .status = .storage_error };
+                        const param_count = write_data[wpos];
+                        wpos += 1;
+                        const params_start = wpos;
+                        wpos = SidecarClient.skip_params(write_data, wpos, param_count) orelse
+                            return .{ .status = .storage_error };
+                        if (!db.execute_raw(sql, write_data[params_start..wpos], param_count)) {
+                            return .{ .status = .storage_error };
+                        }
+                    }
                 }
+
+                // Map status string to Status enum.
+                const status = message.Status.from_string(status_str) orelse .storage_error;
                 return .{ .status = status };
             }
 
@@ -163,7 +217,43 @@ pub fn HandlersType(comptime StorageParam: type) type {
         /// the request doesn't map to a valid operation or the handler
         /// rejects it. Sidecar operations delegate to the sidecar client.
         pub fn handler_route(method: http.Method, raw_path: []const u8, body: []const u8) ?Message {
-            if (sidecar) |*client| return client.translate(method, raw_path, body);
+            if (sidecar) |*client| {
+                // Build route args: [method: u8][path_len: u16 BE][path][body_len: u16 BE][body]
+                var args: [1 + 2 + 0xFFFF + 2 + 0xFFFF]u8 = undefined;
+                var pos: usize = 0;
+                args[pos] = @intFromEnum(method);
+                pos += 1;
+                if (raw_path.len > 0xFFFF) return null;
+                std.mem.writeInt(u16, args[pos..][0..2], @intCast(raw_path.len), .big);
+                pos += 2;
+                @memcpy(args[pos..][0..raw_path.len], raw_path);
+                pos += raw_path.len;
+                if (body.len > 0xFFFF) return null;
+                std.mem.writeInt(u16, args[pos..][0..2], @intCast(body.len), .big);
+                pos += 2;
+                @memcpy(args[pos..][0..body.len], body);
+                pos += body.len;
+
+                client.reset_call_state();
+                if (!client.call_submit("route", args[0..pos])) return null;
+                if (!client.run_to_completion(null, null, 0)) return null;
+                defer client.reset_call_state();
+
+                if (client.result_flag == .failure) return null;
+                const data = client.result_data;
+
+                // Parse result: [found: u8][operation: u8][id: u128 BE]
+                if (data.len < 1) return null;
+                if (data[0] == 0) return null; // not found
+                if (data.len < 19) return null;
+                const operation = std.meta.intToEnum(message.Operation, data[1]) catch return null;
+                const id = std.mem.readInt(u128, data[2..18], .big);
+
+                var msg = std.mem.zeroes(message.Message);
+                msg.operation = operation;
+                msg.id = id;
+                return msg;
+            }
 
             const parse = @import("framework/parse.zig");
             const gen = @import("generated/routes.generated.zig");
@@ -204,7 +294,16 @@ pub fn HandlersType(comptime StorageParam: type) type {
             storage: anytype,
         ) []const u8 {
             if (sidecar) |*client| {
-                return client.execute_render(storage) orelse "";
+                // Build render args: [operation: u8][status: u8]
+                const args = [_]u8{ @intFromEnum(operation), @intFromEnum(status) };
+
+                client.reset_call_state();
+                if (!client.call_submit("render", &args)) return "";
+                if (!client.run_to_completion(query_dispatch_fn, @ptrCast(storage.storage), protocol.queries_max)) return "";
+                defer client.reset_call_state();
+
+                if (client.result_flag == .failure) return "";
+                return client.copy_state(client.result_data);
             }
 
             return dispatch_render(cache, operation, status, fw, render_buf, storage);
