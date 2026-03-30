@@ -26,6 +26,11 @@ right protocol first, then make it non-blocking.
 - ✓ Handler .ts files: async prefetch with await db.query()
 - ✓ PrefetchDb type updated for Promise return
 - Remaining: server sidecar connection management, integration test, old code cleanup
+- TODO: when scanner generates Handlers, sidecar Cache type should be
+  void — makes the "sidecar never reads from cache" invariant comptime-
+  enforced instead of convention-enforced. Requires scanner to know
+  which operations are sidecar (it does — file extensions). Blocked
+  on scanner-generated Handlers.
 
 ## Design decisions
 
