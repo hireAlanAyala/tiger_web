@@ -437,6 +437,37 @@ pub const SimIO = struct {
         self.enqueue(completion);
     }
 
+    /// Non-blocking send — SimIO equivalent. PRNG controls whether the
+    /// send succeeds (partial or full) or returns null (WouldBlock).
+    /// Used by the message bus send_now fast path.
+    pub fn send_now(self: *SimIO, fd: fd_t, buffer: []const u8) ?usize {
+        assert(buffer.len > 0);
+        // Find the client for this fd.
+        for (&self.clients) |*client| {
+            if (client.fd == fd and client.connected) {
+                // PRNG decides: null (WouldBlock) or partial/full send.
+                if (self.prng.boolean()) return null;
+                const max = @min(buffer.len, client.recv_buf.len - client.recv_len);
+                if (max == 0) return null; // Client recv buffer full.
+                const n = self.prng.range_inclusive(u32, 1, @intCast(max));
+                @memcpy(client.recv_buf[client.recv_len..][0..n], buffer[0..n]);
+                client.recv_len += n;
+                return n;
+            }
+        }
+        return 0; // Unknown fd — treat as error.
+    }
+
+    /// Shutdown — SimIO equivalent. Marks the client connection for
+    /// graceful close. In-flight recv/send will see the shutdown state.
+    pub fn shutdown(self: *SimIO, fd: fd_t, _: std.posix.ShutdownHow) void {
+        for (&self.clients) |*client| {
+            if (client.fd == fd) {
+                client.server_closed = true;
+            }
+        }
+    }
+
     pub fn close(self: *SimIO, fd: fd_t) void {
         // Cancel any pending completions for this fd.
         // Mirrors real IO: closing an fd cancels all pending operations on it.

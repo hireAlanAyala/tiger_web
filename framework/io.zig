@@ -146,6 +146,28 @@ pub const IO = struct {
         self.register(completion);
     }
 
+    /// Non-blocking send — try to send immediately without epoll.
+    /// Returns bytes sent, or null if the kernel buffer is full (WouldBlock).
+    /// Used by the message bus send_now fast path to skip epoll round-trips
+    /// for small frames that fit in the kernel buffer.
+    pub fn send_now(_: *IO, fd: fd_t, buffer: []const u8) ?usize {
+        assert(buffer.len > 0);
+        const result = posix.send(fd, buffer, posix.MSG.DONTWAIT | posix.MSG.NOSIGNAL);
+        if (result) |bytes| {
+            return bytes;
+        } else |err| switch (err) {
+            error.WouldBlock => return null,
+            else => return 0, // Error — caller treats 0 as disconnect.
+        }
+    }
+
+    /// Initiate graceful shutdown of a socket. Used by the message bus
+    /// 3-phase termination: shutdown causes in-flight send/recv to fail
+    /// gracefully while keeping the fd open for close.
+    pub fn shutdown(_: *IO, fd: fd_t, how: posix.ShutdownHow) void {
+        posix.shutdown(fd, how) catch {};
+    }
+
     pub fn close(_: *IO, fd: fd_t) void {
         posix.close(fd);
     }
