@@ -140,13 +140,43 @@ scanner collects all `[worker]` annotations globally and generates one
 `worker` object with every method available in every handle. No
 imports. Shared logic is the developer's problem.
 
+### Two types of workers
+
+**Event-driven:** dispatched by a handle via `worker.xxx()`. No
+`interval` annotation. The handle decides when to dispatch.
+Example: `process_image` — triggered when a user uploads an image.
+
+**Interval-driven:** dispatched by the tick loop on a timer. Has
+`interval Ns` annotation. No `worker.xxx()` call in any handle.
+Example: `sync_stripe_charges` — runs every 60 seconds.
+
+The scanner distinguishes them: if a worker has `interval`, it's
+interval-driven. If not, it's event-driven (must be called via
+`worker.xxx()` from at least one handle).
+
+Both produce the same WAL entry. Both use the same dispatch path.
+The only difference is the trigger.
+
+### Dead dispatch deadline
+
+Event-driven workers: deadline is a global comptime constant
+(e.g., `worker_deadline_seconds = 300`). If no result in 5 minutes,
+resolve as dead.
+
+Interval-driven workers: deadline is derived from the interval
+(e.g., `2 × interval`). If `sync_stripe_charges` has `interval 60s`,
+deadline is 120s.
+
 ### Settings belong on the annotation
 
 The handle decides what work to do and with what arguments. The worker
-decides how to do it. The only configurable knob is `interval`. The
-framework provides sensible defaults for everything else. If the same
-worker needs different operational profiles, that is two workers with
-different names.
+decides how to do it. Configurable knobs:
+- `interval Ns` — dispatch frequency for interval-driven workers.
+- `returns .operation` — completion handler target (required).
+
+The framework provides sensible defaults for everything else. If the
+same worker needs different operational profiles, that is two workers
+with different names.
 
 ### Parallelism preserves determinism
 
@@ -329,7 +359,16 @@ request_id=0).
 - [ ] Method signature matches the worker function's parameter types.
 - [ ] The `worker` object is available in every handle. No imports.
 
-### 3. WAL — worker dispatch entries
+### 3. Second sidecar connection (worker socket)
+
+- [ ] Server creates second unix socket for worker CALLs.
+- [ ] Second `listen_and_accept` before HTTP is accepted.
+- [ ] Worker SidecarClient: own send_buf, recv_buf, epoll completion.
+- [ ] Supports concurrent in-flight CALLs with incrementing request_ids.
+- [ ] TS runtime connects to both sockets.
+- [ ] call_runtime.ts handles worker CALLs on the second connection.
+
+### 4. WAL — worker dispatch entries
 
 - [ ] Worker dispatch is a WAL entry: operation type marker, function
   name, serialized args, sequence number.
@@ -344,7 +383,7 @@ request_id=0).
 - [ ] Index size bounded by `max_in_flight_workers` (comptime
   constant, static allocation).
 
-### 4. Tick loop — dispatch
+### 5. Tick loop — dispatch
 
 - [ ] On each tick, read pending dispatches from in-memory index (up
   to in-flight bound).
@@ -357,7 +396,7 @@ request_id=0).
   route to `returns` handler with `ctx.worker_failed`, log a
   warning.
 
-### 5. Completion flow
+### 6. Completion flow
 
 - [ ] Sidecar returns `RESULT(request_id, result_bytes)` — happy path
   data only.
@@ -371,7 +410,7 @@ request_id=0).
   `ctx.worker_failed = true`, no data.
 - [ ] Completion handler always runs — success or failure.
 
-### 6. Worker boundary fuzzer
+### 7. Worker boundary fuzzer
 
 - [ ] PRNG-driven, deterministic, seeded.
 - [ ] Generate malformed CALL results:
@@ -381,14 +420,14 @@ request_id=0).
   - Duplicate results (same request_id twice).
 - [ ] Assert every malformed result is rejected before state machine.
 
-### 7. Tooling
+### 8. Tooling
 
 - [ ] Extend `replay.zig` with a `--workers` flag.
 - [ ] Show pending dispatches (dispatch entries without completions).
 - [ ] Show completed/failed (dispatch + completion pairs).
 - [ ] Deserialize binary args using self-describing row format.
 
-### 8. Delete old worker
+### 9. Delete old worker
 
 - [ ] Remove `worker.zig`.
 - [ ] Remove `run-worker` from `build.zig`.
@@ -425,13 +464,15 @@ export function render() {
 
 // [worker] .process_image
 // returns .image_complete
-// interval 5s
 export async function process_image(product_id: string, url: string) {
   const processed = await imageService.resize(url);
   return { product_id, url: processed.url };
 }
 
-// [route] POST /internal/image-complete
+// Completion handler — triggered by worker RESULT, not HTTP.
+// No [route] annotation. The `returns .image_complete` on the worker
+// tells the framework which handler to call on completion.
+//
 // [handle] .image_complete
 
 // [prefetch]
@@ -457,14 +498,11 @@ export function handle(ctx, db) {
 }
 
 // [render]
-export async function render(ctx, db) {
-  const product = await db.query(
-    "SELECT p.*, c.name as category FROM products p JOIN categories c ON p.category_id = c.id WHERE p.id = ?",
-    ctx.params.id);
+export function render(ctx) {
   if (ctx.status === "failed") {
-    return `<div class="error">Image processing failed for ${product.name}.</div>`;
+    return `<div class="error">Image processing failed.</div>`;
   }
-  return `<img src="${product.thumbnail_url}" /> <span>${product.name} - ${product.category}</span>`;
+  return `<div>Image updated.</div>`;
 }
 ```
 
@@ -481,7 +519,7 @@ export async function sync_stripe_charges() {
   return { charges: charges.data };
 }
 
-// [route] POST /internal/ingest-charges
+// Completion handler — triggered by worker RESULT, not HTTP.
 // [handle] .ingest_charges
 
 // [prefetch]
@@ -503,6 +541,6 @@ export function handle(ctx, db) {
 
 // [render]
 export function render(ctx) {
-  return `<div>Synced ${ctx.body.charges.length} charges.</div>`;
+  return `<div>Sync complete.</div>`;
 }
 ```
