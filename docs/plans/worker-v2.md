@@ -96,16 +96,26 @@ handler call. The scanner proves failure handling exists at build time.
 The worker stays pure — no try/catch, no error routing. The completion
 handler owns all branching. No path leaves business state stuck.
 
-### `worker.xxx()` is sugar
+### `worker.xxx()` is sugar — separate field, not writes list
 
 The handle calls `worker.process_image(id, url)`. Codegen transforms
-this into a write instruction that records the dispatch intent in the
-WAL. The handle's return signature doesn't change. The worker call is
-a side effect on the writes list.
+this into a dispatch entry on a separate `worker_dispatches` field
+of the handle result — NOT mixed into the SQL writes list.
 
-**Why:** The dispatch is just a write like any other. It commits in
-the same transaction as the handle's business writes. Atomic
-enqueueing with no special path.
+The sidecar handle RESULT payload:
+`[status][write_count][writes...][dispatch_count][dispatches...]`
+
+The server processes both: writes → SQL execution + WAL, dispatches →
+dispatch index + WAL. Both in the same WAL entry, same transaction.
+Atomic enqueueing.
+
+**Why:** The writes list is for SQL mutations. Worker dispatch is
+intent to do external work — not a SQL mutation. Mixing them requires
+a marker byte and runtime parsing to distinguish types. Separate
+fields are explicit (server knows what each field contains), safe
+(SQL engine never sees dispatch data), and independently bounded
+(writes_max for SQL, dispatches_max for workers). Wins on all six
+TB principles vs the marker byte approach.
 
 ### Backpressure is a comptime constant
 
@@ -233,17 +243,19 @@ Worker dispatches are recorded in the WAL alongside SQL writes.
 A handle can do SQL writes AND dispatch a worker in the same
 transaction — both are in the same WAL entry.
 
-The WAL entry format gains a discriminator:
-- SQL writes: existing format `[sql_len][sql][param_count][params]`
-- Worker dispatches: `[marker][name_len][name][args_bytes]`
+The WAL entry gains two sections:
+- SQL writes: existing format `[write_count][sql_len][sql][param_count][params]...`
+- Worker dispatches: `[dispatch_count][name_len][name][args_bytes]...`
 
-The marker byte distinguishes worker dispatches from SQL writes
-in the entry's write list. On WAL replay, SQL writes replay as
-SQL, worker dispatches rebuild the pending dispatch index.
+No marker byte. The WAL entry header knows how many writes and
+how many dispatches (separate counts). On replay, SQL writes
+replay as SQL, worker dispatches rebuild the pending dispatch index.
 
 **Why:** The WAL already records every committed mutation. Worker
 dispatches are mutations — "intent to do external work." Without
 WAL entries, the server loses track of pending work after a crash.
+Separate sections (not marker bytes) match the sidecar RESULT
+format — explicit, no parsing ambiguity.
 
 ---
 
@@ -265,9 +277,11 @@ WAL entries, the server loses track of pending work after a crash.
 
 - [ ] Generate one typed method per `[worker]` annotation on the
   `worker` object.
-- [ ] Each method serializes args to binary row format and appends an
-  INSERT-equivalent write instruction to the handle's writes list.
-- [ ] The write records dispatch intent in the WAL.
+- [ ] Each method serializes args to binary format and appends to
+  a separate `worker_dispatches` list — NOT the SQL writes list.
+- [ ] The sidecar handle RESULT includes `[dispatch_count][dispatches]`
+  after `[write_count][writes]`.
+- [ ] The server parses dispatches separately from writes.
 - [ ] Method signature matches the worker function's parameter types.
 - [ ] The `worker` object is available in every handle. No imports.
 
