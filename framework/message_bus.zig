@@ -95,14 +95,18 @@ pub fn ConnectionType(comptime IO: type, comptime options: Options) type {
         send_completion: IO.Completion,
         send_submitted: bool,
 
-        // --- Consumer callback ---
-        // Called with complete, CRC-validated frame data.
-        // Frame data points into recv_message.buffer — valid until
-        // the next recv or compaction. Consumer can call
-        // recv_message.ref() to keep data alive past this callback.
-        // May call send_frame() re-entrantly (QUERY sub-protocol).
-        // May call terminate() (protocol error).
+        // --- Consumer callbacks ---
+        // on_frame_fn: Called with complete, CRC-validated frame data.
+        // Frame data points into recv_message.buffer — valid during
+        // this callback only. Consumer must copy data it needs to
+        // retain (copy_state pattern). May call send_frame/send_message
+        // re-entrantly (QUERY sub-protocol). May call terminate().
         on_frame_fn: *const fn (context: *anyopaque, frame: []const u8) void,
+        // on_close_fn: Called when the connection closes (terminate_close).
+        // Consumer should reset any in-flight state (e.g. call_state
+        // to .failed). Called once, after all IO is drained.
+        // May be null if consumer doesn't need close notification.
+        on_close_fn: ?*const fn (context: *anyopaque) void,
         context: *anyopaque,
 
         // =====================================================================
@@ -112,7 +116,15 @@ pub fn ConnectionType(comptime IO: type, comptime options: Options) type {
         /// Initialize with an fd. Gets a recv message from the pool,
         /// zeros all state, kicks off recv loop.
         /// Called by MessageBus after accept, or directly in tests.
-        pub fn init(self: *Self, io: *IO, pool: *Pool, fd: IO.fd_t, context: *anyopaque, on_frame_fn: *const fn (*anyopaque, []const u8) void) void {
+        pub fn init(
+            self: *Self,
+            io: *IO,
+            pool: *Pool,
+            fd: IO.fd_t,
+            context: *anyopaque,
+            on_frame_fn: *const fn (*anyopaque, []const u8) void,
+            on_close_fn: ?*const fn (*anyopaque) void,
+        ) void {
             assert(self.state == .closed);
             assert(self.recv_message == null);
             defer self.invariants();
@@ -121,6 +133,7 @@ pub fn ConnectionType(comptime IO: type, comptime options: Options) type {
             self.fd = fd;
             self.context = context;
             self.on_frame_fn = on_frame_fn;
+            self.on_close_fn = on_close_fn;
             self.recv_message = pool.get_message();
             self.recv_pos = 0;
             self.advance_pos = 0;
@@ -462,6 +475,11 @@ pub fn ConnectionType(comptime IO: type, comptime options: Options) type {
             self.recv_suspended = false;
             self.send_pos = 0;
             self.state = .closed;
+
+            // Notify consumer that the connection closed.
+            if (self.on_close_fn) |on_close| {
+                on_close(self.context);
+            }
         }
 
         // =====================================================================
@@ -547,14 +565,23 @@ pub fn MessageBusType(comptime IO: type, comptime options: Options) type {
         accept_completion: IO.Completion,
         accept_pending: bool,
 
-        // Consumer callback — stored here, passed to connection on init.
+        // Consumer callbacks — stored here, passed to connection on init.
         on_frame_fn: *const fn (*anyopaque, []const u8) void,
+        on_close_fn: ?*const fn (*anyopaque) void,
         context: *anyopaque,
 
         /// Pool sizing: recv buffer (1) + send queue (send_queue_max) + burst (1).
         const messages_max: u32 = 1 + options.send_queue_max + 1;
 
-        pub fn init_listener(self: *Self, allocator: std.mem.Allocator, io: *IO, path: []const u8, context: *anyopaque, on_frame_fn: *const fn (*anyopaque, []const u8) void) !void {
+        pub fn init_listener(
+            self: *Self,
+            allocator: std.mem.Allocator,
+            io: *IO,
+            path: []const u8,
+            context: *anyopaque,
+            on_frame_fn: *const fn (*anyopaque, []const u8) void,
+            on_close_fn: ?*const fn (*anyopaque) void,
+        ) !void {
             self.io = io;
             self.pool = try Pool.init(allocator, messages_max);
             self.connection = .{
@@ -574,18 +601,21 @@ pub fn MessageBusType(comptime IO: type, comptime options: Options) type {
                 .send_completion = .{},
                 .send_submitted = false,
                 .on_frame_fn = on_frame_fn,
+                .on_close_fn = on_close_fn,
                 .context = context,
             };
             self.listen_fd = -1;
             self.accept_completion = .{};
             self.accept_pending = false;
             self.on_frame_fn = on_frame_fn;
+            self.on_close_fn = on_close_fn;
             self.context = context;
 
             self.listen(path);
         }
 
         pub fn deinit(self: *Self, allocator: std.mem.Allocator) void {
+            assert(self.connection.state == .closed);
             self.pool.deinit(allocator);
         }
 
@@ -655,7 +685,7 @@ pub fn MessageBusType(comptime IO: type, comptime options: Options) type {
             ) catch {};
 
             log.info("accepted fd={d}", .{accepted_fd});
-            self.connection.init(self.io, &self.pool, accepted_fd, self.context, self.on_frame_fn);
+            self.connection.init(self.io, &self.pool, accepted_fd, self.context, self.on_frame_fn, self.on_close_fn);
         }
 
         // --- Delegation to connection ---
@@ -802,7 +832,7 @@ const TestContext = struct {
 fn test_init_conn(conn: *TestConnection, io: *TestIO, pool: *TestConnection.Pool, fd: TestIO.fd_t, ctx: *anyopaque, on_frame_fn: *const fn (*anyopaque, []const u8) void) void {
     conn.state = .closed;
     conn.recv_message = null;
-    conn.init(io, pool, fd, ctx, on_frame_fn);
+    conn.init(io, pool, fd, ctx, on_frame_fn, null);
 }
 
 test "Connection: send and receive a frame" {
@@ -954,7 +984,7 @@ test "Connection: backpressure suspend and resume" {
         .frame_count = 0,
         .conn_ptr = &conn,
     };
-    conn.init(&io, &pool, pair[0], @ptrCast(&ctx), SuspendCtx.on_frame);
+    conn.init(&io, &pool, pair[0], @ptrCast(&ctx), SuspendCtx.on_frame, null);
 
     var buf1: [1024]u8 = undefined;
     var buf2: [1024]u8 = undefined;
