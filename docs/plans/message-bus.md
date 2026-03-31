@@ -1430,6 +1430,15 @@ with FuzzIO fault injection.
   transport
 
 **What this catches that the old approach doesn't:**
+- **Recv buffer compaction bugs:** After `on_frame` returns, the
+  Connection compacts the recv buffer. Any slice stored by the
+  consumer that aliases `frame` (a slice into recv_message.buffer)
+  becomes invalid. The old blocking `read_frame` didn't compact
+  until the next read, hiding this class of bugs. With FuzzIO
+  injecting partial frames after RESULT, compaction triggers every
+  time. Without `copy_state` in `on_frame`, `result_data` would
+  point into compacted memory. **This bug was found during Phase 2
+  implementation.** The fuzzer must exercise this path.
 - Re-entrancy bugs: `send_frame` called from `on_frame_fn`
   inside `try_drain_recv` — state machine transitions that only
   happen in the real callback context
@@ -1442,8 +1451,11 @@ with FuzzIO fault injection.
 
 - [ ] Replace socketpair + thread with Connection + FuzzIO.
 - [ ] SidecarClient receives frames via bus, not `on_recv`.
-- [ ] QUERY sub-protocol via real suspend/send/resume path.
+- [ ] QUERY sub-protocol via real send path (bus.send_message).
 - [ ] FuzzIO fault injection: partial delivery, disconnect.
+- [ ] Compaction after RESULT: inject trailing bytes after RESULT
+  frame so compaction runs after on_frame. Assert result_data
+  (in state_buf) matches expected payload. Catches aliasing bugs.
 - [ ] Protocol content tests preserved (valid/corrupt/truncated).
 - [ ] Query limit exceeded tests preserved.
 - [ ] Register updated fuzzer in `fuzz_tests.zig`.
@@ -1734,6 +1746,30 @@ offset 4). Same number of bytes hashed — no performance cost.
 A corrupted length of any value produces a CRC mismatch because
 the length bytes are included in the checksum. No undetected
 truncation possible.
+
+### 7. Frame data must be copied inside on_frame, not after
+
+`on_frame_fn` receives `frame: []const u8` — a slice into the
+Connection's `recv_message.buffer`. After `on_frame_fn` returns,
+`try_drain_recv` compacts the recv buffer (`copy_left`),
+invalidating the slice.
+
+**Any data derived from `frame` that the consumer stores on its
+own fields must be `copy_state`'d before `on_frame_fn` returns.**
+
+This was not a bug in the old blocking `read_frame` code because
+the recv buffer wasn't reused until the next `read_frame` call.
+With the async bus, compaction is immediate after callback return.
+
+**Found during Phase 2 implementation.** `result_data` was stored
+as a direct slice into `frame`. After compaction, it pointed into
+shifted or overwritten memory. Fixed by calling `copy_state`
+inside `on_frame` before storing `result_data`.
+
+**The sidecar fuzzer (Phase 3) must test this:** inject trailing
+bytes after a RESULT frame so compaction runs after `on_frame`.
+Assert that `result_data` (in `state_buf`) matches expected
+payload.
 
 ## Extension points (future, not built now)
 
