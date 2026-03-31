@@ -27,9 +27,6 @@ pub fn SidecarClientType(comptime IO: type) type {
     const bus_options: Options = .{ .send_queue_max = 2, .frame_max = protocol.frame_max };
 
     const Bus = message_bus.MessageBusType(IO, bus_options);
-    const Connection = message_bus.ConnectionType(IO, bus_options);
-    const Pool = Connection.Pool;
-    const Message = Pool.Message;
 
     return struct {
         const Self = @This();
@@ -102,7 +99,7 @@ pub fn SidecarClientType(comptime IO: type) type {
 
             const msg = bus.pool.get_message();
             const call_len = protocol.build_call(
-                msg.buffer[Connection.frame_header_size..],
+                msg.buffer[Bus.Connection.frame_header_size..],
                 0, // request_id
                 function_name,
                 args,
@@ -173,7 +170,7 @@ pub fn SidecarClientType(comptime IO: type) type {
 
                     // Build QUERY_RESULT into a pool message (zero-copy).
                     const msg = bus.pool.get_message();
-                    const qr_buf = msg.buffer[Connection.frame_header_size..];
+                    const qr_buf = msg.buffer[Bus.Connection.frame_header_size..];
 
                     // QUERY_RESULT: [tag][request_id: u32 BE][query_id: u16 BE]
                     qr_buf[0] = @intFromEnum(protocol.CallTag.query_result);

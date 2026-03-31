@@ -551,11 +551,10 @@ pub const Options = struct {
 /// Parameterized at comptime so each consumer declares its bounds:
 ///   const SidecarBus = MessageBusType(IO, .{ .send_queue_max = 2, .frame_max = 256 * 1024 });
 pub fn MessageBusType(comptime IO: type, comptime options: Options) type {
-    const Connection = ConnectionType(IO, options);
-    const Pool = Connection.Pool;
-
     return struct {
         const Self = @This();
+        pub const Connection = ConnectionType(IO, options);
+        const Pool = Connection.Pool;
 
         io: *IO,
         pool: Pool,

@@ -297,6 +297,8 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
                     .idle => return,
 
                     .prefetch => {
+                        // In sidecar mode, the server short-circuits before
+                        // reaching here. This path is native-only.
                         switch (sm.prefetch(msg)) {
                             .complete => {
                                 sm.tracer.stop(.prefetch, msg.operation);
@@ -307,12 +309,6 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
                             .busy => {
                                 sm.tracer.cancel(.prefetch);
                                 server.pipeline_reset();
-                                return;
-                            },
-                            .pending => {
-                                // Sidecar CALL in-flight. Register fd with
-                                // epoll — callback drives on_recv when data arrives.
-                                server.submit_sidecar_recv();
                                 return;
                             },
                         }
@@ -390,11 +386,8 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
                             ro,
                         );
 
-                        // Check if sidecar render CALL is pending.
-                        if (App.HandlersType(Storage).is_sidecar_pending()) {
-                            server.submit_sidecar_recv();
-                            return;
-                        }
+                        // In sidecar mode, the server short-circuits before
+                        // reaching here. This path is native-only.
 
                         const commit_result = App.encode_response(
                             pipeline_resp.status,

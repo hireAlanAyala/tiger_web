@@ -210,32 +210,20 @@ pub fn StateMachineType(comptime Storage: type, comptime Handlers: type) type {
         pub const PrefetchResult = enum {
             complete, // Prefetch done — proceed to commit.
             busy,     // Storage busy — retry next tick.
-            pending,  // Sidecar CALL in-flight — process_sidecar drives completion.
         };
 
-        /// Start prefetch. Returns .complete (proceed), .busy (retry),
-        /// or .pending (sidecar CALL sent, result arrives via on_recv).
+        /// Start prefetch. Returns .complete (proceed) or .busy (retry).
+        /// In sidecar mode, the server short-circuits before calling this.
         pub fn prefetch(self: *StateMachine, msg: message.Message) PrefetchResult {
             assert(self.prefetch_cache == null);
 
             // Auth: resolve cookie credential → identity.
-            // Only on first call — on resume after .pending, identity
-            // is already set from the first call. Idempotent but
-            // redundant work avoided.
             if (self.prefetch_identity == null) {
                 self.resolve_credential(msg);
             }
 
             self.prefetch_cache = Handlers.handler_prefetch(self.storage, &msg);
             if (self.prefetch_cache != null) return .complete;
-
-            // Null means busy OR sidecar pending. Side-channel check:
-            // handler_prefetch returned null but the sidecar client has an
-            // in-flight CALL — the prefetch is pending, not busy.
-            // This is intentional: the Handlers interface returns ?Cache
-            // (null = not ready). The distinction between busy and pending
-            // is framework orchestration — the handler doesn't know or care.
-            if (Handlers.is_sidecar_pending()) return .pending;
             return .busy;
         }
 

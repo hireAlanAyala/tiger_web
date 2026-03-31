@@ -13,7 +13,7 @@ const http = @import("framework/http.zig");
 const auth = @import("framework/auth.zig");
 const marks = @import("framework/marks.zig");
 const PRNG = @import("stdx").PRNG;
-pub const SidecarClient = @import("sidecar.zig").SidecarClient;
+pub const SidecarClientType = @import("sidecar.zig").SidecarClientType;
 
 const log = marks.wrap_log(std.log.scoped(.app));
 
@@ -79,65 +79,10 @@ pub fn HandlersType(comptime StorageParam: type) type {
     return struct {
         pub const Cache = PrefetchCache;
 
-        /// Check if the sidecar client has an in-flight CALL.
-        /// Used by sm.prefetch to distinguish busy (retry) from
-        /// pending (sidecar processing, process_sidecar will drive).
-        pub fn is_sidecar_pending() bool {
-            if (sidecar) |*client| {
-                return client.call_state == .receiving;
-            }
-            return false;
-        }
-
-        /// Called by the SM's prefetch(). Dispatches to native handler or
-        /// sidecar client. Fault injection for native path.
+        /// Pure native prefetch dispatch. No sidecar knowledge.
+        /// In sidecar mode, the server short-circuits before calling this.
         pub fn handler_prefetch(storage: *StorageParam, msg: *const Message) ?PrefetchCache {
-            if (sidecar) |*client| {
-                // Idempotent: safe to call from both start and resume.
-                // commit_dispatch may re-enter .prefetch after .pending.
-                switch (client.call_state) {
-                    .complete => {
-                        // Resume: sidecar exchange done. Build cache from result.
-                        defer client.reset_call_state();
-                        if (client.result_flag == .failure) return null;
-                    },
-                    .idle => {
-                        // First call: start the exchange (non-blocking).
-                        // call_submit sends the CALL frame. Returns without
-                        // waiting for RESULT. The server registers the sidecar
-                        // fd with epoll — the callback drives on_recv.
-                        var args: [1 + 16]u8 = undefined;
-                        args[0] = @intFromEnum(msg.operation);
-                        std.mem.writeInt(u128, args[1..17], msg.id, .big);
-
-                        if (!client.call_submit("prefetch", &args)) return null;
-                        // Don't call run_to_completion — return null for .pending.
-                        // The epoll callback will drive on_recv to completion.
-                        return null;
-                    },
-                    .receiving => {
-                        // Still waiting for RESULT — process_sidecar hasn't
-                        // completed the exchange yet. Return null → .pending.
-                        return null;
-                    },
-                    .failed => {
-                        client.reset_call_state();
-                        return null;
-                    },
-                }
-
-                // Sidecar holds prefetch results internally.
-                // Return zeroed cache. Enforced by convention, not assertion.
-                // Sidecar cache is void in the generated PrefetchCache.
-                return switch (msg.operation) {
-                    .root => unreachable,
-                    inline else => |op| @unionInit(PrefetchCache, @tagName(op), std.mem.zeroes(
-                        @FieldType(PrefetchCache, @tagName(op)),
-                    )),
-                };
-            }
-
-            // Native: fault injection + dispatch.
+            // Fault injection for simulation.
             if (fault_prng) |prng| {
                 if (prng.chance(fault_busy_ratio)) {
                     log.mark.debug("storage: busy fault injected", .{});
@@ -162,109 +107,20 @@ pub fn HandlersType(comptime StorageParam: type) type {
             return ro.query_raw(sql, params_buf, param_count, mode, out_buf);
         }
 
+        /// Pure native execute dispatch. No sidecar knowledge.
+        /// In sidecar mode, the server short-circuits before calling this.
         pub fn handler_execute(
             cache: PrefetchCache,
             msg: Message,
             fw: FwCtx,
             db: anytype,
         ) state_machine.HandleResult {
-            if (sidecar) |*client| {
-                // Sidecar: cache is a zeroed placeholder — data lives on
-                // the sidecar client. This code path never reads from cache.
-                // Enforced by convention, not assertion (union tag + padding
-                // make byte-level zeroed checks infeasible).
-                // Sidecar cache is void in the generated PrefetchCache.
-                // The runtime sidecar check here is intentional — see
-                // HandlersType doc comment.
-
-                // Build handle args: [operation: u8][id: u128 BE]
-                // Body and prefetch data are already held by the sidecar
-                // from the route and prefetch CALLs.
-                var args: [1 + 16]u8 = undefined;
-                args[0] = @intFromEnum(msg.operation);
-                std.mem.writeInt(u128, args[1..17], msg.id, .big);
-
-                client.reset_call_state();
-                if (!client.call_submit("handle", &args)) return .{ .status = .storage_error };
-                if (!client.run_to_completion(null, null, 0)) return .{ .status = .storage_error };
-                defer client.reset_call_state();
-
-                if (client.result_flag == .failure) return .{ .status = .storage_error };
-                const data = client.result_data;
-
-                // Parse result: [status_len: u16 BE][status_str][write_count: u8][writes...]
-                if (data.len < 3) return .{ .status = .storage_error };
-                const status_len = std.mem.readInt(u16, data[0..2], .big);
-                if (2 + status_len + 1 > data.len) return .{ .status = .storage_error };
-                const status_str = data[2..][0..status_len];
-                const write_count = data[2 + status_len];
-                const write_data = data[2 + status_len + 1 ..];
-
-                // Execute writes through WriteView for WAL recording.
-                // Reuse SidecarClient.execute_writes — same binary format
-                // as the 3-RT protocol. No duplicate parsing.
-                client.handle_writes = write_data;
-                client.handle_write_count = write_count;
-                if (!client.execute_writes(db)) {
-                    client.handle_writes = "";
-                    client.handle_write_count = 0;
-                    return .{ .status = .storage_error };
-                }
-                // Clear after use — handle_writes aliases recv_buf which
-                // is overwritten by the next CALL exchange (render).
-                client.handle_writes = "";
-                client.handle_write_count = 0;
-
-                // Map status string to Status enum.
-                const status = message.Status.from_string(status_str) orelse .storage_error;
-                return .{ .status = status };
-            }
-
             return gen_handlers.dispatch_execute(cache, msg, fw, db);
         }
 
-        /// Route an HTTP request to a typed Message. Returns null if
-        /// the request doesn't map to a valid operation or the handler
-        /// rejects it. Sidecar operations delegate to the sidecar client.
+        /// Pure native route dispatch. No sidecar knowledge.
+        /// In sidecar mode, the server short-circuits before calling this.
         pub fn handler_route(method: http.Method, raw_path: []const u8, body: []const u8) ?Message {
-            if (sidecar) |*client| {
-                // Build route args: [method: u8][path_len: u16 BE][path][body_len: u16 BE][body]
-                var args: [1 + 2 + 0xFFFF + 2 + 0xFFFF]u8 = undefined;
-                var pos: usize = 0;
-                args[pos] = @intFromEnum(method);
-                pos += 1;
-                if (raw_path.len > 0xFFFF) return null;
-                std.mem.writeInt(u16, args[pos..][0..2], @intCast(raw_path.len), .big);
-                pos += 2;
-                @memcpy(args[pos..][0..raw_path.len], raw_path);
-                pos += raw_path.len;
-                if (body.len > 0xFFFF) return null;
-                std.mem.writeInt(u16, args[pos..][0..2], @intCast(body.len), .big);
-                pos += 2;
-                @memcpy(args[pos..][0..body.len], body);
-                pos += body.len;
-
-                client.reset_call_state();
-                if (!client.call_submit("route", args[0..pos])) return null;
-                if (!client.run_to_completion(null, null, 0)) return null;
-                defer client.reset_call_state();
-
-                if (client.result_flag == .failure) return null;
-                const data = client.result_data;
-
-                // Parse result: [found: u8][operation: u8][id: u128 BE]
-                if (data.len < 1) return null;
-                if (data[0] == 0) return null; // not found
-                if (data.len < 18) return null; // found(1) + operation(1) + id(16)
-                const operation = std.meta.intToEnum(message.Operation, data[1]) catch return null;
-                const id = std.mem.readInt(u128, data[2..18], .big);
-
-                var msg = std.mem.zeroes(message.Message);
-                msg.operation = operation;
-                msg.id = id;
-                return msg;
-            }
-
             const parse = @import("framework/parse.zig");
             const gen = @import("generated/routes.generated.zig");
 
@@ -295,6 +151,8 @@ pub fn HandlersType(comptime StorageParam: type) type {
             return result;
         }
 
+        /// Pure native render dispatch. No sidecar knowledge.
+        /// In sidecar mode, the server short-circuits before calling this.
         pub fn handler_render(
             cache: PrefetchCache,
             operation: Operation,
@@ -303,31 +161,6 @@ pub fn HandlersType(comptime StorageParam: type) type {
             render_buf: []u8,
             storage: anytype,
         ) []const u8 {
-            if (sidecar) |*client| {
-                // Idempotent: safe to call from both start and resume.
-                switch (client.call_state) {
-                    .complete => {
-                        defer client.reset_call_state();
-                        if (client.result_flag == .failure) return "";
-                        return client.copy_state(client.result_data);
-                    },
-                    .idle => {
-                        // First call: send CALL (non-blocking).
-                        const args = [_]u8{ @intFromEnum(operation), @intFromEnum(status) };
-                        if (!client.call_submit("render", &args)) return "";
-                        // Return empty — pending signal. commit_dispatch
-                        // checks is_sidecar_pending to distinguish from
-                        // a real empty render result.
-                        return "";
-                    },
-                    .receiving => return "", // still waiting
-                    .failed => {
-                        client.reset_call_state();
-                        return "";
-                    },
-                }
-            }
-
             return gen_handlers.dispatch_render(cache, operation, status, fw, render_buf, storage);
         }
     };
@@ -350,9 +183,11 @@ pub const SM = StateMachineType(Storage);
 
 pub const Wal = @import("framework/wal.zig").WalType(Operation);
 
-/// Optional sidecar client — when set, translate delegates to the
-/// external process instead of the Zig-native handlers.
-pub var sidecar: ?SidecarClient = null;
+/// Whether sidecar mode is enabled. Set by main.zig at startup.
+/// In sidecar mode, the server short-circuits handlers and delegates
+/// to the sidecar via the message bus. The handlers themselves have
+/// no sidecar knowledge — this flag is checked by the server only.
+pub var sidecar_mode: bool = false;
 
 /// Translate an HTTP request into a typed Message. Returns null if the
 /// request doesn't map to a valid operation.
