@@ -1,8 +1,8 @@
 # Worker v2 — WAL-Derived State, Scanner-Enforced Completion
 
-> Depends on [sidecar-v2.md](sidecar-v2.md) Phases 1–3. Workers are
-> built on the unified pipeline, async prefetch, and CALL/RESULT
-> protocol.
+> Built on the unified pipeline, async prefetch, and CALL/RESULT
+> protocol. Sidecar design decisions in
+> `docs/internal/decision-sidecar-protocol.md`.
 
 ## Design decisions
 

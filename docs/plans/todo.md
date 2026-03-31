@@ -83,6 +83,41 @@ Phase 2: shm + futex (25K). Phase 3: typed schemas (26K, +type safety).
 From 25% of native to ~49%. Remaining gap is V8 compute — use Zig/Rust
 if you need more.
 
+## Status-to-HTTP-code mapping — handler returns domain status, framework owns the code
+
+Handlers return a domain status string (`"ok"`, `"not_found"`, `"version_conflict"`).
+The framework maps it to an HTTP status code. The handler author never thinks in codes.
+
+The invariant: if handle returns `"ok"`, the response is 200. Everything else is a
+non-200 derived from the status. The mapping is a compile-time table — exhaustive,
+scanner-enforced, no missing cases.
+
+```
+ok                     → 200
+not_found              → 404
+version_conflict       → 409
+insufficient_inventory → 409
+order_expired          → 410
+invalid_code           → 422
+code_expired           → 422
+storage_error          → 500
+```
+
+Two audiences, two channels, one return value:
+- **Transport status** (is the server working?) — for load balancers, monitoring, retry
+  logic. Derived automatically. The handler author doesn't think about it.
+- **Domain status** (what happened?) — for the application. A bounded enum, scanner-enforced
+  exhaustive, compile-time known. The handler author only thinks about this.
+
+For HTML: status code is informational, page renders the domain status visually.
+For JSON: `{"status": "version_conflict", "data": {...}}` + HTTP 409. Client switches
+on `status` field, not the code. The code is for infrastructure.
+
+This replaces the always-200 model for API responses while keeping the handler interface
+unchanged. Same handler serves HTML and JSON — the framework picks the encoding.
+
+Right primitive: the developer states what happened, the framework handles the protocol.
+
 # Backlog
 
 - TS sidecar render: effects array instead of single string
@@ -107,6 +142,7 @@ if you need more.
 - annotation settings should start with @ so they're obvious special syntax
 - ensure all errors absorbed by the framework like, db, network, worker, etc. are logged correctly for debugging.
 - change prefetch from epoll to io_uring to 15x if a user uses a network db as the db interface postgres would go from 2k to 50k req/s
+- assert the args passed to the sidecar functions are not directly mutated like ctx.something = ""
 
 # clean up
 - ensure we use cli/program defaults very carefully. i like no defaults or few defaults over heavy defaults

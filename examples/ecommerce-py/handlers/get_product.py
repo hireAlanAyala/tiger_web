@@ -1,5 +1,3 @@
-import sys
-sys.path.insert(0, str(__import__("pathlib").Path(__file__).resolve().parents[2] / "adapters" / "python"))
 from tiger_web import esc, price
 
 
