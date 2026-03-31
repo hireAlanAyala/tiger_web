@@ -26,6 +26,8 @@ pub fn main(allocator: std.mem.Allocator, args: FuzzArgs) !void {
     for (0..events_max) |_| {
         const event = prng.chances(.{
             .result_valid = 3,
+            .pend_resume = 3,
+            .pend_resume_with_query = 3,
             .result_corrupt = 4,
             .result_truncated = 3,
             .result_wrong_tag = 2,
@@ -40,6 +42,8 @@ pub fn main(allocator: std.mem.Allocator, args: FuzzArgs) !void {
 
         switch (event) {
             .result_valid => fuzz_result_valid(&prng, &stats),
+            .pend_resume => fuzz_pend_resume(&prng, &stats),
+            .pend_resume_with_query => fuzz_pend_resume_with_query(&prng, &stats),
             .result_corrupt => fuzz_result_corrupt(&prng, &stats),
             .result_truncated => fuzz_result_truncated(&prng, &stats),
             .result_wrong_tag => fuzz_result_wrong_tag(&prng, &stats),
@@ -56,6 +60,7 @@ pub fn main(allocator: std.mem.Allocator, args: FuzzArgs) !void {
     log.info(
         \\Sidecar CALL/RESULT fuzz done:
         \\  events={}
+        \\  pend_resume={} pend_resume_with_query={}
         \\  result: valid={} corrupt={} truncated={} wrong_tag={}
         \\  disconnect: after_call={} mid_query={}
         \\  query_result: corrupt={} wrong_id={}
@@ -63,6 +68,8 @@ pub fn main(allocator: std.mem.Allocator, args: FuzzArgs) !void {
         \\  recover_after_failure={}
     , .{
         events_max,
+        stats.pend_resume,
+        stats.pend_resume_with_query,
         stats.result_valid,
         stats.result_corrupt,
         stats.result_truncated,
@@ -77,6 +84,8 @@ pub fn main(allocator: std.mem.Allocator, args: FuzzArgs) !void {
     });
 
     assert(stats.result_valid > 0);
+    assert(stats.pend_resume > 0);
+    assert(stats.pend_resume_with_query > 0);
     assert(stats.result_corrupt > 0);
     assert(stats.result_truncated > 0);
     assert(stats.disconnect_after_call > 0);
@@ -86,6 +95,8 @@ pub fn main(allocator: std.mem.Allocator, args: FuzzArgs) !void {
 
 const Stats = struct {
     result_valid: u64 = 0,
+    pend_resume: u64 = 0,
+    pend_resume_with_query: u64 = 0,
     result_corrupt: u64 = 0,
     result_truncated: u64 = 0,
     result_wrong_tag: u64 = 0,
@@ -97,6 +108,83 @@ const Stats = struct {
     query_count_exceeded: u64 = 0,
     recover_after_failure: u64 = 0,
 };
+
+// =====================================================================
+// Pend/resume — exercises the async path (call_submit + on_recv)
+// without run_to_completion. This is the path commit_dispatch uses
+// for sidecar prefetch and render.
+// =====================================================================
+
+fn fuzz_pend_resume(prng: *PRNG, stats: *Stats) void {
+    stats.pend_resume += 1;
+    const pair = test_socketpair() orelse return;
+
+    // Mock thread: read CALL, send valid RESULT.
+    const thread = std.Thread.spawn(.{}, mock_valid_result, .{ pair[1], prng.int(u64) }) catch return;
+
+    var client = test_client(pair[0]);
+
+    // Step 1: call_submit — sends CALL, transitions to .receiving.
+    client.reset_call_state();
+    if (!client.call_submit("test", "args")) {
+        thread.join();
+        return;
+    }
+    assert(client.call_state == .receiving);
+
+    // Step 2: on_recv — driven one frame at a time (epoll pattern).
+    // No run_to_completion. This is the async path.
+    const state = client.on_recv(null, null, 0);
+    assert(state == .complete or state == .failed);
+
+    if (state == .complete) {
+        assert(client.result_flag == .success or client.result_flag == .failure);
+    }
+
+    client.reset_call_state();
+    assert(client.call_state == .idle);
+
+    thread.join();
+    client.close();
+}
+
+fn fuzz_pend_resume_with_query(prng: *PRNG, stats: *Stats) void {
+    stats.pend_resume_with_query += 1;
+    const pair = test_socketpair() orelse return;
+
+    // Mock thread: read CALL, send QUERY, read QUERY_RESULT, send RESULT.
+    const thread = std.Thread.spawn(.{}, mock_valid_query_exchange_then_result, .{ pair[1], prng.int(u64) }) catch return;
+
+    var client = test_client(pair[0]);
+    var dummy_ctx: u8 = 0;
+
+    // Step 1: call_submit.
+    client.reset_call_state();
+    if (!client.call_submit("test", "args")) {
+        thread.join();
+        return;
+    }
+    assert(client.call_state == .receiving);
+
+    // Step 2: on_recv — first frame is QUERY, client handles it
+    // (executes query, sends QUERY_RESULT). Still .receiving.
+    var state = client.on_recv(test_query_fn, @ptrCast(&dummy_ctx), 10);
+    if (state == .receiving) {
+        // Step 3: on_recv — second frame is RESULT. Now .complete.
+        state = client.on_recv(test_query_fn, @ptrCast(&dummy_ctx), 10);
+    }
+
+    assert(state == .complete or state == .failed);
+    if (state == .complete) {
+        assert(client.result_flag == .success);
+    }
+
+    client.reset_call_state();
+    assert(client.call_state == .idle);
+
+    thread.join();
+    client.close();
+}
 
 // =====================================================================
 // Valid RESULT — client should parse successfully
