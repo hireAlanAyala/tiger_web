@@ -1204,6 +1204,24 @@ with FuzzIO fault injection.
 - [ ] Query limit exceeded tests preserved.
 - [ ] Register updated fuzzer in `fuzz_tests.zig`.
 
+### After Phase 3: delete TestIO from message_bus.zig
+
+The Phase 1 unit tests use a `TestIO` shim — a third IO
+implementation alongside `IO` and `SimIO` that requires manual
+`tick()` calls. This tests a code path that doesn't exist in
+production. TB doesn't do this — they test through real IO or
+their synthetic FuzzIO, never a throwaway stub.
+
+Once FuzzIO exists (Phase 3), migrate the unit tests to use
+either:
+- **Real IO** with socketpairs and `io.run_for_ns(0)` — tests
+  the actual epoll path. The real code path.
+- **FuzzIO** — tests with fault injection. The fuzzer IS the
+  test suite.
+
+Then delete `TestIO` and `TestContext` from `message_bus.zig`.
+Two IO implementations (production + simulation), not three.
+
 ## Phase 4: SimSidecar
 
 Simulation primitive for sim tests. Replaces the current no-op
