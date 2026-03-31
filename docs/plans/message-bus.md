@@ -1058,6 +1058,73 @@ The cascade: `ServerType(App, IO, Storage)` creates the bus as
 `SidecarClientType(IO)`. The server uses both. All types resolve
 at comptime. No runtime cost. Full type safety.
 
+### Handler IO separation
+
+**TB principle: the state machine doesn't do IO. The server does IO.**
+
+Handlers currently do three things in sidecar mode:
+1. State inspection (check call_state)
+2. Wire format encoding (build args bytes)
+3. IO (call_submit, run_to_completion)
+
+The refactor removes #2 and #3. Handlers only inspect state and
+return typed instructions. The server encodes and does IO.
+
+**Handler return types become explicit tagged unions:**
+
+```zig
+// Prefetch: was ?PrefetchCache (null = pending/busy/failed)
+const PrefetchOutcome = union(enum) {
+    cache: PrefetchCache,     // done — data available
+    sidecar_call: SidecarPrefetchArgs, // need IO — server does it
+    pending: void,            // already in flight
+    failed: void,             // error
+    busy: void,               // fault injection
+};
+
+const SidecarPrefetchArgs = struct {
+    operation: Operation,
+    id: u128,
+};
+
+// Execute: was HandleResult (status only)
+const ExecuteOutcome = union(enum) {
+    result: HandleResult,     // done — status + writes executed
+    sidecar_call: SidecarExecuteArgs, // need IO
+    pending: void,
+    failed: void,
+};
+
+// Render: was []const u8 (empty = pending/failed)
+const RenderOutcome = union(enum) {
+    html: []const u8,         // done — rendered HTML
+    sidecar_call: SidecarRenderArgs, // need IO
+    pending: void,
+    failed: void,
+};
+```
+
+**Server interprets instructions:**
+```
+.prefetch:
+  switch (handler_prefetch(...)):
+    .cache => advance to handle
+    .sidecar_call => client.call_submit(bus, "prefetch", encode(args)); return
+    .pending => return (waiting for callback)
+    .failed => pipeline_reset
+    .busy => pipeline_reset
+
+.handle:
+  switch (handler_execute(...)):
+    .result => WAL, commit_batch, advance to render
+    .sidecar_call => begin_batch; client.call_submit(bus, "handle", encode(args)); return
+    .pending => return
+    .failed => rollback, pipeline_reset
+```
+
+Wire format encoding moves to the server's sidecar adapter.
+Handlers have zero knowledge of the bus, protocol, or wire format.
+
 ### SidecarClient changes
 
 ```zig
