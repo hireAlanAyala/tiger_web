@@ -8,10 +8,17 @@ const std = @import("std");
 const builtin = @import("builtin");
 const assert = std.debug.assert;
 
+/// True in debug/test builds, false in release. Gates expensive O(n)
+/// assertions that would degrade production performance. Matches
+/// TigerBeetle's constants.verify — see their docs at constants.zig:761.
+pub const verify = builtin.mode == .Debug;
+
 pub const BitSetType = @import("bit_set.zig").BitSetType;
 pub const BoundedArrayType = @import("bounded_array.zig").BoundedArrayType;
 pub const PRNG = @import("prng.zig");
 pub const RingBufferType = @import("ring_buffer.zig").RingBufferType;
+pub const StackType = @import("stack.zig").StackType;
+pub const StackLink = @import("stack.zig").StackLink;
 pub const Snap = @import("testing/snaptest.zig").Snap;
 pub const ZipfianGenerator = @import("zipfian.zig").ZipfianGenerator;
 pub const ZipfianShuffled = @import("zipfian.zig").ZipfianShuffled;
