@@ -1,84 +1,59 @@
-//! Sidecar client — CALL/RESULT protocol over unix socket.
+//! Sidecar client — CALL/RESULT protocol state machine.
 //!
-//! Dumb executor model: server sends CALL frames, sidecar runs
-//! functions, returns RESULT frames. QUERY sub-protocol for
-//! db.query() in prefetch and render.
+//! Pure protocol logic — no IO calls. The message bus handles all
+//! socket communication. This module processes frames delivered by
+//! the bus and builds frames for sending.
 //!
-//! State machine: call_submit → on_recv (loop) → complete/failed.
-//! In Phase 2 (sync), run_to_completion drives the loop.
-//! In Phase 3 (async), epoll drives on_recv.
+//! State machine: call_submit → on_frame (loop) → complete/failed.
+//! The server's bus callback drives on_frame when frames arrive.
 //!
-//! Server listens on unix socket, sidecar connects. Connection
-//! established at startup before HTTP is accepted.
+//! Connection lifecycle is handled by the MessageBus (listen, accept,
+//! reconnect). The SidecarClient receives on_close when the bus
+//! connection terminates.
 
 const std = @import("std");
 const assert = std.debug.assert;
 const message = @import("message.zig");
 const protocol = @import("protocol.zig");
-const http = @import("framework/http.zig");
+const MessageBusType = @import("framework/message_bus.zig").MessageBusType;
+const ConnectionType = @import("framework/message_bus.zig").ConnectionType;
 
 const log = std.log.scoped(.sidecar);
 
 pub const SidecarClient = struct {
     pub const max_queries_per_call = protocol.queries_max;
+
+    // Bus options — sidecar is serial (2 slots: CALL + QUERY_RESULT).
+    pub const bus_options = .{ .send_queue_max = 2, .frame_max = protocol.frame_max };
+
     // Sized to 3 × frame_max: each round trip copies at most one
     // frame's worth of data. Three round trips = 3 × frame_max.
-    //   RT1: prefetch_decl ≤ frame_max
-    //   RT2: handle_writes + render_decl ≤ frame_max
-    //   RT3: html ≤ frame_max
     const state_buf_max = 3 * protocol.frame_max;
 
-    fd: std.posix.fd_t = -1,
-    path: []const u8,
-
-    // Frame buffers — heap-allocated once at init, reused per request.
-    send_buf: *[protocol.frame_max]u8,
-    recv_buf: *[protocol.frame_max + 4]u8,
-
     // Per-request state — copied into owned memory, not aliased.
-    // Each phase writes to state_buf via copy_state(). The slices
-    // point into state_buf, not recv_buf. Immune to call reordering.
     state_buf: *[state_buf_max]u8,
     state_pos: usize = 0,
-    // Write execution state — shared between old and new protocol.
-    // handler_execute sets these from the RESULT payload, then calls
-    // execute_writes which reads them.
+
+    // Write execution state.
     handle_writes: []const u8 = "",
     handle_write_count: u8 = 0,
 
-    // CALL/RESULT state machine fields — used by the new protocol.
+    // CALL/RESULT state machine.
     call_state: CallState = .idle,
     call_query_count: u32 = 0,
     result_flag: protocol.ResultFlag = .success,
     result_data: []const u8 = "",
     /// Prefetch result — stored between prefetch and handle phases.
-    /// The server passes this through opaquely. Aliases state_buf.
     prefetch_result: []const u8 = "",
 
-    comptime {
-        // Memory budget: send + recv + state allocated once at startup.
-        // send(256K) + recv(256K) + state(768K) ≈ 1.25MB.
-        assert(protocol.frame_max + (protocol.frame_max + 4) + state_buf_max < 2 * 1024 * 1024);
-        assert(@sizeOf(SidecarClient) <= 256);
-    }
-
-    pub fn init(path: []const u8) SidecarClient {
-        const send = std.heap.page_allocator.create([protocol.frame_max]u8) catch
-            @panic("sidecar: failed to allocate send buffer");
-        const recv = std.heap.page_allocator.create([protocol.frame_max + 4]u8) catch
-            @panic("sidecar: failed to allocate recv buffer");
+    pub fn init() SidecarClient {
         const state = std.heap.page_allocator.create([state_buf_max]u8) catch
             @panic("sidecar: failed to allocate state buffer");
-        return .{
-            .path = path,
-            .send_buf = send,
-            .recv_buf = recv,
-            .state_buf = state,
-        };
+        return .{ .state_buf = state };
     }
 
-    /// Copy data from recv_buf into state_buf. Returns a slice into
-    /// state_buf that owns the data. Immune to recv_buf overwrites.
+    /// Copy data into state_buf. Returns a slice into state_buf
+    /// that owns the data. Immune to recv buffer overwrites.
     pub fn copy_state(self: *SidecarClient, data: []const u8) []const u8 {
         if (data.len == 0) return "";
         const start = self.state_pos;
@@ -89,196 +64,17 @@ pub const SidecarClient = struct {
     }
 
     // =================================================================
-    // Connection management
-    // =================================================================
-
-    /// Listen on the unix socket path and accept one sidecar connection.
-    /// Blocks until the sidecar connects. Used at startup — the server
-    /// doesn't accept HTTP until the sidecar is connected.
-    pub fn listen_and_accept(self: *SidecarClient) bool {
-        assert(self.fd == -1);
-        assert(self.path.len > 0);
-
-        // Remove stale socket file.
-        var unlink_path: [108]u8 = undefined;
-        @memcpy(unlink_path[0..self.path.len], self.path);
-        unlink_path[self.path.len] = 0;
-        std.posix.unlinkZ(@ptrCast(unlink_path[0 .. self.path.len + 1])) catch {};
-
-        const listen_fd = std.posix.socket(std.posix.AF.UNIX, std.posix.SOCK.STREAM, 0) catch |err| {
-            log.warn("socket: {}", .{err});
-            return false;
-        };
-
-        var addr: std.posix.sockaddr.un = .{ .path = undefined };
-        assert(self.path.len < addr.path.len);
-        @memcpy(addr.path[0..self.path.len], self.path);
-        addr.path[self.path.len] = 0;
-
-        std.posix.bind(listen_fd, @ptrCast(&addr), @sizeOf(std.posix.sockaddr.un)) catch |err| {
-            log.warn("bind: {}", .{err});
-            std.posix.close(listen_fd);
-            return false;
-        };
-
-        std.posix.listen(listen_fd, 1) catch |err| {
-            log.warn("listen: {}", .{err});
-            std.posix.close(listen_fd);
-            return false;
-        };
-
-        log.info("waiting for sidecar on {s}", .{self.path});
-
-        // Blocking accept — server waits for sidecar before starting.
-        const fd = std.posix.accept(listen_fd, null, null, 0) catch |err| {
-            log.warn("accept: {}", .{err});
-            std.posix.close(listen_fd);
-            return false;
-        };
-
-        // Close the listen fd — we only accept one sidecar connection.
-        std.posix.close(listen_fd);
-
-        const timeout: std.posix.timeval = .{ .sec = 5, .usec = 0 };
-        std.posix.setsockopt(fd, std.posix.SOL.SOCKET, std.posix.SO.RCVTIMEO, std.mem.asBytes(&timeout)) catch |err| {
-            log.warn("setsockopt RCVTIMEO: {}", .{err});
-            std.posix.close(fd);
-            return false;
-        };
-        std.posix.setsockopt(fd, std.posix.SOL.SOCKET, std.posix.SO.SNDTIMEO, std.mem.asBytes(&timeout)) catch |err| {
-            log.warn("setsockopt SNDTIMEO: {}", .{err});
-            std.posix.close(fd);
-            return false;
-        };
-
-        self.fd = fd;
-        log.info("sidecar connected", .{});
-        return true;
-    }
-
-    /// Legacy: connect TO the sidecar (old model — sidecar listens).
-    /// Kept for reconnection logic until fully migrated.
-    pub fn connect(self: *SidecarClient) bool {
-        assert(self.fd == -1);
-        assert(self.path.len > 0);
-
-        const fd = std.posix.socket(std.posix.AF.UNIX, std.posix.SOCK.STREAM, 0) catch |err| {
-            log.warn("socket: {}", .{err});
-            return false;
-        };
-
-        var addr: std.posix.sockaddr.un = .{ .path = undefined };
-        assert(self.path.len < addr.path.len);
-        @memcpy(addr.path[0..self.path.len], self.path);
-        addr.path[self.path.len] = 0;
-
-        std.posix.connect(fd, @ptrCast(&addr), @sizeOf(std.posix.sockaddr.un)) catch |err| {
-            log.warn("connect: {}", .{err});
-            std.posix.close(fd);
-            return false;
-        };
-
-        const timeout: std.posix.timeval = .{ .sec = 5, .usec = 0 };
-        std.posix.setsockopt(fd, std.posix.SOL.SOCKET, std.posix.SO.RCVTIMEO, std.mem.asBytes(&timeout)) catch |err| {
-            log.warn("setsockopt RCVTIMEO: {}", .{err});
-            std.posix.close(fd);
-            return false;
-        };
-        std.posix.setsockopt(fd, std.posix.SOL.SOCKET, std.posix.SO.SNDTIMEO, std.mem.asBytes(&timeout)) catch |err| {
-            log.warn("setsockopt SNDTIMEO: {}", .{err});
-            std.posix.close(fd);
-            return false;
-        };
-
-        self.fd = fd;
-        log.info("connected to {s}", .{self.path});
-        return true;
-    }
-
-    pub fn close(self: *SidecarClient) void {
-        if (self.fd != -1) {
-            std.posix.close(self.fd);
-            self.fd = -1;
-        }
-    }
-
-    fn handle_disconnect(self: *SidecarClient) void {
-        assert(self.fd != -1);
-        log.warn("sidecar disconnected", .{});
-        std.posix.close(self.fd);
-        self.fd = -1;
-        self.reset_request_state();
-    }
-
-    fn try_reconnect(self: *SidecarClient) void {
-        assert(self.fd == -1);
-        if (self.connect()) {
-            log.info("sidecar reconnected", .{});
-        }
-    }
-
-    fn reset_request_state(self: *SidecarClient) void {
-        self.state_pos = 0;
-        self.handle_writes = "";
-        self.handle_write_count = 0;
-    }
-
-    // =================================================================
-    // CALL/RESULT exchange — state machine for dumb executor protocol
-    //
-    // Structured as a state machine, not a blocking loop. In Phase 2
-    // (sync), run_to_completion() drives all transitions in one call.
-    // In Phase 3 (async), epoll drives transitions via on_recv().
-    //
-    // Tradeoff: the old call_exchange used comptime allow_queries to
-    // eliminate the QUERY branch at compile time for no-query CALLs.
-    // The state machine uses a runtime null check (query_fn == null)
-    // because function pointers can't be comptime. This is the price
-    // of storability — the QueryFn must be a field for async Phase 3.
-    // Same tradeoff TB makes with callback context pointers.
-    // The state machine is the same — only the driver changes.
+    // CALL/RESULT state machine
     // =================================================================
 
     pub const CallState = enum {
-        idle,          // No CALL in flight
-        receiving,     // CALL sent, waiting for frames from sidecar
-        complete,      // RESULT received — result_flag and result_data valid
-        failed,        // Protocol error or disconnect
+        idle,
+        receiving, // CALL sent, waiting for frames
+        complete, // RESULT received
+        failed, // Protocol error or disconnect
     };
 
-    /// Submit a CALL frame. Transitions to .receiving.
-    /// Args are copied into send_buf by build_call.
-    pub fn call_submit(self: *SidecarClient, function_name: []const u8, args: []const u8) bool {
-        assert(self.call_state == .idle);
-
-        if (self.fd == -1) {
-            self.try_reconnect();
-            if (self.fd == -1) return false;
-        }
-
-        const call_len = protocol.build_call(
-            self.send_buf,
-            0, // request_id — single in-flight for sync
-            function_name,
-            args,
-        ) orelse {
-            log.warn("call: frame too large for {s}", .{function_name});
-            return false;
-        };
-
-        if (!protocol.write_frame(self.fd, self.send_buf[0..call_len])) {
-            self.handle_disconnect();
-            return false;
-        }
-
-        self.call_state = .receiving;
-        self.call_query_count = 0;
-        return true;
-    }
-
-    /// Query dispatch function type. The context is an opaque pointer
-    /// to the storage ReadView (or whatever provides query_raw).
-    /// Same pattern as TB's IO callbacks — context + operation.
+    /// Query dispatch function type — same as before.
     pub const QueryFn = *const fn (
         context: *anyopaque,
         sql: []const u8,
@@ -288,118 +84,125 @@ pub const SidecarClient = struct {
         out_buf: []u8,
     ) ?[]const u8;
 
-    /// Process one received frame. Called by the recv loop (sync) or
-    /// epoll handler (async). Returns the new state.
+    /// Submit a CALL frame via the bus. Builds the CALL payload
+    /// into a pool message (zero-copy) and sends it.
+    pub fn call_submit(self: *SidecarClient, bus: anytype, function_name: []const u8, args: []const u8) bool {
+        assert(self.call_state == .idle);
+
+        const pool = &bus.pool;
+        const msg = pool.get_message();
+
+        const header_size = @TypeOf(bus.*).Connection.frame_header_size;
+        const call_len = protocol.build_call(
+            msg.buffer[header_size..],
+            0, // request_id
+            function_name,
+            args,
+        ) orelse {
+            log.warn("call: frame too large for {s}", .{function_name});
+            pool.unref(msg);
+            return false;
+        };
+
+        bus.send_message(msg, @intCast(call_len));
+        self.call_state = .receiving;
+        self.call_query_count = 0;
+        return true;
+    }
+
+    /// Process one received frame. Called by the server's bus
+    /// on_frame callback. Same logic as the old on_recv but with
+    /// no IO calls — the bus handles framing and CRC validation.
     ///
-    /// On .query: executes SQL via query_fn(query_ctx), sends QUERY_RESULT.
-    /// On .result: stores result, transitions to .complete.
-    /// On error: transitions to .failed.
-    pub fn on_recv(
+    /// For QUERY frames: builds QUERY_RESULT into a pool message
+    /// and sends via the bus (zero-copy).
+    pub fn on_frame(
         self: *SidecarClient,
+        bus: anytype,
+        frame: []const u8,
         query_fn: ?QueryFn,
         query_ctx: ?*anyopaque,
         comptime queries_max: u32,
-    ) CallState {
+    ) void {
         assert(self.call_state == .receiving);
-
-        const frame = protocol.read_frame(self.fd, self.recv_buf) orelse {
-            self.handle_disconnect();
-            self.call_state = .failed;
-            return .failed;
-        };
 
         const parsed = protocol.parse_sidecar_frame(frame) orelse {
             log.warn("call: invalid frame from sidecar", .{});
-            self.handle_disconnect();
             self.call_state = .failed;
-            return .failed;
+            return;
         };
 
         switch (parsed.tag) {
             .result => {
                 const result = protocol.parse_result_payload(parsed.payload) orelse {
                     log.warn("call: invalid RESULT payload", .{});
-                    self.handle_disconnect();
                     self.call_state = .failed;
-                    return .failed;
+                    return;
                 };
                 self.result_flag = result.flag;
                 self.result_data = result.data;
                 self.call_state = .complete;
-                return .complete;
             },
             .query => {
                 if (query_fn == null) {
                     log.warn("call: QUERY received during no-query CALL", .{});
-                    self.handle_disconnect();
                     self.call_state = .failed;
-                    return .failed;
+                    return;
                 }
 
                 if (self.call_query_count >= queries_max) {
                     log.warn("call: exceeded max queries ({d})", .{queries_max});
-                    self.handle_disconnect();
                     self.call_state = .failed;
-                    return .failed;
+                    return;
                 }
                 self.call_query_count += 1;
 
                 const query = protocol.parse_query_payload(parsed.payload) orelse {
                     log.warn("call: invalid QUERY payload", .{});
-                    self.handle_disconnect();
                     self.call_state = .failed;
-                    return .failed;
+                    return;
                 };
 
-                // Execute SQL via the caller's query function.
-                // Row set written directly into send_buf after the
-                // 7-byte QUERY_RESULT header (tag + request_id + query_id).
+                // Build QUERY_RESULT into a pool message (zero-copy).
+                const pool = &bus.pool;
+                const msg = pool.get_message();
+                const header_size = @TypeOf(bus.*).Connection.frame_header_size;
+                const qr_buf = msg.buffer[header_size..];
+
+                // QUERY_RESULT header: [tag: u8][request_id: u32 BE][query_id: u16 BE]
+                qr_buf[0] = @intFromEnum(protocol.CallTag.query_result);
+                std.mem.writeInt(u32, qr_buf[1..5], parsed.request_id, .big);
+                std.mem.writeInt(u16, qr_buf[5..7], query.query_id, .big);
+
+                // Execute SQL — row set written directly after the 7-byte header.
                 const row_set = query_fn.?(
                     query_ctx.?,
                     query.sql,
                     query.params_buf,
                     query.param_count,
                     query.mode,
-                    self.send_buf[7..],
-                ) orelse blk: {
-                    break :blk @as([]const u8, "");
-                };
+                    qr_buf[7..],
+                ) orelse "";
 
-                // Send QUERY_RESULT — echo query_id for Promise.all() matching.
-                self.send_buf[0] = @intFromEnum(protocol.CallTag.query_result);
-                std.mem.writeInt(u32, self.send_buf[1..5], parsed.request_id, .big);
-                std.mem.writeInt(u16, self.send_buf[5..7], query.query_id, .big);
-                const qr_total = 7 + row_set.len;
-
-                if (!protocol.write_frame(self.fd, self.send_buf[0..qr_total])) {
-                    self.handle_disconnect();
-                    self.call_state = .failed;
-                    return .failed;
-                }
+                const qr_total: u32 = @intCast(7 + row_set.len);
+                bus.send_message(msg, qr_total);
 
                 // Stay in .receiving — more frames expected.
-                return .receiving;
             },
             else => unreachable,
         }
     }
 
-    /// Drive the state machine to completion. Blocking — used in Phase 2.
-    /// In Phase 3, this is replaced by epoll-driven on_recv() calls.
-    pub fn run_to_completion(
-        self: *SidecarClient,
-        query_fn: ?QueryFn,
-        query_ctx: ?*anyopaque,
-        comptime queries_max: u32,
-    ) bool {
-        assert(self.call_state == .receiving);
-        while (self.call_state == .receiving) {
-            _ = self.on_recv(query_fn, query_ctx, queries_max);
+    /// Called by the server when the bus connection closes.
+    /// Resets in-flight state so the next accept starts clean.
+    pub fn on_close(self: *SidecarClient) void {
+        if (self.call_state == .receiving) {
+            log.warn("sidecar disconnected during exchange", .{});
+            self.call_state = .failed;
         }
-        return self.call_state == .complete;
+        self.reset_request_state();
     }
 
-    /// Reset call state between requests.
     pub fn reset_call_state(self: *SidecarClient) void {
         self.call_state = .idle;
         self.call_query_count = 0;
@@ -407,19 +210,23 @@ pub const SidecarClient = struct {
         self.result_data = "";
     }
 
+    fn reset_request_state(self: *SidecarClient) void {
+        self.state_pos = 0;
+        self.handle_writes = "";
+        self.handle_write_count = 0;
+    }
+
     // =================================================================
     // Execute writes
     // =================================================================
 
     /// Execute handle's write queue against storage.
-    /// Called inside the server's transaction boundary.
     pub fn execute_writes(self: *SidecarClient, storage: anytype) bool {
         const data = self.handle_writes;
         if (self.handle_write_count == 0) return true;
 
         var dpos: usize = 0;
         for (0..self.handle_write_count) |_| {
-            // sql: [u16 BE sql_len][sql_bytes]
             if (dpos + 2 > data.len) return false;
             const sql_len = std.mem.readInt(u16, data[dpos..][0..2], .big);
             dpos += 2;
@@ -427,7 +234,6 @@ pub const SidecarClient = struct {
             const sql = data[dpos..][0..sql_len];
             dpos += sql_len;
 
-            // params: [u8 param_count][params...]
             if (dpos >= data.len) return false;
             const param_count = data[dpos];
             dpos += 1;
@@ -440,12 +246,7 @@ pub const SidecarClient = struct {
         }
         return true;
     }
-    // =================================================================
-    // Binary format helpers — shared parsing for declarations/params
-    // =================================================================
 
-    /// Skip past one param list in a binary buffer.
-    /// Returns new position, or null if malformed.
     pub fn skip_params(data: []const u8, start: usize, param_count: u8) ?usize {
         var pos = start;
         for (0..param_count) |_| {
@@ -469,5 +270,4 @@ pub const SidecarClient = struct {
         }
         return pos;
     }
-
 };
