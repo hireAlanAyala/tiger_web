@@ -257,6 +257,50 @@ WAL entries, the server loses track of pending work after a crash.
 Separate sections (not marker bytes) match the sidecar RESULT
 format — explicit, no parsing ambiguity.
 
+### Completion uses synthetic message
+
+When a worker RESULT arrives, the server constructs a Message for
+the `returns` operation — same as how `translate()` constructs a
+Message from HTTP. The `returns` handler's prefetch/handle/render
+run normally. `ctx.body` contains the worker's return data.
+
+No special path — the completion enters the serial pipeline like
+any other request. The only difference is the message source (worker
+RESULT vs HTTP request).
+
+### `ctx.worker_failed` is a status value
+
+Don't add a flag to Message. The server sets the message status to
+a reserved value (e.g., `.worker_failed`). The completion handler
+checks `ctx.status === "worker_failed"` or the framework derives
+`ctx.worker_failed` from the status. The scanner enforces the branch
+exists.
+
+### Interval workers create their own WAL entries
+
+Interval-driven workers (`interval 60s`) are triggered by the tick
+loop timer — same mechanism as `timeout_idle`. When the timer fires,
+the tick loop writes a dispatch WAL entry (same format as event-
+driven) and processes it. The WAL is always the source of truth.
+The timer is just the trigger.
+
+Event-driven workers (`worker.xxx()` in handle) write the dispatch
+entry during the handle's commit. Either way, a WAL entry exists
+and the tick loop picks it up. One dispatch path after the WAL.
+
+### Two sidecar connections
+
+Two unix sockets, two paths. The server creates both listen sockets
+before accepting HTTP. The TS runtime connects to both.
+
+- Request socket: existing `listen_and_accept` for request CALLs.
+- Worker socket: second `listen_and_accept` for worker CALLs.
+
+Each has its own SidecarClient, send_buf, recv_buf, epoll completion.
+Worker SidecarClient supports concurrent in-flight CALLs with
+incrementing request_ids (vs request SidecarClient which is serial,
+request_id=0).
+
 ---
 
 ## Implementation checklist
