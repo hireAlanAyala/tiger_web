@@ -71,6 +71,10 @@ pub const SimIO = struct {
     accept_fault_probability: PRNG.Ratio,
     recv_fault_probability: PRNG.Ratio,
     send_fault_probability: PRNG.Ratio,
+    /// Probability that send_now returns null (WouldBlock simulation).
+    /// Controls how often the fast path succeeds vs falls back to async.
+    /// Swarm testing should randomize this per seed.
+    send_now_fault_probability: PRNG.Ratio,
 
     const PendingOp = struct {
         completion: *Completion,
@@ -115,6 +119,7 @@ pub const SimIO = struct {
             .accept_fault_probability = PRNG.Ratio.zero(),
             .recv_fault_probability = PRNG.Ratio.zero(),
             .send_fault_probability = PRNG.Ratio.zero(),
+            .send_now_fault_probability = PRNG.Ratio.zero(),
         };
         for (&sim.pending) |*p| {
             p.* = .{ .completion = undefined, .active = false };
@@ -437,16 +442,17 @@ pub const SimIO = struct {
         self.enqueue(completion);
     }
 
-    /// Non-blocking send — SimIO equivalent. PRNG controls whether the
-    /// send succeeds (partial or full) or returns null (WouldBlock).
-    /// Used by the message bus send_now fast path.
+    /// Non-blocking send — SimIO equivalent. Returns null based on
+    /// send_now_fault_probability. Matches real IO: null means
+    /// "can't complete now, fall back to async." Successful sends
+    /// may be partial (PRNG-driven).
     pub fn send_now(self: *SimIO, fd: fd_t, buffer: []const u8) ?usize {
         assert(buffer.len > 0);
+        // Fault injection: return null (WouldBlock simulation).
+        if (self.prng.chance(self.send_now_fault_probability)) return null;
         // Find the client for this fd.
         for (&self.clients) |*client| {
             if (client.fd == fd and client.connected) {
-                // PRNG decides: null (WouldBlock) or partial/full send.
-                if (self.prng.boolean()) return null;
                 const max = @min(buffer.len, client.recv_buf.len - client.recv_len);
                 if (max == 0) return null; // Client recv buffer full.
                 const n = self.prng.range_inclusive(u32, 1, @intCast(max));
@@ -455,7 +461,7 @@ pub const SimIO = struct {
                 return n;
             }
         }
-        return 0; // Unknown fd — treat as error.
+        return null; // Unknown fd — fall back to async.
     }
 
     /// Shutdown — SimIO equivalent. Marks the client connection for
