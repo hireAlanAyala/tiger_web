@@ -592,30 +592,26 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
 
                         switch (client.call_state) {
                             .idle => {
-                                // Open transaction before sending CALL.
-                                sm.begin_batch();
-                                if (server.wal != null) {
-                                    sm.wal_record_buf = &server.wal_record_scratch;
-                                }
-
+                                // Send CALL — no transaction yet. Transaction
+                                // opens when RESULT arrives and we execute writes
+                                // synchronously. TB pattern: don't open a transaction
+                                // across async boundaries.
                                 const m = server.commit_msg.?;
                                 var args: [1 + 16]u8 = undefined;
                                 args[0] = @intFromEnum(m.operation);
                                 std.mem.writeInt(u128, args[1..17], m.id, .big);
 
                                 if (!client.call_submit(&server.sidecar_bus, "handle", &args)) {
-                                    sm.commit_batch(); // close transaction
                                     server.pipeline_reset();
                                     return;
                                 }
-                                return; // pending — transaction stays open
+                                return; // pending
                             },
                             .receiving => return,
                             .complete => {
                                 defer client.reset_call_state();
 
                                 if (client.result_flag == .failure) {
-                                    sm.commit_batch();
                                     server.pipeline_reset();
                                     return;
                                 }
@@ -624,13 +620,11 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
 
                                 // Parse: [status_len: u16 BE][status_str][write_count: u8][writes...]
                                 if (data.len < 3) {
-                                    sm.commit_batch();
                                     server.pipeline_reset();
                                     return;
                                 }
                                 const status_len = std.mem.readInt(u16, data[0..2], .big);
                                 if (2 + status_len + 1 > data.len) {
-                                    sm.commit_batch();
                                     server.pipeline_reset();
                                     return;
                                 }
@@ -638,7 +632,13 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
                                 const write_count = data[2 + status_len];
                                 const write_data = data[2 + status_len + 1 ..];
 
-                                // Execute writes inside the open transaction.
+                                // Transaction: open, execute writes, WAL, close.
+                                // All synchronous — no async boundary inside transaction.
+                                sm.begin_batch();
+                                if (server.wal != null) {
+                                    sm.wal_record_buf = &server.wal_record_scratch;
+                                }
+
                                 client.handle_writes = write_data;
                                 client.handle_write_count = write_count;
                                 var write_view = if (sm.wal_record_buf) |buf|
@@ -675,8 +675,8 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
 
                                 sm.commit_batch();
 
-                                const status = @import("../message.zig").Status.from_string(status_str) orelse .storage_error;
-                                const identity = sm.prefetch_identity orelse std.mem.zeroes(@import("../message.zig").PrefetchIdentity);
+                                const status = App.Status.from_string(status_str) orelse .storage_error;
+                                const identity = sm.prefetch_identity orelse std.mem.zeroes(StateMachine.CommitOutput.Identity);
 
                                 server.commit_pipeline_resp = .{
                                     .status = status,
@@ -691,7 +691,6 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
                             },
                             .failed => {
                                 client.reset_call_state();
-                                sm.commit_batch();
                                 server.pipeline_reset();
                                 return;
                             },
