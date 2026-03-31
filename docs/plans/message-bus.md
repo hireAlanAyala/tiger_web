@@ -243,6 +243,99 @@ The throughput bottleneck is the sidecar gap (55K native vs
 for when io_uring becomes relevant (network storage with 500μs+
 query latency — even then, pipeline depth matters more).
 
+## Phase 0: MessagePool + Connection rewrite
+
+Port TB's `StackType` and `MessagePool` verbatim. Rewrite
+`ConnectionType` to use `*Message` pointers instead of static
+`SendEntry` buffers. This is the foundation — Phase 1 shipped
+with static buffers as a first pass; Phase 0 corrects to TB's
+architecture before Phase 2 builds on it.
+
+### Port from TigerBeetle (copy, don't rewrite)
+
+**`stack.zig`** → `framework/stdx/stack.zig` (120 lines)
+- TB's `src/stack.zig` — intrusive LIFO linked list
+- `StackType(T)` with `push`, `pop`, `peek`, `empty`, `count`
+- Only dependency: `stdx` (already in our codebase)
+- Copy verbatim. Change `constants` import to local verify flag.
+
+**`message_pool.zig`** → `framework/message_pool.zig` (~100 lines)
+- Stripped from TB's `src/message_pool.zig` (344 lines)
+- Remove: VSR types (Header, Command, ProcessType), sector
+  alignment, `CommandMessageType`, `Options` union, `body_used`,
+  `build`, `into`, `into_any`
+- Keep: `Message` struct (`buffer`, `references`, `link`),
+  `init_capacity`, `get_message`, `ref`, `unref`, `deinit`,
+  `FreeList` (StackType)
+- Parameterize on `buf_max: u32` (our `frame_max + 8`)
+
+**Resulting Message struct:**
+```zig
+pub const Message = struct {
+    buffer: *[buf_max]u8,
+    references: u32 = 0,
+    link: FreeList.Link = .{},
+
+    pub fn ref(message: *Message) *Message {
+        assert(message.references > 0);
+        assert(message.link.next == null);
+        message.references += 1;
+        return message;
+    }
+};
+```
+
+### Connection rewrite
+
+**Send queue:** `RingBufferType(*Message, .{ .array = send_queue_max })`
+- Holds `*Message` pointers, not embedded 256KB entries
+- `send_frame` → get message from pool, build payload + CRC,
+  queue pointer, kick send loop
+- `begin_frame` → get message from pool, return writable slice
+- `commit_frame` → write header + CRC, queue pointer
+- `send_now` → reads from `message.buffer[send_pos..]` directly
+- `send_callback` → `pool.unref` when fully sent
+- `terminate_close` → `pool.unref` all queued messages
+
+**Recv buffer:** `*Message` from pool (not embedded `[recv_buf_max]u8`)
+- `init` → get message from pool for recv buffer
+- `recv` → reads into `message.buffer[recv_pos..]`
+- `on_frame_fn` → consumer can `ref` the message to keep data
+  alive past callback (eliminates `copy_state`)
+- `terminate_close` → `pool.unref` recv message
+
+**Memory difference:**
+- Old: 1MB+ per Connection (static recv_buf + 4 × send_bufs)
+- New: Connection struct is ~200 bytes. Buffers live in the pool.
+  Pool is shared — idle connections hold no buffers.
+
+### Pool sizing
+
+```zig
+const messages_max = 1   // recv buffer
+    + send_queue_max     // send queue (worst case: all slots full)
+    + 1;                 // burst (get_message during on_frame_fn)
+```
+
+For sidecar (send_queue_max = 2): 4 messages = 4 × 256KB = 1MB pool.
+
+### Checklist
+
+- [ ] Copy `stack.zig` → `framework/stdx/stack.zig`.
+- [ ] Build `MessagePool` in `framework/message_pool.zig` —
+  stripped from TB, parameterized on `buf_max`.
+- [ ] Rewrite `ConnectionType` send queue: `*Message` pointers.
+- [ ] Add `begin_frame` / `commit_frame` (zero-copy write path).
+- [ ] Keep `send_frame` as convenience wrapper.
+- [ ] Rewrite `ConnectionType` recv buffer: `*Message` from pool.
+- [ ] `on_frame_fn` delivers slice into recv message buffer.
+- [ ] `terminate_close` unrefs all messages.
+- [ ] `defer self.invariants()` on all entry points.
+- [ ] Update MessageBusType to create pool + pass to Connection.
+- [ ] Update all tests.
+- [ ] All unit tests pass.
+- [ ] All sim tests pass.
+
 ## Phase 1: Connection + MessageBus
 
 ~350 lines, two types in `message_bus.zig`.
