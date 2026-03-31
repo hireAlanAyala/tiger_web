@@ -163,8 +163,8 @@ The framework provides sensible defaults for everything else. If the
 same worker needs different operational profiles, that is two workers
 with different names.
 
-Interval/cron-style workers are a separate feature — not in scope
-for this plan.
+Interval/cron-style workers and table sync patterns are separate
+features — not in scope for this plan.
 
 ### Parallelism preserves determinism
 
@@ -222,17 +222,6 @@ table — no runtime string lookup.
 **Why:** The scanner can prove at build time that the target exists
 and the types align. Runtime only checks that the request_id maps to
 a known in-flight dispatch — all values are comptime-known.
-
-### Table sync is the external data pattern
-
-Microservices that need external data write to a local table through
-the server's pipeline. A sync worker fetches from the external service
-and posts the data through a completion operation. The state machine
-reads locally, never reaches out.
-
-**Why:** The server stays air-gapped at runtime. The tick sees all
-data locally. The WAL captures every mutation including synced data.
-No unbounded waits, no external dependencies in the hot path.
 
 ### Separate connections for workers and requests
 
