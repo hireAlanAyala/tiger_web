@@ -51,40 +51,11 @@ pub const Message = message.Message;
 pub const MessageResponse = message.MessageResponse;
 pub const Operation = message.Operation;
 pub const Status = message.Status;
-/// PrefetchCache — tagged union of all handler Prefetch types.
-///
-/// Stored on the SM as an opaque field between prefetch() and commit().
-/// The SM doesn't know what's inside — it stores it in prefetch, hands
-/// it back in commit. App.handler_prefetch fills it, App.handler_execute
-/// unpacks it. One type parameter, one field, clean dependency direction.
-/// Fields ordered to match Operation enum declaration order (required by Zig).
-pub const PrefetchCache = union(Operation) {
-    root: void,
-    create_product: @import("handlers/create_product.zig").Prefetch,
-    get_product: @import("handlers/get_product.zig").Prefetch,
-    list_products: @import("handlers/list_products.zig").Prefetch,
-    update_product: @import("handlers/update_product.zig").Prefetch,
-    delete_product: @import("handlers/delete_product.zig").Prefetch,
-    get_product_inventory: @import("handlers/get_product_inventory.zig").Prefetch,
-    transfer_inventory: @import("handlers/transfer_inventory.zig").Prefetch,
-    create_order: @import("handlers/create_order.zig").Prefetch,
-    get_order: @import("handlers/get_order.zig").Prefetch,
-    list_orders: @import("handlers/list_orders.zig").Prefetch,
-    complete_order: @import("handlers/complete_order.zig").Prefetch,
-    cancel_order: @import("handlers/cancel_order.zig").Prefetch,
-    search_products: @import("handlers/search_products.zig").Prefetch,
-    create_collection: @import("handlers/create_collection.zig").Prefetch,
-    get_collection: @import("handlers/get_collection.zig").Prefetch,
-    list_collections: @import("handlers/list_collections.zig").Prefetch,
-    delete_collection: @import("handlers/delete_collection.zig").Prefetch,
-    add_collection_member: @import("handlers/add_collection_member.zig").Prefetch,
-    remove_collection_member: @import("handlers/remove_collection_member.zig").Prefetch,
-    page_load_dashboard: @import("handlers/page_load_dashboard.zig").Prefetch,
-    page_load_login: @import("handlers/page_load_login.zig").Prefetch,
-    request_login_code: @import("handlers/request_login_code.zig").Prefetch,
-    verify_login_code: @import("handlers/verify_login_code.zig").Prefetch,
-    logout: @import("handlers/logout.zig").Prefetch,
-};
+/// Generated handler dispatch — PrefetchCache, dispatch functions,
+/// is_sidecar_operation. Scanner-generated from handler annotations.
+/// Fields emitted in Operation enum declaration order (Zig union requirement).
+const gen_handlers = @import("generated/handlers.generated.zig");
+pub const PrefetchCache = gen_handlers.PrefetchCache;
 
 /// Handlers interface — passed to StateMachineType so the SM can call
 /// handler dispatch without importing App. The SM is parameterized on
@@ -166,7 +137,7 @@ pub fn HandlersType(comptime StorageParam: type) type {
                 }
             }
             const ro = StorageParam.ReadView.init(storage);
-            return dispatch_prefetch(ro, msg);
+            return gen_handlers.dispatch_prefetch(ro, msg);
         }
 
         pub const FwCtx = @import("framework/handler.zig").FrameworkCtx(message.PrefetchIdentity);
@@ -240,7 +211,7 @@ pub fn HandlersType(comptime StorageParam: type) type {
                 return .{ .status = status };
             }
 
-            return dispatch_execute(cache, msg, fw, db);
+            return gen_handlers.dispatch_execute(cache, msg, fw, db);
         }
 
         /// Route an HTTP request to a typed Message. Returns null if
@@ -348,7 +319,7 @@ pub fn HandlersType(comptime StorageParam: type) type {
                 }
             }
 
-            return dispatch_render(cache, operation, status, fw, render_buf, storage);
+            return gen_handlers.dispatch_render(cache, operation, status, fw, render_buf, storage);
         }
     };
 }
@@ -402,193 +373,6 @@ pub fn translate(method: http.Method, raw_path: []const u8, body: []const u8) ?M
 //   calls handler.handle(), applies writes via callback.
 //
 // The SM owns the cross-cutting concerns (auth, tracer).
-// These functions own the handler dispatch logic.
-// =====================================================================
-
-// ReadOnlyStorage enforcement is now via Storage.ReadView — see decisions/storage-ownership.md.
-
-/// Phase 1: dispatch to handler.prefetch() via ReadOnlyStorage.
-/// Returns the handler's Prefetch result wrapped in the PrefetchCache union.
-/// Returns null if the handler returned null (storage busy).
-fn dispatch_prefetch(ro: anytype, msg: *const Message) ?PrefetchCache {
-    return switch (msg.operation) {
-        .root => unreachable,
-        .get_product => prefetch_one(@import("handlers/get_product.zig"), .get_product, ro, msg),
-        .create_product => prefetch_one(@import("handlers/create_product.zig"), .create_product, ro, msg),
-        .list_products => prefetch_one(@import("handlers/list_products.zig"), .list_products, ro, msg),
-        .update_product => prefetch_one(@import("handlers/update_product.zig"), .update_product, ro, msg),
-        .delete_product => prefetch_one(@import("handlers/delete_product.zig"), .delete_product, ro, msg),
-        .get_product_inventory => prefetch_one(@import("handlers/get_product_inventory.zig"), .get_product_inventory, ro, msg),
-        .search_products => prefetch_one(@import("handlers/search_products.zig"), .search_products, ro, msg),
-        .transfer_inventory => prefetch_one(@import("handlers/transfer_inventory.zig"), .transfer_inventory, ro, msg),
-        .create_collection => prefetch_one(@import("handlers/create_collection.zig"), .create_collection, ro, msg),
-        .get_collection => prefetch_one(@import("handlers/get_collection.zig"), .get_collection, ro, msg),
-        .list_collections => prefetch_one(@import("handlers/list_collections.zig"), .list_collections, ro, msg),
-        .delete_collection => prefetch_one(@import("handlers/delete_collection.zig"), .delete_collection, ro, msg),
-        .add_collection_member => prefetch_one(@import("handlers/add_collection_member.zig"), .add_collection_member, ro, msg),
-        .remove_collection_member => prefetch_one(@import("handlers/remove_collection_member.zig"), .remove_collection_member, ro, msg),
-        .create_order => prefetch_one(@import("handlers/create_order.zig"), .create_order, ro, msg),
-        .get_order => prefetch_one(@import("handlers/get_order.zig"), .get_order, ro, msg),
-        .list_orders => prefetch_one(@import("handlers/list_orders.zig"), .list_orders, ro, msg),
-        .complete_order => prefetch_one(@import("handlers/complete_order.zig"), .complete_order, ro, msg),
-        .cancel_order => prefetch_one(@import("handlers/cancel_order.zig"), .cancel_order, ro, msg),
-        .page_load_dashboard => prefetch_one(@import("handlers/page_load_dashboard.zig"), .page_load_dashboard, ro, msg),
-        .page_load_login => prefetch_one(@import("handlers/page_load_login.zig"), .page_load_login, ro, msg),
-        .request_login_code => prefetch_one(@import("handlers/request_login_code.zig"), .request_login_code, ro, msg),
-        .verify_login_code => prefetch_one(@import("handlers/verify_login_code.zig"), .verify_login_code, ro, msg),
-        .logout => prefetch_one(@import("handlers/logout.zig"), .logout, ro, msg),
-    };
-}
-
-fn prefetch_one(comptime H: type, comptime op: Operation, ro: anytype, msg: *const Message) ?PrefetchCache {
-    const result = H.prefetch(ro, msg) orelse return null;
-    return @unionInit(PrefetchCache, @tagName(op), result);
-}
-
-/// Phase 2: dispatch to handler.handle() with write-only db access.
-/// The SM calls this from commit() inside a begin/commit transaction.
-fn dispatch_execute(
-    cache: PrefetchCache,
-    msg: Message,
-    fw: anytype,
-    db: anytype,
-) state_machine.HandleResult {
-    return switch (msg.operation) {
-        .root => unreachable,
-        .get_product => execute_one(@import("handlers/get_product.zig"), .get_product, cache, msg, fw, db),
-        .create_product => execute_one(@import("handlers/create_product.zig"), .create_product, cache, msg, fw, db),
-        .list_products => execute_one(@import("handlers/list_products.zig"), .list_products, cache, msg, fw, db),
-        .update_product => execute_one(@import("handlers/update_product.zig"), .update_product, cache, msg, fw, db),
-        .delete_product => execute_one(@import("handlers/delete_product.zig"), .delete_product, cache, msg, fw, db),
-        .get_product_inventory => execute_one(@import("handlers/get_product_inventory.zig"), .get_product_inventory, cache, msg, fw, db),
-        .search_products => execute_one(@import("handlers/search_products.zig"), .search_products, cache, msg, fw, db),
-        .transfer_inventory => execute_one(@import("handlers/transfer_inventory.zig"), .transfer_inventory, cache, msg, fw, db),
-        .create_collection => execute_one(@import("handlers/create_collection.zig"), .create_collection, cache, msg, fw, db),
-        .get_collection => execute_one(@import("handlers/get_collection.zig"), .get_collection, cache, msg, fw, db),
-        .list_collections => execute_one(@import("handlers/list_collections.zig"), .list_collections, cache, msg, fw, db),
-        .delete_collection => execute_one(@import("handlers/delete_collection.zig"), .delete_collection, cache, msg, fw, db),
-        .add_collection_member => execute_one(@import("handlers/add_collection_member.zig"), .add_collection_member, cache, msg, fw, db),
-        .remove_collection_member => execute_one(@import("handlers/remove_collection_member.zig"), .remove_collection_member, cache, msg, fw, db),
-        .create_order => execute_one(@import("handlers/create_order.zig"), .create_order, cache, msg, fw, db),
-        .get_order => execute_one(@import("handlers/get_order.zig"), .get_order, cache, msg, fw, db),
-        .list_orders => execute_one(@import("handlers/list_orders.zig"), .list_orders, cache, msg, fw, db),
-        .complete_order => execute_one(@import("handlers/complete_order.zig"), .complete_order, cache, msg, fw, db),
-        .cancel_order => execute_one(@import("handlers/cancel_order.zig"), .cancel_order, cache, msg, fw, db),
-        .page_load_dashboard => execute_one(@import("handlers/page_load_dashboard.zig"), .page_load_dashboard, cache, msg, fw, db),
-        .page_load_login => execute_one(@import("handlers/page_load_login.zig"), .page_load_login, cache, msg, fw, db),
-        .request_login_code => execute_one(@import("handlers/request_login_code.zig"), .request_login_code, cache, msg, fw, db),
-        .verify_login_code => execute_one(@import("handlers/verify_login_code.zig"), .verify_login_code, cache, msg, fw, db),
-        .logout => execute_one(@import("handlers/logout.zig"), .logout, cache, msg, fw, db),
-    };
-}
-
-fn execute_one(
-    comptime H: type,
-    comptime op: Operation,
-    cache: PrefetchCache,
-    msg: Message,
-    fw: anytype,
-    db: anytype,
-) state_machine.HandleResult {
-    const prefetched = @field(cache, @tagName(op));
-    const ctx = H.Context{
-        .prefetched = prefetched,
-        .body = if (H.Context.BodyType == void) {} else msg.body_as(H.Context.BodyType),
-        .fw = fw,
-        .render_buf = &.{}, // render not wired yet
-    };
-
-    return H.handle(ctx, db);
-}
-
-/// Phase 3: dispatch to handler.render().
-/// Called after commit with the cache and pipeline response.
-/// Returns the HTML slice (into render_buf) that the framework will wrap.
-fn dispatch_render(
-    cache: PrefetchCache,
-    operation: Operation,
-    status: message.Status,
-    fw: anytype,
-    render_buf: []u8,
-    storage: anytype,
-) []const u8 {
-    return switch (operation) {
-        .root => unreachable,
-        .get_product => render_one(@import("handlers/get_product.zig"), .get_product, cache, status, fw, render_buf, storage),
-        .create_product => render_one(@import("handlers/create_product.zig"), .create_product, cache, status, fw, render_buf, storage),
-        .list_products => render_one(@import("handlers/list_products.zig"), .list_products, cache, status, fw, render_buf, storage),
-        .update_product => render_one(@import("handlers/update_product.zig"), .update_product, cache, status, fw, render_buf, storage),
-        .delete_product => render_one(@import("handlers/delete_product.zig"), .delete_product, cache, status, fw, render_buf, storage),
-        .get_product_inventory => render_one(@import("handlers/get_product_inventory.zig"), .get_product_inventory, cache, status, fw, render_buf, storage),
-        .search_products => render_one(@import("handlers/search_products.zig"), .search_products, cache, status, fw, render_buf, storage),
-        .transfer_inventory => render_one(@import("handlers/transfer_inventory.zig"), .transfer_inventory, cache, status, fw, render_buf, storage),
-        .create_collection => render_one(@import("handlers/create_collection.zig"), .create_collection, cache, status, fw, render_buf, storage),
-        .get_collection => render_one(@import("handlers/get_collection.zig"), .get_collection, cache, status, fw, render_buf, storage),
-        .list_collections => render_one(@import("handlers/list_collections.zig"), .list_collections, cache, status, fw, render_buf, storage),
-        .delete_collection => render_one(@import("handlers/delete_collection.zig"), .delete_collection, cache, status, fw, render_buf, storage),
-        .add_collection_member => render_one(@import("handlers/add_collection_member.zig"), .add_collection_member, cache, status, fw, render_buf, storage),
-        .remove_collection_member => render_one(@import("handlers/remove_collection_member.zig"), .remove_collection_member, cache, status, fw, render_buf, storage),
-        .create_order => render_one(@import("handlers/create_order.zig"), .create_order, cache, status, fw, render_buf, storage),
-        .get_order => render_one(@import("handlers/get_order.zig"), .get_order, cache, status, fw, render_buf, storage),
-        .list_orders => render_one(@import("handlers/list_orders.zig"), .list_orders, cache, status, fw, render_buf, storage),
-        .complete_order => render_one(@import("handlers/complete_order.zig"), .complete_order, cache, status, fw, render_buf, storage),
-        .cancel_order => render_one(@import("handlers/cancel_order.zig"), .cancel_order, cache, status, fw, render_buf, storage),
-        .page_load_dashboard => render_one(@import("handlers/page_load_dashboard.zig"), .page_load_dashboard, cache, status, fw, render_buf, storage),
-        .page_load_login => render_one(@import("handlers/page_load_login.zig"), .page_load_login, cache, status, fw, render_buf, storage),
-        .request_login_code => render_one(@import("handlers/request_login_code.zig"), .request_login_code, cache, status, fw, render_buf, storage),
-        .verify_login_code => render_one(@import("handlers/verify_login_code.zig"), .verify_login_code, cache, status, fw, render_buf, storage),
-        .logout => render_one(@import("handlers/logout.zig"), .logout, cache, status, fw, render_buf, storage),
-    };
-}
-
-/// Map shared message.Status to a per-handler Status enum by name.
-/// If the handler's Status is message.Status (shared), this is a no-op.
-/// If it's a per-handler enum, the mapping is resolved at comptime.
-/// Asserts if the shared status has no matching variant in the handler's enum —
-/// that means handle() returned a status it didn't declare.
-fn map_status(comptime HandlerStatus: type, status: message.Status) HandlerStatus {
-    if (HandlerStatus == message.Status) return status;
-    // Per-handler enum: map by name at comptime.
-    const status_name = @tagName(status);
-    inline for (@typeInfo(HandlerStatus).@"enum".fields) |f| {
-        if (std.mem.eql(u8, f.name, status_name)) {
-            return @enumFromInt(f.value);
-        }
-    }
-    // Handle returned a status the handler didn't declare.
-    unreachable;
-}
-
-fn render_one(
-    comptime H: type,
-    comptime op: Operation,
-    cache: PrefetchCache,
-    status: message.Status,
-    fw: anytype,
-    render_buf: []u8,
-    storage: anytype,
-) []const u8 {
-    const prefetched = @field(cache, @tagName(op));
-    const HandlerStatus = H.Context.StatusType;
-    const ctx = H.Context{
-        .prefetched = prefetched,
-        .body = if (H.Context.BodyType == void) {} else undefined,
-        .fw = fw,
-        .render_buf = render_buf,
-        .status = map_status(HandlerStatus, status),
-    };
-
-    // Render gets read-only db access for post-mutation queries.
-    // Most handlers use render(ctx) — only handlers with side-effect data
-    // (e.g. complete_order needing post-commit inventory) use render(ctx, db).
-    // See decisions/render-db-access.md for the full reasoning.
-    const render_fn_info = @typeInfo(@TypeOf(H.render)).@"fn";
-    if (render_fn_info.params.len >= 2) {
-        return H.render(ctx, storage);
-    } else {
-        return H.render(ctx);
-    }
-}
 
 // Render scratch buffer — module-level, single-threaded. Used by the
 // full-page path to avoid aliasing between render output and send_buf.
