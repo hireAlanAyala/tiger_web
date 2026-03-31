@@ -287,16 +287,48 @@ WAL entries, the server loses track of pending work after a crash.
 Separate sections (not marker bytes) match the sidecar RESULT
 format — explicit, no parsing ambiguity.
 
-### Completion uses synthetic message
+### Completion flows through the normal annotation pipeline
 
-When a worker RESULT arrives, the server constructs a Message for
-the `returns` operation — same as how `translate()` constructs a
-Message from HTTP. The `returns` handler's prefetch/handle/render
-run normally. `ctx.body` contains the worker's return data.
+When a worker RESULT arrives, the server calls the `returns`
+operation's route function with the worker's return data as
+`req.body`. The route function extracts `id` and `body` — same as
+an HTTP route, just without `// match`. The result flows through
+the normal pipeline: prefetch → handle → render.
 
-No special path — the completion enters the serial pipeline like
-any other request. The only difference is the message source (worker
-RESULT vs HTTP request).
+Completion handlers use the same annotations as HTTP handlers:
+`[route]`, `[prefetch]`, `[handle]`, `[render]`. The only
+difference: no `// match` directive (not triggered by HTTP).
+
+```typescript
+// HTTP handler — has match:
+// [route] .get_product
+// match GET /products/:id
+export function route(req) {
+  return { id: req.params.id };
+}
+
+// Completion handler — no match, triggered by worker RESULT:
+// [route] .image_complete
+export function route(req) {
+  return { id: req.body.product_id, body: req.body };
+}
+```
+
+The framework knows the operation from the `returns` annotation.
+The route function just transforms data. Same pipeline, no special
+path.
+
+### Uniform handler signature: `ctx` + `db`
+
+Every phase after route receives `ctx`:
+- `route(req)` — transforms input, returns `{id, body}`
+- `prefetch(ctx, db)` — reads via `await db.query()`
+- `handle(ctx, db)` — writes via `db.execute()`
+- `render(ctx)` or `render(ctx, db)` — returns HTML
+
+`ctx` contains: `id`, `body`, `prefetched` (after prefetch),
+`status` (in render), `worker_failed` (for completion handlers).
+Consistent across HTTP and worker completion handlers.
 
 ### `ctx.worker_failed` is a status value
 
@@ -444,16 +476,16 @@ request_id=0).
 // [handle] .upload_image
 
 // [prefetch]
-export async function prefetch(msg, db) {
+export async function prefetch(ctx, db) {
   const product = await db.query(
-    "SELECT * FROM products WHERE id = ?", msg.id);
+    "SELECT * FROM products WHERE id = ?", ctx.id);
   return { product };
 }
 
 export function handle(ctx, db) {
   db.execute("UPDATE products SET image_status = 'processing' WHERE id = ?",
-    ctx.params.id);
-  worker.process_image(ctx.params.id, ctx.body.url);
+    ctx.id);
+  worker.process_image(ctx.id, ctx.body.url);
   return "processing";
 }
 
@@ -470,22 +502,26 @@ export async function process_image(product_id: string, url: string) {
 }
 
 // Completion handler — triggered by worker RESULT, not HTTP.
-// No [route] annotation. The `returns .image_complete` on the worker
-// tells the framework which handler to call on completion.
-//
-// [handle] .image_complete
+// Same annotations as HTTP handlers, just no // match directive.
+// The `returns .image_complete` on the worker tells the framework
+// which operation to route the RESULT to.
 
-// [prefetch]
-export async function prefetch(msg, db) {
+// [route] .image_complete
+export function route(req) {
+  return { id: req.body.product_id, body: req.body };
+}
+
+// [prefetch] .image_complete
+export async function prefetch(ctx, db) {
   const product = await db.query(
-    "SELECT * FROM products WHERE id = ?", msg.body.product_id);
+    "SELECT * FROM products WHERE id = ?", ctx.id);
   return { product };
 }
 
+// [handle] .image_complete
 export function handle(ctx, db) {
   if (ctx.worker_failed) {
-    db.execute("UPDATE products SET image_status = 'failed' WHERE id = ?",
-      ctx.body.product_id);
+    db.execute("UPDATE products SET image_status = 'failed' WHERE id = ?", ctx.id);
     return "failed";
   }
   // Idempotent: check status before writing
@@ -493,11 +529,11 @@ export function handle(ctx, db) {
     return "ok";
   }
   db.execute("UPDATE products SET thumbnail_url = ?, image_status = 'done' WHERE id = ?",
-    ctx.body.url, ctx.body.product_id);
+    ctx.body.url, ctx.id);
   return "ok";
 }
 
-// [render]
+// [render] .image_complete
 export function render(ctx) {
   if (ctx.status === "failed") {
     return `<div class="error">Image processing failed.</div>`;
@@ -520,13 +556,18 @@ export async function sync_stripe_charges() {
 }
 
 // Completion handler — triggered by worker RESULT, not HTTP.
-// [handle] .ingest_charges
 
-// [prefetch]
-export async function prefetch(msg, db) {
+// [route] .ingest_charges
+export function route(req) {
+  return { id: "0".repeat(32), body: req.body };
+}
+
+// [prefetch] .ingest_charges
+export async function prefetch(ctx, db) {
   return {};  // no prefetch needed
 }
 
+// [handle] .ingest_charges
 export function handle(ctx, db) {
   if (ctx.worker_failed) {
     // Log, alert, or schedule retry — developer decides.
@@ -539,7 +580,7 @@ export function handle(ctx, db) {
   return "ok";
 }
 
-// [render]
+// [render] .ingest_charges
 export function render(ctx) {
   return `<div>Sync complete.</div>`;
 }
