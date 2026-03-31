@@ -54,8 +54,8 @@ forever, consuming an in-flight slot. Without resolution, slots leak
 until the bound fills up and no new workers dispatch.
 
 The tick loop enforces a deadline on in-flight dispatches. If a CALL
-has been outstanding longer than the deadline (comptime-known, derived
-from the worker's interval), the framework resolves it as dead: it
+has been outstanding longer than the deadline (comptime-known global
+constant), the framework resolves it as dead: it
 commits a dead-dispatch entry to the WAL (freeing the in-flight slot)
 and logs a warning. The dispatch is no longer pending — it's resolved.
 
@@ -140,43 +140,25 @@ scanner collects all `[worker]` annotations globally and generates one
 `worker` object with every method available in every handle. No
 imports. Shared logic is the developer's problem.
 
-### Two types of workers
-
-**Event-driven:** dispatched by a handle via `worker.xxx()`. No
-`interval` annotation. The handle decides when to dispatch.
-Example: `process_image` — triggered when a user uploads an image.
-
-**Interval-driven:** dispatched by the tick loop on a timer. Has
-`interval Ns` annotation. No `worker.xxx()` call in any handle.
-Example: `sync_stripe_charges` — runs every 60 seconds.
-
-The scanner distinguishes them: if a worker has `interval`, it's
-interval-driven. If not, it's event-driven (must be called via
-`worker.xxx()` from at least one handle).
-
-Both produce the same WAL entry. Both use the same dispatch path.
-The only difference is the trigger.
-
 ### Dead dispatch deadline
 
-Event-driven workers: deadline is a global comptime constant
-(e.g., `worker_deadline_seconds = 300`). If no result in 5 minutes,
-resolve as dead.
-
-Interval-driven workers: deadline is derived from the interval
-(e.g., `2 × interval`). If `sync_stripe_charges` has `interval 60s`,
-deadline is 120s.
+Deadline is a global comptime constant (e.g.,
+`worker_deadline_seconds = 300`). If no result in 5 minutes, resolve
+as dead. The developer sets this based on their longest expected
+worker execution time.
 
 ### Settings belong on the annotation
 
 The handle decides what work to do and with what arguments. The worker
-decides how to do it. Configurable knobs:
-- `interval Ns` — dispatch frequency for interval-driven workers.
-- `returns .operation` — completion handler target (required).
+decides how to do it. One required setting:
+- `returns .operation` — completion handler target.
 
 The framework provides sensible defaults for everything else. If the
 same worker needs different operational profiles, that is two workers
 with different names.
+
+Interval/cron-style workers are a separate feature — not in scope
+for this plan.
 
 ### Parallelism preserves determinism
 
@@ -338,18 +320,6 @@ checks `ctx.status === "worker_failed"` or the framework derives
 `ctx.worker_failed` from the status. The scanner enforces the branch
 exists.
 
-### Interval workers create their own WAL entries
-
-Interval-driven workers (`interval 60s`) are triggered by the tick
-loop timer — same mechanism as `timeout_idle`. When the timer fires,
-the tick loop writes a dispatch WAL entry (same format as event-
-driven) and processes it. The WAL is always the source of truth.
-The timer is just the trigger.
-
-Event-driven workers (`worker.xxx()` in handle) write the dispatch
-entry during the handle's commit. Either way, a WAL entry exists
-and the tick loop picks it up. One dispatch path after the WAL.
-
 ### Two sidecar connections
 
 Two unix sockets, two paths. The server creates both listen sockets
@@ -372,7 +342,6 @@ request_id=0).
 - [ ] Add `worker` to the scanner's Phase enum.
 - [ ] Parse `[worker] .name` — worker name (becomes function name for
   CALL).
-- [ ] Parse `interval Ns` — dispatch frequency. Default 5s.
 - [ ] Collect all `[worker]` annotations.
 - [ ] Parse `returns .operation` — completion handler target.
 - [ ] Validate `returns` target exists as a registered operation.
@@ -542,46 +511,48 @@ export function render(ctx) {
 }
 ```
 
-## Table sync example — Stripe data
+## Second example — payment processing
 
 ```typescript
-// handlers/sync_stripe.ts
+// handlers/charge_payment.ts
 
-// [worker] .sync_stripe_charges
-// returns .ingest_charges
-// interval 60s
-export async function sync_stripe_charges() {
-  const charges = await stripe.charges.list({ limit: 100 });
-  return { charges: charges.data };
+// [worker] .charge_payment
+// returns .payment_complete
+export async function charge_payment(order_id: string, amount: number) {
+  const charge = await stripe.charges.create({ amount, currency: "usd" });
+  return { order_id, charge_id: charge.id, status: charge.status };
 }
 
-// Completion handler — triggered by worker RESULT, not HTTP.
-
-// [route] .ingest_charges
+// [route] .payment_complete
 export function route(req) {
-  return { id: "0".repeat(32), body: req.body };
+  return { id: req.body.order_id, body: req.body };
 }
 
-// [prefetch] .ingest_charges
+// [prefetch] .payment_complete
 export async function prefetch(ctx, db) {
-  return {};  // no prefetch needed
+  const order = await db.query("SELECT * FROM orders WHERE id = ?", ctx.id);
+  return { order };
 }
 
-// [handle] .ingest_charges
+// [handle] .payment_complete
 export function handle(ctx, db) {
   if (ctx.worker_failed) {
-    // Log, alert, or schedule retry — developer decides.
-    return "sync_failed";
+    db.execute("UPDATE orders SET payment_status = 'failed' WHERE id = ?", ctx.id);
+    return "failed";
   }
-  for (const charge of ctx.body.charges) {
-    db.execute("INSERT OR REPLACE INTO stripe_charges (id, amount, status) VALUES (?, ?, ?)",
-      charge.id, charge.amount, charge.status);
+  if (ctx.prefetched.order.payment_status === "paid") {
+    return "ok";  // idempotent
   }
+  db.execute("UPDATE orders SET payment_status = 'paid', charge_id = ? WHERE id = ?",
+    ctx.body.charge_id, ctx.id);
   return "ok";
 }
 
-// [render] .ingest_charges
+// [render] .payment_complete
 export function render(ctx) {
-  return `<div>Sync complete.</div>`;
+  if (ctx.status === "failed") {
+    return `<div class="error">Payment failed.</div>`;
+  }
+  return `<div>Payment confirmed.</div>`;
 }
 ```
