@@ -12,5 +12,7 @@ zig/
 # TB pattern: generate, commit, CI verifies `git diff --exit-code`.
 node_modules/
 **/node_modules/
+__pycache__/
+**/__pycache__/
 package-lock.json
 **/package-lock.json

@@ -219,7 +219,12 @@ pub fn StateMachineType(comptime Storage: type, comptime Handlers: type) type {
             assert(self.prefetch_cache == null);
 
             // Auth: resolve cookie credential → identity.
-            self.resolve_credential(msg);
+            // Only on first call — on resume after .pending, identity
+            // is already set from the first call. Idempotent but
+            // redundant work avoided.
+            if (self.prefetch_identity == null) {
+                self.resolve_credential(msg);
+            }
 
             self.prefetch_cache = Handlers.handler_prefetch(self.storage, &msg);
             if (self.prefetch_cache != null) return .complete;
@@ -227,9 +232,9 @@ pub fn StateMachineType(comptime Storage: type, comptime Handlers: type) type {
             // Null means busy OR sidecar pending. Side-channel check:
             // handler_prefetch returned null but the sidecar client has an
             // in-flight CALL — the prefetch is pending, not busy.
-            // TODO: handler_prefetch should return a tagged type (complete/
-            // busy/pending) instead of ?Cache + side-channel. Requires
-            // changing the Handlers interface — deferred to scanner refactor.
+            // This is intentional: the Handlers interface returns ?Cache
+            // (null = not ready). The distinction between busy and pending
+            // is framework orchestration — the handler doesn't know or care.
             if (Handlers.is_sidecar_pending()) return .pending;
             return .busy;
         }
