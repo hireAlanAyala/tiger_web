@@ -14,12 +14,15 @@
    Remove session_action from HandleResult. Session changes via
    db.execute on a sessions table. Only logout uses session_action.
 
-4. **SimIO sidecar simulation** — DEFERRED
-   Extend SimIO to simulate the sidecar fd. Enables deterministic
-   sim tests for async pend/resume path (commit_dispatch stages,
-   epoll-driven on_recv, pipeline resume). Currently covered by
-   protocol fuzzer (state machine level) and manual e2e. The sim
-   test is architecturally correct — seeded, reproducible, full stack.
+4. **SimSidecar** — DEFERRED
+   Separate simulation primitive for the sidecar (not SimIO — that's
+   HTTP clients). SimSidecar speaks CALL/RESULT frames, controls
+   when RESULTs arrive (PRNG-driven delays, failures), and exercises
+   the async pend/resume path (commit_dispatch stages, epoll-driven
+   on_recv, pipeline resume). Same pattern as TB's SimStorage —
+   each simulated component has its own type. The server sees it as
+   a normal sidecar fd. Currently covered by protocol fuzzer (state
+   machine level) and manual e2e.
 
 5. **Non-blocking sidecar frame IO** — DEFERRED
    `sidecar_recv_callback` calls `on_recv` which does blocking
