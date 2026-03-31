@@ -72,7 +72,9 @@ states.
 
 The worker is a pure function: args in, data out. It returns happy
 path data only. No error handling, no routing decisions, no framework
-knowledge.
+knowledge. Workers cannot call `db.query()` — they have no QUERY
+sub-protocol. The worker connection only handles RESULT frames.
+Workers do external IO (API calls, network), not database IO.
 
 ```typescript
 export async function process_image(product_id: string, url: string) {
@@ -107,7 +109,11 @@ The sidecar handle RESULT payload:
 
 The server processes both: writes → SQL execution + WAL, dispatches →
 dispatch index + WAL. Both in the same WAL entry, same transaction.
-Atomic enqueueing.
+Atomic enqueueing. If the handle returns a non-ok status, the
+dispatch still commits — the status is for the HTTP response, not
+a rollback signal. The developer controls both: if they don't want
+the worker dispatched on error, they don't call `worker.xxx()` in
+the error path.
 
 **Why:** The writes list is for SQL mutations. Worker dispatch is
 intent to do external work — not a SQL mutation. Mixing them requires
@@ -263,6 +269,12 @@ No marker byte. The WAL entry header knows how many writes and
 how many dispatches (separate counts). On replay, SQL writes
 replay as SQL, worker dispatches rebuild the pending dispatch index.
 
+The WAL `op` number identifies each dispatch. Completion WAL entries
+reference the dispatch op. Pending = dispatch op with no completion
+referencing it. The `op` is the stable identifier — request_id is
+ephemeral (assigned by WorkerClient, lost on crash). Mapping:
+`request_id → PendingCall.op → worker_name → returns operation`.
+
 **Why:** The WAL already records every committed mutation. Worker
 dispatches are mutations — "intent to do external work." Without
 WAL entries, the server loses track of pending work after a crash.
@@ -280,6 +292,10 @@ the normal pipeline: prefetch → handle → render.
 Completion handlers use the same annotations as HTTP handlers:
 `[route]`, `[prefetch]`, `[handle]`, `[render]`. The only
 difference: no `// match` directive (not triggered by HTTP).
+
+The scanner suppresses the "missing match" warning for operations
+that are `returns` targets of a worker annotation. A routeless
+`[route]` is intentional for completion handlers, not a mistake.
 
 ```typescript
 // HTTP handler — has match:
@@ -464,8 +480,8 @@ scanner. Same workflow — no special registration.
 ```typescript
 // handlers/upload_image.ts
 
-// [route] POST /products/:id/image
-// [handle] .upload_image
+// [route] .upload_image
+// match POST /products/:id/image
 
 // [prefetch]
 export async function prefetch(ctx, db) {
