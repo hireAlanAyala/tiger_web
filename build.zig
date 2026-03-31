@@ -176,7 +176,7 @@ pub fn build(b: *std.Build) void {
     }
 
     // Modules that need libc (socketpair for tests) but not sqlite.
-    for ([_][]const u8{"message_bus.zig"}) |mod| {
+    for ([_][]const u8{"framework/message_bus.zig"}) |mod| {
         const unit_test = b.addTest(.{
             .root_source_file = b.path(mod),
             .target = target,
