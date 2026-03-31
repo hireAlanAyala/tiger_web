@@ -158,6 +158,7 @@ pub fn build(b: *std.Build) void {
     // --- Unit tests for individual modules ---
     const modules = [_][]const u8{
         "message.zig",
+        "framework/message_pool.zig",
         "wal_test.zig",
         "annotation_scanner.zig",
     };
