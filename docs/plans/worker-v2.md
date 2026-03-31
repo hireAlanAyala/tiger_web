@@ -320,18 +320,41 @@ checks `ctx.status === "worker_failed"` or the framework derives
 `ctx.worker_failed` from the status. The scanner enforces the branch
 exists.
 
-### Two sidecar connections
+### Two sidecar connections, two client types
 
 Two unix sockets, two paths. The server creates both listen sockets
 before accepting HTTP. The TS runtime connects to both.
 
-- Request socket: existing `listen_and_accept` for request CALLs.
-- Worker socket: second `listen_and_accept` for worker CALLs.
+- **Request socket** — existing `SidecarClient` + `listen_and_accept`.
+  Serial, one CALL in-flight, request_id=0.
+- **Worker socket** — new `WorkerClient` + second `listen_and_accept`.
+  Concurrent, fixed array of pending slots, incrementing request_ids.
 
-Each has its own SidecarClient, send_buf, recv_buf, epoll completion.
-Worker SidecarClient supports concurrent in-flight CALLs with
-incrementing request_ids (vs request SidecarClient which is serial,
-request_id=0).
+`WorkerClient` is a separate type from `SidecarClient` — different
+invariants. SidecarClient is serial (one slot). WorkerClient is
+concurrent (array of max_in_flight slots). Don't extend one into
+the other.
+
+```
+WorkerClient:
+  pending: [max_in_flight]PendingCall  // fixed array, static alloc
+  dispatch(name, args) → ?request_id  // find free slot, send CALL
+  on_recv()                            // match RESULT to pending slot
+  take_completed() → ?PendingCall      // dequeue for completion routing
+  check_deadlines(now) → ?PendingCall  // find expired, resolve dead
+```
+
+Result data is copied into owned `result_buf` on completion —
+recv_buf is reused for the next frame. Same `copy_state` pattern
+as SidecarClient.
+
+### Completion operations are normal operations
+
+Adding a worker means adding its completion operation to the
+Operation enum in message.zig (`image_complete = 25`), same as
+any other handler. Writing the handler file with `[route]`,
+`[prefetch]`, `[handle]`, `[render]` annotations. Running the
+scanner. Same workflow — no special registration.
 
 ---
 
