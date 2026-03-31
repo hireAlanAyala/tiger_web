@@ -174,6 +174,7 @@ pub fn ConnectionType(comptime IO: type, comptime options: Options) type {
         /// transfers ownership via send_message. No half-built messages
         /// in the queue.
         pub fn send_message(self: *Self, message: *Message, payload_len: u32) void {
+            assert(message.references > 0); // caller must own the message
             if (self.state != .connected) {
                 self.pool.unref(message);
                 return;
@@ -1008,6 +1009,50 @@ test "Connection: backpressure suspend and resume" {
 
     conn.invariants();
 
+    posix.close(client_fd);
+    TestIO.tick(&conn.recv_completion);
+    try testing.expectEqual(TestConnection.State.closed, conn.state);
+}
+
+test "Connection: send_message zero-copy path" {
+    var io = TestIO{};
+    var pool = try TestConnection.Pool.init(testing.allocator, 8);
+    defer pool.deinit(testing.allocator);
+    const pair = test_socketpair();
+    const client_fd = pair[1];
+
+    var ctx = TestContext.init();
+    var conn: TestConnection = undefined;
+    test_init_conn(&conn, &io, &pool, pair[0], @ptrCast(&ctx), TestContext.on_frame);
+
+    // Zero-copy: get message from pool, build payload directly, send.
+    const message = pool.get_message();
+    const payload = "zero-copy!";
+    @memcpy(message.buffer[TestConnection.frame_header_size..][0..payload.len], payload);
+    conn.send_message(message, payload.len);
+
+    // Read from client side and verify.
+    var read_buf: [1024]u8 = undefined;
+    var total_read: usize = 0;
+    for (0..10) |_| {
+        const n = posix.recv(client_fd, read_buf[total_read..], posix.MSG.DONTWAIT) catch break;
+        if (n == 0) break;
+        total_read += n;
+    }
+
+    try testing.expect(total_read >= 8 + payload.len);
+    const recv_len = std.mem.readInt(u32, read_buf[0..4], .big);
+    try testing.expectEqual(@as(u32, payload.len), recv_len);
+    try testing.expectEqualSlices(u8, payload, read_buf[8..][0..payload.len]);
+
+    // Verify CRC.
+    const stored_crc = std.mem.readInt(u32, read_buf[4..8], .little);
+    var crc = Crc32.init();
+    crc.update(read_buf[0..4]);
+    crc.update(read_buf[8..][0..payload.len]);
+    try testing.expectEqual(crc.final(), stored_crc);
+
+    conn.invariants();
     posix.close(client_fd);
     TestIO.tick(&conn.recv_completion);
     try testing.expectEqual(TestConnection.State.closed, conn.state);
