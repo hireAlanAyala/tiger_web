@@ -136,65 +136,47 @@ pub fn ConnectionType(comptime IO: type, comptime options: Options) type {
 
         /// Queue a frame for sending. Gets a message from the pool,
         /// copies the payload, adds frame header + CRC, and queues
-        /// the message pointer. The send loop is kicked if not running.
-        ///
-        /// For zero-copy, use begin_frame/commit_frame instead.
+        /// the message pointer. Convenience wrapper around
+        /// send_message for callers that have the payload in a
+        /// separate buffer.
         pub fn send_frame(self: *Self, data: []const u8) void {
             if (self.state != .connected) return;
-            defer self.invariants();
             assert(data.len <= frame_max);
             assert(!self.send_queue.full());
 
             const message = self.pool.get_message();
-            const len: u32 = @intCast(data.len);
-
-            // Length prefix (big-endian).
-            std.mem.writeInt(u32, message.buffer[0..4], len, .big);
-            // Payload.
-            @memcpy(message.buffer[8..][0..data.len], data);
-            // CRC-32 covers len_bytes ++ payload_bytes (little-endian).
-            var crc = Crc32.init();
-            crc.update(message.buffer[0..4]);
-            crc.update(message.buffer[8..][0..data.len]);
-            std.mem.writeInt(u32, message.buffer[4..8], crc.final(), .little);
-
-            self.send_queue.push_assume_capacity(message);
-            if (!self.send_submitted) self.do_send();
+            @memcpy(message.buffer[frame_header_size..][0..data.len], data);
+            self.send_message(message, @intCast(data.len));
         }
 
-        /// Get a writable buffer for the next frame's payload area.
-        /// Caller builds payload directly into this buffer (zero-copy).
-        /// Call commit_frame(payload_len) when done.
-        /// Returns null if not connected or queue is full.
-        pub fn begin_frame(self: *Self) ?[*]u8 {
-            if (self.state != .connected) return null;
-            if (self.send_queue.full()) return null;
-            const message = self.pool.get_message();
-            // Temporarily push to queue so we have the message tracked.
-            // commit_frame finalizes the header. If the caller abandons
-            // the frame (doesn't call commit_frame), the message leaks.
-            // This is a programming error — assert in invariants.
-            self.send_queue.push_assume_capacity(message);
-            return message.buffer[frame_header_size..].ptr;
-        }
-
-        /// Finalize a frame started by begin_frame. Writes the frame
-        /// header (len + CRC) and kicks the send loop.
-        pub fn commit_frame(self: *Self, payload_len: u32) void {
-            if (self.state != .connected) return;
+        /// Queue a message for sending. The caller built the payload
+        /// directly into message.buffer[frame_header_size..] (zero-copy).
+        /// This function writes the frame header (len + CRC), takes
+        /// ownership of the message (queues it), and kicks the send loop.
+        ///
+        /// After this call, the caller no longer owns the message.
+        /// The bus unrefs it when fully sent.
+        ///
+        /// TB pattern: caller gets message from pool, builds content,
+        /// transfers ownership via send_message. No half-built messages
+        /// in the queue.
+        pub fn send_message(self: *Self, message: *Message, payload_len: u32) void {
+            if (self.state != .connected) {
+                self.pool.unref(message);
+                return;
+            }
             defer self.invariants();
             assert(payload_len <= frame_max);
-            // The message is already at the tail of the queue (from begin_frame).
-            const message = self.send_queue.tail_ptr().?.*;
+            assert(!self.send_queue.full());
 
-            // Length prefix (big-endian).
+            // Write frame header: [len: u32 BE][crc32: u32 LE]
             std.mem.writeInt(u32, message.buffer[0..4], payload_len, .big);
-            // CRC-32 covers len_bytes ++ payload_bytes.
             var crc = Crc32.init();
             crc.update(message.buffer[0..4]);
             crc.update(message.buffer[frame_header_size..][0..payload_len]);
             std.mem.writeInt(u32, message.buffer[4..8], crc.final(), .little);
 
+            self.send_queue.push_assume_capacity(message);
             if (!self.send_submitted) self.do_send();
         }
 
@@ -682,12 +664,8 @@ pub fn MessageBusType(comptime IO: type, comptime options: Options) type {
             self.connection.send_frame(data);
         }
 
-        pub fn begin_frame(self: *Self) ?[*]u8 {
-            return self.connection.begin_frame();
-        }
-
-        pub fn commit_frame(self: *Self, payload_len: u32) void {
-            self.connection.commit_frame(payload_len);
+        pub fn send_message(self: *Self, message: *Connection.Message, payload_len: u32) void {
+            self.connection.send_message(message, payload_len);
         }
 
         pub fn suspend_recv(self: *Self) void {
