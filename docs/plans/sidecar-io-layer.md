@@ -23,6 +23,39 @@ in production, SimIO in simulation). Two consequences:
 These are the same fix. Make the sidecar go through the IO layer.
 SimSidecar falls out naturally.
 
+## Layer 0: Research — TB's Grid + SimStorage pattern
+
+Before implementing, read TigerBeetle's Grid and SimStorage to
+understand how they handle the same problem (IO layer seam for
+simulation).
+
+### What to read
+
+- `src/vsr/grid.zig` — how Grid submits read/write operations to
+  the IO layer, how callbacks resume processing.
+- `src/testing/storage.zig` (or similar) — how SimStorage intercepts
+  Grid IO, delivers results deterministically via PRNG.
+- How the Grid handles partial IO completion (if at all).
+- How SimStorage registers with the IO layer.
+- How Grid operations chain (read → process → write → callback).
+
+### What to look for
+
+- The registration mechanism: how does SimStorage tell the IO layer
+  "I handle this fd"?
+- Callback chaining: how does Grid chain send → recv sequences?
+- Buffering: does Grid accumulate partial reads, or does io_uring
+  guarantee complete operations?
+- PRNG-driven delays: how does SimStorage control timing?
+
+### Apply to our design
+
+Map findings to our Layer 1 (buffered frame reader) and Layer 2
+(SimSidecar). Adjust the plan if TB's pattern differs from what
+we've designed.
+
+---
+
 ## Layer 1: Buffered frame reader on SidecarClient
 
 Replace `read_frame` (blocking recv loop) with buffered IO-layer
