@@ -145,7 +145,10 @@ pub fn SidecarClientType(comptime IO: type) type {
                         return;
                     };
                     self.result_flag = result.flag;
-                    self.result_data = result.data;
+                    // copy_state: result.data is a slice into the bus's recv
+                    // buffer which is compacted after on_frame returns. Must
+                    // copy into owned state_buf before the slice is invalidated.
+                    self.result_data = self.copy_state(result.data);
                     self.call_state = .complete;
                 },
                 .query => {
