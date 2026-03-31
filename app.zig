@@ -61,6 +61,14 @@ pub const PrefetchCache = gen_handlers.PrefetchCache;
 /// handler dispatch without importing App. The SM is parameterized on
 /// this type. It calls prefetch/execute through it. App defines the
 /// implementation. Clean one-way dependency: App → SM, never SM → App.
+///
+/// The runtime `if (sidecar)` checks in handler_prefetch/execute/render
+/// are intentional. The sidecar decision is a framework orchestration
+/// concern (CALL/RESULT protocol, async epoll, state management), not
+/// a dispatch concern. The generated dispatch (handlers.generated.zig)
+/// is pure: handler module → function call. Moving the sidecar logic
+/// into generated code would couple the scanner to the protocol layer.
+///
 /// Fault injection configuration — module-level because single-threaded,
 /// one message at a time. Set by sim/fuzz tests before running operations.
 /// Production leaves these at defaults (no faults).
@@ -120,7 +128,7 @@ pub fn HandlersType(comptime StorageParam: type) type {
 
                 // Sidecar holds prefetch results internally.
                 // Return zeroed cache. Enforced by convention, not assertion.
-                // TODO: scanner-generated Handlers uses void Cache.
+                // Sidecar cache is void in the generated PrefetchCache.
                 return switch (msg.operation) {
                     .root => unreachable,
                     inline else => |op| @unionInit(PrefetchCache, @tagName(op), std.mem.zeroes(
@@ -165,8 +173,9 @@ pub fn HandlersType(comptime StorageParam: type) type {
                 // the sidecar client. This code path never reads from cache.
                 // Enforced by convention, not assertion (union tag + padding
                 // make byte-level zeroed checks infeasible).
-                // TODO: scanner-generated Handlers uses void Cache for
-                // sidecar operations — comptime enforcement.
+                // Sidecar cache is void in the generated PrefetchCache.
+                // The runtime sidecar check here is intentional — see
+                // HandlersType doc comment.
 
                 // Build handle args: [operation: u8][id: u128 BE]
                 // Body and prefetch data are already held by the sidecar

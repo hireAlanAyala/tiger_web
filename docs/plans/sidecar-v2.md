@@ -9,7 +9,7 @@ Phase 1: Unify pipeline       ✓ complete
 Phase 2: CALL/RESULT protocol  ✓ complete
 Phase 3: Protocol fuzzer       ✓ complete
 Phase 4: Async prefetch        ✓ complete (prefetch async, handle/render still blocking)
-Phase 5: Scanner refactor       (generate Handlers, void Cache, call_runtime imports)
+Phase 5: Scanner refactor       ✓ complete (5a: TS adapter, 5b: Zig dispatch)
 Phase 6: Workers               (see worker-v2.md)
 ```
 
@@ -634,7 +634,7 @@ Two parts: TS-side (done) and Zig-side (deferred).
 - [x] MessageTag removed from serde.ts (no consumers).
 - [x] test.ts updated for new protocol direction.
 
-### Phase 5b: Zig scanner generates Handlers type (deferred)
+### Phase 5b: Zig scanner generates Handlers type (closed)
 
 **Goal:** The annotation scanner generates a Zig file that replaces
 the hand-written HandlersType in app.zig. Eliminates runtime sidecar
@@ -665,25 +665,25 @@ table). The same pattern generates `handlers.generated.zig`:
 - Module-level `sidecar` var removed — sidecar connection state
   moves to the generated Handlers type or the server.
 
-**Why deferred:**
+**What was done:**
 
-This is a deep refactor of the Zig compilation model. The scanner
-would generate a Zig file that replaces HandlersType in app.zig,
-including the PrefetchCache union with operation-specific types.
-Touches the core of how the framework binds to handlers.
+- [x] Scanner emits handlers.generated.zig with PrefetchCache,
+  dispatch_prefetch/execute/render, is_sidecar_operation, and
+  helper functions (prefetch_one, execute_one, render_one).
+- [x] PrefetchCache uses void for sidecar operations (generated).
+- [x] app.zig imports PrefetchCache + dispatch from generated file.
 
-Does not block workers — workers can be built with the current
-runtime sidecar checks. The scanner-generated Handlers is
-architectural purity, not functional value.
+**What stays as-is (won't do):**
 
-**Checklist (to be refined when starting):**
-
-- [ ] Scanner emits handlers.generated.zig with Handlers struct.
-- [ ] PrefetchCache uses void for sidecar operations.
-- [ ] Remove runtime `if (sidecar)` checks from HandlersType.
-- [ ] Remove module-level `sidecar` var from app.zig.
-- [ ] Sidecar connection state on Handlers or server.
-- [ ] Sidecar availability check in pipeline (comptime-tagged).
+- Runtime `if (sidecar)` checks in HandlersType — INTENTIONAL.
+  The sidecar decision is framework orchestration (CALL/RESULT
+  protocol, async epoll, state management), not dispatch. The
+  generated file is pure dispatch: handler module → function call.
+  Moving sidecar logic into generated code would couple the scanner
+  to the protocol layer. Wrong separation of concerns.
+- Module-level `sidecar` var — framework state for the sidecar
+  connection. Stays in app.zig with the HandlersType.
+- Sidecar availability check — stays in server.zig pipeline code.
 
 ---
 
