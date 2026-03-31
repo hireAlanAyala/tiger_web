@@ -174,6 +174,20 @@ pub fn build(b: *std.Build) void {
         unit_test_step.dependOn(&run_unit_test.step);
     }
 
+    // Modules that need libc (socketpair for tests) but not sqlite.
+    for ([_][]const u8{"message_bus.zig"}) |mod| {
+        const unit_test = b.addTest(.{
+            .root_source_file = b.path(mod),
+            .target = target,
+            .optimize = optimize,
+        });
+        unit_test.root_module.addImport("stdx", stdx_module);
+        unit_test.linkLibC();
+        const run_ut = b.addRunArtifact(unit_test);
+        run_ut.setEnvironmentVariable("ZIG_EXE", b.graph.zig_exe);
+        unit_test_step.dependOn(&run_ut.step);
+    }
+
     // Modules that need sqlite3 + libc.
     for ([_][]const u8{ "storage.zig", "replay.zig", "state_machine_test.zig", "sidecar.zig" }) |mod| {
         const unit_test = b.addTest(.{
