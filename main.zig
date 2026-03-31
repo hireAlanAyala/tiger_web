@@ -88,10 +88,13 @@ pub fn main() !void {
         Server.max_connections,
     });
     if (cli.log_debug) log.info("log_level=debug log_trace={}", .{cli.log_trace});
-    // Sidecar mode: the server handles bus init and async accept.
-    if (cli.sidecar != null) {
+    // Sidecar mode: server creates bus + client, tick_accept handles connection.
+    if (cli.sidecar) |path| {
         App.sidecar_mode = true;
-        // TODO: server creates bus + client on init, tick_accept handles connection.
+        server.init_sidecar(std.heap.page_allocator, path) catch {
+            log.err("sidecar init failed on {s}", .{path});
+            std.process.exit(1);
+        };
     }
 
     log.info("listening on port {d}", .{actual_port});

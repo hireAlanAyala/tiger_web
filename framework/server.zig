@@ -42,6 +42,13 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
     const StateMachine = App.StateMachineType(Storage);
     const Wal = App.Wal;
 
+    // Sidecar types — resolved at comptime from App.
+    const SidecarClient = if (@hasDecl(App, "SidecarClientType"))
+        App.SidecarClientType(IO)
+    else
+        void;
+    const SidecarBus = if (SidecarClient != void) SidecarClient.BusType else void;
+
     comptime {
         // Validate StateMachine interface — framework calls these in the tick loop.
         assert(@hasDecl(StateMachine, "set_time"));
@@ -95,16 +102,30 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
         /// Auth identity — persists from prefetch to render.
         commit_identity: ?StateMachine.CommitOutput.Identity = null,
 
+        // --- Sidecar (optional) ---
+        // Present when App.sidecar_mode is true. The server owns the bus
+        // and client. Handlers have zero sidecar knowledge — the server
+        // short-circuits commit_dispatch in sidecar mode.
+        sidecar_client: if (SidecarClient != void) SidecarClient else void =
+            if (SidecarClient != void) undefined else {},
+        sidecar_bus: if (SidecarBus != void) SidecarBus else void =
+            if (SidecarBus != void) undefined else {},
 
         /// Pipeline stage — serial, one request at a time (TB pattern).
         /// Guards process_inbox: if not .idle, no new pipeline starts.
         /// For Zig handlers, all stages complete in one tick (immediate).
         /// For sidecar handlers, stages may span ticks (async in Phase 4).
         const CommitStage = enum {
-            idle,     // No request in pipeline
-            prefetch, // Waiting for prefetch result
-            handle,   // Executing handle + writes in transaction
-            render,   // Executing render + encoding response
+            idle,              // No request in pipeline
+            // Native pipeline stages:
+            prefetch,          // SM prefetch (native handlers)
+            handle,            // SM commit + writes in transaction
+            render,            // Render HTML + encode response
+            // Sidecar pipeline stages (server owns IO):
+            sidecar_route,     // CALL "route" sent, waiting for RESULT
+            sidecar_prefetch,  // CALL "prefetch" sent, waiting for RESULT
+            sidecar_handle,    // CALL "handle" sent, waiting for RESULT
+            sidecar_render,    // CALL "render" sent, waiting for RESULT
         };
 
         /// Log metrics every 10,000 ticks (~100s at 10ms/tick).
@@ -143,7 +164,63 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
                 }
             }
             allocator.free(server.connections);
+            if (SidecarBus != void and App.sidecar_mode) {
+                server.sidecar_bus.deinit(allocator);
+            }
             server.* = undefined;
+        }
+
+        /// Initialize sidecar bus and client. Called by main after server init.
+        pub fn init_sidecar(server: *Server, allocator: std.mem.Allocator, path: []const u8) !void {
+            if (SidecarClient == void) return;
+            server.sidecar_client = SidecarClient.init();
+            try server.sidecar_bus.init_listener(
+                allocator,
+                server.io,
+                path,
+                @ptrCast(server),
+                sidecar_on_frame,
+                sidecar_on_close,
+            );
+        }
+
+        // --- Sidecar bus callbacks ---
+
+        fn sidecar_on_frame(ctx: *anyopaque, frame: []const u8) void {
+            const server: *Server = @ptrCast(@alignCast(ctx));
+            if (SidecarClient == void) return;
+
+            const query_fn = App.HandlersType(Storage).query_dispatch_fn;
+            const query_ctx: *anyopaque = @ptrCast(server.state_machine.storage);
+            server.sidecar_client.on_frame(
+                &server.sidecar_bus,
+                frame,
+                query_fn,
+                query_ctx,
+                SidecarClient.max_queries_per_call,
+            );
+
+            // Resume pipeline if exchange completed or failed.
+            switch (server.sidecar_client.call_state) {
+                .complete, .failed => server.commit_dispatch(),
+                .receiving => {}, // QUERY sub-protocol — more frames expected
+                .idle => unreachable,
+            }
+        }
+
+        fn sidecar_on_close(ctx: *anyopaque) void {
+            const server: *Server = @ptrCast(@alignCast(ctx));
+            if (SidecarClient == void) return;
+
+            server.sidecar_client.on_close();
+
+            // If a pipeline stage was waiting on sidecar, fail it.
+            switch (server.commit_stage) {
+                .sidecar_route, .sidecar_prefetch, .sidecar_handle, .sidecar_render => {
+                    server.pipeline_reset();
+                },
+                else => {},
+            }
         }
 
         /// One tick of the server. Called from the main event loop.
@@ -157,6 +234,10 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
         pub fn tick(server: *Server) void {
             server.tick_count +%= 1;
             defer server.invariants();
+            // Sidecar bus: accept sidecar connections.
+            if (SidecarBus != void and App.sidecar_mode) {
+                server.sidecar_bus.tick_accept();
+            }
             server.maybe_accept();
             server.process_inbox();
             server.log_metrics();
@@ -242,38 +323,34 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
                     .incomplete, .invalid => unreachable,
                 };
 
-                // Route through app codec.
-                var msg = App.translate(parsed.method, parsed.path, parsed.body) orelse {
-                    log.mark.warn("unmapped request: {s} {s} fd={d}", .{ @tagName(parsed.method), parsed.path, conn.fd });
-                    // Not a pipeline — just an error response. Don't hold the stage.
-                    // Valid HTTP frame but can't route it (unknown path, bad JSON,
-                    // invalid UUID). Send a generic error — not a structured error
-                    // enum. translate() is ?Message, not a error union, deliberately:
-                    // TB doesn't explain why a message is invalid because the SDK
-                    // can't produce one. We don't control the client, but the fix
-                    // for bad requests is a client library, not better server errors.
-                    // A structured TranslateError would grow with every codec change
-                    // and leak application concerns into the framework.
-                    // See decisions/divergences.md "Error Response on Unmapped Requests".
-                    const resp = unmapped_response(conn);
-                    conn.set_response(resp.offset, resp.len);
-                    conn.keep_alive = false;
-                    continue;
-                };
                 conn.is_datastar_request = parsed.is_datastar_request;
-                msg.set_credential(parsed.identity_cookie);
 
-                // Unified pipeline — SM orchestrates prefetch → commit → render.
-                // HandlersType dispatches to native handlers or sidecar client
-                // per-operation. One code path for both.
+                if (App.sidecar_mode and SidecarClient != void) {
+                    // Sidecar mode: route via bus. The sidecar does routing.
+                    // Start with .sidecar_route — commit_dispatch sends the
+                    // CALL and waits for RESULT.
+                    server.commit_stage = .sidecar_route;
+                    server.commit_connection = conn;
+                    // commit_msg set after route RESULT arrives.
+                    server.commit_dispatch();
+                } else {
+                    // Native mode: route locally via translate.
+                    var msg = App.translate(parsed.method, parsed.path, parsed.body) orelse {
+                        log.mark.warn("unmapped request: {s} {s} fd={d}", .{ @tagName(parsed.method), parsed.path, conn.fd });
+                        const resp = unmapped_response(conn);
+                        conn.set_response(resp.offset, resp.len);
+                        conn.keep_alive = false;
+                        continue;
+                    };
+                    msg.set_credential(parsed.identity_cookie);
 
-                server.commit_stage = .prefetch;
-                server.commit_connection = conn;
-                server.commit_msg = msg;
+                    server.commit_stage = .prefetch;
+                    server.commit_connection = conn;
+                    server.commit_msg = msg;
 
-                // Start the pipeline — commit_dispatch drives it.
-                server.state_machine.tracer.start(.prefetch);
-                server.commit_dispatch();
+                    server.state_machine.tracer.start(.prefetch);
+                    server.commit_dispatch();
+                }
             }
         }
 
@@ -353,12 +430,7 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
 
 
                     .render => {
-                        // Render runs OUTSIDE the transaction (commit_batch
-                        // ran in .handle). This is correct: render reads
-                        // post-commit state. SQLite WAL mode allows reads
-                        // without a transaction.
-
-                        // Invariant: handle result must have been produced.
+                        // Render runs OUTSIDE the transaction.
                         assert(server.commit_pipeline_resp != null);
                         assert(server.commit_cache != null);
                         assert(server.commit_identity != null);
@@ -384,33 +456,320 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
                             ro,
                         );
 
-                        // In sidecar mode, the server short-circuits before
-                        // reaching here. This path is native-only.
-
-                        const commit_result = App.encode_response(
-                            pipeline_resp.status,
-                            html,
-                            &conn.send_buf,
-                            conn.is_datastar_request,
-                            pipeline_resp.session_action,
-                            pipeline_resp.user_id,
-                            pipeline_resp.is_authenticated,
-                            pipeline_resp.is_new_visitor,
-                            sm.secret_key,
-                        );
-
-                        sm.tracer.stop(.execute, msg.operation);
-                        sm.tracer.trace_log(msg.operation, commit_result.status, conn.fd);
-
-                        conn.set_response(commit_result.response.offset, commit_result.response.len);
-                        conn.keep_alive = commit_result.response.keep_alive;
-
-                        server.pipeline_reset();
+                        server.encode_and_respond(conn, msg, pipeline_resp, html);
                         return;
                     },
 
+                    // =========================================================
+                    // Sidecar pipeline stages
+                    // Server owns all IO. Handlers are not called.
+                    // Each stage: send CALL → wait for RESULT → process.
+                    // on_frame callback resumes commit_dispatch.
+                    // =========================================================
+
+                    .sidecar_route => {
+                        if (SidecarClient == void) unreachable;
+                        const client = &server.sidecar_client;
+
+                        switch (client.call_state) {
+                            .idle => {
+                                // First call: build route args and send CALL.
+                                const parsed = switch (http.parse_request(conn.recv_buf[0..conn.recv_pos])) {
+                                    .complete => |p| p,
+                                    .incomplete, .invalid => unreachable,
+                                };
+                                // [method: u8][path_len: u16 BE][path][body_len: u16 BE][body]
+                                var args: [1 + 2 + 0xFFFF + 2 + 0xFFFF]u8 = undefined;
+                                var pos: usize = 0;
+                                args[pos] = @intFromEnum(parsed.method);
+                                pos += 1;
+                                std.mem.writeInt(u16, args[pos..][0..2], @intCast(parsed.path.len), .big);
+                                pos += 2;
+                                @memcpy(args[pos..][0..parsed.path.len], parsed.path);
+                                pos += parsed.path.len;
+                                const body = parsed.body;
+                                std.mem.writeInt(u16, args[pos..][0..2], @intCast(body.len), .big);
+                                pos += 2;
+                                @memcpy(args[pos..][0..body.len], body);
+                                pos += body.len;
+
+                                client.reset_call_state();
+                                if (!client.call_submit(&server.sidecar_bus, "route", args[0..pos])) {
+                                    server.pipeline_reset();
+                                    return;
+                                }
+                                return; // pending — on_frame resumes
+                            },
+                            .receiving => return, // still waiting
+                            .complete => {
+                                // Parse RESULT: [found: u8][operation: u8][id: u128 BE]
+                                defer client.reset_call_state();
+                                if (client.result_flag == .failure) {
+                                    server.pipeline_reset();
+                                    return;
+                                }
+                                const data = client.result_data;
+                                if (data.len < 1 or data[0] == 0 or data.len < 18) {
+                                    // Not found or malformed.
+                                    const resp = unmapped_response(conn);
+                                    conn.set_response(resp.offset, resp.len);
+                                    conn.keep_alive = false;
+                                    server.pipeline_reset();
+                                    return;
+                                }
+                                const operation = std.meta.intToEnum(App.Operation, data[1]) catch {
+                                    server.pipeline_reset();
+                                    return;
+                                };
+                                const id = std.mem.readInt(u128, data[2..18], .big);
+
+                                var route_msg = std.mem.zeroes(App.Message);
+                                route_msg.operation = operation;
+                                route_msg.id = id;
+
+                                // Re-parse for credential.
+                                const parsed2 = switch (http.parse_request(conn.recv_buf[0..conn.recv_pos])) {
+                                    .complete => |p| p,
+                                    .incomplete, .invalid => unreachable,
+                                };
+                                route_msg.set_credential(parsed2.identity_cookie);
+
+                                server.commit_msg = route_msg;
+                                server.commit_stage = .sidecar_prefetch;
+                                continue;
+                            },
+                            .failed => {
+                                client.reset_call_state();
+                                server.pipeline_reset();
+                                return;
+                            },
+                        }
+                    },
+
+                    .sidecar_prefetch => {
+                        if (SidecarClient == void) unreachable;
+                        const client = &server.sidecar_client;
+
+                        switch (client.call_state) {
+                            .idle => {
+                                // Resolve auth before prefetch (same as SM.prefetch).
+                                sm.resolve_credential(server.commit_msg.?);
+
+                                // Build args: [operation: u8][id: u128 BE]
+                                const m = server.commit_msg.?;
+                                var args: [1 + 16]u8 = undefined;
+                                args[0] = @intFromEnum(m.operation);
+                                std.mem.writeInt(u128, args[1..17], m.id, .big);
+
+                                if (!client.call_submit(&server.sidecar_bus, "prefetch", &args)) {
+                                    server.pipeline_reset();
+                                    return;
+                                }
+                                return; // pending
+                            },
+                            .receiving => return,
+                            .complete => {
+                                defer client.reset_call_state();
+                                if (client.result_flag == .failure) {
+                                    server.pipeline_reset();
+                                    return;
+                                }
+                                // Prefetch complete — advance to handle.
+                                server.commit_stage = .sidecar_handle;
+                                continue;
+                            },
+                            .failed => {
+                                client.reset_call_state();
+                                server.pipeline_reset();
+                                return;
+                            },
+                        }
+                    },
+
+                    .sidecar_handle => {
+                        if (SidecarClient == void) unreachable;
+                        const client = &server.sidecar_client;
+
+                        switch (client.call_state) {
+                            .idle => {
+                                // Open transaction before sending CALL.
+                                sm.begin_batch();
+                                if (server.wal != null) {
+                                    sm.wal_record_buf = &server.wal_record_scratch;
+                                }
+
+                                const m = server.commit_msg.?;
+                                var args: [1 + 16]u8 = undefined;
+                                args[0] = @intFromEnum(m.operation);
+                                std.mem.writeInt(u128, args[1..17], m.id, .big);
+
+                                if (!client.call_submit(&server.sidecar_bus, "handle", &args)) {
+                                    sm.commit_batch(); // close transaction
+                                    server.pipeline_reset();
+                                    return;
+                                }
+                                return; // pending — transaction stays open
+                            },
+                            .receiving => return,
+                            .complete => {
+                                defer client.reset_call_state();
+
+                                if (client.result_flag == .failure) {
+                                    sm.commit_batch();
+                                    server.pipeline_reset();
+                                    return;
+                                }
+
+                                const data = client.result_data;
+
+                                // Parse: [status_len: u16 BE][status_str][write_count: u8][writes...]
+                                if (data.len < 3) {
+                                    sm.commit_batch();
+                                    server.pipeline_reset();
+                                    return;
+                                }
+                                const status_len = std.mem.readInt(u16, data[0..2], .big);
+                                if (2 + status_len + 1 > data.len) {
+                                    sm.commit_batch();
+                                    server.pipeline_reset();
+                                    return;
+                                }
+                                const status_str = data[2..][0..status_len];
+                                const write_count = data[2 + status_len];
+                                const write_data = data[2 + status_len + 1 ..];
+
+                                // Execute writes inside the open transaction.
+                                client.handle_writes = write_data;
+                                client.handle_write_count = write_count;
+                                var write_view = if (sm.wal_record_buf) |buf|
+                                    Storage.WriteView.init_recording(sm.storage, buf)
+                                else
+                                    Storage.WriteView.init(sm.storage);
+                                if (!client.execute_writes(&write_view)) {
+                                    client.handle_writes = "";
+                                    client.handle_write_count = 0;
+                                    sm.commit_batch();
+                                    server.pipeline_reset();
+                                    return;
+                                }
+                                sm.wal_record_len = write_view.record_pos;
+                                sm.wal_record_count = write_view.record_count;
+                                client.handle_writes = "";
+                                client.handle_write_count = 0;
+
+                                // WAL.
+                                const m = server.commit_msg.?;
+                                if (server.wal) |wal| {
+                                    if (!wal.disabled and m.operation.is_mutation()) {
+                                        wal.append_writes(
+                                            m.operation,
+                                            sm.now,
+                                            if (sm.wal_record_buf) |buf| buf[0..sm.wal_record_len] else "",
+                                            sm.wal_record_count,
+                                            &server.wal_scratch,
+                                        );
+                                        sm.wal_record_len = 0;
+                                        sm.wal_record_count = 0;
+                                    }
+                                }
+
+                                sm.commit_batch();
+
+                                const status = @import("../message.zig").Status.from_string(status_str) orelse .storage_error;
+                                const identity = sm.prefetch_identity orelse std.mem.zeroes(@import("../message.zig").PrefetchIdentity);
+
+                                server.commit_pipeline_resp = .{
+                                    .status = status,
+                                    .session_action = .none,
+                                    .user_id = identity.user_id,
+                                    .is_authenticated = identity.is_authenticated != 0,
+                                    .is_new_visitor = identity.is_new != 0,
+                                };
+
+                                server.commit_stage = .sidecar_render;
+                                continue;
+                            },
+                            .failed => {
+                                client.reset_call_state();
+                                sm.commit_batch();
+                                server.pipeline_reset();
+                                return;
+                            },
+                        }
+                    },
+
+                    .sidecar_render => {
+                        if (SidecarClient == void) unreachable;
+                        const client = &server.sidecar_client;
+
+                        switch (client.call_state) {
+                            .idle => {
+                                const m = server.commit_msg.?;
+                                const pipeline_resp = server.commit_pipeline_resp.?;
+                                const args = [_]u8{
+                                    @intFromEnum(m.operation),
+                                    @intFromEnum(pipeline_resp.status),
+                                };
+
+                                if (!client.call_submit(&server.sidecar_bus, "render", &args)) {
+                                    server.pipeline_reset();
+                                    return;
+                                }
+                                return; // pending
+                            },
+                            .receiving => return,
+                            .complete => {
+                                defer client.reset_call_state();
+                                const pipeline_resp = server.commit_pipeline_resp.?;
+
+                                const html = if (client.result_flag == .failure)
+                                    @as([]const u8, "")
+                                else
+                                    client.copy_state(client.result_data);
+
+                                server.encode_and_respond(conn, server.commit_msg.?, pipeline_resp, html);
+                                return;
+                            },
+                            .failed => {
+                                client.reset_call_state();
+                                server.pipeline_reset();
+                                return;
+                            },
+                        }
+                    },
                 }
             }
+        }
+
+        /// Encode response and send to client. Shared by native render
+        /// and sidecar render stages.
+        fn encode_and_respond(
+            server: *Server,
+            conn: *Connection,
+            msg: App.Message,
+            pipeline_resp: StateMachine.PipelineResponse,
+            html: []const u8,
+        ) void {
+            const sm = server.state_machine;
+            const commit_result = App.encode_response(
+                pipeline_resp.status,
+                html,
+                &conn.send_buf,
+                conn.is_datastar_request,
+                pipeline_resp.session_action,
+                pipeline_resp.user_id,
+                pipeline_resp.is_authenticated,
+                pipeline_resp.is_new_visitor,
+                sm.secret_key,
+            );
+
+            sm.tracer.stop(.execute, msg.operation);
+            sm.tracer.trace_log(msg.operation, commit_result.status, conn.fd);
+
+            conn.set_response(commit_result.response.offset, commit_result.response.len);
+            conn.keep_alive = commit_result.response.keep_alive;
+
+            server.pipeline_reset();
         }
 
         /// Register sidecar fd for readability notification via epoll.
