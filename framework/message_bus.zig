@@ -12,6 +12,11 @@
 //!
 //! Protocol logic (CALL/RESULT, QUERY) lives in the consumer, not
 //! in the transport.
+//!
+//! Buffer ownership follows TB's pattern: a pre-allocated MessagePool
+//! holds ref-counted messages. The send queue holds *Message pointers
+//! (zero-copy). The recv buffer is a *Message from the pool. Consumers
+//! can ref messages to keep data alive past callbacks.
 
 const std = @import("std");
 const posix = std.posix;
@@ -20,33 +25,39 @@ const Crc32 = std.hash.crc.Crc32;
 const stdx = @import("stdx");
 const maybe = stdx.maybe;
 const RingBufferType = stdx.RingBufferType;
+const MessagePoolType = @import("message_pool.zig").MessagePoolType;
 const marks = @import("marks.zig");
 const log = marks.wrap_log(std.log.scoped(.message_bus));
 
 /// Transport primitive. Recv loop, send queue, frame accumulation,
 /// CRC-32 validation, backpressure, 3-phase termination.
 ///
+/// Buffer ownership: send queue holds *Message pointers from the pool.
+/// Recv reads into a *Message buffer from the pool. No embedded buffers
+/// in the Connection struct — idle connections hold no memory.
+///
 /// Parameterized at comptime so each consumer states its bounds:
-///   const SidecarConn = ConnectionType(IO, .{ .send_queue_max = 2 });
-///   const WorkerConn = ConnectionType(IO, .{ .send_queue_max = 4 });
+///   const SidecarConn = ConnectionType(IO, .{ .send_queue_max = 2, .frame_max = 256 * 1024 });
 pub fn ConnectionType(comptime IO: type, comptime options: Options) type {
     return struct {
         const Self = @This();
 
         // --- Frame format ---
-        // [payload_len: u32 BE][crc32: u32][payload bytes]
+        // [payload_len: u32 BE][crc32: u32 LE][payload bytes]
         // CRC covers len_bytes ++ payload_bytes (not just payload).
-        const frame_header_size: u32 = 8; // 4 len + 4 crc32
+        pub const frame_header_size: u32 = 8; // 4 len + 4 crc32
         const frame_max: u32 = options.frame_max;
-        const recv_buf_max: u32 = frame_max + frame_header_size;
-        const send_buf_max: u32 = frame_max + frame_header_size;
+        pub const buf_max: u32 = frame_max + frame_header_size;
         const send_queue_max: u32 = options.send_queue_max;
+
+        pub const Pool = MessagePoolType(buf_max);
+        pub const Message = Pool.Message;
+        const SendQueue = RingBufferType(*Message, .{ .array = send_queue_max });
 
         comptime {
             assert(frame_header_size == 8);
-            assert(recv_buf_max <= std.math.maxInt(u32));
+            assert(buf_max <= std.math.maxInt(u32));
             assert(send_queue_max >= 2); // CALL + QUERY_RESULT
-            assert(recv_buf_max == frame_max + frame_header_size);
         }
 
         pub const State = enum {
@@ -60,11 +71,14 @@ pub fn ConnectionType(comptime IO: type, comptime options: Options) type {
         };
 
         io: *IO,
+        pool: *Pool,
         state: State,
         fd: IO.fd_t,
 
         // --- Recv state ---
-        recv_buf: [recv_buf_max]u8,
+        // Recv buffer is a *Message from the pool. Frame data points
+        // into this buffer. Consumer can ref it to keep data alive.
+        recv_message: ?*Message,
         recv_pos: u32, // bytes received (end of data)
         advance_pos: u32, // bytes validated (checksum-checked)
         process_pos: u32, // bytes consumed by on_frame_fn
@@ -73,93 +87,118 @@ pub fn ConnectionType(comptime IO: type, comptime options: Options) type {
         recv_suspended: bool,
 
         // --- Send state ---
-        // Bounded queue of outgoing frames. Uses TB's RingBufferType
-        // (ported from stdx/ring_buffer.zig). Each entry holds the
-        // framed data and its length. Pre-allocated, no dynamic alloc.
+        // Send queue holds *Message pointers from the pool.
+        // Zero-copy: caller builds into message buffer, queues pointer.
+        // Messages are unref'd when fully sent.
         send_queue: SendQueue,
-        send_pos: u32, // bytes sent of current head frame
+        send_pos: u32, // bytes sent of current head message
         send_completion: IO.Completion,
         send_submitted: bool,
 
         // --- Consumer callback ---
         // Called with complete, CRC-validated frame data.
+        // Frame data points into recv_message.buffer — valid until
+        // the next recv or compaction. Consumer can call
+        // recv_message.ref() to keep data alive past this callback.
         // May call send_frame() re-entrantly (QUERY sub-protocol).
         // May call terminate() (protocol error).
-        // Frame data is valid only during this callback — consumer
-        // must copy via copy_state() if data is needed later.
         on_frame_fn: *const fn (context: *anyopaque, frame: []const u8) void,
         context: *anyopaque,
-
-        pub const SendEntry = struct { buf: [send_buf_max]u8 = undefined, len: u32 = 0 };
-        pub const SendQueue = RingBufferType(SendEntry, .{ .array = send_queue_max });
 
         // =====================================================================
         // Public API
         // =====================================================================
 
-        /// Initialize with an fd. Zeros all state, kicks off recv loop.
+        /// Initialize with an fd. Gets a recv message from the pool,
+        /// zeros all state, kicks off recv loop.
         /// Called by MessageBus after accept, or directly in tests.
-        pub fn init(self: *Self, io: *IO, fd: IO.fd_t, context: *anyopaque, on_frame_fn: *const fn (*anyopaque, []const u8) void) void {
+        pub fn init(self: *Self, io: *IO, pool: *Pool, fd: IO.fd_t, context: *anyopaque, on_frame_fn: *const fn (*anyopaque, []const u8) void) void {
             assert(self.state == .closed);
+            assert(self.recv_message == null);
             defer self.invariants();
             self.io = io;
+            self.pool = pool;
             self.fd = fd;
             self.context = context;
             self.on_frame_fn = on_frame_fn;
-            // Zero all mutable state — Connection may be reused after
-            // terminate_close. Don't assume fields are zero-initialized.
+            self.recv_message = pool.get_message();
             self.recv_pos = 0;
             self.advance_pos = 0;
             self.process_pos = 0;
             self.recv_submitted = false;
             self.recv_suspended = false;
-            self.send_queue.clear();
+            self.send_queue = SendQueue.init();
             self.send_pos = 0;
             self.send_submitted = false;
             self.state = .connected;
             self.submit_recv();
         }
 
-        /// Queue a frame for sending. May be called re-entrantly from
-        /// on_frame_fn (QUERY sub-protocol). The frame is copied into
-        /// a send queue slot, CRC-32 is computed, and the send loop
-        /// is kicked if not already running.
+        /// Queue a frame for sending. Gets a message from the pool,
+        /// copies the payload, adds frame header + CRC, and queues
+        /// the message pointer. The send loop is kicked if not running.
+        ///
+        /// For zero-copy, use begin_frame/commit_frame instead.
         pub fn send_frame(self: *Self, data: []const u8) void {
-            // Silently drop if terminating (TB pattern). This happens
-            // when on_frame_fn calls send_frame re-entrantly and a
-            // previous send_frame in the same callback triggered
-            // terminate via send_now returning 0.
             if (self.state != .connected) return;
             defer self.invariants();
             assert(data.len <= frame_max);
-            assert(!self.send_queue.full()); // bounded
+            assert(!self.send_queue.full());
 
-            // Get pointer to next queue slot and build frame in-place.
-            const entry = self.send_queue.next_tail_ptr().?;
+            const message = self.pool.get_message();
             const len: u32 = @intCast(data.len);
 
             // Length prefix (big-endian).
-            std.mem.writeInt(u32, entry.buf[0..4], len, .big);
-
+            std.mem.writeInt(u32, message.buffer[0..4], len, .big);
             // Payload.
-            @memcpy(entry.buf[8..][0..data.len], data);
-
+            @memcpy(message.buffer[8..][0..data.len], data);
             // CRC-32 covers len_bytes ++ payload_bytes (little-endian).
             var crc = Crc32.init();
-            crc.update(entry.buf[0..4]); // length prefix
-            crc.update(entry.buf[8..][0..data.len]); // payload
-            std.mem.writeInt(u32, entry.buf[4..8], crc.final(), .little);
+            crc.update(message.buffer[0..4]);
+            crc.update(message.buffer[8..][0..data.len]);
+            std.mem.writeInt(u32, message.buffer[4..8], crc.final(), .little);
 
-            entry.len = frame_header_size + len;
-            self.send_queue.advance_tail();
+            self.send_queue.push_assume_capacity(message);
+            if (!self.send_submitted) self.do_send();
+        }
 
-            // Kick the send loop if not already running.
+        /// Get a writable buffer for the next frame's payload area.
+        /// Caller builds payload directly into this buffer (zero-copy).
+        /// Call commit_frame(payload_len) when done.
+        /// Returns null if not connected or queue is full.
+        pub fn begin_frame(self: *Self) ?[*]u8 {
+            if (self.state != .connected) return null;
+            if (self.send_queue.full()) return null;
+            const message = self.pool.get_message();
+            // Temporarily push to queue so we have the message tracked.
+            // commit_frame finalizes the header. If the caller abandons
+            // the frame (doesn't call commit_frame), the message leaks.
+            // This is a programming error — assert in invariants.
+            self.send_queue.push_assume_capacity(message);
+            return message.buffer[frame_header_size..].ptr;
+        }
+
+        /// Finalize a frame started by begin_frame. Writes the frame
+        /// header (len + CRC) and kicks the send loop.
+        pub fn commit_frame(self: *Self, payload_len: u32) void {
+            if (self.state != .connected) return;
+            defer self.invariants();
+            assert(payload_len <= frame_max);
+            // The message is already at the tail of the queue (from begin_frame).
+            const message = self.send_queue.tail_ptr().?.*;
+
+            // Length prefix (big-endian).
+            std.mem.writeInt(u32, message.buffer[0..4], payload_len, .big);
+            // CRC-32 covers len_bytes ++ payload_bytes.
+            var crc = Crc32.init();
+            crc.update(message.buffer[0..4]);
+            crc.update(message.buffer[frame_header_size..][0..payload_len]);
+            std.mem.writeInt(u32, message.buffer[4..8], crc.final(), .little);
+
             if (!self.send_submitted) self.do_send();
         }
 
         /// Stop submitting io.recv — consumer needs time to process.
-        /// Used by QUERY sub-protocol: suspend before sending
-        /// QUERY_RESULT, resume after.
         pub fn suspend_recv(self: *Self) void {
             assert(self.state == .connected);
             assert(!self.recv_suspended);
@@ -201,15 +240,20 @@ pub fn ConnectionType(comptime IO: type, comptime options: Options) type {
         // Recv internals
         // =====================================================================
 
+        fn recv_buf(self: *Self) []u8 {
+            return self.recv_message.?.buffer;
+        }
+
         fn submit_recv(self: *Self) void {
             assert(self.state == .connected);
             assert(!self.recv_submitted);
             assert(!self.recv_suspended);
-            assert(self.recv_pos < recv_buf_max); // buffer has room
+            assert(self.recv_message != null);
+            assert(self.recv_pos < buf_max);
             self.recv_submitted = true;
             self.io.recv(
                 self.fd,
-                self.recv_buf[self.recv_pos..],
+                self.recv_buf()[self.recv_pos..],
                 &self.recv_completion,
                 @ptrCast(self),
                 recv_callback,
@@ -238,68 +282,62 @@ pub fn ConnectionType(comptime IO: type, comptime options: Options) type {
 
             const bytes: u32 = @intCast(result);
             self.recv_pos += bytes;
-            assert(self.recv_pos <= recv_buf_max);
+            assert(self.recv_pos <= buf_max);
 
             // Buffer full with incomplete frame — peer is stuck or malicious.
-            if (self.recv_pos == recv_buf_max and self.advance_pos < self.recv_pos) {
+            if (self.recv_pos == buf_max and self.advance_pos < self.recv_pos) {
                 self.terminate(.shutdown);
                 return;
             }
 
             self.advance();
-            if (self.state != .connected) return; // advance() may have terminated
+            if (self.state != .connected) return;
             self.try_drain_recv();
         }
 
         /// Validate as many complete frames as possible.
-        /// Called after recv_callback (new bytes) and idempotent on
-        /// re-entry (no new bytes → exits immediately).
         fn advance(self: *Self) void {
+            const buf = self.recv_buf();
             while (true) {
                 const frame_start = self.advance_pos;
 
-                // Stage 1: need 4 bytes for length prefix.
                 if (self.recv_pos - frame_start < 4) return;
-                const len = std.mem.readInt(u32, self.recv_buf[frame_start..][0..4], .big);
+                const len = std.mem.readInt(u32, buf[frame_start..][0..4], .big);
                 if (len > frame_max) {
                     self.terminate(.shutdown);
                     return;
                 }
 
-                // Stage 2: need 4 checksum + len payload bytes.
                 const total = frame_header_size + len;
                 if (self.recv_pos - frame_start < total) return;
 
                 // Validate CRC-32 (covers len + payload, stored as little-endian).
-                assert(frame_start + total <= recv_buf_max);
-                const stored_crc = std.mem.readInt(u32, self.recv_buf[frame_start + 4 ..][0..4], .little);
+                assert(frame_start + total <= buf_max);
+                const stored_crc = std.mem.readInt(u32, buf[frame_start + 4 ..][0..4], .little);
                 var crc = Crc32.init();
-                crc.update(self.recv_buf[frame_start..][0..4]); // len bytes
-                crc.update(self.recv_buf[frame_start + 8 ..][0..total - 8]); // payload
+                crc.update(buf[frame_start..][0..4]);
+                crc.update(buf[frame_start + 8 ..][0..total - 8]);
                 if (crc.final() != stored_crc) {
                     self.terminate(.shutdown);
                     return;
                 }
 
                 self.advance_pos = frame_start + total;
-                // Loop to validate next frame if bytes are available.
             }
         }
 
         /// Deliver validated, unconsumed frames to the consumer.
         /// Compacts the recv buffer once after all frames are drained.
         fn try_drain_recv(self: *Self) void {
+            const buf = self.recv_buf();
             while (self.advance_pos > self.process_pos) {
-                const len = std.mem.readInt(u32, self.recv_buf[self.process_pos..][0..4], .big);
-                const frame = self.recv_buf[self.process_pos + 8 ..][0..len];
+                const len = std.mem.readInt(u32, buf[self.process_pos..][0..4], .big);
+                const frame = buf[self.process_pos + 8 ..][0..len];
 
-                // Advance process_pos before callback — frame data remains
-                // valid until compaction (which happens after the loop).
                 self.process_pos += frame_header_size + len;
 
                 self.on_frame_fn(self.context, frame);
 
-                // on_frame_fn may have called terminate() or suspend_recv().
                 maybe(self.state == .terminating);
                 if (self.state != .connected) return;
                 if (self.recv_suspended) return;
@@ -309,7 +347,7 @@ pub fn ConnectionType(comptime IO: type, comptime options: Options) type {
             if (self.process_pos > 0) {
                 const remaining = self.recv_pos - self.process_pos;
                 if (remaining > 0) {
-                    stdx.copy_left(.exact, u8, self.recv_buf[0..remaining], self.recv_buf[self.process_pos..][0..remaining]);
+                    stdx.copy_left(.exact, u8, buf[0..remaining], buf[self.process_pos..][0..remaining]);
                 }
                 self.recv_pos = remaining;
                 self.advance_pos = 0;
@@ -325,32 +363,33 @@ pub fn ConnectionType(comptime IO: type, comptime options: Options) type {
         // Send internals
         // =====================================================================
 
-        /// Top-level send loop. Try send_now fast path, then async.
+        /// Read the framed length from a send message's buffer.
+        /// The length is encoded in the first 4 bytes (big-endian)
+        /// plus the frame_header_size.
+        fn send_msg_len(message: *Message) u32 {
+            return frame_header_size + std.mem.readInt(u32, message.buffer[0..4], .big);
+        }
+
         fn do_send(self: *Self) void {
             assert(self.state == .connected);
             self.send_now();
-            if (self.state != .connected) return; // send_now may have terminated
-            if (self.send_queue.empty()) return; // all drained
+            if (self.state != .connected) return;
+            if (self.send_queue.empty()) return;
             self.submit_send();
         }
 
-        /// Non-blocking send via IO layer. Drains as many queued frames
-        /// as the kernel buffer accepts without blocking.
         fn send_now(self: *Self) void {
-            while (self.send_queue.head_ptr()) |entry| {
-                const buf = entry.buf[0..entry.len];
+            while (self.send_queue.head()) |message| {
+                const total_len = send_msg_len(message);
 
-                while (self.send_pos < entry.len) {
-                    // send_now returns null for WouldBlock AND errors.
-                    // On null, fall back to async send which handles
-                    // errors via the full error union in send_callback.
-                    const n = self.io.send_now(self.fd, buf[self.send_pos..]) orelse return;
+                while (self.send_pos < total_len) {
+                    const n = self.io.send_now(self.fd, message.buffer[self.send_pos..total_len]) orelse return;
                     self.send_pos += @intCast(n);
                 }
 
-                // Frame fully sent. Advance head (don't pop — avoids
-                // copying 256KB SendEntry by value).
-                self.send_queue.advance_head();
+                // Frame fully sent. Pop pointer and unref message.
+                const sent = self.send_queue.pop().?;
+                self.pool.unref(sent);
                 self.send_pos = 0;
             }
         }
@@ -358,11 +397,12 @@ pub fn ConnectionType(comptime IO: type, comptime options: Options) type {
         fn submit_send(self: *Self) void {
             assert(!self.send_submitted);
             assert(!self.send_queue.empty());
-            const entry = self.send_queue.head_ptr().?;
+            const message = self.send_queue.head().?;
+            const total_len = send_msg_len(message);
             self.send_submitted = true;
             self.io.send(
                 self.fd,
-                entry.buf[self.send_pos..entry.len],
+                message.buffer[self.send_pos..total_len],
                 &self.send_completion,
                 @ptrCast(self),
                 send_callback,
@@ -386,10 +426,12 @@ pub fn ConnectionType(comptime IO: type, comptime options: Options) type {
             }
 
             self.send_pos += @intCast(result);
-            const entry = self.send_queue.head_ptr().?;
-            assert(self.send_pos <= entry.len);
-            if (self.send_pos == entry.len) {
-                self.send_queue.advance_head();
+            const message = self.send_queue.head().?;
+            const total_len = send_msg_len(message);
+            assert(self.send_pos <= total_len);
+            if (self.send_pos == total_len) {
+                const sent = self.send_queue.pop().?;
+                self.pool.unref(sent);
                 self.send_pos = 0;
             }
 
@@ -402,8 +444,8 @@ pub fn ConnectionType(comptime IO: type, comptime options: Options) type {
 
         fn terminate_join(self: *Self) void {
             assert(self.state == .terminating);
-            if (self.recv_submitted) return; // callback will re-call us
-            if (self.send_submitted) return; // callback will re-call us
+            if (self.recv_submitted) return;
+            if (self.send_submitted) return;
             self.terminate_close();
         }
 
@@ -413,17 +455,22 @@ pub fn ConnectionType(comptime IO: type, comptime options: Options) type {
             assert(!self.send_submitted);
             defer self.invariants();
 
-            // Set both submitted flags TRUE to prevent terminate_join
-            // re-entry during close (TB pattern).
             self.recv_submitted = true;
             self.send_submitted = true;
 
-            // Drain send queue.
-            self.send_queue.clear();
+            // Unref all queued send messages.
+            while (self.send_queue.pop()) |message| {
+                self.pool.unref(message);
+            }
+
+            // Unref recv message.
+            if (self.recv_message) |msg| {
+                self.pool.unref(msg);
+                self.recv_message = null;
+            }
 
             self.io.close(self.fd);
 
-            // Reset all state.
             self.fd = -1;
             self.recv_pos = 0;
             self.advance_pos = 0;
@@ -443,12 +490,13 @@ pub fn ConnectionType(comptime IO: type, comptime options: Options) type {
             // Position chain.
             assert(self.process_pos <= self.advance_pos);
             assert(self.advance_pos <= self.recv_pos);
-            assert(self.recv_pos <= recv_buf_max);
+            assert(self.recv_pos <= buf_max);
 
             // Send queue bounds.
             assert(self.send_queue.count <= send_queue_max);
             if (!self.send_queue.empty()) {
-                assert(self.send_pos <= self.send_queue.head_ptr_const().?.len);
+                const head_len = send_msg_len(self.send_queue.head().?);
+                assert(self.send_pos <= head_len);
             } else {
                 assert(self.send_pos == 0);
             }
@@ -470,8 +518,12 @@ pub fn ConnectionType(comptime IO: type, comptime options: Options) type {
                     assert(self.advance_pos == 0);
                     assert(self.process_pos == 0);
                     assert(self.send_queue.empty());
+                    assert(self.recv_message == null);
                 },
-                .connected => assert(self.fd != -1),
+                .connected => {
+                    assert(self.fd != -1);
+                    assert(self.recv_message != null);
+                },
                 .terminating => assert(self.fd != -1),
             }
 
@@ -491,18 +543,21 @@ pub const Options = struct {
     frame_max: u32,
 };
 
-/// Lifecycle manager. Owns one Connection. Handles listen, accept,
-/// reconnect-on-disconnect. The Connection doesn't know it exists.
+/// Lifecycle manager. Owns one Connection and a MessagePool.
+/// Handles listen, accept, reconnect-on-disconnect.
+/// The Connection doesn't know it exists.
 ///
 /// Parameterized at comptime so each consumer declares its bounds:
-///   const SidecarBus = MessageBusType(IO, .{ .send_queue_max = 2 });
+///   const SidecarBus = MessageBusType(IO, .{ .send_queue_max = 2, .frame_max = 256 * 1024 });
 pub fn MessageBusType(comptime IO: type, comptime options: Options) type {
     const Connection = ConnectionType(IO, options);
+    const Pool = Connection.Pool;
 
     return struct {
         const Self = @This();
 
         io: *IO,
+        pool: Pool,
         connection: Connection,
 
         // Listen/accept — one connection only.
@@ -514,14 +569,18 @@ pub fn MessageBusType(comptime IO: type, comptime options: Options) type {
         on_frame_fn: *const fn (*anyopaque, []const u8) void,
         context: *anyopaque,
 
-        pub fn init_listener(self: *Self, io: *IO, path: []const u8, context: *anyopaque, on_frame_fn: *const fn (*anyopaque, []const u8) void) void {
+        /// Pool sizing: recv buffer (1) + send queue (send_queue_max) + burst (1).
+        const messages_max: u32 = 1 + options.send_queue_max + 1;
+
+        pub fn init_listener(self: *Self, allocator: std.mem.Allocator, io: *IO, path: []const u8, context: *anyopaque, on_frame_fn: *const fn (*anyopaque, []const u8) void) !void {
             self.io = io;
-            self.listen_fd = -1; // Set before listen() — if listen fails, tick_accept guards on this.
+            self.pool = try Pool.init(allocator, messages_max);
             self.connection = .{
                 .io = io,
+                .pool = &self.pool,
                 .state = .closed,
                 .fd = -1,
-                .recv_buf = undefined,
+                .recv_message = null,
                 .recv_pos = 0,
                 .advance_pos = 0,
                 .process_pos = 0,
@@ -535,6 +594,7 @@ pub fn MessageBusType(comptime IO: type, comptime options: Options) type {
                 .on_frame_fn = on_frame_fn,
                 .context = context,
             };
+            self.listen_fd = -1;
             self.accept_completion = .{};
             self.accept_pending = false;
             self.on_frame_fn = on_frame_fn;
@@ -543,12 +603,15 @@ pub fn MessageBusType(comptime IO: type, comptime options: Options) type {
             self.listen(path);
         }
 
+        pub fn deinit(self: *Self, allocator: std.mem.Allocator) void {
+            self.pool.deinit(allocator);
+        }
+
         fn listen(self: *Self, path: []const u8) void {
             assert(self.connection.state == .closed);
             assert(path.len > 0);
-            assert(path.len < 108); // sockaddr_un.path max
+            assert(path.len < 108);
 
-            // Unlink stale socket file.
             var unlink_path: [108]u8 = undefined;
             @memcpy(unlink_path[0..path.len], path);
             unlink_path[path.len] = 0;
@@ -579,10 +642,8 @@ pub fn MessageBusType(comptime IO: type, comptime options: Options) type {
             log.info("listening on {s}", .{path});
         }
 
-        /// Called every tick. Submits accept if connection is closed
-        /// and no accept is in-flight.
         pub fn tick_accept(self: *Self) void {
-            if (self.listen_fd == -1) return; // listen() failed
+            if (self.listen_fd == -1) return;
             if (self.connection.state != .closed) return;
             if (self.accept_pending) return;
             self.accept_pending = true;
@@ -598,12 +659,12 @@ pub fn MessageBusType(comptime IO: type, comptime options: Options) type {
             const self: *Self = @ptrCast(@alignCast(ctx));
             self.accept_pending = false;
 
-            if (result < 0) return; // try again next tick
+            if (result < 0) return;
 
             const accepted_fd: IO.fd_t = result;
 
             // Set SO_SNDBUF to hold the full send queue.
-            const sndbuf_size: c_int = @intCast(Connection.send_queue_max * Connection.send_buf_max);
+            const sndbuf_size: c_int = @intCast(Connection.send_queue_max * Connection.buf_max);
             posix.setsockopt(
                 accepted_fd,
                 posix.SOL.SOCKET,
@@ -612,13 +673,21 @@ pub fn MessageBusType(comptime IO: type, comptime options: Options) type {
             ) catch {};
 
             log.info("accepted fd={d}", .{accepted_fd});
-            self.connection.init(self.io, accepted_fd, self.context, self.on_frame_fn);
+            self.connection.init(self.io, &self.pool, accepted_fd, self.context, self.on_frame_fn);
         }
 
         // --- Delegation to connection ---
 
         pub fn send_frame(self: *Self, data: []const u8) void {
             self.connection.send_frame(data);
+        }
+
+        pub fn begin_frame(self: *Self) ?[*]u8 {
+            return self.connection.begin_frame();
+        }
+
+        pub fn commit_frame(self: *Self, payload_len: u32) void {
+            self.connection.commit_frame(payload_len);
         }
 
         pub fn suspend_recv(self: *Self) void {
@@ -646,7 +715,7 @@ fn test_socketpair() [2]posix.fd_t {
 
 /// Build a wire frame (len + crc + payload) into buf. Returns the framed slice.
 fn test_build_frame(buf: []u8, payload: []const u8) []const u8 {
-    assert(payload.len <= 256 * 1024); // frame_max for tests
+    assert(payload.len <= 256 * 1024);
     const len: u32 = @intCast(payload.len);
     const total = 8 + payload.len;
     assert(total <= buf.len);
@@ -662,12 +731,10 @@ fn test_build_frame(buf: []u8, payload: []const u8) []const u8 {
     return buf[0..total];
 }
 
-/// Minimal IO that completes operations synchronously for unit tests.
-/// Uses real unix sockets (socketpair) — send/recv are real syscalls.
-/// send_now uses MSG.DONTWAIT on the real fd.
+/// Minimal IO for unit tests. Stores completions, caller drives
+/// via tick(). Uses real unix sockets for send_now.
 ///
-/// TODO: Delete after Phase 3 (FuzzIO). See plan: "After Phase 3:
-/// delete TestIO from message_bus.zig".
+/// TODO: Delete after Phase 3 (FuzzIO).
 const TestIO = struct {
     pub const fd_t = posix.fd_t;
     pub const Completion = struct {
@@ -691,7 +758,7 @@ const TestIO = struct {
 
     pub fn send_now(_: *TestIO, fd: fd_t, buffer: []const u8) ?usize {
         const result = posix.send(fd, buffer, posix.MSG.DONTWAIT | posix.MSG.NOSIGNAL);
-        if (result) |bytes| return bytes else |_| return null;
+        return result catch null;
     }
 
     pub fn accept(_: *TestIO, _: fd_t, _: *Completion, _: *anyopaque, _: *const fn (*anyopaque, i32) void) void {}
@@ -704,7 +771,6 @@ const TestIO = struct {
         posix.close(fd);
     }
 
-    /// Drive one pending completion by doing the actual syscall.
     fn tick(completion: *Completion) void {
         const op = completion.operation;
         if (op == .none) return;
@@ -728,21 +794,20 @@ const TestIO = struct {
     }
 };
 
-const TestConnection = ConnectionType(TestIO, .{ .send_queue_max = 4, .frame_max = 256 * 1024 });
+const test_frame_max = 256 * 1024;
+const TestConnection = ConnectionType(TestIO, .{ .send_queue_max = 4, .frame_max = test_frame_max });
 
 /// Test context that records delivered frames.
 const TestContext = struct {
     frames: [16][]const u8,
     frame_bufs: [16][1024]u8,
     frame_count: u32,
-    conn: *TestConnection,
 
-    fn init(conn: *TestConnection) TestContext {
+    fn init() TestContext {
         return .{
             .frames = undefined,
             .frame_bufs = undefined,
             .frame_count = 0,
-            .conn = conn,
         };
     }
 
@@ -756,34 +821,35 @@ const TestContext = struct {
     }
 };
 
+fn test_init_conn(conn: *TestConnection, io: *TestIO, pool: *TestConnection.Pool, fd: TestIO.fd_t, ctx: *anyopaque, on_frame_fn: *const fn (*anyopaque, []const u8) void) void {
+    conn.state = .closed;
+    conn.recv_message = null;
+    conn.init(io, pool, fd, ctx, on_frame_fn);
+}
+
 test "Connection: send and receive a frame" {
     var io = TestIO{};
+    var pool = try TestConnection.Pool.init(testing.allocator, 8);
+    defer pool.deinit(testing.allocator);
     const pair = test_socketpair();
-    const server_fd = pair[0];
     const client_fd = pair[1];
 
+    var ctx = TestContext.init();
     var conn: TestConnection = undefined;
-    conn.state = .closed;
-    var ctx = TestContext.init(&conn);
-    conn.init(&io, server_fd, @ptrCast(&ctx), TestContext.on_frame);
+    test_init_conn(&conn, &io, &pool, pair[0], @ptrCast(&ctx), TestContext.on_frame);
 
-    // Write a frame from the "client" side.
     const payload = "hello, message bus!";
     var frame_buf: [1024]u8 = undefined;
     const frame = test_build_frame(&frame_buf, payload);
     const written = posix.send(client_fd, frame, 0) catch unreachable;
     assert(written == frame.len);
 
-    // Drive the recv completion — the Connection has a pending recv.
     TestIO.tick(&conn.recv_completion);
 
-    // The frame should have been delivered.
     try testing.expectEqual(@as(u32, 1), ctx.frame_count);
     try testing.expectEqualSlices(u8, payload, ctx.frames[0]);
-
     conn.invariants();
 
-    // Close the client fd to trigger orderly shutdown on next recv tick.
     posix.close(client_fd);
     TestIO.tick(&conn.recv_completion);
     try testing.expectEqual(TestConnection.State.closed, conn.state);
@@ -791,22 +857,19 @@ test "Connection: send and receive a frame" {
 
 test "Connection: send queue delivers multiple frames in order" {
     var io = TestIO{};
+    var pool = try TestConnection.Pool.init(testing.allocator, 8);
+    defer pool.deinit(testing.allocator);
     const pair = test_socketpair();
-    const server_fd = pair[0];
     const client_fd = pair[1];
-    defer posix.close(client_fd);
 
+    var ctx = TestContext.init();
     var conn: TestConnection = undefined;
-    conn.state = .closed;
-    var ctx = TestContext.init(&conn);
-    conn.init(&io, server_fd, @ptrCast(&ctx), TestContext.on_frame);
+    test_init_conn(&conn, &io, &pool, pair[0], @ptrCast(&ctx), TestContext.on_frame);
 
-    // Queue 3 frames.
     conn.send_frame("frame-one");
     conn.send_frame("frame-two");
     conn.send_frame("frame-three");
 
-    // Read all data from client side and verify frames arrive in order.
     var read_buf: [4096]u8 = undefined;
     var total_read: usize = 0;
     for (0..10) |_| {
@@ -815,14 +878,12 @@ test "Connection: send queue delivers multiple frames in order" {
         total_read += n;
     }
 
-    // Parse received frames — each is [len:4][crc:4][payload].
     var pos: usize = 0;
     var frame_count: u32 = 0;
     var received_payloads: [4][]const u8 = undefined;
     while (pos + 8 <= total_read) {
         const len = std.mem.readInt(u32, read_buf[pos..][0..4], .big);
-        const payload_data = read_buf[pos + 8 ..][0..len];
-        received_payloads[frame_count] = payload_data;
+        received_payloads[frame_count] = read_buf[pos + 8 ..][0..len];
         frame_count += 1;
         pos += 8 + len;
     }
@@ -833,51 +894,49 @@ test "Connection: send queue delivers multiple frames in order" {
     try testing.expectEqualSlices(u8, "frame-three", received_payloads[2]);
 
     conn.invariants();
-    conn.terminate(.no_shutdown);
+
+    // Close client fd and drive recv to complete 3-phase termination.
+    posix.close(client_fd);
+    TestIO.tick(&conn.recv_completion);
+    try testing.expectEqual(TestConnection.State.closed, conn.state);
 }
 
 test "Connection: CRC mismatch terminates" {
     var io = TestIO{};
+    var pool = try TestConnection.Pool.init(testing.allocator, 8);
+    defer pool.deinit(testing.allocator);
     const pair = test_socketpair();
-    const server_fd = pair[0];
     const client_fd = pair[1];
-    defer posix.close(client_fd);
 
+    var ctx = TestContext.init();
     var conn: TestConnection = undefined;
-    conn.state = .closed;
-    var ctx = TestContext.init(&conn);
-    conn.init(&io, server_fd, @ptrCast(&ctx), TestContext.on_frame);
+    test_init_conn(&conn, &io, &pool, pair[0], @ptrCast(&ctx), TestContext.on_frame);
 
-    // Build a valid frame, then corrupt the CRC.
     var frame_buf: [1024]u8 = undefined;
     const frame = test_build_frame(&frame_buf, "corrupted");
-    // Flip a bit in the CRC field.
     frame_buf[4] ^= 0x01;
     const written = posix.send(client_fd, frame, 0) catch unreachable;
     assert(written == frame.len);
 
-    // Drive recv — should terminate on CRC mismatch.
     TestIO.tick(&conn.recv_completion);
 
     try testing.expectEqual(TestConnection.State.closed, conn.state);
-    try testing.expectEqual(@as(u32, 0), ctx.frame_count); // no frame delivered
+    try testing.expectEqual(@as(u32, 0), ctx.frame_count);
+    posix.close(client_fd);
 }
 
-test "Connection: orderly shutdown (0 bytes) terminates with no_shutdown" {
+test "Connection: orderly shutdown (0 bytes)" {
     var io = TestIO{};
+    var pool = try TestConnection.Pool.init(testing.allocator, 8);
+    defer pool.deinit(testing.allocator);
     const pair = test_socketpair();
-    const server_fd = pair[0];
     const client_fd = pair[1];
 
+    var ctx = TestContext.init();
     var conn: TestConnection = undefined;
-    conn.state = .closed;
-    var ctx = TestContext.init(&conn);
-    conn.init(&io, server_fd, @ptrCast(&ctx), TestContext.on_frame);
+    test_init_conn(&conn, &io, &pool, pair[0], @ptrCast(&ctx), TestContext.on_frame);
 
-    // Close the client side — next recv will get 0 bytes.
     posix.close(client_fd);
-
-    // Drive recv — should get 0 bytes → orderly shutdown.
     TestIO.tick(&conn.recv_completion);
 
     try testing.expectEqual(TestConnection.State.closed, conn.state);
@@ -885,12 +944,11 @@ test "Connection: orderly shutdown (0 bytes) terminates with no_shutdown" {
 
 test "Connection: backpressure suspend and resume" {
     var io = TestIO{};
+    var pool = try TestConnection.Pool.init(testing.allocator, 8);
+    defer pool.deinit(testing.allocator);
     const pair = test_socketpair();
-    const server_fd = pair[0];
     const client_fd = pair[1];
-    defer posix.close(client_fd);
 
-    // Context that suspends after first frame.
     const SuspendCtx = struct {
         frames: [16][]const u8,
         frame_bufs: [16][1024]u8,
@@ -903,7 +961,6 @@ test "Connection: backpressure suspend and resume" {
             @memcpy(self.frame_bufs[i][0..frame.len], frame);
             self.frames[i] = self.frame_bufs[i][0..frame.len];
             self.frame_count += 1;
-            // Suspend after first frame.
             if (self.frame_count == 1) {
                 self.conn_ptr.suspend_recv();
             }
@@ -912,38 +969,29 @@ test "Connection: backpressure suspend and resume" {
 
     var conn: TestConnection = undefined;
     conn.state = .closed;
+    conn.recv_message = null;
     var ctx = SuspendCtx{
         .frames = undefined,
         .frame_bufs = undefined,
         .frame_count = 0,
         .conn_ptr = &conn,
     };
-    conn.init(&io, server_fd, @ptrCast(&ctx), SuspendCtx.on_frame);
+    conn.init(&io, &pool, pair[0], @ptrCast(&ctx), SuspendCtx.on_frame);
 
-    // Send two frames from client.
     var buf1: [1024]u8 = undefined;
     var buf2: [1024]u8 = undefined;
-    const f1 = test_build_frame(&buf1, "first");
-    const f2 = test_build_frame(&buf2, "second");
+    _ = posix.send(client_fd, test_build_frame(&buf1, "first"), 0) catch unreachable;
+    _ = posix.send(client_fd, test_build_frame(&buf2, "second"), 0) catch unreachable;
 
-    // Write both frames.
-    _ = posix.send(client_fd, f1, 0) catch unreachable;
-    _ = posix.send(client_fd, f2, 0) catch unreachable;
-
-    // Drive recv — should deliver first frame, then suspend.
     TestIO.tick(&conn.recv_completion);
 
     try testing.expectEqual(@as(u32, 1), ctx.frame_count);
     try testing.expectEqualSlices(u8, "first", ctx.frames[0]);
     try testing.expect(conn.recv_suspended);
 
-    // Resume — should deliver second frame.
     conn.resume_recv();
 
-    // The second frame may still be in the buffer from the first recv,
-    // or we need another recv tick. Check if it was delivered.
     if (ctx.frame_count == 1) {
-        // Need another recv to get the second frame.
         TestIO.tick(&conn.recv_completion);
     }
 
@@ -951,13 +999,17 @@ test "Connection: backpressure suspend and resume" {
     try testing.expectEqualSlices(u8, "second", ctx.frames[1]);
 
     conn.invariants();
-    conn.terminate(.no_shutdown);
+
+    posix.close(client_fd);
+    TestIO.tick(&conn.recv_completion);
+    try testing.expectEqual(TestConnection.State.closed, conn.state);
 }
 
 test "Connection: invariants hold in closed state" {
     var conn: TestConnection = undefined;
     conn.state = .closed;
     conn.fd = -1;
+    conn.recv_message = null;
     conn.recv_pos = 0;
     conn.advance_pos = 0;
     conn.process_pos = 0;
