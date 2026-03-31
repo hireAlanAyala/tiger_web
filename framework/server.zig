@@ -95,8 +95,6 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
         /// Auth identity — persists from prefetch to render.
         commit_identity: ?StateMachine.CommitOutput.Identity = null,
 
-        /// IO completion for sidecar fd readability notifications.
-        sidecar_completion: IO.Completion = .{},
 
         /// Pipeline stage — serial, one request at a time (TB pattern).
         /// Guards process_inbox: if not .idle, no new pipeline starts.
@@ -417,50 +415,6 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
 
         /// Register sidecar fd for readability notification via epoll.
         /// Called when a sidecar CALL is in-flight (.pending).
-        fn submit_sidecar_recv(server: *Server) void {
-            if (@hasDecl(App, "sidecar")) {
-                if (App.sidecar) |*client| {
-                    if (client.fd != -1) {
-                        server.io.readable(
-                            client.fd,
-                            &server.sidecar_completion,
-                            @ptrCast(server),
-                            sidecar_recv_callback,
-                        );
-                    }
-                }
-            }
-        }
-
-        /// Epoll callback — sidecar fd has data to read.
-        /// Drives on_recv, re-registers if exchange not complete,
-        /// calls commit_dispatch to resume the pipeline when done.
-        fn sidecar_recv_callback(context: *anyopaque, _: i32) void {
-            const server: *Server = @ptrCast(@alignCast(context));
-
-            if (!@hasDecl(App, "sidecar")) return;
-            const client = &App.sidecar.?;
-            if (client.call_state != .receiving) return;
-
-            // Drive on_recv — may process QUERY frames inline.
-            const query_fn = App.HandlersType(Storage).query_dispatch_fn;
-            const query_ctx: *anyopaque = @ptrCast(server.state_machine.storage);
-            const state = client.on_recv(query_fn, query_ctx, App.SidecarClient.max_queries_per_call);
-
-            switch (state) {
-                .receiving => {
-                    // Exchange not done — more frames expected (QUERY sub-protocol).
-                    // Re-register for next readability event.
-                    server.submit_sidecar_recv();
-                },
-                .complete, .failed => {
-                    // Exchange done — resume the pipeline.
-                    server.commit_dispatch();
-                },
-                .idle => unreachable, // on_recv never returns .idle
-            }
-        }
-
         /// Reset the pipeline to idle. Called on completion, busy, or failure.
         fn pipeline_reset(server: *Server) void {
             server.commit_stage = .idle;

@@ -88,14 +88,10 @@ pub fn main() !void {
         Server.max_connections,
     });
     if (cli.log_debug) log.info("log_level=debug log_trace={}", .{cli.log_trace});
-    // Sidecar: listen on unix socket, wait for sidecar to connect.
-    // Server doesn't accept HTTP until the sidecar is connected.
-    if (cli.sidecar) |path| {
-        App.sidecar = App.SidecarClient.init(path);
-        if (!App.sidecar.?.listen_and_accept()) {
-            log.err("sidecar failed to connect on {s}", .{path});
-            std.process.exit(1);
-        }
+    // Sidecar mode: the server handles bus init and async accept.
+    if (cli.sidecar != null) {
+        App.sidecar_mode = true;
+        // TODO: server creates bus + client on init, tick_accept handles connection.
     }
 
     log.info("listening on port {d}", .{actual_port});
