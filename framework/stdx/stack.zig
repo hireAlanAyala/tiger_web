@@ -116,6 +116,107 @@ const StackAny = struct {
     }
 };
 
+test "Stack: fuzz" {
+    // Fuzzy test to compare behavior of Stack against std.ArrayList (reference model).
+    comptime assert(stdx.verify);
+
+    const allocator = std.testing.allocator;
+
+    var prng = stdx.PRNG.from_seed_testing();
+
+    const Item = struct {
+        id: u32,
+        link: StackType(@This()).Link,
+    };
+    const Stack = StackType(Item);
+
+    const item_count_max = 1024;
+    const events_max = 1 << 10;
+
+    const Event = enum { push, pop };
+    const event_weights = stdx.PRNG.EnumWeightsType(Event){
+        .push = 2,
+        .pop = 1,
+    };
+
+    // Allocate a pool of nodes.
+    var items = try allocator.alloc(Item, item_count_max);
+    defer allocator.free(items);
+
+    for (items, 0..) |*item, i| {
+        item.* = Item{ .id = @intCast(i), .link = .{} };
+    }
+
+    // A bit set that tracks which nodes are available.
+    var items_free = try std.DynamicBitSetUnmanaged.initFull(allocator, item_count_max);
+    defer items_free.deinit(allocator);
+
+    var stack = Stack.init(.{
+        .capacity = item_count_max,
+        .verify_push = true,
+    });
+
+    // Reference model: a dynamic array of node IDs in Stack order (last is the top).
+    var model = try std.ArrayList(u32).initCapacity(allocator, item_count_max);
+    defer model.deinit();
+
+    // Run a sequence of randomized events.
+    for (0..events_max) |_| {
+        assert(model.items.len <= item_count_max);
+        assert(model.items.len == stack.count());
+        assert(model.items.len == 0 or !stack.empty());
+
+        const event = prng.enum_weighted(Event, event_weights);
+        switch (event) {
+            .push => {
+                // Only push if a free node is available.
+                const free_index = items_free.findFirstSet() orelse continue;
+                const item = &items[free_index];
+                stack.push(item);
+                try model.append(item.id);
+                items_free.unset(item.id);
+            },
+            .pop => {
+                if (stack.pop()) |item| {
+                    // The reference model should have the same node at the top.
+                    const id = item.id;
+                    const expected = model.pop();
+                    assert(id == expected);
+                    items_free.set(id);
+                } else {
+                    assert(model.items.len == 0);
+                    assert(stack.empty());
+                    assert(stack.count() == 0);
+                    assert(stack.peek() == null);
+                }
+            },
+        }
+        // Verify that peek() returns the same as the last element in our model.
+        if (model.items.len > 0) {
+            const top = stack.peek() orelse unreachable;
+            const top_ref = model.pop().?;
+            assert(top.id == top_ref);
+            try model.append(top_ref);
+        } else {
+            assert(stack.empty());
+            assert(stack.count() == 0);
+            assert(stack.peek() == null);
+        }
+    }
+
+    // Finally, empty the Stack and ensure our reference model agrees.
+    while (stack.pop()) |item| {
+        const id = item.id;
+        const expected = model.pop();
+        assert(id == expected);
+        items_free.set(id);
+    }
+    assert(model.items.len == 0);
+    assert(stack.empty());
+    assert(stack.count() == 0);
+    assert(stack.peek() == null);
+}
+
 test "Stack: push/pop/peek/empty" {
     const testing = @import("std").testing;
     const Item = struct { link: StackLink = .{} };
