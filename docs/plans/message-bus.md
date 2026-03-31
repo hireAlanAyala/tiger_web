@@ -1041,6 +1041,23 @@ The transaction (`begin_batch`) is opened in `.handle` and
 closed (`commit_batch`) when `.handle_pending` completes. The
 batch stays open across ticks — safe for single-threaded.
 
+### SidecarClient parameterized on IO type
+
+`SidecarClient` becomes `SidecarClientType(IO)` — parameterized
+on the IO type, matching the comptime cascade pattern used by
+`ServerType(App, IO, Storage)` and `ConnectionType(IO, Options)`.
+
+**No `anytype` for bus parameters.** TB's principle: the types
+are the documentation. `anytype` hides the interface — you can't
+see what `bus` needs from the type signature. Pay the comptime
+cascade: SidecarClient is parameterized on IO, bus type is
+concrete, every call site has a real type.
+
+The cascade: `ServerType(App, IO, Storage)` creates the bus as
+`MessageBusType(IO, sidecar_options)`. `App` exposes
+`SidecarClientType(IO)`. The server uses both. All types resolve
+at comptime. No runtime cost. Full type safety.
+
 ### SidecarClient changes
 
 ```zig
