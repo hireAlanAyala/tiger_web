@@ -31,13 +31,18 @@ simulation).
 
 ### What to read
 
+- `src/message_bus.zig` — **closest analog.** TCP stream reassembly
+  for replica communication. Handles partial reads, accumulates
+  bytes into message buffers, processes when complete. This is the
+  buffering pattern we need for sidecar frames.
 - `src/vsr/grid.zig` — how Grid submits read/write operations to
-  the IO layer, how callbacks resume processing.
+  the IO layer, how callbacks resume processing. (Note: Grid uses
+  io_uring with block-aligned reads — no partial data. The
+  buffering pattern is in message_bus, not Grid.)
 - `src/testing/storage.zig` (or similar) — how SimStorage intercepts
   Grid IO, delivers results deterministically via PRNG.
-- How the Grid handles partial IO completion (if at all).
 - How SimStorage registers with the IO layer.
-- How Grid operations chain (read → process → write → callback).
+- How Grid/message_bus operations chain (send → recv sequences).
 
 ### What to look for
 
