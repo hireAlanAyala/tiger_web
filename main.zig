@@ -89,13 +89,16 @@ pub fn main() !void {
     defer wal.deinit();
 
     var time_real = TimeReal{};
-    // Server.init creates embedded Bus/Client and wires sm.handlers
-    // (TB pattern: Replica.init creates MessageBus last).
+    var server = try Server.init(std.heap.page_allocator, &io, &sm, listen_fd, time_real.time(), &wal);
+
+    // Wire sidecar Bus/Client AFTER server is at its final address.
+    // Two-phase init: Server.init returns the struct, wire_sidecar
+    // takes &server — pointers to embedded fields are now stable.
     const sidecar_path: ?[]const u8 = if (App.sidecar_enabled)
         (cli.sidecar orelse "/tmp/tiger_web_sidecar.sock")
     else
         null;
-    var server = try Server.init(std.heap.page_allocator, &io, &sm, listen_fd, time_real.time(), &wal, sidecar_path);
+    try server.wire_sidecar(std.heap.page_allocator, sidecar_path);
 
     log.info("storage=sqlite wal=tiger_web.wal tick_interval={d}ms connections={d}", .{
         tick_ns / std.time.ns_per_ms,
