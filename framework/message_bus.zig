@@ -573,11 +573,15 @@ pub fn MessageBusType(comptime IO: type, comptime options: Options) type {
         /// Pool sizing: recv buffer (1) + send queue (send_queue_max) + burst (1).
         const messages_max: u32 = 1 + options.send_queue_max + 1;
 
-        pub fn init_listener(
+        /// Initialize pool and state. Does NOT start listening.
+        /// Call start_listener() after the callback context is available.
+        /// Two-phase init: init() sets up memory, start_listener() binds
+        /// the socket. This supports cases where the callback context
+        /// (e.g., the server) is created after the bus.
+        pub fn init_pool(
             self: *Self,
             allocator: std.mem.Allocator,
             io: *IO,
-            path: []const u8,
             context: *anyopaque,
             on_frame_fn: *const fn (*anyopaque, []const u8) void,
             on_close_fn: ?*const fn (*anyopaque) void,
@@ -610,7 +614,27 @@ pub fn MessageBusType(comptime IO: type, comptime options: Options) type {
             self.on_frame_fn = on_frame_fn;
             self.on_close_fn = on_close_fn;
             self.context = context;
+        }
 
+        /// Full init — init pool + start listening. Convenience for
+        /// cases where the callback context is available at init time.
+        pub fn init_listener(
+            self: *Self,
+            allocator: std.mem.Allocator,
+            io: *IO,
+            path: []const u8,
+            context: *anyopaque,
+            on_frame_fn: *const fn (*anyopaque, []const u8) void,
+            on_close_fn: ?*const fn (*anyopaque) void,
+        ) !void {
+            try self.init_pool(allocator, io, context, on_frame_fn, on_close_fn);
+            self.start_listener(path);
+        }
+
+        /// Start listening on the given unix socket path.
+        /// Called after init_pool when the callback context wasn't
+        /// available at init time (two-phase init).
+        pub fn start_listener(self: *Self, path: []const u8) void {
             self.listen(path);
         }
 
