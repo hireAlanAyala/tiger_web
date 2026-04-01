@@ -53,7 +53,7 @@ function has(body: string, text: string): boolean {
 
 async function startServer(): Promise<void> {
   execSync("npm run build", { cwd: `${PROJ}/examples/ecommerce-ts`, stdio: "pipe" });
-  execSync(`${PROJ}/zig/zig build`, { cwd: PROJ, stdio: "pipe" });
+  execSync(`${PROJ}/zig/zig build -Dsidecar=true`, { cwd: PROJ, stdio: "pipe" });
 
   // Server starts first — listens on unix socket, waits for sidecar.
   server = spawn(
@@ -73,11 +73,15 @@ async function startServer(): Promise<void> {
     stdio: "pipe",
   });
 
-  // Wait for server ready (sidecar connects, server starts accepting HTTP).
+  // Wait for server ready — must get 200, not 503 (sidecar not connected yet).
   for (let i = 0; i < 30; i++) {
-    try { await fetch(`${BASE}/`); return; } catch { await sleep(200); }
+    try {
+      const r = await fetch(`${BASE}/products`);
+      if (r.status === 200) return;
+    } catch {}
+    await sleep(200);
   }
-  throw new Error("Server failed to start");
+  throw new Error("Server failed to start (sidecar may not have connected)");
 }
 
 function stopServer(): void {
@@ -393,6 +397,38 @@ async function testSidecarAlive(): Promise<void> {
   assert(sidecar!.exitCode === null, "sidecar has not exited");
 }
 
+// --- Crash / Recovery ---
+
+async function testSidecarCrashRecovery(): Promise<void> {
+  // Kill the sidecar — server should return 503.
+  assert(sidecar !== null, "sidecar exists before kill");
+  const oldPid = sidecar!.pid;
+  sidecar!.kill("SIGKILL");
+  await sleep(500); // Let the server detect disconnect
+
+  // Requests should get 503 while sidecar is down.
+  const r503 = await req("GET", "/products");
+  assert(r503.status === 503, `crash recovery: 503 while down (got ${r503.status})`);
+
+  // Restart sidecar — server should re-accept and route again.
+  sidecar = spawn("npx", ["tsx", `${PROJ}/adapters/call_runtime.ts`, SOCK], {
+    cwd: `${PROJ}/examples/ecommerce-ts`,
+    stdio: "pipe",
+  });
+
+  // Wait for sidecar to connect and READY handshake.
+  for (let i = 0; i < 30; i++) {
+    const check = await req("GET", "/products");
+    if (check.status === 200) break;
+    await sleep(200);
+  }
+
+  // Requests should work again. Data persists (SQLite).
+  const r200 = await req("GET", "/products");
+  assert(r200.status === 200, `crash recovery: 200 after restart (got ${r200.status})`);
+  assert(has(r200.body, "Another Item"), "crash recovery: data persists after restart");
+}
+
 // --- Runner ---
 
 async function main(): Promise<void> {
@@ -441,8 +477,11 @@ async function main(): Promise<void> {
     // Query param routing
     await testQueryParamRouting();
 
-    // Sidecar health
+    // Sidecar health (before crash test)
     await testSidecarAlive();
+
+    // Crash / Recovery (must be last — kills and restarts sidecar)
+    await testSidecarCrashRecovery();
 
   } catch (err) {
     console.error("Test harness error:", err);
