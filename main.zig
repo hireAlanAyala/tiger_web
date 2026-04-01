@@ -88,13 +88,10 @@ pub fn main() !void {
         Server.max_connections,
     });
     if (cli.log_debug) log.info("log_level=debug log_trace={}", .{cli.log_trace});
-    // Sidecar mode: server creates bus + client, tick_accept handles connection.
-    if (cli.sidecar) |path| {
-        App.sidecar_mode = true;
-        server.init_sidecar(std.heap.page_allocator, path) catch {
-            log.err("sidecar init failed on {s}", .{path});
-            std.process.exit(1);
-        };
+    // Sidecar mode: Phase 2 will add SidecarHandlersType behind the
+    // handler interface. For now, sidecar flag is parsed but not acted on.
+    if (cli.sidecar != null) {
+        log.info("sidecar mode requested — not yet implemented (Phase 2)", .{});
     }
 
     log.info("listening on port {d}", .{actual_port});

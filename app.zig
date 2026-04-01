@@ -215,11 +215,9 @@ pub const SM = StateMachineType(Storage);
 
 pub const Wal = @import("framework/wal.zig").WalType(Operation);
 
-/// Whether sidecar mode is enabled. Set by main.zig at startup.
-/// In sidecar mode, the server short-circuits handlers and delegates
-/// to the sidecar via the message bus. The handlers themselves have
-/// no sidecar knowledge — this flag is checked by the server only.
-pub var sidecar_mode: bool = false;
+// Sidecar mode: Phase 2 will add comptime handler selection here.
+// pub const Handlers = if (sidecar) SidecarHandlersType(Storage) else NativeHandlersType(Storage);
+// For now, only native handlers are available.
 
 /// Translate an HTTP request into a typed Message. Returns null if the
 /// request doesn't map to a valid operation.
