@@ -42,6 +42,7 @@ fn fuzz_log(
 const Fuzzers = .{
     .state_machine = @import("fuzz.zig"),
     .replay = @import("replay_fuzz.zig"),
+    .message_bus = @import("message_bus_fuzz.zig"),
     // TODO: sidecar_fuzz.zig needs rewrite for SidecarClientType(IO) + FuzzIO (Phase 3).
     // Disabled until then — the old fuzzer references deleted SidecarClient API.
     // .sidecar = @import("sidecar_fuzz.zig"),
@@ -93,6 +94,7 @@ fn main_smoke(gpa: std.mem.Allocator) !void {
             .canary => continue,
             .state_machine => 10_000,
             .replay => 5_000,
+            .message_bus => 10_000,
             .row_format => 10_000,
         };
 
