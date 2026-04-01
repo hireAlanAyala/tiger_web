@@ -238,35 +238,27 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
                 // If a pipeline is in-flight, don't start another.
                 if (server.commit_stage != .idle) break;
 
-                // Re-parse HTTP from recv_buf. Deterministic — same bytes, same result.
-                const parsed = switch (http.parse_request(conn.recv_buf[0..conn.recv_pos])) {
-                    .complete => |p| p,
-                    // Frame was validated by connection, re-parse must succeed.
-                    .incomplete, .invalid => unreachable,
-                };
-
-                conn.is_datastar_request = parsed.is_datastar_request;
-
                 // Start pipeline at .route — routing is the first stage.
-                // commit_dispatch handles translate + advance to prefetch.
+                // commit_dispatch parses HTTP and routes.
                 server.commit_stage = .route;
                 server.commit_connection = conn;
                 server.commit_dispatch();
             }
         }
 
-        /// Pipeline state machine — drives prefetch → handle → render.
-        /// Called from process_inbox (start) and process_sidecar (resume).
+        /// Pipeline state machine — drives route → prefetch → handle → render.
+        /// Called from process_inbox (start). When a handler returns .pending,
+        /// the async callback calls commit_dispatch to resume.
         /// TB's commit_dispatch pattern.
         ///
         /// Each stage either completes (advance to next) or pends (return).
-        /// For Zig handlers, all stages complete in one call — the loop
-        /// runs start to finish. For sidecar handlers, a stage may pend
-        /// waiting for a CALL RESULT. process_sidecar resumes.
+        /// For native handlers, all stages complete in one call. For async
+        /// handlers (Phase 2), a stage may return .pending.
         fn commit_dispatch(server: *Server) void {
-            // Re-entrancy guard (TB pattern). Prevents nested execution
-            // if sidecar_on_frame fires during dispatch (e.g., send_now
-            // fast path completes inline and triggers a recv callback).
+            // Re-entrancy guard (TB pattern). Currently no async callbacks
+            // (native handlers are sync). Phase 2 adds async handler callbacks
+            // that call commit_dispatch to resume — the guard prevents nested
+            // execution.
             assert(!server.commit_dispatch_entered);
             server.commit_dispatch_entered = true;
             defer server.commit_dispatch_entered = false;
@@ -279,12 +271,13 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
                     .idle => return,
 
                     .route => {
-                        // Route: resolve raw HTTP to typed Message.
-                        // Re-parse from conn.recv_buf (deterministic).
+                        // Route: parse HTTP and resolve to typed Message.
+                        // Parse from conn.recv_buf (deterministic — same bytes, same result).
                         const parsed = switch (http.parse_request(conn.recv_buf[0..conn.recv_pos])) {
                             .complete => |p| p,
                             .incomplete, .invalid => unreachable,
                         };
+                        conn.is_datastar_request = parsed.is_datastar_request;
 
                         var msg = App.translate(parsed.method, parsed.path, parsed.body) orelse {
                             log.mark.warn("unmapped request: {s} {s} fd={d}", .{ @tagName(parsed.method), parsed.path, conn.fd });
@@ -399,8 +392,7 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
             }
         }
 
-        /// Encode response and send to client. Shared by native render
-        /// and sidecar render stages.
+        /// Encode response and send to client.
         fn encode_and_respond(
             server: *Server,
             conn: *Connection,
@@ -430,8 +422,6 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
             server.pipeline_reset();
         }
 
-        /// Register sidecar fd for readability notification via epoll.
-        /// Called when a sidecar CALL is in-flight (.pending).
         /// Reset the pipeline to idle. Called on completion, busy, or failure.
         fn pipeline_reset(server: *Server) void {
             server.commit_stage = .idle;
