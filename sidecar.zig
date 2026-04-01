@@ -49,6 +49,10 @@ pub fn SidecarClientType(comptime IO: type) type {
         // CALL/RESULT state machine.
         call_state: CallState = .idle,
         call_query_count: u32 = 0,
+        /// The request_id sent in the most recent CALL. Validated
+        /// against the request_id in every RESULT and QUERY frame.
+        /// Detects stale or mismatched responses.
+        expected_request_id: u32 = 0,
         result_flag: protocol.ResultFlag = .success,
         result_data: []const u8 = "",
         /// Prefetch result — stored between prefetch and handle phases.
@@ -94,13 +98,13 @@ pub fn SidecarClientType(comptime IO: type) type {
 
         /// Submit a CALL frame via the bus. Builds the CALL payload
         /// into a pool message (zero-copy) and sends it.
-        pub fn call_submit(self: *Self, bus: *Bus, function_name: []const u8, args: []const u8) bool {
+        pub fn call_submit(self: *Self, bus: *Bus, function_name: []const u8, args: []const u8, request_id: u32) bool {
             assert(self.call_state == .idle);
 
             const msg = bus.pool.get_message();
             const call_len = protocol.build_call(
                 msg.buffer[Bus.Connection.frame_header_size..],
-                0, // request_id
+                request_id,
                 function_name,
                 args,
             ) orelse {
@@ -112,6 +116,7 @@ pub fn SidecarClientType(comptime IO: type) type {
             bus.send_message(msg, @intCast(call_len));
             self.call_state = .receiving;
             self.call_query_count = 0;
+            self.expected_request_id = request_id;
             return true;
         }
 
@@ -133,6 +138,15 @@ pub fn SidecarClientType(comptime IO: type) type {
                 self.call_state = .failed;
                 return;
             };
+
+            // Validate request_id — detect stale or mismatched responses.
+            if (parsed.request_id != self.expected_request_id) {
+                log.warn("call: request_id mismatch: expected {d}, got {d}", .{
+                    self.expected_request_id, parsed.request_id,
+                });
+                self.call_state = .failed;
+                return;
+            }
 
             switch (parsed.tag) {
                 .result => {
@@ -208,11 +222,12 @@ pub fn SidecarClientType(comptime IO: type) type {
         pub fn reset_call_state(self: *Self) void {
             self.call_state = .idle;
             self.call_query_count = 0;
+            self.expected_request_id = 0;
             self.result_flag = .success;
             self.result_data = "";
         }
 
-        fn reset_request_state(self: *Self) void {
+        pub fn reset_request_state(self: *Self) void {
             self.state_pos = 0;
             self.handle_writes = "";
             self.handle_write_count = 0;
