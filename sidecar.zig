@@ -23,8 +23,13 @@ const log = std.log.scoped(.sidecar);
 /// The IO type flows through from ServerType → MessageBusType →
 /// ConnectionType → SidecarClientType. All types resolve at comptime.
 pub fn SidecarClientType(comptime IO: type) type {
-    // Bus options — sidecar is serial (2 slots: CALL + QUERY_RESULT).
-    const bus_options: Options = .{ .send_queue_max = 2, .frame_max = protocol.frame_max };
+    // Bus options — sized for worst-case: 1 CALL + queries_max QUERY_RESULTs.
+    // The sidecar protocol is serial (one QUERY at a time), but the
+    // transport must not assert-crash if a rogue sidecar bursts QUERYs.
+    const bus_options: Options = .{
+        .send_queue_max = 1 + protocol.queries_max,
+        .frame_max = protocol.frame_max,
+    };
 
     const Bus = message_bus.MessageBusType(IO, bus_options);
 
@@ -146,7 +151,14 @@ pub fn SidecarClientType(comptime IO: type) type {
             query_ctx: ?*anyopaque,
             comptime queries_max: u32,
         ) void {
-            assert(self.call_state == .receiving);
+            // Don't assert — an unsolicited frame from a rogue sidecar
+            // must not crash the server. Detect and kill instead.
+            if (self.call_state != .receiving) {
+                log.warn("call: unsolicited frame (call_state={s})", .{@tagName(self.call_state)});
+                self.call_state = .failed;
+                self.protocol_violation = true;
+                return;
+            }
 
             const parsed = protocol.parse_sidecar_frame(frame) orelse {
                 log.warn("call: invalid frame from sidecar", .{});
@@ -201,6 +213,15 @@ pub fn SidecarClientType(comptime IO: type) type {
                         self.call_state = .failed;
                         return;
                     };
+
+                    // Check send queue before allocating — a rogue sidecar
+                    // bursting QUERYs must not assert-crash the server.
+                    if (bus.connection.send_queue.full()) {
+                        log.warn("call: send queue full, cannot queue QUERY_RESULT", .{});
+                        self.call_state = .failed;
+                        self.protocol_violation = true;
+                        return;
+                    }
 
                     // Build QUERY_RESULT into a pool message (zero-copy).
                     const msg = bus.pool.get_message();
