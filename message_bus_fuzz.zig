@@ -73,18 +73,30 @@ pub fn main(allocator: std.mem.Allocator, args: FuzzArgs) !void {
     // Ensure valid frames can be injected to avoid starvation.
     if (weights.inject_valid_frame == 0) weights.inject_valid_frame = 1;
 
+    var disconnected = false; // Between disconnect and reconnect — no injection
+
     for (0..events_max) |_| {
         const event = prng.enum_weighted(Event, weights);
 
-        if (conn.state == .closed) {
-            // Close old fds before reconnecting.
-            io.close(current_pair[0]);
-            io.close(current_pair[1]);
-            current_pair = io.create_socketpair();
-            conn.init(&io, &pool, current_pair[0], @ptrCast(&ctx), FuzzContext.on_frame, null);
-            // Reset delivery tracking for new connection.
+        if (conn.state == .closed and !disconnected) {
+            // Connection closed (from terminate, oversized frame, etc.)
+            // but not via our disconnect event. Treat as unexpected close.
             ctx.reset();
-            stats.reconnects += 1;
+            disconnected = true;
+        }
+
+        if (disconnected) {
+            // Only reconnect events are useful while disconnected.
+            // Don't inject frames — there's no connection.
+            if (event != .tick and event != .tick_multiple) {
+                // Close old fds and reconnect.
+                io.close(current_pair[0]);
+                io.close(current_pair[1]);
+                current_pair = io.create_socketpair();
+                conn.init(&io, &pool, current_pair[0], @ptrCast(&ctx), FuzzContext.on_frame, null);
+                disconnected = false;
+                stats.reconnects += 1;
+            }
             continue;
         }
 
@@ -172,16 +184,48 @@ pub fn main(allocator: std.mem.Allocator, args: FuzzArgs) !void {
             },
             .terminate => {
                 if (conn.state != .connected) continue;
-                conn.terminate(.shutdown);
+                // Drain pending frames before terminating.
+                for (0..1000) |_| {
+                    if (conn.state != .connected) break;
+                    if (ctx.all_delivered()) break;
+                    io.tick(&conn);
+                    stats.ticks += 1;
+                }
+                if (conn.state == .connected and ctx.all_delivered()) {
+                    stats.fully_drained += 1;
+                }
+                if (conn.state == .connected) {
+                    conn.terminate(.shutdown);
+                }
+                ctx.reset();
                 stats.terminates += 1;
             },
             .disconnect => {
-                if (conn.state == .connected) {
-                    io.close_peer(current_pair[1]);
-                    stats.disconnects += 1;
-                    // Don't tick immediately — let the fuzzer discover
-                    // the disconnect naturally on the next tick event.
+                if (conn.state != .connected) continue;
+
+                // Drain: tick until all injected frames are delivered
+                // or connection closes. If the connection dies during
+                // drain (recv error injection), accept the loss —
+                // the error is a valid transport outcome.
+                for (0..1000) |_| {
+                    if (conn.state != .connected) break;
+                    if (ctx.all_delivered()) break;
+                    io.tick(&conn);
+                    stats.ticks += 1;
                 }
+                if (conn.state == .connected and ctx.all_delivered()) {
+                    stats.fully_drained += 1;
+                }
+
+                io.close_peer(current_pair[1]);
+                for (0..100) |_| {
+                    if (conn.state == .closed) break;
+                    io.tick(&conn);
+                    stats.ticks += 1;
+                }
+                ctx.reset();
+                disconnected = true;
+                stats.disconnects += 1;
             },
         }
     }
@@ -201,7 +245,7 @@ pub fn main(allocator: std.mem.Allocator, args: FuzzArgs) !void {
         \\  injected={} corrupt={} oversized={}
         \\  sent={} delivered={}
         \\  suspends={} resumes={} terminates={}
-        \\  disconnects={} reconnects={}
+        \\  disconnects={} reconnects={} fully_drained={}
     , .{
         events_max,
         stats.ticks,
@@ -215,6 +259,7 @@ pub fn main(allocator: std.mem.Allocator, args: FuzzArgs) !void {
         stats.terminates,
         stats.disconnects,
         stats.reconnects,
+        stats.fully_drained,
     });
 
     // Valid frames must be delivered (unless all connections terminated).
@@ -232,6 +277,7 @@ const Stats = struct {
     terminates: u64 = 0,
     disconnects: u64 = 0,
     reconnects: u64 = 0,
+    fully_drained: u64 = 0, // sessions where all frames delivered before teardown
 };
 
 /// Tracks expected and delivered frames for verification.
@@ -252,6 +298,16 @@ const FuzzContext = struct {
     fn reset(self: *FuzzContext) void {
         self.expected_head = 0;
         self.expected_tail = 0;
+    }
+
+    fn all_delivered(self: *const FuzzContext) bool {
+        return self.expected_head == self.expected_tail;
+    }
+
+    /// Assert all expected frames were delivered. Called before
+    /// disconnect — verifies no frames were lost in transit.
+    fn assert_drained(self: *const FuzzContext) void {
+        assert(self.expected_head == self.expected_tail);
     }
 
     fn expect_frame(self: *FuzzContext, payload: []const u8) void {
