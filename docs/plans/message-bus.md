@@ -966,12 +966,168 @@ is also new — wraps `posix.shutdown`, SimIO marks the connection.
 - [ ] `SimIO.shutdown` — marks connection shutdown state.
 - [ ] `FuzzIO.send_now` — configurable `send_now_probability`.
 
+## Phase 1.5: Gateway Layer — Protocol-Agnostic Server
+
+> **TB insight:** The replica never parses network packets. It
+> receives `*Message` from the bus. The bus handles all wire-level
+> concerns. The replica is a pure message processor.
+
+The server is currently an HTTP server — it parses HTTP, extracts
+cookies, routes paths. With the sidecar, it also orchestrates
+CALL/RESULT exchanges. These are two protocol-specific code paths
+baked into the framework.
+
+The gateway pattern makes the server protocol-agnostic. Gateways
+translate external protocols into `Message` values. The server
+only processes Messages. It doesn't know HTTP or sidecar exist.
+
+### Architecture
+
+```
+Browser ── HTTP ──→ [HTTP Gateway] ──→ inbox ──→ Server ──→ SM
+                                         ↑
+Sidecar ── frames ─→ [Sidecar Gateway] ──┘
+```
+
+Each gateway:
+1. Accepts connections (HTTP TCP, sidecar unix socket)
+2. Parses the protocol (HTTP headers, sidecar CALL/RESULT)
+3. Produces typed `Message` values
+4. Pushes to the server's inbox
+5. Receives response Messages from the server
+6. Formats the response in the protocol (HTTP response, RESULT frame)
+
+The server's `process_inbox` pops Messages and dispatches. It
+doesn't call `http.parse_request` or know about sidecar stages.
+One code path for all protocols.
+
+### What changes
+
+**Server (`framework/server.zig`):**
+- `process_inbox` pops Messages from an inbox, not from HTTP
+  connections directly. No `http.parse_request`, no `App.translate`.
+- `commit_dispatch` has only native stages: prefetch, handle,
+  render. No sidecar_route/sidecar_prefetch/sidecar_handle/
+  sidecar_render. Those move to the sidecar gateway.
+- Server doesn't import `http.zig`.
+
+**HTTP Gateway (new, `framework/http_gateway.zig`):**
+- Owns the HTTP listener + connection pool (current server accept
+  + connection.zig).
+- Parses HTTP, calls `App.translate` to route.
+- Pushes `Message` to server inbox.
+- Receives response from server, encodes HTTP response.
+- Owns cookie/auth extraction (currently in process_inbox).
+
+**Sidecar Gateway (replaces current sidecar orchestration):**
+- Owns the sidecar MessageBus + SidecarClient.
+- Handles the 4-stage CALL/RESULT flow (route → prefetch →
+  handle → render) internally.
+- Produces a final `Message` for the server (after routing) and
+  a response `Message` back to the sidecar (after render).
+- The server sees ONE Message per request, processes it through
+  SM, returns ONE response. No sidecar stages in the server.
+
+**Inbox:**
+- Bounded queue of `Message` values.
+- HTTP gateway pushes parsed HTTP requests.
+- Sidecar gateway pushes routed requests.
+- Server pops and processes.
+
+### What this eliminates
+
+- `sidecar_route`, `sidecar_prefetch`, `sidecar_handle`,
+  `sidecar_render` stages in `commit_dispatch` — all gone.
+- `if (App.sidecar_mode)` checks in the server — gone.
+- `SidecarClient` and `SidecarBus` fields on the server — gone.
+  They move to the sidecar gateway.
+- HTTP parsing in `process_inbox` — gone. Moves to HTTP gateway.
+- The server becomes a pure message processor like TB's replica.
+
+### Sidecar gateway flow
+
+The sidecar gateway handles the entire CALL/RESULT exchange:
+
+```
+HTTP Gateway → inbox → Server → SM prefetch/commit/render → response
+                                 ↓
+Sidecar Gateway:
+  1. Receive Message from inbox (routed request)
+  2. CALL "prefetch" → wait → RESULT
+  3. CALL "handle" → wait → RESULT → execute writes
+  4. CALL "render" → wait → RESULT (HTML)
+  5. Return response Message to server for encoding
+```
+
+Wait — this doesn't work. The sidecar gateway can't call the SM
+because the SM is on the server. The sidecar flow is:
+
+```
+1. HTTP arrives at HTTP gateway
+2. In sidecar mode: HTTP gateway delegates to sidecar gateway
+3. Sidecar gateway: CALL "route" → RESULT → Message
+4. Push Message to server inbox
+5. Server processes Message through pipeline:
+   - Prefetch: server delegates to sidecar gateway (CALL "prefetch")
+   - Handle: server delegates to sidecar gateway (CALL "handle")
+   - Render: server delegates to sidecar gateway (CALL "render")
+6. Server returns response
+7. HTTP gateway encodes HTTP response
+```
+
+The server still orchestrates the pipeline stages — but instead
+of directly calling SM methods or sidecar methods, it calls
+a generic `PrefetchProvider` interface. In native mode, the
+provider is the SM. In sidecar mode, the provider is the sidecar
+gateway. The server doesn't know which.
+
+This is a deeper refactor. The server's pipeline becomes:
+
+```zig
+// Server pipeline — generic over provider
+const Provider = if (sidecar_mode) SidecarGateway else StateMachine;
+
+.prefetch => {
+    switch (provider.prefetch(msg)) {
+        .complete => { advance to handle },
+        .busy => { retry },
+        .pending => { return }, // async — callback resumes
+    }
+},
+```
+
+### Dependencies
+
+```
+Phase 0:   MessagePool + Connection (*Message pointers)
+Phase 1:   Connection + MessageBus (transport primitive)
+Phase 1.5: Gateway layer (protocol-agnostic server)
+Phase 2:   Sidecar gateway (replaces sidecar stages)
+```
+
+Phase 1.5 is the HTTP gateway extraction. Phase 2 becomes the
+sidecar gateway using the same pattern. Both produce Messages
+for the server. The server is protocol-free.
+
+### Checklist
+
+- [ ] Define `Message` inbox interface (bounded queue).
+- [ ] Extract HTTP gateway from server (`framework/http_gateway.zig`).
+- [ ] Move HTTP parsing, App.translate, cookie extraction to gateway.
+- [ ] Move HTTP connection pool + accept to gateway.
+- [ ] Server `process_inbox` pops from inbox, not HTTP connections.
+- [ ] Server `commit_dispatch` — native stages only.
+- [ ] Server doesn't import `http.zig`.
+- [ ] Sidecar gateway wraps SidecarClient + MessageBus.
+- [ ] Sidecar gateway produces Messages for inbox.
+- [ ] All existing tests pass.
+- [ ] Sim tests pass (SimIO drives gateway, not server directly).
+
 ## Phase 2: Rewire SidecarClient
 
-Replace blocking `protocol.read_frame`/`write_frame` with
-MessageBus. SidecarClient becomes a pure protocol state machine
-— no IO calls. All three pipeline phases (prefetch, handle,
-render) are fully async through the bus.
+With the gateway layer in place, Phase 2 simplifies. The sidecar
+gateway owns the bus + client and handles the CALL/RESULT flow.
+The server sees Messages — same as from the HTTP gateway.
 
 ### Async handle decision
 
@@ -1637,17 +1793,24 @@ If the frame arrives, it's valid. Faults affect *whether* and
 ## Dependencies
 
 ```
-Phase 1: Connection + MessageBus  (standalone, unit-testable)
+Phase 0:   MessagePool + Connection (*Message pointers) ✓ DONE
+Phase 1:   Connection + MessageBus (transport primitive) ✓ DONE
+Phase 1.5: Gateway layer (protocol-agnostic server)
     ↓
-Phase 2: Rewire SidecarClient    (depends on Phase 1)
+Phase 2:   Sidecar gateway (sidecar as gateway, not server stages)
     ↓
-Phase 3: MessageBus Fuzzer       (depends on Phase 1, can start
-    ↓                             during Phase 2)
-Phase 4: SimSidecar              (depends on Phase 1 + 2)
+Phase 3:   MessageBus Fuzzer (can start during Phase 2)
+    ↓
+Phase 4:   SimSidecar
 ```
 
-Build bottom-up. Connection is fuzzable before MessageBus
-integration. Phase 3 can overlap with Phase 2.
+Phase 1.5 extracts the HTTP gateway from the server. Phase 2
+adds the sidecar gateway using the same pattern. Both produce
+Messages. The server is a pure message processor.
+
+Phase 1.5 is the architectural foundation — the server stops
+being an HTTP server and becomes TB's replica pattern: a message
+processor that doesn't know about protocols.
 
 ## TB audit result
 
