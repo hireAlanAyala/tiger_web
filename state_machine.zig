@@ -274,8 +274,25 @@ pub fn StateMachineType(comptime Storage: type, comptime Handlers: type) type {
             identity: Identity,
         };
 
-        /// Commit — always synchronous. TB pattern: execute never waits.
-        /// All data loaded during prefetch. Execute only processes.
+        /// Commit — ALWAYS synchronous. Never returns .pending.
+        ///
+        /// TB pattern: execute never waits. All data is loaded during
+        /// prefetch (async). Execute only processes loaded data (sync).
+        /// No transaction across async boundaries.
+        ///
+        /// For sidecar: the handle CALL happens during PREFETCH, not
+        /// during execute. Prefetch sends CALL "handle" and returns
+        /// .pending. When the RESULT arrives, prefetch resumes and
+        /// stores the handle result. Execute then parses the loaded
+        /// result and executes SQL writes synchronously.
+        ///
+        /// The async/sync split:
+        ///   prefetch: CALL route + prefetch + handle (async, .pending)
+        ///   execute:  parse handle RESULT, db.execute writes (sync)
+        ///   render:   CALL render (async, .pending)
+        ///
+        /// DO NOT add .pending to this function. If execute needs
+        /// async IO, the data should have been loaded in prefetch.
         pub fn commit(self: *StateMachine, msg: message.Message) CommitOutput {
             const cache = self.prefetch_cache.?;
             defer self.prefetch_cache = null;

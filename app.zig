@@ -139,8 +139,10 @@ pub fn HandlersType(comptime StorageParam: type) type {
             return ro.query_raw(sql, params_buf, param_count, mode, out_buf);
         }
 
-        /// Execute dispatch. Always synchronous — all data loaded during
-        /// prefetch. TB pattern: execute never waits, never returns .pending.
+        /// Execute dispatch. ALWAYS synchronous — returns HandleResult,
+        /// never null or .pending. All data loaded during prefetch.
+        /// TB pattern: execute never waits. DO NOT make this async.
+        /// If execute needs data from the sidecar, load it in prefetch.
         pub fn handler_execute(
             cache: PrefetchCache,
             msg: Message,
