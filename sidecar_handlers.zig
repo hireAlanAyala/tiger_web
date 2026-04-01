@@ -31,8 +31,8 @@ const log = std.log.scoped(.sidecar_handlers);
 
 pub fn SidecarHandlersType(comptime StorageParam: type, comptime IO: type) type {
     const SidecarClient = @import("sidecar.zig").SidecarClientType(IO);
-    const bus_options: message_bus.Options = .{ .send_queue_max = 2, .frame_max = protocol.frame_max };
-    const Bus = message_bus.MessageBusType(IO, bus_options);
+    // Bus type from SidecarClient — single source of truth for options.
+    const Bus = SidecarClient.BusType;
 
     return struct {
         const Self = @This();
@@ -421,8 +421,11 @@ pub fn SidecarHandlersType(comptime StorageParam: type, comptime IO: type) type 
                 self.handle_status = .storage_error;
                 return;
             }
+            // data is already in state_buf (copied by on_frame's
+            // copy_state). No need to copy again — the slice is
+            // stable and owned. Avoids wasting state_buf capacity.
             c.handle_writes = if (pos < data.len)
-                c.copy_state(data[pos..])
+                data[pos..]
             else
                 "";
         }
