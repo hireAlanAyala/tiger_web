@@ -1401,142 +1401,54 @@ fuzzer must use the bus, not call `on_frame` directly. Calling
 context, `recv_submitted` state, and `maybe(state == .terminating)`
 checks. Bugs at the integration boundary would be invisible.
 
-### message_bus_fuzz.zig — transport isolation
+### message_bus_fuzz.zig — transport isolation (DONE)
 
-Dedicated transport fuzzer with a synthetic IO layer (TB's
-`message_bus_fuzz.zig` pattern). Connection is tested directly
-(hand it an fd from FuzzIO). MessageBus accept logic tested
-separately.
+FuzzIO embedded in `message_bus_fuzz.zig` (TB pattern). Exercises
+`ConnectionType(FuzzIO)` — one connection per seed, no reconnects.
 
-### Synthetic IO (TB pattern)
+**FuzzIO design (implemented):**
+- Synchronous tick (no priority queue — sufficient for serial pipeline)
+- Bidirectional socket pairs with static send buffers (64KB)
+- Random recv/send ordering per tick
+- Recv leaves completion pending when no data (no spurious -1)
+- Send leaves completion pending when buffer full (no 0-byte)
+- inject_data returns false when buffer full (no silent truncation)
+- fd recycling with aliasing assertion
 
-Not a simple tick-and-complete stub. A proper synthetic IO with:
+**Fault injection (swarm-tested per seed):**
+- recv_partial_probability (20-80%)
+- send_partial_probability (20-80%)
+- send_now_success_probability (30-90%)
+- recv_error_probability (0-20%)
+- send_error_probability (0-10%)
+- Event weights via random_enum_weights (TB swarm pattern)
+- Destructive event weights capped to avoid early termination
 
-- **Priority-queue event scheduling.** Operations complete at
-  PRNG-chosen future ticks, not immediately. Models real async
-  timing where recv can complete before or after send.
-- **Synthetic connection pairing.** Accept creates a bidirectional
-  fd pair. Data sent on one fd appears in the other's recv buffer.
-  The fuzzer injects frames by writing to the "sidecar side" fd.
-- **Per-operation configurable failure ratios.** Each operation
-  (accept, recv, send, close) has an independent probability of
-  failing, with PRNG-selected error codes.
-- **Stateful partial transfer.** Send appends to a buffer with
-  an offset. Recv reads from the sender's buffer at a PRNG-chosen
-  chunk size. Models TCP buffering faithfully.
-- **Swarm testing.** All probabilities randomized per seed (TB
-  pattern). Each seed explores a different region of the
-  configuration space. `send_now_probability` controls how often
-  the fast path succeeds vs falls back to async.
+**What's tested:**
+- [x] Frame accumulation (random chunk sizes via partial recv)
+- [x] CRC validation (corrupt frames → terminate)
+- [x] Oversized frame rejection
+- [x] Partial sends + send_now fast path
+- [x] Send queue with send_frame + send_message (zero-copy)
+- [x] Backpressure (suspend_recv / resume_recv)
+- [x] Terminate initiated by consumer
+- [x] Disconnect (peer close → EOF)
+- [x] Send error injection (EPIPE/ECONNRESET equivalent)
+- [x] Re-entrancy: send_frame from on_frame (QUERY pattern)
+- [x] Re-entrancy: terminate from on_frame (try_drain_recv stops)
+- [x] Delivery verification (checksums in order, panic on mismatch)
+- [x] Error-free post-loop drain (hard assertion if alive + missing)
 
-```zig
-const FuzzIO = struct {
-    prng: stdx.PRNG,
-    events: PriorityQueue(Event),
-    connections: AutoArrayHashMap(fd_t, SocketConnection),
-    ticks: u64,
-    fd_next: fd_t,
+**Deterministic re-entrancy tests (message_bus.zig unit tests):**
+- [x] send_frame from on_frame — reply frame delivered
+- [x] terminate from on_frame — second frame not delivered
 
-    const SocketConnection = struct {
-        remote: ?fd_t,
-        sending: BoundedArray(u8, send_buf_max),
-        sending_offset: u32,
-        shutdown_recv: bool,
-        shutdown_send: bool,
-        closed: bool,
-        pending_recv: bool,
-        pending_send: bool,
-    };
-
-    const Options = struct {
-        recv_partial_probability: Ratio,
-        recv_error_probability: Ratio,
-        send_partial_probability: Ratio,
-        send_error_probability: Ratio,
-        send_now_probability: Ratio,    // fast path success rate
-        accept_error_probability: Ratio,
-    };
-
-    pub fn accept(...) void;    // PRNG: succeed or fail
-    pub fn recv(...) void;      // PRNG: 1..N bytes or error
-    pub fn send(...) void;      // PRNG: 1..N bytes or error
-    pub fn send_now(...) ?usize; // PRNG: succeed, partial, or null
-    pub fn close(...) void;
-    pub fn shutdown(...) void;
-    pub fn run(self: *FuzzIO) void;  // drain ready events
-};
-```
-
-### What to fuzz
-
-1. **Frame accumulation** — inject multi-frame payloads delivered
-   in random-sized chunks. Assert every frame delivered matches
-   what was injected, in order.
-2. **Checksum validation** — inject frames with corrupted checksums
-   or corrupted length prefixes. Assert bus terminates the
-   connection (never delivers a bad frame).
-3. **Partial sends** — send_callback returns < send_len. Assert
-   bus re-submits remaining bytes. Also test `send_now` returning
-   partial (fast path → async fallback mid-frame).
-4. **Send queue depth** — queue multiple frames rapidly. Assert
-   all frames are delivered in order. Test queue-full boundary.
-   Test `send_frame` while `send_submitted` is true (frame goes
-   to queue, not immediate send).
-5. **Interleaved send/recv** — send a frame while receiving.
-   Exercises the QUERY sub-protocol pattern (suspend → send →
-   resume → recv). Test re-entrancy: `on_frame_fn` calls
-   `send_frame()`.
-6. **Disconnect mid-transfer** — recv returns 0 (orderly) or
-   error (network) mid-frame. Assert connection transitions to
-   `.terminating`, then `.closed`. Assert orderly vs error uses
-   correct termination mode.
-7. **Accept failures** — accept returns error. Assert bus retries
-   on next `tick_accept()`. Assert connection stays `.closed`.
-8. **Backpressure** — suspend_recv, inject more data, resume.
-   Assert no data loss, frames delivered in order after resume.
-9. **Terminate during IO** — call terminate() while recv_submitted
-   or send_submitted is true. Assert 3-phase completes cleanly.
-   Assert submitted flags set to true during close.
-10. **Terminate from on_frame_fn** — consumer calls `terminate()`
-    inside the callback. Assert try_drain_recv stops iterating.
-    Assert 3-phase completes.
-11. **Send error cascades recv** — TB marks the connection
-    `closed = true` on send error, ensuring pending recv also
-    fails rather than stalling. Test this interleaving.
-12. **Buffer full with incomplete frame** — inject a length prefix
-    claiming `frame_max` bytes, then fill buffer without completing
-    the frame. Assert connection terminates immediately (constraint
-    #3), not waiting for idle timeout.
-
-### Invariants
-
-After every tick:
-- `bus.invariants()` passes.
-- All delivered frames match injected frames (checksum tracking).
-- No orphaned fds (all opened fds eventually closed).
-- `messages_delivered + messages_in_flight == messages_injected`.
-- State machine consistency: no callbacks fire after `.closed`.
-
-### Checklist
-
-- [ ] `FuzzIO` struct with priority-queue events.
-- [ ] Synthetic connection pairing (bidirectional fd map).
-- [ ] Per-operation configurable failure ratios.
-- [ ] Swarm testing: all ratios randomized per seed.
-- [ ] `send_now` with configurable probability.
-- [ ] Stateful partial transfer (send buffer + offset).
-- [ ] Frame accumulation fuzz (random chunk sizes).
-- [ ] Checksum validation fuzz (corrupted frames).
-- [ ] Partial send fuzz (random send_callback results).
-- [ ] Send queue depth fuzz (rapid queueing, in-order delivery).
-- [ ] Interleaved send/recv fuzz (QUERY pattern, re-entrancy).
-- [ ] Disconnect mid-transfer fuzz (0 vs error).
-- [ ] Accept failure fuzz.
-- [ ] Backpressure fuzz (suspend → inject → resume).
-- [ ] Terminate-during-IO fuzz.
-- [ ] Terminate-from-callback fuzz.
-- [ ] Send-error-cascades-recv fuzz.
-- [ ] Buffer-full-incomplete-frame fuzz (constraint #3).
+**Not tested (deferred or out of scope):**
+- [ ] Priority-queue scheduling (timing-dependent interleavings)
+- [ ] Accept failure (MessageBus lifecycle, not Connection)
+- [ ] Send corruption in transit (needs receiver-side Connection)
+- [ ] Buffer-full slow-fill (only oversized header tested)
+- [ ] Reconnection after termination (sidecar fuzzer's job)
 - [ ] End-to-end delivery tracking (checksum-keyed).
 - [ ] `bus.invariants()` checked every tick.
 - [ ] Register in `fuzz_tests.zig` dispatcher.
