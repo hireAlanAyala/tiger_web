@@ -966,168 +966,180 @@ is also new — wraps `posix.shutdown`, SimIO marks the connection.
 - [ ] `SimIO.shutdown` — marks connection shutdown state.
 - [ ] `FuzzIO.send_now` — configurable `send_now_probability`.
 
-## Phase 1.5: Gateway Layer — Protocol-Agnostic Server
+## Phase 1.5: Consolidated Pipeline — Async Handler Interface
 
-> **TB insight:** The replica never parses network packets. It
-> receives `*Message` from the bus. The bus handles all wire-level
-> concerns. The replica is a pure message processor.
-
-The server is currently an HTTP server — it parses HTTP, extracts
-cookies, routes paths. With the sidecar, it also orchestrates
-CALL/RESULT exchanges. These are two protocol-specific code paths
-baked into the framework.
-
-The gateway pattern makes the server protocol-agnostic. Gateways
-translate external protocols into `Message` values. The server
-only processes Messages. It doesn't know HTTP or sidecar exist.
+> **TB insight:** The SM pipeline is the single protocol. The
+> handler is the pluggable implementation. The replica doesn't
+> know if prefetch was satisfied from cache or required a disk
+> read. Same interface, different backends.
+>
+> **Reverted: Gateway approach.** The gateway pattern tried to
+> solve a protocol problem by extracting HTTP into a separate
+> component. But HTTP decoding is an edge concern — not a core
+> concern. The core is the SM pipeline (prefetch → handle →
+> render). The handler implementation (native SQLite vs sidecar
+> CALL/RESULT) is behind the handler interface. The server and
+> SM don't know which one is running.
 
 ### Architecture
 
 ```
-Browser ── HTTP ──→ [HTTP Gateway] ──→ inbox ──→ Server ──→ SM
-                                         ↑
-Sidecar ── frames ─→ [Sidecar Gateway] ──┘
+Edge (decode):  HTTP → parse → Message
+                                  ↓
+Core (single):  SM pipeline: prefetch → handle → render
+                Handler impl: native (sync) OR sidecar (async)
+                                  ↓
+Edge (encode):  Message → HTTP response
 ```
 
-Each gateway:
-1. Accepts connections (HTTP TCP, sidecar unix socket)
-2. Parses the protocol (HTTP headers, sidecar CALL/RESULT)
-3. Produces typed `Message` values
-4. Pushes to the server's inbox
-5. Receives response Messages from the server
-6. Formats the response in the protocol (HTTP response, RESULT frame)
+The edges decode/encode external protocols. The core processes
+Messages through one pipeline. The handler implementation is
+pluggable — native handlers query SQLite (sync), sidecar handlers
+send CALL frames (async). The SM handles both through the same
+`.pending` + callback mechanism.
 
-The server's `process_inbox` pops Messages and dispatches. It
-doesn't call `http.parse_request` or know about sidecar stages.
-One code path for all protocols.
+**Future protocols (WebSocket, gRPC, admin CLI) add new edges,
+not new core paths.** Each edge decodes its protocol into a
+Message, feeds the SM pipeline, and encodes the response back.
+The pipeline and handlers don't change.
 
 ### What changes
 
-**Server (`framework/server.zig`):**
-- `process_inbox` pops Messages from an inbox, not from HTTP
-  connections directly. No `http.parse_request`, no `App.translate`.
-- `commit_dispatch` has only native stages: prefetch, handle,
-  render. No sidecar_route/sidecar_prefetch/sidecar_handle/
-  sidecar_render. Those move to the sidecar gateway.
-- Server doesn't import `http.zig`.
+**SM `PrefetchResult` gains `.pending` back — but correctly.**
 
-**HTTP Gateway (new, `framework/http_gateway.zig`):**
-- Owns the HTTP listener + connection pool (current server accept
-  + connection.zig).
-- Parses HTTP, calls `App.translate` to route.
-- Pushes `Message` to server inbox.
-- Receives response from server, encodes HTTP response.
-- Owns cookie/auth extraction (currently in process_inbox).
+The SM's `prefetch()` returns `.pending` when the handler needs
+async IO. This is TB's pattern: `commit_prefetch()` returns
+`.pending`, the callback fires, `commit_dispatch_resume()`
+continues. The SM doesn't know if the handler used SQLite or
+the sidecar — it just calls the handler and handles the result.
 
-**Sidecar Gateway (replaces current sidecar orchestration):**
-- Owns the sidecar MessageBus + SidecarClient.
-- Handles the 4-stage CALL/RESULT flow (route → prefetch →
-  handle → render) internally.
-- Produces a final `Message` for the server (after routing) and
-  a response `Message` back to the sidecar (after render).
-- The server sees ONE Message per request, processes it through
-  SM, returns ONE response. No sidecar stages in the server.
+```zig
+pub const PrefetchResult = enum {
+    complete, // Handler returned data synchronously.
+    busy,     // Storage busy — retry next tick.
+    pending,  // Handler needs async IO — callback resumes.
+};
+```
 
-**Inbox:**
-- Bounded queue of `Message` values.
-- HTTP gateway pushes parsed HTTP requests.
-- Sidecar gateway pushes routed requests.
-- Server pops and processes.
+**Handlers support async natively.**
+
+The handler interface gains async support as a first-class
+capability, not a sidecar special case:
+
+```zig
+// Native handler: sync — returns cache immediately.
+fn handler_prefetch(storage, msg) ?Cache {
+    return dispatch_prefetch(storage, msg); // SQLite query
+}
+
+// Sidecar handler: async — sends CALL, returns null.
+// Bus callback fires → call_state = .complete → SM resumes.
+fn handler_prefetch(storage, msg) ?Cache {
+    switch (sidecar.call_state) {
+        .idle => { sidecar.call_submit(bus, "prefetch", args); return null; },
+        .receiving => return null,  // still pending
+        .complete => { build cache from result; return cache; },
+        .failed => return null,
+    }
+}
+```
+
+The SM calls the handler. The handler returns null for "not
+ready" (busy or pending). The SM distinguishes via
+`is_handler_pending()` — same as before, but through the
+handler interface, not a sidecar-specific side channel.
+
+**Server `commit_dispatch` has ONE set of stages.**
+
+No `sidecar_route`, `sidecar_prefetch`, `sidecar_handle`,
+`sidecar_render`. The pipeline is:
+
+```
+.prefetch → .handle → .render
+```
+
+Same for native and sidecar. The handler implementation decides
+sync vs async. The server doesn't know.
+
+**Server sidecar stages are deleted.**
+
+The `sidecar_*` stages in `commit_dispatch` are replaced by
+the SM's `.pending` result. When `sm.prefetch()` returns
+`.pending`, the server returns from `commit_dispatch`. The bus
+callback fires `on_frame`, which calls `commit_dispatch` to
+resume. The SM calls the handler again (idempotent), handler
+sees `.complete`, returns the cache. Pipeline advances.
 
 ### What this eliminates
 
 - `sidecar_route`, `sidecar_prefetch`, `sidecar_handle`,
-  `sidecar_render` stages in `commit_dispatch` — all gone.
-- `if (App.sidecar_mode)` checks in the server — gone.
-- `SidecarClient` and `SidecarBus` fields on the server — gone.
-  They move to the sidecar gateway.
-- HTTP parsing in `process_inbox` — gone. Moves to HTTP gateway.
-- The server becomes a pure message processor like TB's replica.
+  `sidecar_render` stages — all deleted from server.
+- `if (App.sidecar_mode)` branch in `process_inbox` — deleted.
+  HTTP parsing happens in both modes (the sidecar route is
+  handled by the sidecar handler during translate, using
+  `io.run_for_ns(0)` for the synchronous route CALL — this is
+  the one acceptable shim, outside the pipeline).
+- Sidecar bus/client fields on server — stay on server (server
+  owns IO) but the server doesn't orchestrate CALL/RESULT. The
+  handlers do, through the bus that the server provides.
 
-### Sidecar gateway flow
+### Sidecar handler IO — who calls the bus?
 
-The sidecar gateway handles the entire CALL/RESULT exchange:
-
-```
-HTTP Gateway → inbox → Server → SM prefetch/commit/render → response
-                                 ↓
-Sidecar Gateway:
-  1. Receive Message from inbox (routed request)
-  2. CALL "prefetch" → wait → RESULT
-  3. CALL "handle" → wait → RESULT → execute writes
-  4. CALL "render" → wait → RESULT (HTML)
-  5. Return response Message to server for encoding
-```
-
-Wait — this doesn't work. The sidecar gateway can't call the SM
-because the SM is on the server. The sidecar flow is:
-
-```
-1. HTTP arrives at HTTP gateway
-2. In sidecar mode: HTTP gateway delegates to sidecar gateway
-3. Sidecar gateway: CALL "route" → RESULT → Message
-4. Push Message to server inbox
-5. Server processes Message through pipeline:
-   - Prefetch: server delegates to sidecar gateway (CALL "prefetch")
-   - Handle: server delegates to sidecar gateway (CALL "handle")
-   - Render: server delegates to sidecar gateway (CALL "render")
-6. Server returns response
-7. HTTP gateway encodes HTTP response
-```
-
-The server still orchestrates the pipeline stages — but instead
-of directly calling SM methods or sidecar methods, it calls
-a generic `PrefetchProvider` interface. In native mode, the
-provider is the SM. In sidecar mode, the provider is the sidecar
-gateway. The server doesn't know which.
-
-This is a deeper refactor. The server's pipeline becomes:
+The handlers don't call the bus directly (handlers don't do IO).
+The handlers call through a `SidecarProvider` that wraps the
+bus. The provider is set at init time:
 
 ```zig
-// Server pipeline — generic over provider
-const Provider = if (sidecar_mode) SidecarGateway else StateMachine;
-
-.prefetch => {
-    switch (provider.prefetch(msg)) {
-        .complete => { advance to handle },
-        .busy => { retry },
-        .pending => { return }, // async — callback resumes
-    }
-},
+// App composition root:
+pub const Handlers = if (sidecar_mode)
+    SidecarHandlersType(Storage, SidecarClient)
+else
+    NativeHandlersType(Storage);
 ```
+
+`SidecarHandlersType` implements the same interface as
+`NativeHandlersType` (handler_prefetch, handler_execute,
+handler_render). Inside, it calls `sidecar_client.call_submit`
+and checks `sidecar_client.call_state`. The SM and server see
+the same interface regardless.
+
+This is the comptime cascade: `App` chooses the handler
+implementation at compile time. The SM is parameterized on
+`Handlers`. The server is parameterized on `App`. One binary
+for native mode, one binary for sidecar mode. No runtime
+`if (sidecar_mode)` checks.
 
 ### Dependencies
 
-```
-Phase 0:   MessagePool + Connection (*Message pointers)
-Phase 1:   Connection + MessageBus (transport primitive)
-Phase 1.5: Gateway layer (protocol-agnostic server)
-Phase 2:   Sidecar gateway (replaces sidecar stages)
-```
-
-Phase 1.5 is the HTTP gateway extraction. Phase 2 becomes the
-sidecar gateway using the same pattern. Both produce Messages
-for the server. The server is protocol-free.
+This phase requires:
+- Phase 0 (done): MessagePool + Connection
+- Phase 1 (done): ConnectionType + MessageBusType
+- The handler interface to support async (`.pending` + callback)
 
 ### Checklist
 
-- [ ] Define `Message` inbox interface (bounded queue).
-- [ ] Extract HTTP gateway from server (`framework/http_gateway.zig`).
-- [ ] Move HTTP parsing, App.translate, cookie extraction to gateway.
-- [ ] Move HTTP connection pool + accept to gateway.
-- [ ] Server `process_inbox` pops from inbox, not HTTP connections.
-- [ ] Server `commit_dispatch` — native stages only.
-- [ ] Server doesn't import `http.zig`.
-- [ ] Sidecar gateway wraps SidecarClient + MessageBus.
-- [ ] Sidecar gateway produces Messages for inbox.
+- [ ] Restore `PrefetchResult.pending` to SM.
+- [ ] SM `prefetch()` calls handler, returns `.pending` if handler
+  returns null and `is_handler_pending()` is true.
+- [ ] SM callback mechanism: handler completes async →
+  `commit_dispatch_resume()`.
+- [ ] `SidecarHandlersType(Storage, SidecarClient)` — implements
+  same interface as native handlers using sidecar protocol.
+- [ ] `App` composition root selects handlers at comptime.
+- [ ] Server `commit_dispatch` — delete all `sidecar_*` stages.
+- [ ] Server `commit_dispatch` — `.pending` result triggers return,
+  callback resumes.
+- [ ] Delete `sidecar_mode` flag — comptime handler selection.
+- [ ] Route: synchronous in both modes (native: App.translate,
+  sidecar: io.run_for_ns(0) shim — outside pipeline).
 - [ ] All existing tests pass.
-- [ ] Sim tests pass (SimIO drives gateway, not server directly).
+- [ ] Sim tests pass.
 
-## Phase 2: Rewire SidecarClient
+## Phase 2: Sidecar Integration
 
-With the gateway layer in place, Phase 2 simplifies. The sidecar
-gateway owns the bus + client and handles the CALL/RESULT flow.
-The server sees Messages — same as from the HTTP gateway.
+With the consolidated pipeline, Phase 2 focuses on the sidecar
+handler implementation and the TS wire format — not on server
+pipeline changes.
 
 ### Async handle decision
 
@@ -1795,22 +1807,25 @@ If the frame arrives, it's valid. Faults affect *whether* and
 ```
 Phase 0:   MessagePool + Connection (*Message pointers) ✓ DONE
 Phase 1:   Connection + MessageBus (transport primitive) ✓ DONE
-Phase 1.5: Gateway layer (protocol-agnostic server)
+Phase 1.5: Consolidated pipeline (async handler interface)
     ↓
-Phase 2:   Sidecar gateway (sidecar as gateway, not server stages)
+Phase 2:   Sidecar integration (SidecarHandlersType + TS wire format)
     ↓
 Phase 3:   MessageBus Fuzzer (can start during Phase 2)
     ↓
 Phase 4:   SimSidecar
 ```
 
-Phase 1.5 extracts the HTTP gateway from the server. Phase 2
-adds the sidecar gateway using the same pattern. Both produce
-Messages. The server is a pure message processor.
+Phase 1.5 restores `.pending` to the SM, makes handlers async-
+capable, and deletes the sidecar stages from the server. The
+pipeline becomes single-path: prefetch → handle → render, same
+for native and sidecar. Handler implementation is pluggable.
 
-Phase 1.5 is the architectural foundation — the server stops
-being an HTTP server and becomes TB's replica pattern: a message
-processor that doesn't know about protocols.
+Phase 2 implements `SidecarHandlersType` and the TS wire format.
+The server doesn't change — only the handler implementation.
+
+Future protocols add edges (decode/encode), not core paths.
+The SM pipeline is the single protocol.
 
 ## TB audit result
 
