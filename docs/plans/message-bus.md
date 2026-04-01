@@ -1220,9 +1220,10 @@ This phase requires:
 - [x] Stale doc comments fixed.
 
 **Known items for Phase 2 to address:**
-- [ ] `sm.commit()` returns `CommitOutput` directly — needs to
-  support `.pending` for async handle. Change return type to
-  `union(enum) { output: CommitOutput, pending }` or similar.
+- [x] ~~`sm.commit()` needs .pending~~ — REVERTED. Execute is
+  permanently synchronous. TB pattern: irreversible side effects
+  (SQL writes inside transaction) must not cross async boundaries.
+  Sidecar handle CALL moves to prefetch. Documented in commit().
 - [ ] Tracer span cleanup on `.pending` failure: when a handler
   returns `.pending` and later the connection dies (sidecar
   disconnect), the `on_close` callback must cancel the in-flight
@@ -1234,19 +1235,31 @@ This phase requires:
 - [ ] `commit_dispatch_entered` guard — currently no async
   callbacks exist (native is sync). Phase 2 adds callbacks that
   re-enter commit_dispatch. The guard is already in place.
-- [ ] Sim tests pass.
+
+**Sidecar CALL flow (corrected):**
+```
+prefetch: CALL "route" → CALL "prefetch" → CALL "handle"
+          (all three async, all in prefetch stage)
+          .pending until all three results arrive
+execute:  parse handle RESULT, execute SQL writes
+          (always sync — transaction opens, writes, closes)
+render:   CALL "render"
+          (async, .pending until HTML arrives)
+```
+
+The handle CALL loads data. Execute processes loaded data.
+Same split as TB: prefetch is async IO, execute is computation.
+Execute is permanently synchronous — see commit() doc comment.
 
 ## Phase 2: Sidecar Integration
 
-> **Blocked on Phase 1.5.** The TS wire format must change
-> simultaneously with the Zig side. The current sidecar stages
-> in `commit_dispatch` (sidecar_route, sidecar_prefetch,
-> sidecar_handle, sidecar_render) will be deleted by Phase 1.5
-> when the pipeline consolidates. No point wiring TS to code
-> that's about to be replaced.
+> **Phase 1.5 DONE.** Pipeline has four stages (route, prefetch,
+> handle, render) with `.pending` support on route, prefetch,
+> and render. Execute is permanently synchronous. Handler
+> interface is async-capable. Comptime handler selection ready.
 
-With the consolidated pipeline, Phase 2 focuses on the sidecar
-handler implementation and the TS wire format — not on server
+Phase 2 focuses on the sidecar handler implementation and the
+TS wire format — not on server
 pipeline changes.
 
 ### Async handle decision
