@@ -1209,6 +1209,31 @@ This phase requires:
 - [ ] Delete sidecar bus/client fields from server (move to
   SidecarHandlersType or App).
 - [ ] All existing tests pass.
+
+**Phase 1.5 status: Steps 1-3 DONE. Remaining for Phase 2:**
+- [x] `.route` stage added to pipeline (Step 1).
+- [x] `.pending` support on prefetch (Step 2).
+- [x] Sidecar stages deleted from server (Step 3).
+- [x] `sidecar_mode` flag deleted.
+- [x] `is_handler_pending()` on HandlersType (native: false).
+- [x] Double HTTP parse eliminated.
+- [x] Stale doc comments fixed.
+
+**Known items for Phase 2 to address:**
+- [ ] `sm.commit()` returns `CommitOutput` directly — needs to
+  support `.pending` for async handle. Change return type to
+  `union(enum) { output: CommitOutput, pending }` or similar.
+- [ ] Tracer span cleanup on `.pending` failure: when a handler
+  returns `.pending` and later the connection dies (sidecar
+  disconnect), the `on_close` callback must cancel the in-flight
+  tracer span before calling `pipeline_reset`. Currently
+  `pipeline_reset` does NOT cancel tracers — each stage handles
+  its own cleanup. Phase 2's on_close must do this.
+- [ ] Rename `HandlersType` to `NativeHandlersType` when adding
+  `SidecarHandlersType`. Cosmetic but clarifies the two paths.
+- [ ] `commit_dispatch_entered` guard — currently no async
+  callbacks exist (native is sync). Phase 2 adds callbacks that
+  re-enter commit_dispatch. The guard is already in place.
 - [ ] Sim tests pass.
 
 ## Phase 2: Sidecar Integration
