@@ -274,20 +274,12 @@ pub fn StateMachineType(comptime Storage: type, comptime Handlers: type) type {
             identity: Identity,
         };
 
-        /// Commit result — supports async handlers.
-        /// Native handlers always return .output (synchronous).
-        /// Sidecar handlers (Phase 2) may return .pending.
-        pub const CommitResult = union(enum) {
-            output: CommitOutput,
-            pending,
-        };
-
-        /// Phase 2: commit — returns CommitResult.
-        /// Idempotent — safe to call on both start and resume.
-        pub fn commit(self: *StateMachine, msg: message.Message) CommitResult {
+        /// Commit — always synchronous. TB pattern: execute never waits.
+        /// All data loaded during prefetch. Execute only processes.
+        pub fn commit(self: *StateMachine, msg: message.Message) CommitOutput {
             const cache = self.prefetch_cache.?;
-            // Don't defer-clear — .pending needs cache on resume.
-            // Clear explicitly on .output path below.
+            defer self.prefetch_cache = null;
+            defer self.prefetch_identity = null;
 
             const fw = Handlers.FwCtx{
                 .identity = self.prefetch_identity orelse std.mem.zeroes(message.PrefetchIdentity),
@@ -307,13 +299,7 @@ pub fn StateMachineType(comptime Storage: type, comptime Handlers: type) type {
                 msg,
                 fw,
                 &write_view,
-            ) orelse {
-                // Handler needs async IO — return .pending.
-                // Transaction is open (begin_batch called by server).
-                // Server handles .pending → returns from commit_dispatch.
-                // Callback resumes → commit() called again (idempotent).
-                return .pending;
-            };
+            );
             // Store recording output for the server's WAL append.
             self.wal_record_len = write_view.record_pos;
             self.wal_record_count = write_view.record_count;
@@ -331,17 +317,11 @@ pub fn StateMachineType(comptime Storage: type, comptime Handlers: type) type {
             };
 
             self.tracer.count_status(resp.status);
-
-            // Clear prefetch state — commit complete, cache ownership transfers out.
-            self.prefetch_cache = null;
-            const final_identity = self.prefetch_identity orelse std.mem.zeroes(message.PrefetchIdentity);
-            self.prefetch_identity = null;
-
-            return .{ .output = .{
+            return .{
                 .response = resp,
                 .cache = cache,
-                .identity = final_identity,
-            } };
+                .identity = self.prefetch_identity orelse std.mem.zeroes(message.PrefetchIdentity),
+            };
         }
 
         // --- Per-pattern execute handlers ---
