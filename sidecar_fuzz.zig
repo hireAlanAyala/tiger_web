@@ -446,14 +446,19 @@ const SidecarFuzzCtx = struct {
 
     fn on_bus_frame(ctx_ptr: *anyopaque, frame: []const u8) void {
         const self: *SidecarFuzzCtx = @ptrCast(@alignCast(ctx_ptr));
-        // Only dispatch if client is expecting a frame.
-        // Unsolicited frames are handled by on_frame's check.
         self.client.on_frame(
             self.bus,
             frame,
-            null, // no query_fn in fuzzer
-            null, // no query_ctx
+            dummy_query_fn,
+            undefined, // query_ctx not used by dummy
             SidecarClient.max_queries_per_call,
         );
+    }
+
+    /// Dummy query function — returns an empty row set.
+    /// Exercises the QUERY → QUERY_RESULT path without needing
+    /// a real database.
+    fn dummy_query_fn(_: *anyopaque, _: []const u8, _: []const u8, _: u8, _: protocol.QueryMode, _: []u8) ?[]const u8 {
+        return ""; // empty result set
     }
 };
