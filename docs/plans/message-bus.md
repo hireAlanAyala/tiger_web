@@ -1597,6 +1597,42 @@ with FuzzIO fault injection.
 - [ ] Query limit exceeded tests preserved.
 - [ ] Register updated fuzzer in `fuzz_tests.zig`.
 
+**Recovery path testing (web server resilience):**
+
+The sidecar fuzzer must test the recovery path that the transport
+fuzzer cannot: sidecar disconnect → pipeline .busy → sidecar
+reconnect → pipeline resumes → request succeeds.
+
+This is architecturally different from TB. TB's Replica has
+consensus — one connection failure is not a system failure. A
+web server must recover from sidecar crashes because:
+
+- The sidecar can be restarted while work is queued.
+- HTTP requests should retry, not fail, if the sidecar recovers
+  within the request timeout (30s).
+- The server should crash only after exhausting retries, not on
+  first error.
+
+The layers handle this separately:
+
+| Layer | Behavior |
+|---|---|
+| Connection | Terminates on error (correct — broken socket is broken) |
+| MessageBus | tick_accept re-accepts when sidecar reconnects |
+| call_submit | Returns false when bus not connected (pipeline .busy) |
+| Server pipeline | Retries prefetch next tick if .busy |
+| HTTP connection | Survives — stays in .ready until 30s timeout |
+
+The transport fuzzer tests layer 1 (Connection terminates correctly).
+The sidecar fuzzer must test layers 2-5 (system recovers from
+termination):
+
+- [ ] Disconnect sidecar mid-CALL → pipeline returns .busy
+- [ ] Reconnect sidecar → next tick retries → CALL succeeds
+- [ ] Multiple disconnect/reconnect cycles within one HTTP request
+- [ ] HTTP request timeout while sidecar is down → error response
+- [ ] Sidecar reconnect after timeout → next request succeeds
+
 ### After Phase 3: delete TestIO from message_bus.zig
 
 The Phase 1 unit tests use a `TestIO` shim — a third IO
