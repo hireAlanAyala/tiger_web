@@ -40,7 +40,7 @@ test "benchmark: state machine" {
 
     var storage = try App.Storage.init(":memory:");
     defer storage.deinit();
-    var sm = StateMachine.init(&storage, false, 0, bench_test_key);
+    var sm = StateMachine.init(&storage, .{}, false, 0, bench_test_key);
 
     // --- Seed phase (untimed) ---
 
