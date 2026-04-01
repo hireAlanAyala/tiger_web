@@ -93,6 +93,13 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
         /// 30 seconds at 10ms/tick.
         pub const request_timeout_ticks = 3000;
 
+        /// Sidecar response deadline: 5 seconds at 10ms/tick.
+        /// If the pipeline has been pending (waiting for sidecar
+        /// RESULT) for this many ticks, SIGKILL the sidecar.
+        /// A stuck handler (infinite loop, deadlocked await, long GC)
+        /// blocks the serial pipeline — all requests stall.
+        const sidecar_response_timeout_ticks: u32 = 500;
+
         // --- Fields ---
 
         io: *IO,
@@ -129,6 +136,9 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
         /// Re-entrancy guard for commit_dispatch (TB pattern).
         /// Prevents nested execution if on_frame fires during dispatch.
         commit_dispatch_entered: bool = false,
+        /// Tick when the pipeline started waiting for sidecar response.
+        /// Used for response timeout — SIGKILL if exceeded.
+        commit_pending_since: u32 = 0,
 
         // Sidecar Bus and Client — embedded in the Server (TB pattern:
         // Replica embeds MessageBus). Callbacks use the context pointer
@@ -237,6 +247,7 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
             if (App.sidecar_enabled) server.sidecar_bus.tick_accept();
             server.maybe_accept();
             server.process_inbox();
+            if (App.sidecar_enabled) server.timeout_sidecar_response();
             server.log_metrics();
             server.flush_outbox();
             server.continue_receives();
@@ -314,8 +325,8 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
                 if (server.commit_stage != .idle) break;
 
                 // Start pipeline at .route — routing is the first stage.
-                // commit_dispatch parses HTTP and routes.
                 server.commit_stage = .route;
+                server.commit_pending_since = server.tick_count;
                 server.commit_connection = conn;
                 server.commit_dispatch();
             }
@@ -535,6 +546,7 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
             server.commit_pipeline_resp = null;
             server.commit_cache = null;
             server.commit_identity = null;
+            server.commit_pending_since = 0;
         }
 
         // =============================================================
@@ -647,6 +659,29 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
             // which sets sidecar_connected = false.
             if (server.sidecar_bus.connection.state == .connected) {
                 server.sidecar_bus.connection.terminate(.shutdown);
+            }
+        }
+
+        /// Sidecar response timeout — kill the sidecar if the pipeline
+        /// has been pending for too long. A stuck handler (infinite loop,
+        /// deadlocked await, long GC) blocks the serial pipeline.
+        /// Uses existing recovery: kill → on_close → 503 or render fallback.
+        fn timeout_sidecar_response(server: *Server) void {
+            if (server.commit_stage == .idle) return;
+            if (!server.sidecar_connected) return;
+
+            // Only timeout when actually waiting for sidecar response.
+            // .handle is synchronous — no sidecar involvement.
+            const pending = switch (server.commit_stage) {
+                .route, .prefetch, .render => server.state_machine.handlers.is_handler_pending(),
+                .handle, .idle => false,
+            };
+            if (!pending) return;
+
+            const elapsed = server.tick_count -% server.commit_pending_since;
+            if (elapsed >= sidecar_response_timeout_ticks) {
+                log.warn("sidecar: response timeout ({d} ticks), killing", .{elapsed});
+                server.kill_sidecar();
             }
         }
 
