@@ -266,7 +266,11 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
             const sm = server.state_machine;
             const conn = server.commit_connection orelse return;
 
-            while (true) {
+            // Bounded loop (TB pattern). 4 stages × 2 for safety.
+            // Each iteration advances commit_stage forward. If we ever
+            // loop more than 8 times, a bug caused a backward jump or
+            // infinite cycle — crash immediately.
+            for (0..8) |_| {
                 switch (server.commit_stage) {
                     .idle => return,
 
@@ -399,7 +403,7 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
                     },
 
                 }
-            }
+            } else unreachable; // loop bound exceeded — pipeline bug
         }
 
         /// Encode response and send to client.
