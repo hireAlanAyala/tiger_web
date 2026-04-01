@@ -981,6 +981,19 @@ fn upload_results(
             return;
         }
 
+        // Monotonic lifetime counter. The merge algorithm drops old seeds, losing their
+        // counts. This file preserves the true total across all uploads.
+        //
+        // We only track seeds_run, not seeds_failed. A failed seed becomes a passing seed
+        // after the fix lands — the failure was a success (it caught a bug). Tracking
+        // lifetime failures would conflate "bugs caught" (good) with "bugs present" (bad).
+        // "Bugs caught by fuzzing" is a human-curated count on the testing page.
+        var totals = try SeedTotals.read(shell, arena.allocator());
+        for (seeds_new) |seed| {
+            totals.seeds_run += seed.count;
+        }
+        try totals.write(shell, arena.allocator());
+
         var seeds_merged_logs = std.StringHashMap(void).init(arena.allocator());
         for (seeds_merged) |*seed| {
             if (seed.log) |path| try seeds_merged_logs.putNoClobber(path, {});
@@ -1009,7 +1022,7 @@ fn upload_results(
         }
 
         try shell.cwd.writeFile(.{ .sub_path = "./fuzzing/data.json", .data = seeds_json });
-        try shell.exec("git add ./fuzzing/data.json", .{});
+        try shell.exec("git add ./fuzzing/data.json ./fuzzing/totals.json", .{});
         try shell.git_env_setup(.{ .use_hostname = true });
         try shell.exec("git commit -m 🌱", .{});
         if (token) |_| {
@@ -1027,6 +1040,28 @@ fn upload_results(
         return error.CanNotPush;
     }
 }
+
+const SeedTotals = struct {
+    seeds_run: u64 = 0,
+
+    fn read(shell: *Shell, allocator: std.mem.Allocator) !SeedTotals {
+        const data = shell.cwd.readFileAlloc(
+            allocator,
+            "./fuzzing/totals.json",
+            4096,
+        ) catch |err| switch (err) {
+            error.FileNotFound => return SeedTotals{},
+            else => return err,
+        };
+        return std.json.parseFromSliceLeaky(SeedTotals, allocator, data, .{}) catch
+            return error.InvalidJson;
+    }
+
+    fn write(self: SeedTotals, shell: *Shell, allocator: std.mem.Allocator) !void {
+        const json = try std.json.stringifyAlloc(allocator, self, .{});
+        try shell.cwd.writeFile(.{ .sub_path = "./fuzzing/totals.json", .data = json });
+    }
+};
 
 const SeedRecord = struct {
     const MergeOptions = struct {
