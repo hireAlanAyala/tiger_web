@@ -35,3 +35,19 @@ After the checklist passes, do two focused passes:
 - Fixed-input unit tests — prevents regression on known cases
 - Seed unit tests — finds unhandled edge cases when input data is unpredictable
 - Simulation tests — ensures integration across the full stack
+
+## Audit (periodic)
+
+Derived from SQLite's testing page, filtered through TB's principles. These aren't per-feature checks — run them periodically against the whole codebase.
+
+### Function length (70-line limit)
+- [ ] No function in `state_machine.zig`, `server.zig`, `connection.zig`, `storage.zig`, `app.zig` exceeds 70 lines. TB: "Art is born of constraints." If a function is too long, centralize control flow in the parent and move non-branchy logic to helpers.
+
+### Hot-loop extraction
+- [ ] Hot loops use standalone functions with primitive args (no `self`). TB: "the compiler doesn't need to prove that it can cache struct's fields in registers." Check `server.zig` tick, `connection.zig` recv/send paths, `state_machine.zig` prefetch/execute.
+
+### Argument passing
+- [ ] Function args > 16 bytes passed as `*const` when the callee doesn't need a copy. Prevents accidental stack copies and catches caller bugs where an alias is mutated mid-call.
+
+### In-place construction
+- [ ] Large structs initialized in-place via out-pointer (`fn init(target: *Self) void`), not returned by value. Prevents intermediate copies and assumes pointer stability.
