@@ -53,6 +53,10 @@ pub fn SidecarClientType(comptime IO: type) type {
         /// against the request_id in every RESULT and QUERY frame.
         /// Detects stale or mismatched responses.
         expected_request_id: u32 = 0,
+        /// Set to true on protocol violations (invalid frame, request_id
+        /// mismatch, query limit exceeded). The server checks this after
+        /// process_sidecar_frame and kills the sidecar process.
+        protocol_violation: bool = false,
         result_flag: protocol.ResultFlag = .success,
         result_data: []const u8 = "",
         /// Prefetch result — stored between prefetch and handle phases.
@@ -147,6 +151,7 @@ pub fn SidecarClientType(comptime IO: type) type {
             const parsed = protocol.parse_sidecar_frame(frame) orelse {
                 log.warn("call: invalid frame from sidecar", .{});
                 self.call_state = .failed;
+                self.protocol_violation = true;
                 return;
             };
 
@@ -156,6 +161,7 @@ pub fn SidecarClientType(comptime IO: type) type {
                     self.expected_request_id, parsed.request_id,
                 });
                 self.call_state = .failed;
+                self.protocol_violation = true;
                 return;
             }
 
@@ -164,6 +170,7 @@ pub fn SidecarClientType(comptime IO: type) type {
                     const result = protocol.parse_result_payload(parsed.payload) orelse {
                         log.warn("call: invalid RESULT payload", .{});
                         self.call_state = .failed;
+                        self.protocol_violation = true;
                         return;
                     };
                     self.result_flag = result.flag;
@@ -177,12 +184,14 @@ pub fn SidecarClientType(comptime IO: type) type {
                     if (query_fn == null) {
                         log.warn("call: QUERY received during no-query CALL", .{});
                         self.call_state = .failed;
+                        self.protocol_violation = true;
                         return;
                     }
 
                     if (self.call_query_count >= queries_max) {
                         log.warn("call: exceeded max queries ({d})", .{queries_max});
                         self.call_state = .failed;
+                        self.protocol_violation = true;
                         return;
                     }
                     self.call_query_count += 1;
@@ -234,6 +243,7 @@ pub fn SidecarClientType(comptime IO: type) type {
             self.call_state = .idle;
             self.call_query_count = 0;
             self.expected_request_id = 0;
+            self.protocol_violation = false;
             self.result_flag = .success;
             self.result_data = "";
         }
