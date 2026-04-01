@@ -398,6 +398,11 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
                                 server.pipeline_reset();
                                 return;
                             },
+                            .pending => {
+                                // Handler needs async IO — callback will
+                                // call commit_dispatch to resume.
+                                return;
+                            },
                         }
                     },
 

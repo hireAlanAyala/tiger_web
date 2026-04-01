@@ -104,6 +104,13 @@ pub fn HandlersType(comptime StorageParam: type) type {
     return struct {
         pub const Cache = PrefetchCache;
 
+        /// Whether an async handler operation is in-flight.
+        /// Native handlers are always synchronous — returns false.
+        /// SidecarHandlersType overrides this to check call_state.
+        pub fn is_handler_pending() bool {
+            return false;
+        }
+
         /// Native prefetch dispatch. In sidecar mode, the server uses
         /// SidecarHandlersType instead — same interface, different impl.
         pub fn handler_prefetch(storage: *StorageParam, msg: *const Message) ?PrefetchCache {

@@ -210,10 +210,11 @@ pub fn StateMachineType(comptime Storage: type, comptime Handlers: type) type {
         pub const PrefetchResult = enum {
             complete, // Prefetch done — proceed to commit.
             busy,     // Storage busy — retry next tick.
+            pending,  // Handler needs async IO — callback resumes.
         };
 
-        /// Start prefetch. Returns .complete (proceed) or .busy (retry).
-        /// In sidecar mode, the server short-circuits before calling this.
+        /// Start prefetch. Returns .complete, .busy, or .pending.
+        /// Idempotent — safe to call on both start and resume.
         pub fn prefetch(self: *StateMachine, msg: message.Message) PrefetchResult {
             assert(self.prefetch_cache == null);
 
@@ -224,6 +225,10 @@ pub fn StateMachineType(comptime Storage: type, comptime Handlers: type) type {
 
             self.prefetch_cache = Handlers.handler_prefetch(self.storage, &msg);
             if (self.prefetch_cache != null) return .complete;
+
+            // Handler returned null — either busy (retry) or pending
+            // (async IO in-flight, callback will resume).
+            if (Handlers.is_handler_pending()) return .pending;
             return .busy;
         }
 
