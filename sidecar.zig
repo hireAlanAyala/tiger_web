@@ -121,6 +121,12 @@ pub fn SidecarClientType(comptime IO: type) type {
                 return false;
             }
 
+            // Don't submit if the send queue is full.
+            if (bus.connection.send_queue.full()) {
+                log.warn("call: send queue full for {s}", .{function_name});
+                return false;
+            }
+
             const msg = bus.pool.get_message();
             const call_len = protocol.build_call(
                 msg.buffer[Bus.Connection.frame_header_size..],
