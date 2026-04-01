@@ -1367,32 +1367,60 @@ receives the QUERY_RESULT.
 - [x] `main.zig` — HandlersFor + StateMachineWith
 - [x] All unit tests, sim tests, fuzz smoke pass
 
-**Step 2 — TODO:**
-- [ ] TS sidecar: update `sendFrame` to 8-byte header (len + CRC)
-- [ ] TS sidecar: update `processFrames` to validate CRC on receive
-- [ ] TS sidecar: CRC-32 via Node.js `zlib.crc32` (Node 22+)
-- [ ] `call_submit`: accept request_id parameter
-- [ ] Wire next_request_id through SidecarHandlersType
+**Step 2 — DONE:**
+- [x] TS sidecar: 8-byte CRC frame header (sendFrame/processFrames)
+- [x] TS sidecar: CRC-32 via Node.js `zlib.crc32`
+- [x] `call_submit`: accepts request_id, validated in on_frame
+- [x] Wire next_request_id through SidecarHandlersType
 
-**Step 3 — TODO:**
-- [ ] Server: add sidecar_bus field, init, set_sidecar, callback wiring
-- [ ] Build flag: `-Dsidecar=true` flips `sidecar_enabled`
-- [ ] End-to-end test: `npm run dev` with sidecar
-- [ ] Delete dead code: protocol.read_frame/write_frame/recv_exact/send_exact
-- [ ] Remove io.readable() if unused
-- [ ] Sidecar fuzzer rewrite (Phase 3)
+**Step 3 — DONE:**
+- [x] Bus/Client embedded in Server (TB pattern)
+- [x] Build flag: `-Dsidecar=true`
+- [x] READY handshake on connect (version + PID)
+- [x] Binary sidecar state (503 while disconnected)
+- [x] Render crash fallback (200 degraded, no retry)
+- [x] Kill on protocol violation (SIGKILL)
+- [x] Response timeout (5s deadline)
+- [x] Sidecar fuzzer rewrite (Phase 3)
 
-## Phase 3: Fuzzers
+**End-to-end verified manually (npm run dev):**
+- [x] `tiger-web build` — annotation scan + codegen
+- [x] `tiger-web dev` — server + sidecar start, READY handshake
+- [x] GET /products → HTML rendered by TS sidecar
+- [x] POST /products → product created, listed on next GET
+- [x] Kill sidecar → 503 "service unavailable"
+- [x] Restart sidecar → READY handshake → GET returns 200
 
-Two fuzzers, two layers (TB pattern: fuzz through the real code
-paths, never bypass a layer):
+**Remaining cleanup (not blocking):**
+- [ ] Delete protocol.read_frame/write_frame (blocked by old test)
+- [ ] Delete io.readable() (no callers)
+- [ ] Automated e2e test script (currently manual curl commands)
 
-- **`message_bus_fuzz.zig`** (new) — exercises the Connection
-  transport in isolation with FuzzIO. Tests frame accumulation,
-  partial sends, termination, backpressure. No protocol knowledge.
-- **`sidecar_fuzz.zig`** (updated) — exercises CALL/RESULT
-  protocol flowing through the real Connection + FuzzIO. Tests
-  protocol content AND transport integration. Replaces the
+## Phase 3: Fuzzers — DONE
+
+Three files, two layers, shared IO:
+
+- **`fuzz_io.zig`** — shared socket simulator. Bidirectional
+  pairs, partial delivery, error injection. IO simulates sockets,
+  fuzzers drive timing via do_recv/do_send.
+- **`message_bus_fuzz.zig`** — transport layer. ConnectionType(FuzzIO).
+  Frame accumulation, CRC, partial send/recv, backpressure,
+  re-entrancy (send_frame + terminate from on_frame), delivery
+  verification, error-free post-loop drain.
+- **`sidecar_fuzz.zig`** — protocol layer. SidecarClientType(FuzzIO)
+  through real ConnectionType. CALL/RESULT, QUERY sub-protocol,
+  corrupt/truncated/wrong-tag frames, request_id mismatch,
+  unsolicited frames, multi-call sequencing.
+
+**Bugs found by fuzzers:**
+- call_submit assert on full send queue (server crash)
+- Null query_fn causing all QUERY events to fail
+
+**Deterministic unit tests (message_bus.zig):**
+- send_frame from on_frame (re-entrancy)
+- terminate from on_frame (try_drain_recv stops)
+
+Previously `sidecar_fuzz.zig` used socketpair + threads. Replaced with
   current socketpair + thread approach with bus + FuzzIO.
 
 TB's principle: fuzz through the real code paths. The protocol
