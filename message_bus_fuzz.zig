@@ -3,13 +3,12 @@
 //! Exercises ConnectionType(FuzzIO) with PRNG-driven fault injection.
 //! No protocol knowledge — tests the transport layer in isolation.
 //!
-//! One connection per seed. No reconnects — disconnect or terminate
-//! ends the test. After the event loop, assert all valid frames
-//! delivered (or connection cleanly terminated). TB pattern:
-//! assert delivery at the end, not cooperatively during the run.
+//! One connection per seed. No reconnects. After the event loop,
+//! disables error injection and drains — asserts all valid frames
+//! delivered (or connection already terminated during event loop).
 //!
-//! FuzzIO is embedded here (TB pattern: IO simulation is purpose-built
-//! for the fuzzer, not a reusable module).
+//! Re-entrancy: on_frame callback sometimes calls send_frame or
+//! terminate — exercises the try_drain_recv interleaving path.
 
 const std = @import("std");
 const posix = std.posix;
@@ -51,7 +50,8 @@ pub fn main(allocator: std.mem.Allocator, args: FuzzArgs) !void {
     conn.recv_completion = .{};
     conn.send_completion = .{};
 
-    var ctx = FuzzContext.init();
+    // Re-entrancy context: on_frame may call send_frame or terminate.
+    var ctx = FuzzContext.init(&conn, &pool, &prng);
     conn.init(&io, &pool, pair[0], @ptrCast(&ctx), FuzzContext.on_frame, null);
 
     var stats = Stats{};
@@ -72,17 +72,26 @@ pub fn main(allocator: std.mem.Allocator, args: FuzzArgs) !void {
     var weights = fuzz_lib.random_enum_weights(&prng, Event);
     if (weights.tick == 0 and weights.tick_multiple == 0) weights.tick = 1;
     if (weights.inject_valid_frame == 0) weights.inject_valid_frame = 1;
-    // Cap destructive events — they end the test. Without caps,
-    // most seeds terminate in the first few events and never
-    // exercise sustained frame exchanges.
+    // Cap destructive events — they end the test.
     weights.terminate = @min(weights.terminate, 3);
     weights.disconnect = @min(weights.disconnect, 3);
     weights.inject_corrupt_frame = @min(weights.inject_corrupt_frame, 10);
     weights.inject_oversized_frame = @min(weights.inject_oversized_frame, 5);
 
-    // Event loop — PRNG drives everything. No cooperative mode.
+    // Log swarm parameters for seed reproduction.
+    log.info("Fuzz config:", .{});
+    log.info("  recv_partial={d}/{d} send_partial={d}/{d} send_now={d}/{d}", .{
+        io.recv_partial_probability.numerator,   io.recv_partial_probability.denominator,
+        io.send_partial_probability.numerator,   io.send_partial_probability.denominator,
+        io.send_now_success_probability.numerator, io.send_now_success_probability.denominator,
+    });
+    log.info("  recv_error={d}/{d} send_error={d}/{d}", .{
+        io.recv_error_probability.numerator, io.recv_error_probability.denominator,
+        io.send_error_probability.numerator, io.send_error_probability.denominator,
+    });
+
+    // Event loop — PRNG drives everything.
     for (0..events_max) |_| {
-        // Connection dead — stop. One connection per seed.
         if (conn.state == .closed) break;
         if (conn.state == .terminating) {
             io.tick(&conn);
@@ -185,26 +194,32 @@ pub fn main(allocator: std.mem.Allocator, args: FuzzArgs) !void {
         }
     }
 
-    // Post-loop: tick remaining IO to deliver pending frames.
-    // Error injection stays on — the transport must deliver despite
-    // errors, or terminate cleanly. No cooperative mode.
-    const ticks_drain = events_max * 10;
-    for (0..ticks_drain) |_| {
-        if (conn.state == .closed) break;
-        if (conn.state == .connected and ctx.all_delivered()) break;
-        io.tick(&conn);
-        stats.ticks += 1;
-    }
+    // Post-loop drain: disable error injection and deliver remaining
+    // frames. If the connection is alive, all frames must be delivered.
+    // Error injection is disabled because our Connection terminates on
+    // errors (by design) — the drain verifies delivery, not error
+    // handling (already tested during the event loop).
+    const terminated_during_events = conn.state == .closed;
 
-    // Final assertion: if connection is alive, all frames must be
-    // delivered. If connection died (error, disconnect, corrupt),
-    // that's a valid outcome — but we track it.
-    if (conn.state == .connected) {
-        if (!ctx.all_delivered()) {
-            std.debug.panic(
-                "seed={}: only {}/{} frames delivered (connection still alive)",
-                .{ seed, ctx.delivered_count, ctx.expected_tail },
-            );
+    if (!terminated_during_events) {
+        io.recv_error_probability = Ratio.zero();
+        io.send_error_probability = Ratio.zero();
+
+        const ticks_drain = events_max * 10;
+        for (0..ticks_drain) |_| {
+            if (conn.state == .closed) break;
+            if (conn.state == .connected and ctx.all_delivered()) break;
+            io.tick(&conn);
+            stats.ticks += 1;
+        }
+
+        if (conn.state == .connected) {
+            if (!ctx.all_delivered()) {
+                std.debug.panic(
+                    "seed={}: only {}/{} frames delivered (connection alive, drain complete)",
+                    .{ seed, ctx.delivered_count, ctx.expected_tail },
+                );
+            }
         }
     }
 
@@ -223,7 +238,8 @@ pub fn main(allocator: std.mem.Allocator, args: FuzzArgs) !void {
         \\  injected={} corrupt={} oversized={}
         \\  sent={} delivered={}
         \\  suspends={} resumes={} terminates={}
-        \\  disconnects={} connection_alive={}
+        \\  disconnects={} reentrant_sends={} reentrant_terminates={}
+        \\  terminated_during_events={}
     , .{
         events_max,
         stats.ticks,
@@ -236,7 +252,9 @@ pub fn main(allocator: std.mem.Allocator, args: FuzzArgs) !void {
         stats.resumes,
         stats.terminates,
         stats.disconnects,
-        conn.state != .closed,
+        ctx.reentrant_sends,
+        ctx.reentrant_terminates,
+        terminated_during_events,
     });
 
     assert(stats.ticks > 0);
@@ -255,17 +273,34 @@ const Stats = struct {
 };
 
 /// Tracks expected and delivered frames for verification.
-/// Delivered frames must match injected frames in order.
+/// Also exercises re-entrancy: on_frame sometimes calls send_frame
+/// or terminate on the Connection (the try_drain_recv interleaving).
 const FuzzContext = struct {
     const max_pending = 4096;
+
+    conn: *Connection,
+    pool: *Connection.Pool,
+    prng: *PRNG,
 
     expected: [max_pending]u32 = undefined,
     expected_head: u32 = 0,
     expected_tail: u32 = 0,
     delivered_count: u64 = 0,
+    reentrant_sends: u64 = 0,
+    reentrant_terminates: u64 = 0,
 
-    fn init() FuzzContext {
-        return .{};
+    // Re-entrancy probabilities (swarm-tested).
+    send_from_callback_probability: Ratio,
+    terminate_from_callback_probability: Ratio,
+
+    fn init(conn: *Connection, pool: *Connection.Pool, prng: *PRNG) FuzzContext {
+        return .{
+            .conn = conn,
+            .pool = pool,
+            .prng = prng,
+            .send_from_callback_probability = PRNG.ratio(prng.range_inclusive(u64, 0, 3), 10),
+            .terminate_from_callback_probability = PRNG.ratio(prng.range_inclusive(u64, 0, 1), 10),
+        };
     }
 
     fn all_delivered(self: *const FuzzContext) bool {
@@ -283,13 +318,42 @@ const FuzzContext = struct {
         const checksum = frame_checksum(frame);
 
         // Verify delivered frame matches next expected.
+        // If no expectation exists, this is an unexpected frame —
+        // either a fabricated frame (bug) or a frame from send_frame/
+        // send_message that went to the peer and came back. Since we
+        // don't track outbound frames, only assert on inbound.
         if (self.expected_head < self.expected_tail) {
             const expected = self.expected[self.expected_head % max_pending];
             assert(checksum == expected);
             self.expected_head += 1;
         }
+        // Frames without expectations are outbound send_frame echoes
+        // or re-entrant sends — not tracked. This is acceptable
+        // because the Connection doesn't loop back frames to itself.
 
         self.delivered_count += 1;
+
+        // Re-entrancy: sometimes send a frame from inside on_frame.
+        // Exercises the try_drain_recv → on_frame_fn → send_frame
+        // path (the QUERY sub-protocol pattern).
+        if (self.conn.state == .connected and
+            self.prng.chance(self.send_from_callback_probability))
+        {
+            if (self.conn.send_queue.count < fuzz_send_queue_max) {
+                self.conn.send_frame("reentrant");
+                self.reentrant_sends += 1;
+            }
+        }
+
+        // Re-entrancy: sometimes terminate from inside on_frame.
+        // Exercises maybe(state == .terminating) after on_frame_fn
+        // in try_drain_recv. The loop must stop iterating.
+        if (self.conn.state == .connected and
+            self.prng.chance(self.terminate_from_callback_probability))
+        {
+            self.conn.terminate(.shutdown);
+            self.reentrant_terminates += 1;
+        }
     }
 };
 
@@ -332,7 +396,7 @@ const FuzzIO = struct {
         const Op = enum { none, accept, recv, send, readable };
     };
 
-    const max_connections = 4; // Only need one socketpair
+    const max_connections = 4;
     const send_buf_max = 64 * 1024;
 
     const SocketConnection = struct {
@@ -350,10 +414,12 @@ const FuzzIO = struct {
     connections: [max_connections]SocketConnection = [_]SocketConnection{.{}} ** max_connections,
     fd_next: fd_t = 10,
 
+    // Fault injection (swarm-tested per seed).
     recv_partial_probability: Ratio,
     send_partial_probability: Ratio,
     send_now_success_probability: Ratio,
     recv_error_probability: Ratio,
+    send_error_probability: Ratio,
 
     fn init(prng: *PRNG) FuzzIO {
         return .{
@@ -361,7 +427,8 @@ const FuzzIO = struct {
             .recv_partial_probability = PRNG.ratio(prng.range_inclusive(u64, 2, 8), 10),
             .send_partial_probability = PRNG.ratio(prng.range_inclusive(u64, 2, 8), 10),
             .send_now_success_probability = PRNG.ratio(prng.range_inclusive(u64, 3, 9), 10),
-            .recv_error_probability = PRNG.ratio(prng.range_inclusive(u64, 0, 1), 10),
+            .recv_error_probability = PRNG.ratio(prng.range_inclusive(u64, 0, 2), 10),
+            .send_error_probability = PRNG.ratio(prng.range_inclusive(u64, 0, 1), 10),
         };
     }
 
@@ -407,8 +474,7 @@ const FuzzIO = struct {
         c.closed = true;
     }
 
-    /// Drive pending IO. Only completes when data is available or
-    /// error/EOF. Randomly chooses recv-first or send-first.
+    /// Drive pending IO. Randomly chooses recv-first or send-first.
     fn tick(self: *FuzzIO, conn: *Connection) void {
         if (self.prng.boolean()) {
             self.tick_recv(conn);
@@ -435,6 +501,7 @@ const FuzzIO = struct {
             return;
         }
 
+        // Error injection.
         if (self.prng.chance(self.recv_error_probability)) {
             conn.recv_completion.operation = .none;
             conn.recv_completion.callback(conn.recv_completion.context, -1);
@@ -488,6 +555,13 @@ const FuzzIO = struct {
         };
 
         if (local.closed or local.shutdown_send) {
+            conn.send_completion.operation = .none;
+            conn.send_completion.callback(conn.send_completion.context, -1);
+            return;
+        }
+
+        // Send error injection.
+        if (self.prng.chance(self.send_error_probability)) {
             conn.send_completion.operation = .none;
             conn.send_completion.callback(conn.send_completion.context, -1);
             return;
