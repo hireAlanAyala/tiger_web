@@ -1096,3 +1096,118 @@ test "Connection: invariants hold in closed state" {
     conn.send_pos = 0;
     conn.invariants();
 }
+
+test "Connection: re-entrancy — send_frame from on_frame" {
+    // Exercises the try_drain_recv → on_frame_fn → send_frame path.
+    // This is the QUERY sub-protocol pattern: the consumer sends a
+    // response frame while receiving a request frame.
+    var io = TestIO{};
+    var pool = try TestConnection.Pool.init(testing.allocator, 8);
+    defer pool.deinit(testing.allocator);
+    const pair = test_socketpair();
+    const client_fd = pair[1];
+
+    const ReentrantSendCtx = struct {
+        send_count: u32 = 0,
+        conn_ptr: *TestConnection,
+        pool_ptr: *TestConnection.Pool,
+
+        fn on_frame(ctx_ptr: *anyopaque, _: []const u8) void {
+            const self: *@This() = @ptrCast(@alignCast(ctx_ptr));
+            // Re-entrant: send a frame from inside on_frame.
+            if (self.conn_ptr.state == .connected and
+                self.conn_ptr.send_queue.count < 4)
+            {
+                self.conn_ptr.send_frame("reply");
+                self.send_count += 1;
+            }
+        }
+    };
+
+    var conn: TestConnection = undefined;
+    conn.state = .closed;
+    conn.recv_message = null;
+    var ctx = ReentrantSendCtx{ .conn_ptr = &conn, .pool_ptr = &pool };
+    conn.init(&io, &pool, pair[0], @ptrCast(&ctx), ReentrantSendCtx.on_frame, null);
+
+    // Inject a valid frame from the client side.
+    const payload = "request";
+    var frame_buf: [1024]u8 = undefined;
+    const frame = test_build_frame(&frame_buf, payload);
+    const written = posix.send(client_fd, frame, 0) catch unreachable;
+    assert(written == frame.len);
+
+    // Tick recv — delivers the frame, on_frame sends a reply.
+    TestIO.tick(&conn.recv_completion);
+
+    // Assert re-entrant send happened.
+    try testing.expectEqual(@as(u32, 1), ctx.send_count);
+    try testing.expect(conn.state == .connected);
+    conn.invariants();
+
+    // Verify reply was sent to client.
+    var read_buf: [1024]u8 = undefined;
+    var total_read: usize = 0;
+    for (0..10) |_| {
+        const n = posix.recv(client_fd, read_buf[total_read..], posix.MSG.DONTWAIT) catch break;
+        if (n == 0) break;
+        total_read += n;
+    }
+    // Reply frame: 8 header + 5 ("reply")
+    try testing.expect(total_read >= 8 + 5);
+    try testing.expectEqualSlices(u8, "reply", read_buf[8..13]);
+
+    // Clean up.
+    posix.close(client_fd);
+    TestIO.tick(&conn.recv_completion);
+    try testing.expectEqual(TestConnection.State.closed, conn.state);
+}
+
+test "Connection: re-entrancy — terminate from on_frame" {
+    // Exercises the try_drain_recv → on_frame_fn → terminate path.
+    // After terminate, try_drain_recv must stop iterating (checks
+    // state != .connected after on_frame_fn returns).
+    var io = TestIO{};
+    var pool = try TestConnection.Pool.init(testing.allocator, 8);
+    defer pool.deinit(testing.allocator);
+    const pair = test_socketpair();
+    const client_fd = pair[1];
+
+    const TerminateCtx = struct {
+        terminated: bool = false,
+        conn_ptr: *TestConnection,
+
+        fn on_frame(ctx_ptr: *anyopaque, _: []const u8) void {
+            const self: *@This() = @ptrCast(@alignCast(ctx_ptr));
+            if (self.conn_ptr.state == .connected) {
+                self.conn_ptr.terminate(.no_shutdown);
+                self.terminated = true;
+            }
+        }
+    };
+
+    var conn: TestConnection = undefined;
+    conn.state = .closed;
+    conn.recv_message = null;
+    var ctx = TerminateCtx{ .conn_ptr = &conn };
+    conn.init(&io, &pool, pair[0], @ptrCast(&ctx), TerminateCtx.on_frame, null);
+
+    // Inject TWO valid frames. The first triggers terminate.
+    // The second must NOT be delivered (try_drain_recv stops).
+    var buf1: [1024]u8 = undefined;
+    var buf2: [1024]u8 = undefined;
+    _ = posix.send(client_fd, test_build_frame(&buf1, "first"), 0) catch unreachable;
+    _ = posix.send(client_fd, test_build_frame(&buf2, "second"), 0) catch unreachable;
+
+    // Tick recv — delivers first frame, on_frame terminates.
+    TestIO.tick(&conn.recv_completion);
+
+    // Assert terminate happened and only one frame was delivered.
+    try testing.expect(ctx.terminated);
+    // Connection should be .closed (terminate_close runs because
+    // recv_submitted was cleared before try_drain_recv, and
+    // send_submitted is false — no in-flight IO to wait for).
+    try testing.expectEqual(TestConnection.State.closed, conn.state);
+
+    posix.close(client_fd);
+}
