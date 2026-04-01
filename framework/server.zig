@@ -330,7 +330,15 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
                             sm.wal_record_buf = &server.wal_record_scratch;
                         }
 
-                        const commit_output = sm.commit(msg);
+                        switch (sm.commit(msg)) {
+                            .pending => {
+                                // Handler needs async IO — callback resumes.
+                                // Transaction stays open (begin_batch already
+                                // called). Phase 2: on resume, handler returns
+                                // .output with writes to execute.
+                                return;
+                            },
+                            .output => |commit_output| {
                         server.commit_pipeline_resp = commit_output.response;
                         server.commit_cache = commit_output.cache;
                         server.commit_identity = commit_output.identity;
@@ -354,6 +362,8 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
 
                         server.commit_stage = .render;
                         continue;
+                            },
+                        }
                     },
 
 

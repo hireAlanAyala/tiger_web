@@ -144,7 +144,7 @@ pub fn main(_: std.mem.Allocator, args: FuzzArgs) !void {
         // Prefetch — may fail with busy, in which case we just skip.
         if (sm.prefetch(msg) != .complete) continue;
 
-        const resp = sm.commit(msg).response;
+        const resp = sm.commit(msg).output.response;
         coverage.record(operation);
         features.record_message(msg, resp);
 
@@ -161,21 +161,21 @@ pub fn main(_: std.mem.Allocator, args: FuzzArgs) !void {
                     // ID from the create message body, not the response.
                     const probe = message.Message.init(.get_product, msg.body_as(message.Product).id, 1, {});
                     if (sm.prefetch(probe) == .complete) {
-                        const probe_resp = sm.commit(probe).response;
+                        const probe_resp = sm.commit(probe).output.response;
                         assert(probe_resp.status == .ok or probe_resp.status == .storage_error);
                     }
                 },
                 .create_collection => {
                     const probe = message.Message.init(.get_collection, msg.body_as(message.ProductCollection).id, 1, {});
                     if (sm.prefetch(probe) == .complete) {
-                        const probe_resp = sm.commit(probe).response;
+                        const probe_resp = sm.commit(probe).output.response;
                         assert(probe_resp.status == .ok or probe_resp.status == .storage_error);
                     }
                 },
                 .create_order => {
                     const probe = message.Message.init(.get_order, msg.body_as(message.OrderRequest).id, 1, {});
                     if (sm.prefetch(probe) == .complete) {
-                        const probe_resp = sm.commit(probe).response;
+                        const probe_resp = sm.commit(probe).output.response;
                         assert(probe_resp.status == .ok or probe_resp.status == .storage_error);
                     }
                 },

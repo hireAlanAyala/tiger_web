@@ -274,9 +274,17 @@ pub fn StateMachineType(comptime Storage: type, comptime Handlers: type) type {
             identity: Identity,
         };
 
-        /// Phase 2: commit — returns CommitOutput (response + cache for render).
-        /// The handler's domain data stays in the cache for the render phase.
-        pub fn commit(self: *StateMachine, msg: message.Message) CommitOutput {
+        /// Commit result — supports async handlers.
+        /// Native handlers always return .output (synchronous).
+        /// Sidecar handlers (Phase 2) may return .pending.
+        pub const CommitResult = union(enum) {
+            output: CommitOutput,
+            pending,
+        };
+
+        /// Phase 2: commit — returns CommitResult.
+        /// Idempotent — safe to call on both start and resume.
+        pub fn commit(self: *StateMachine, msg: message.Message) CommitResult {
             const cache = self.prefetch_cache.?;
             defer self.prefetch_cache = null;
             defer self.prefetch_identity = null;
@@ -317,11 +325,11 @@ pub fn StateMachineType(comptime Storage: type, comptime Handlers: type) type {
             };
 
             self.tracer.count_status(resp.status);
-            return .{
+            return .{ .output = .{
                 .response = resp,
                 .cache = cache,
                 .identity = self.prefetch_identity orelse std.mem.zeroes(message.PrefetchIdentity),
-            };
+            } };
         }
 
         // --- Per-pattern execute handlers ---
