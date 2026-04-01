@@ -393,6 +393,28 @@ fn send_exact(fd: std.posix.fd_t, bytes: []const u8) bool {
 // CALL/RESULT frame builders — server-side
 // =====================================================================
 
+/// Write the CALL frame header into buf. Returns the byte offset
+/// after the header — the caller writes args starting here.
+/// Layout: [tag: u8][request_id: u32 BE][name_len: u16 BE][name]
+///
+/// Zero-copy: the caller builds args directly into buf after the
+/// header. No intermediate args buffer, no double copy.
+pub fn write_call_header(buf: []u8, request_id: u32, function_name: []const u8) usize {
+    assert(function_name.len <= function_name_max);
+    const header_len = 1 + 4 + 2 + function_name.len;
+    assert(header_len <= buf.len);
+    var pos: usize = 0;
+    buf[pos] = @intFromEnum(CallTag.call);
+    pos += 1;
+    std.mem.writeInt(u32, buf[pos..][0..4], request_id, .big);
+    pos += 4;
+    std.mem.writeInt(u16, buf[pos..][0..2], @intCast(function_name.len), .big);
+    pos += 2;
+    @memcpy(buf[pos..][0..function_name.len], function_name);
+    pos += function_name.len;
+    return pos;
+}
+
 /// Build a CALL frame in buf. Returns the payload length.
 /// Layout: [tag: u8][request_id: u32 BE][name_len: u16 BE][name][args...]
 pub fn build_call(buf: []u8, request_id: u32, function_name: []const u8, args: []const u8) ?usize {
