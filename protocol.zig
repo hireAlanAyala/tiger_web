@@ -145,7 +145,44 @@ pub const CallTag = enum(u8) {
     result = 0x11,
     query = 0x12,
     query_result = 0x13,
+    /// Sent by sidecar after connecting. Server validates before
+    /// routing requests. The connection is "disconnected" until
+    /// a valid READY frame is received.
+    ready = 0x20,
 };
+
+// =====================================================================
+// READY handshake — sidecar → server
+//
+// Sent once after unix socket connect. The server must receive and
+// validate this before marking the sidecar as connected. Until then,
+// all HTTP requests get 503.
+//
+// Layout: [tag: 0x20][version: u16 BE][pid: u32 BE]
+//
+// version: protocol version (currently 1). Server rejects mismatches.
+// pid:     sidecar process ID. Server uses this for SIGKILL on
+//          protocol violations.
+// =====================================================================
+
+pub const protocol_version: u16 = 1;
+
+pub const ReadyPayload = struct {
+    version: u16,
+    pid: u32,
+};
+
+pub fn parse_ready_frame(frame: []const u8) ?ReadyPayload {
+    // Frame is the payload after CRC validation (no tag prefix —
+    // the tag is stripped by parse_sidecar_frame or checked before).
+    // But READY is the first frame, parsed before the CALL/RESULT
+    // protocol. The full frame includes the tag.
+    if (frame.len < 7) return null; // tag(1) + version(2) + pid(4)
+    if (frame[0] != @intFromEnum(CallTag.ready)) return null;
+    const version = std.mem.readInt(u16, frame[1..3], .big);
+    const pid = std.mem.readInt(u32, frame[3..7], .big);
+    return .{ .version = version, .pid = pid };
+}
 
 /// Maximum function name length (e.g., "handle_create_product").
 pub const function_name_max = 128;
