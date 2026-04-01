@@ -274,25 +274,32 @@ pub fn StateMachineType(comptime Storage: type, comptime Handlers: type) type {
             identity: Identity,
         };
 
-        /// Commit — ALWAYS synchronous. Never returns .pending.
+        /// Commit — ALWAYS synchronous. Never returns .pending. Never
+        /// will be async. This is a permanent architectural constraint.
         ///
-        /// TB pattern: execute never waits. All data is loaded during
-        /// prefetch (async). Execute only processes loaded data (sync).
-        /// No transaction across async boundaries.
+        /// WHY: Execute has irreversible side effects (SQL writes).
+        /// begin_batch opens a transaction, execute runs writes,
+        /// commit_batch closes it. This must be one uninterruptible
+        /// sequence. If execute were async, the transaction would be
+        /// open across an async boundary — a crash or disconnect
+        /// during the wait leaves partial writes in an open
+        /// transaction. The state is ambiguous: committed or not?
         ///
-        /// For sidecar: the handle CALL happens during PREFETCH, not
-        /// during execute. Prefetch sends CALL "handle" and returns
-        /// .pending. When the RESULT arrives, prefetch resumes and
-        /// stores the handle result. Execute then parses the loaded
-        /// result and executes SQL writes synchronously.
+        /// TB's commit_execute increments commit_min (the commit
+        /// marker). Once incremented, the operation is committed on
+        /// every replica. There is no undo. TB makes execute sync
+        /// so this marker is either fully advanced or not touched.
+        /// Same principle: side effects are irreversible, don't put
+        /// an async boundary in the middle of irreversible work.
         ///
-        /// The async/sync split:
-        ///   prefetch: CALL route + prefetch + handle (async, .pending)
+        /// The correct split: load all data first (prefetch, async,
+        /// safe to retry/abort), then apply it all at once (execute,
+        /// sync, no interruption).
+        ///
+        /// For sidecar: the handle CALL happens during PREFETCH.
+        ///   prefetch: CALL route + prefetch + handle (async)
         ///   execute:  parse handle RESULT, db.execute writes (sync)
-        ///   render:   CALL render (async, .pending)
-        ///
-        /// DO NOT add .pending to this function. If execute needs
-        /// async IO, the data should have been loaded in prefetch.
+        ///   render:   CALL render (async)
         pub fn commit(self: *StateMachine, msg: message.Message) CommitOutput {
             const cache = self.prefetch_cache.?;
             defer self.prefetch_cache = null;
