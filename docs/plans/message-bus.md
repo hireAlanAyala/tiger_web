@@ -1213,6 +1213,13 @@ This phase requires:
 
 ## Phase 2: Sidecar Integration
 
+> **Blocked on Phase 1.5.** The TS wire format must change
+> simultaneously with the Zig side. The current sidecar stages
+> in `commit_dispatch` (sidecar_route, sidecar_prefetch,
+> sidecar_handle, sidecar_render) will be deleted by Phase 1.5
+> when the pipeline consolidates. No point wiring TS to code
+> that's about to be replaced.
+
 With the consolidated pipeline, Phase 2 focuses on the sidecar
 handler implementation and the TS wire format — not on server
 pipeline changes.
