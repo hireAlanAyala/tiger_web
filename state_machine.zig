@@ -167,6 +167,12 @@ pub fn StateMachineType(comptime Storage: type, comptime Handlers: type) type {
     return struct {
         const StateMachine = @This();
 
+        /// Handler dispatch — native or sidecar. Owned by the SM.
+        /// For native: zero-size struct (no fields, zero bytes).
+        /// For sidecar: holds client/bus pointers, phase state, etc.
+        /// All handler calls go through self.handlers.method().
+        handlers: Handlers,
+
         storage: *Storage,
         tracer: Tracer,
         prng: PRNG,
@@ -176,8 +182,8 @@ pub fn StateMachineType(comptime Storage: type, comptime Handlers: type) type {
         /// each process_inbox call. Used for order timeout_at.
         now: i64,
 
-        /// Prefetch cache — opaque to the SM. Populated by Handlers.handler_prefetch()
-        /// in prefetch(), consumed by Handlers.handler_execute() in commit().
+        /// Prefetch cache — opaque to the SM. Populated by handlers.handler_prefetch()
+        /// in prefetch(), consumed by handlers.handler_execute() in commit().
         /// The SM stores it between phases but never inspects it.
         prefetch_cache: ?Handlers.Cache,
 
@@ -192,8 +198,9 @@ pub fn StateMachineType(comptime Storage: type, comptime Handlers: type) type {
         wal_record_len: usize = 0,
         wal_record_count: u8 = 0,
 
-        pub fn init(storage: *Storage, log_trace: bool, prng_seed: u64, secret_key: *const [auth.key_length]u8) StateMachine {
+        pub fn init(storage: *Storage, handlers: Handlers, log_trace: bool, prng_seed: u64, secret_key: *const [auth.key_length]u8) StateMachine {
             return .{
+                .handlers = handlers,
                 .storage = storage,
                 .tracer = Tracer.init(log_trace),
                 .prng = PRNG.from_seed(prng_seed),
@@ -223,12 +230,12 @@ pub fn StateMachineType(comptime Storage: type, comptime Handlers: type) type {
                 self.resolve_credential(msg);
             }
 
-            self.prefetch_cache = Handlers.handler_prefetch(self.storage, &msg);
+            self.prefetch_cache = self.handlers.handler_prefetch(self.storage, &msg);
             if (self.prefetch_cache != null) return .complete;
 
             // Handler returned null — either busy (retry) or pending
             // (async IO in-flight, callback will resume).
-            if (Handlers.is_handler_pending()) return .pending;
+            if (self.handlers.is_handler_pending()) return .pending;
             return .busy;
         }
 
@@ -305,7 +312,8 @@ pub fn StateMachineType(comptime Storage: type, comptime Handlers: type) type {
             defer self.prefetch_cache = null;
             defer self.prefetch_identity = null;
 
-            const fw = Handlers.FwCtx{
+            const FwCtx = Handlers.FwCtx;
+            const fw = FwCtx{
                 .identity = self.prefetch_identity orelse std.mem.zeroes(message.PrefetchIdentity),
                 .now = self.now,
                 .is_sse = false, // Set by server when render is wired.
@@ -318,7 +326,7 @@ pub fn StateMachineType(comptime Storage: type, comptime Handlers: type) type {
                 Storage.WriteView.init_recording(self.storage, buf)
             else
                 Storage.WriteView.init(self.storage);
-            const handle_result = Handlers.handler_execute(
+            const handle_result = self.handlers.handler_execute(
                 cache,
                 msg,
                 fw,
