@@ -16,6 +16,8 @@ const Shell = @import("shell.zig");
 
 const cfo = @import("./scripts/cfo.zig");
 const ci = @import("./scripts/ci.zig");
+const coverage = @import("./scripts/coverage.zig");
+const metrics = @import("./scripts/metrics.zig");
 const perf_script = @import("./scripts/perf.zig");
 
 pub fn log_fn(
@@ -33,6 +35,8 @@ pub const std_options: std.Options = .{ .logFn = log_fn };
 const CLIArgs = union(enum) {
     cfo: cfo.CLIArgs,
     ci: ci.CLIArgs,
+    coverage: coverage.CLIArgs,
+    metrics: metrics.CLIArgs,
     perf: perf_script.CLIArgs,
 
     pub const help =
@@ -43,6 +47,10 @@ const CLIArgs = union(enum) {
         \\  zig build scripts -- cfo [--budget=<duration>] [--refresh=<duration>] [--concurrency=<n>]
         \\
         \\  zig build scripts -- ci [--validate-release]
+        \\
+        \\  zig build scripts -- coverage
+        \\
+        \\  zig build scripts -- metrics [--no-fetch]
         \\
         \\  zig build scripts -- perf [--connections=<n>] [--requests=<n>]
         \\
@@ -74,6 +82,8 @@ pub fn main() !void {
     switch (cli_args) {
         .cfo => |args_cfo| try cfo.main(shell, gpa, args_cfo),
         .ci => |args_ci| try ci.main(shell, gpa, args_ci),
+        .coverage => |args_cov| try coverage.main(shell, gpa, args_cov),
+        .metrics => |args_metrics| try metrics.main(shell, gpa, args_metrics),
         .perf => |args_perf| try perf_script.main(shell, gpa, args_perf),
     }
 }
