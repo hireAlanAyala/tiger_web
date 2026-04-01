@@ -75,12 +75,37 @@ pub const PrefetchCache = gen_handlers.PrefetchCache;
 pub var fault_prng: ?*PRNG = null;
 pub var fault_busy_ratio: PRNG.Ratio = PRNG.Ratio.zero();
 
+// =====================================================================
+// Handler type selection — two paths, intentionally.
+//
+// Native handlers (NativeHandlersType below) compile Zig handler code
+// directly into the server binary. Zero overhead — function calls.
+// 53K req/s.
+//
+// Sidecar handlers (SidecarHandlersType, Phase 2) implement the same
+// interface but delegate to an external runtime via the message bus.
+// Any language that speaks the sidecar protocol: TypeScript, Python,
+// Rust, C, Go. With shared memory transport: ~34K req/s for native-
+// compiled handlers (Rust/C/Go), ~25K for V8 (TypeScript).
+//
+// The two-path split is worth keeping. The complexity is contained
+// entirely in the handler implementation files — the SM, server, and
+// pipeline see ONE handler interface. The comptime selection is one
+// line. Native handlers never pay sidecar overhead. Sidecar handlers
+// get any-runtime flexibility.
+//
+// Future: dlopen for native-compiled handler plugins (Rust, C, Go)
+// would reach near-native speed (~53K) without the sidecar protocol.
+// That's additive — a third handler implementation behind the same
+// interface.
+// =====================================================================
+
 pub fn HandlersType(comptime StorageParam: type) type {
     return struct {
         pub const Cache = PrefetchCache;
 
-        /// Pure native prefetch dispatch. No sidecar knowledge.
-        /// In sidecar mode, the server short-circuits before calling this.
+        /// Native prefetch dispatch. In sidecar mode, the server uses
+        /// SidecarHandlersType instead — same interface, different impl.
         pub fn handler_prefetch(storage: *StorageParam, msg: *const Message) ?PrefetchCache {
             // Fault injection for simulation.
             if (fault_prng) |prng| {
