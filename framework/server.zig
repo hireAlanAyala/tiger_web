@@ -439,6 +439,11 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
         /// Phase 2: if .pending leads to external failure (sidecar disconnect),
         /// the on_close callback must cancel the tracer before calling reset.
         fn pipeline_reset(server: *Server) void {
+            // If .handle was pending, a transaction is open. Close it.
+            // Committing an empty transaction is a no-op in SQLite.
+            if (server.commit_stage == .handle) {
+                server.state_machine.commit_batch();
+            }
             server.commit_stage = .idle;
             server.commit_connection = null;
             server.commit_msg = null;
