@@ -822,7 +822,7 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
             const response =
                 "HTTP/1.1 503 Service Unavailable\r\n" ++
                 "Content-Type: text/plain\r\n" ++
-                "Content-Length: 24\r\n" ++
+                "Content-Length: 21\r\n" ++
                 "Connection: close\r\n" ++
                 "\r\n" ++
                 "service unavailable\n";
