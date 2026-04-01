@@ -1518,6 +1518,18 @@ Recovery testing requires the full stack — deferred to sim.zig.
   result_data in state_buf survives recv buffer compaction.
 - [ ] Register updated fuzzer in `fuzz_tests.zig`.
 
+**Hardening scenarios (from TB audit, bugs found in code review):**
+- [ ] Unsolicited frame — inject frame when call_state != .receiving.
+  Must set protocol_violation, not crash the server.
+- [ ] Send queue overflow — burst QUERYs exceeding send_queue_max.
+  Must set protocol_violation, not assert-crash.
+- [ ] Compaction preserves advance_pos — suspend_recv during
+  try_drain_recv, inject more data, resume. Validated-but-
+  undelivered frames must be delivered after resume, not lost.
+- [ ] state_buf capacity — inject large RESULT + QUERY results
+  that approach state_buf_max. copy_state assert must fire on
+  overflow, not silently corrupt.
+
 ### Recovery testing — sim.zig (separate concern)
 
 Recovery requires Server + SM + MessageBus — wrong level for
