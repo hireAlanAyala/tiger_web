@@ -342,14 +342,18 @@ pub fn ConnectionType(comptime IO: type, comptime options: Options) type {
                 if (self.recv_suspended) return;
             }
 
-            // All frames consumed. Compact: move unvalidated tail to front.
+            // Compact: move unconsumed data to front of buffer.
+            // Preserves the advance_pos offset — validated-but-undelivered
+            // frames (between process_pos and advance_pos) stay validated
+            // after compaction. Without this, resume_recv would re-validate
+            // frames that already passed CRC, or worse, skip them.
             if (self.process_pos > 0) {
                 const remaining = self.recv_pos - self.process_pos;
                 if (remaining > 0) {
                     stdx.copy_left(.exact, u8, buf[0..remaining], buf[self.process_pos..][0..remaining]);
                 }
                 self.recv_pos = remaining;
-                self.advance_pos = 0;
+                self.advance_pos -= self.process_pos;
                 self.process_pos = 0;
             }
 
