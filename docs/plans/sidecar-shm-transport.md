@@ -440,6 +440,22 @@ transport changes — only the IO layer and handler implementation.
 - **Compiled templates** — massive new dependency for ~4μs. TB: "avoiding dependencies acts as a forcing function."
 - **Async sidecar exchange** — blocking window is 8μs. Async adds connection states, cross-tick temporal coupling, and risk of unexpected data visibility between ticks.
 - **Spin-wait** — burns a core. Violates "put a limit on everything."
+  However, the IO parameterization makes this a future opt-in:
+  `SharedMemoryIO(.{ .signaling = .spin })`. One comptime line.
+  The developer chooses knowingly. Worth it for compiled-language
+  sidecars (Zig/Rust/C/Go) where handler compute is ~1-2μs and
+  transport dominates:
+
+  | Runtime | Futex (safe) | Spin (burns core) | Gain |
+  |---|---|---|---|
+  | Zig/Rust/C/Go | ~34K | ~45K | +32% |
+  | TypeScript (V8) | ~25K | ~27K | +8% |
+  | Python | ~5K | ~5K | ~0% |
+
+  Gain is large when handler is fast (transport dominates). Small
+  when handler is slow (runtime dominates). Not worth it for
+  interpreted languages. Dangerous but valuable for latency-
+  sensitive compiled handlers. Default remains futex.
 - **Spin-then-futex** — two code paths for 3μs. Violates "zero technical debt."
 - **eventfd** — abstraction over futex for epoll integration we don't need.
 - **Embedded V8** — massive dependency (Bun is 300K+ lines), single-language.
