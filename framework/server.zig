@@ -101,6 +101,9 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
         commit_cache: ?App.HandlersType(Storage).Cache = null,
         /// Auth identity — persists from prefetch to render.
         commit_identity: ?StateMachine.CommitOutput.Identity = null,
+        /// Re-entrancy guard for commit_dispatch (TB pattern).
+        /// Prevents nested execution if on_frame fires during dispatch.
+        commit_dispatch_entered: bool = false,
 
         // --- Sidecar (optional) ---
         // Present when App.sidecar_mode is true. The server owns the bus
@@ -363,17 +366,22 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
         /// runs start to finish. For sidecar handlers, a stage may pend
         /// waiting for a CALL RESULT. process_sidecar resumes.
         fn commit_dispatch(server: *Server) void {
+            // Re-entrancy guard (TB pattern). Prevents nested execution
+            // if sidecar_on_frame fires during dispatch (e.g., send_now
+            // fast path completes inline and triggers a recv callback).
+            assert(!server.commit_dispatch_entered);
+            server.commit_dispatch_entered = true;
+            defer server.commit_dispatch_entered = false;
+
             const sm = server.state_machine;
-            const conn = server.commit_connection.?;
-            const msg = server.commit_msg.?;
+            const conn = server.commit_connection orelse return;
 
             while (true) {
                 switch (server.commit_stage) {
                     .idle => return,
 
                     .prefetch => {
-                        // In sidecar mode, the server short-circuits before
-                        // reaching here. This path is native-only.
+                        const msg = server.commit_msg.?;
                         switch (sm.prefetch(msg)) {
                             .complete => {
                                 sm.tracer.stop(.prefetch, msg.operation);
@@ -390,7 +398,7 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
                     },
 
                     .handle => {
-                        // Invariant: prefetch must have completed.
+                        const msg = server.commit_msg.?;
                         assert(sm.prefetch_cache != null);
                         // Invariant: handle result not yet produced.
                         assert(server.commit_pipeline_resp == null);
@@ -430,7 +438,7 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
 
 
                     .render => {
-                        // Render runs OUTSIDE the transaction.
+                        const msg = server.commit_msg.?;
                         assert(server.commit_pipeline_resp != null);
                         assert(server.commit_cache != null);
                         assert(server.commit_identity != null);
