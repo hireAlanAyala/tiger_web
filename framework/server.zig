@@ -149,7 +149,6 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
             listen_fd: IO.fd_t,
             time: Time,
             wal: ?*Wal,
-            sidecar_path: ?[]const u8,
         ) !Server {
             const connections = try allocator.alloc(Connection, max_connections);
             errdefer allocator.free(connections);
@@ -158,7 +157,7 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
                 conn.* = Connection.init_free();
             }
 
-            var server = Server{
+            return Server{
                 .io = io,
                 .state_machine = state_machine,
                 .time = time,
@@ -170,27 +169,31 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
                 .wal = wal,
                 .tick_count = 0,
             };
+        }
 
-            // Initialize sidecar Bus and Client last (TB pattern).
-            // Wire them into sm.handlers so the handler methods can
-            // access them via self.sidecar_bus / self.sidecar_client.
-            if (App.sidecar_enabled) {
-                server.sidecar_client = SidecarClient.init();
-                try server.sidecar_bus.init_pool(
-                    allocator,
-                    io,
-                    @ptrCast(&server),
-                    sidecar_on_frame,
-                    sidecar_on_close,
-                );
-                state_machine.handlers.sidecar_client = &server.sidecar_client;
-                state_machine.handlers.sidecar_bus = &server.sidecar_bus;
-                if (sidecar_path) |path| {
-                    server.sidecar_bus.start_listener(path);
-                }
+        /// Wire the sidecar Bus and Client into the server and SM.
+        /// Called AFTER the server is stored at its final address
+        /// (caller's stack or heap). Takes &self — pointers to
+        /// embedded fields are stable because self won't move.
+        ///
+        /// Two-phase init: Server.init returns the struct, then
+        /// wire_sidecar takes addresses of the embedded fields.
+        /// This avoids dangling pointers from return-by-value.
+        pub fn wire_sidecar(server: *Server, allocator: std.mem.Allocator, sidecar_path: ?[]const u8) !void {
+            if (!App.sidecar_enabled) return;
+            server.sidecar_client = SidecarClient.init();
+            try server.sidecar_bus.init_pool(
+                allocator,
+                server.io,
+                @ptrCast(server),
+                sidecar_on_frame,
+                sidecar_on_close,
+            );
+            server.state_machine.handlers.sidecar_client = &server.sidecar_client;
+            server.state_machine.handlers.sidecar_bus = &server.sidecar_bus;
+            if (sidecar_path) |path| {
+                server.sidecar_bus.start_listener(path);
             }
-
-            return server;
         }
 
         pub fn deinit(server: *Server, allocator: std.mem.Allocator) void {
@@ -538,7 +541,8 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
                 // Cancel pipeline if in-flight.
                 const sm = server.state_machine;
                 switch (server.commit_stage) {
-                    .route, .prefetch => sm.tracer.cancel(.prefetch),
+                    .route => {}, // no tracer span active during route
+                    .prefetch => sm.tracer.cancel(.prefetch),
                     .render => sm.tracer.cancel(.execute),
                     .handle, .idle => {},
                 }
@@ -639,7 +643,8 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
                     if (server.commit_connection == conn and server.commit_stage != .idle) {
                         const sm = server.state_machine;
                         switch (server.commit_stage) {
-                            .route, .prefetch => sm.tracer.cancel(.prefetch),
+                            .route => {}, // no tracer span active during route
+                            .prefetch => sm.tracer.cancel(.prefetch),
                             .render => sm.tracer.cancel(.execute),
                             .handle, .idle => {},
                         }
