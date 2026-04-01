@@ -1224,17 +1224,14 @@ This phase requires:
   permanently synchronous. TB pattern: irreversible side effects
   (SQL writes inside transaction) must not cross async boundaries.
   Sidecar handle CALL moves to prefetch. Documented in commit().
-- [ ] Tracer span cleanup on `.pending` failure: when a handler
-  returns `.pending` and later the connection dies (sidecar
-  disconnect), the `on_close` callback must cancel the in-flight
-  tracer span before calling `pipeline_reset`. Currently
-  `pipeline_reset` does NOT cancel tracers — each stage handles
-  its own cleanup. Phase 2's on_close must do this.
-- [ ] Rename `HandlersType` to `NativeHandlersType` when adding
-  `SidecarHandlersType`. Cosmetic but clarifies the two paths.
-- [ ] `commit_dispatch_entered` guard — currently no async
-  callbacks exist (native is sync). Phase 2 adds callbacks that
-  re-enter commit_dispatch. The guard is already in place.
+- [x] Tracer span cleanup on `.pending` failure: sidecar_on_close
+  cancels tracer spans before pipeline_reset. timeout_idle also
+  cancels if the timed-out connection has a pending pipeline.
+- [x] `SidecarHandlersType` added alongside `HandlersType`.
+  HandlersType kept as name (not renamed) — comptime selection
+  via HandlersFor makes the distinction clear.
+- [x] `commit_dispatch_entered` guard in place. sidecar_on_frame
+  calls commit_dispatch — guard prevents nested execution.
 
 **Sidecar CALL flow (corrected):**
 ```
@@ -1251,12 +1248,12 @@ The handle CALL loads data. Execute processes loaded data.
 Same split as TB: prefetch is async IO, execute is computation.
 Execute is permanently synchronous — see commit() doc comment.
 
-## Phase 2: Sidecar Integration
+## Phase 2: Sidecar Integration — DONE
 
-> **Phase 1.5 DONE.** Pipeline has four stages (route, prefetch,
-> handle, render) with `.pending` support on route, prefetch,
-> and render. Execute is permanently synchronous. Handler
-> interface is async-capable. Comptime handler selection ready.
+> All three steps complete. Server compiles and runs in both
+> native (`zig build`) and sidecar (`zig build -Dsidecar=true`)
+> modes. Bus embedded in Server (TB pattern). TS wire format
+> updated with CRC. Full pipeline wired end-to-end.
 
 ### Step 1: SidecarHandlersType — DONE
 
