@@ -130,6 +130,7 @@ Right primitive: the developer states what happened, the framework handles the p
 
 # Backlog
 
+- design a system for deriving docs from the code, and documenting the bible, architecture, and docs separately
 - TS sidecar render: effects array instead of single string
 - Cross-platform support (currently Linux only, epoll)
 - CI: run test-adapter, integration tests against /examples

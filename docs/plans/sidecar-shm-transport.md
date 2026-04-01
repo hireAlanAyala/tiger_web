@@ -40,14 +40,19 @@ all six TB principles.
 |---|---|---|
 | Spin-wait | ~2μs | **Boundedness**: burns a full core, no upper bound on CPU if sidecar is slow. **Determinism**: timing-dependent by construction. |
 | Spin-then-futex | ~3μs | **Right primitive**: two code paths for 3μs — "zero technical debt" means don't add complexity you don't need. Sim CAN test both paths (determinism concern was overstated), but the complexity is real. |
-| Pure futex | ~8μs | None. One code path, deterministic, bounded by timeout, fuzzable, is the primitive (eventfd and spin are built on top). |
-| eventfd | ~10μs | **Right primitive**: abstraction over futex + counter + fd, designed for epoll bridging. We don't need epoll integration (blocking exchange). Using it is using the wrong tool. |
+| Pure futex | ~8μs | Blocks the event loop. The 8μs is the happy path — actual block is however long V8 takes (GC, JIT deopt). Server can't process timeouts, accepts, or metrics during the wait. TB never blocks the event loop. |
+| eventfd | ~10μs | None. One code path, deterministic, bounded by epoll timeout. The async pipeline (message-bus Phase 1.5) needs epoll bridging — eventfd is the right primitive for "signal an epoll-driven event loop from another process." |
 | io_uring futex | ~6μs | **Right primitive**: not using io_uring for anything else. **Safety**: 50K+ lines of kernel dependency surface. TB built their own IO ring for control. |
 
-**Chose futex.** Only option that passes all six columns. It IS the
-primitive — atomic compare-and-wait on a u32. One code path.
-Deterministic. Bounded by timeout. No fds, no kernel buffers, no
-abstraction layers. Every language can call it.
+**Chose eventfd.** The async pipeline (`.pending` + callback) changed
+the calculus. The original evaluation rejected eventfd because "we
+don't need epoll bridging" — true when the exchange was blocking,
+wrong now that every handler is async. eventfd is purpose-built for
+this: one `write(efd, 1)` wakes the other process's epoll. No fd
+leaks, no kernel buffers beyond one u64 counter, no abstraction
+layers. Bounded by epoll timeout. Deterministic (same signal, same
+wake). Fuzzable (SimIO models eventfd as an instant delivery with
+PRNG-driven delay).
 
 ### Transport mechanism
 
@@ -192,42 +197,54 @@ Currently `sidecar_commit_and_encode` blocks the tick for ~58μs
 (3 socket RTs). With shared memory + futex, the block drops to ~8μs
 (2 futex RTs).
 
-Async (eventfd in epoll set, split across ticks, new connection state
-`waiting_sidecar`) violates:
-- **Right primitive**: the server is single-threaded, one thing at a
-  time IS the primitive. The sidecar exchange isn't independent — the
-  connection needs the result before it can respond.
-- **Explicit**: exchange spans ticks, developer must reason about what
-  happened between send and receive. With blocking: nothing.
-- **Safety**: new connection state, new transitions, new invariants.
-  Also: other connections may commit writes between ticks, so the
-  sidecar's render reads may see unexpected data.
+**Chose async (eventfd + epoll).** The message-bus Phase 1.5 pipeline
+supports async handlers with `.pending` + callback. This eliminates
+the original objections to async:
 
-**Originally chose blocking.** 128 connections × 8μs = 1ms per tick.
+- ~~**Right primitive**: single-threaded, one thing at a time~~
+  → The pipeline already handles `.pending`. The tick loop already
+  continues while handlers await IO. Blocking is now the exception,
+  not the primitive.
+- ~~**Explicit**: exchange spans ticks~~
+  → Every sidecar handler already spans ticks via the message bus
+  plan. Same pattern: handler returns `.pending`, callback resumes
+  `commit_dispatch`. The developer reasons about one interface.
+- ~~**Safety**: new connection state, new transitions~~
+  → The `.pending` handler state and `commit_dispatch` resume path
+  already exist. No new states. The sidecar exchange uses the same
+  mechanism as every other async handler.
 
-**UPDATE (post message-bus Phase 1.5):** The server pipeline now
-supports async handlers with `.pending` + callback. The blocking
-vs async decision needs revisiting:
+The blocking argument (8μs is acceptable) was wrong for a deeper
+reason: 8μs is the **happy path**. The actual block is however long
+V8 takes — GC pause, JIT deopt, slow handler. `futex_wait` with a
+timeout freezes the entire server for the full timeout before
+recovery. TB never blocks the event loop. Their `commit_prefetch`
+returns `.pending` and the tick continues.
 
-- **Blocking futex in handler:** Simpler. Blocks the event loop for
-  ~4μs per futex_wait. Server can't process timeouts, accepts, or
-  metrics during the wait. Acceptable if wait is short.
-- **eventfd + epoll:** Handler writes to shared memory, does
-  futex_wake, returns `.pending`. Sidecar writes response to shared
-  memory, writes to eventfd. Epoll fires callback, handler resumes.
-  One syscall per signal. Fits the IO model. But was rejected as
-  "wrong primitive" (eventfd is an abstraction over futex for epoll
-  bridging). With the async pipeline in place, epoll bridging IS
-  what we need — eventfd becomes the right primitive.
-- **Poll in tick loop:** Check shared memory flag every tick. Adds
-  one tick latency (~10ms). Too slow.
+**Flow:**
+```
+Handler writes request to shared memory
+  → atomic store server_seq (release)
+  → write 1 to eventfd (wakes sidecar's epoll/poll)
+  → return .pending
 
-**Recommendation:** Revisit eventfd. The async pipeline changes the
-calculus — the "wrong primitive" argument was based on blocking
-exchange where epoll bridging was unnecessary. With `.pending`
-handlers, epoll bridging is exactly what we need. eventfd is the
-right primitive for "signal an epoll-driven event loop from another
-process via shared memory."
+Sidecar reads request, computes, writes response
+  → atomic store sidecar_seq (release)
+  → write 1 to server's eventfd (registered in server's epoll)
+
+Server's epoll fires eventfd readable
+  → eventfd callback: read eventfd, call commit_dispatch_resume
+  → handler re-enters, reads response (acquire on sidecar_seq)
+  → .complete → advance pipeline
+```
+
+Two eventfds: one for server→sidecar notification, one for
+sidecar→server. Each registered in the respective process's epoll
+set. eventfd is the right primitive for "signal an epoll-driven
+event loop from another process" — it exists specifically for this.
+The original rejection called it "an abstraction over futex for
+epoll bridging we don't need." With the async pipeline, epoll
+bridging IS what we need.
 
 ## Projected performance
 
@@ -236,11 +253,11 @@ Per-request cost breakdown:
 | Component | Current | Phase 1 | Phase 2 | Phase 3 |
 |---|---|---|---|---|
 | Zig-side (SQLite + framing) | 19μs | 19μs | 19μs | 19μs |
-| Transport | 58μs (3 RT socket) | 38μs (2 RT socket) | 8μs (2 RT futex) | 8μs |
+| Transport | 58μs (3 RT socket) | 38μs (2 RT socket) | 10μs (2 RT eventfd) | 10μs |
 | V8 compute | ~15μs | ~15μs | ~15μs | ~11μs |
-| **Total** | **77μs** | **57μs** | **40μs** | **36μs** |
-| **req/s** | **13K** | **17K** | **25K** | **~26K** |
-| **% of native** | **25%** | **32%** | **47%** | **~49%** |
+| **Total** | **77μs** | **57μs** | **42μs** | **38μs** |
+| **req/s** | **13K** | **17K** | **24K** | **~26K** |
+| **% of native** | **25%** | **32%** | **45%** | **~49%** |
 
 ~49% of native is the TB-aligned ceiling for Node.js. The remaining
 gap is V8 computation (handler logic, HTML string concatenation) —
@@ -294,22 +311,74 @@ Shared region layout (comptime-sized, ~512 KB):
 └─────────────────────────────────────────┘
 ```
 
-Server writes request, atomic store `server_seq`, `futex_wake`.
-Sidecar reads, processes, writes response, atomic store `sidecar_seq`,
-`futex_wake`. Sequence numbers detect stale data and missed exchanges.
-
 Layout is an `extern struct` with
 `comptime { assert(@sizeOf(Header) == 64); }` — the layout is the
 protocol, verified at compile time.
 
+### Memory ordering
+
+Sequence numbers are the synchronization points. Without explicit
+ordering, the CPU can reorder stores: the server could see a new
+`sidecar_seq` but read stale response payload bytes. TB is
+meticulous about this — "be explicit" means specifying the memory
+model, not hoping the compiler does the right thing.
+
+**Write side (server publishes request):**
+```zig
+// 1. Write payload (ordinary stores — no ordering constraint between payload bytes).
+@memcpy(region.request_slot[0..len], payload);
+std.mem.writeInt(u32, &region.header.request_len, len, .big);
+std.mem.writeInt(u32, &region.header.request_crc, crc, .big);
+
+// 2. Release fence: all payload stores visible before seq update.
+@atomicStore(u32, &region.header.server_seq, seq, .release);
+
+// 3. Signal sidecar (eventfd write).
+```
+
+**Read side (sidecar consumes request):**
+```zig
+// 1. Acquire fence: seq load orders before all payload loads.
+const seq = @atomicLoad(u32, &region.header.server_seq, .acquire);
+if (seq == last_seen_seq) return; // no new request
+
+// 2. Read payload (ordinary loads — guaranteed visible by acquire).
+const len = std.mem.readInt(u32, &region.header.request_len, .big);
+const crc = std.mem.readInt(u32, &region.header.request_crc, .big);
+const payload = region.request_slot[0..len];
+```
+
+Same pattern reversed for sidecar→server (sidecar does release
+store on `sidecar_seq`, server does acquire load).
+
+**Why acquire/release, not SeqCst:** Two producers, two consumers,
+no third-party observer. Acquire/release is sufficient — it
+establishes a happens-before between the writer's stores and the
+reader's loads. SeqCst adds a full barrier for total ordering
+across all threads, which we don't need (only two participants).
+TB uses release/acquire for their FIFO queues for the same reason.
+
+**The eventfd is not the fence.** The eventfd write/read happen
+AFTER the atomic store/load. They are notification, not
+synchronization. A process could theoretically see the eventfd
+signal before the acquire load sees the new seq — that's fine,
+it just means the handler re-enters, sees old seq, returns
+`.pending` again, and waits for the next signal. The atomic
+seq IS the synchronization point. The eventfd is just the wake.
+
 ## Node.js native addon
 
-Node.js can't mmap or futex natively. Small addon required (~80 LOC C++):
+Node.js can't mmap natively. Small addon required (~80 LOC C++):
 
 - `shm_open(name)` → fd
 - `mmap(fd, size)` → Buffer (backed by shared pages)
-- `futex_wait(buffer, offset, expected)` → blocks until woken
-- `futex_wake(buffer, offset)` → wakes waiter
+- `eventfd(0, EFD_NONBLOCK)` → fd (for epoll/poll registration)
+- `eventfd_write(fd)` → signal the other process
+- `eventfd_read(fd)` → consume signal
+
+eventfd returns a regular fd — Node.js can `poll`/`select` on it
+natively or register it in its event loop via `uv_poll_t`. No
+blocking required on the sidecar side either.
 
 Stable POSIX/Linux syscalls, no maintenance burden. Same addon works
 for any Node.js sidecar. Go/Rust/Java/Python can call these natively.
@@ -359,19 +428,27 @@ modes. The socket protocol is battle-tested. The replacement must be
 equally proven before it replaces anything.
 
 - [ ] Define shared region layout as `extern struct` with comptime size assertions
-- [ ] Server creates `/dev/shm/tiger-sidecar-{pid}`, mmaps region
+- [ ] Header includes CRC fields: `request_crc`, `response_crc` (CRC-32 of len ++ payload)
+- [ ] Server creates `/dev/shm/tiger-{pid}-{boot_id}`, mmaps region
+- [ ] `shm_unlink` before `shm_open(O_CREAT|O_EXCL)` — no stale regions from crashes
 - [ ] Replace `protocol.read_frame` / `protocol.write_frame` with direct shared memory read/write
-- [ ] Replace socket send/recv with futex_wake/futex_wait
-- [ ] Crash recovery: server zeros region on sidecar timeout, sidecar re-maps on restart (same recovery path as socket disconnect)
+- [ ] Signaling via eventfd (2 eventfds: server→sidecar, sidecar→server)
+- [ ] Server registers sidecar→server eventfd in epoll set
+- [ ] Handler writes to shm, `@atomicStore(.release)` on seq, writes eventfd, returns `.pending`
+- [ ] eventfd callback: `@atomicLoad(.acquire)` on seq, validate CRC, resume `commit_dispatch`
 - [ ] Sequence number validation (stale response detection)
-- [ ] Build Node.js native addon (mmap + futex, ~80 LOC C++)
+- [ ] Crash recovery: server detects sidecar death via `waitpid`/`SIGCHLD`
+- [ ] Crash recovery: server zeros region header, re-spawns sidecar
+- [ ] Crash recovery: CRC mismatch on partial write → pipeline failure (not undefined behavior)
+- [ ] Build Node.js native addon (mmap + eventfd, ~80 LOC C++)
 - [ ] Update `dispatch.generated.ts` to use addon instead of socket
 - [ ] Fuzz: 10K+ exchanges through shared memory transport
-- [ ] Fuzz: torn writes (sidecar crash mid-response-write)
+- [ ] Fuzz: torn writes (sidecar crash mid-response-write, CRC must catch)
 - [ ] Fuzz: stale sequences (sidecar reads from previous exchange)
-- [ ] Fuzz: server timeout during sidecar processing (recovery path)
+- [ ] Fuzz: server eventfd timeout during sidecar processing (recovery path)
 - [ ] Fuzz: sidecar crash + restart + re-map (reconnection path)
-- [ ] Measure: expect ~25K req/s
+- [ ] Fuzz: memory ordering — verify acquire/release prevents stale payload reads
+- [ ] Measure: expect ~24K req/s
 
 ### Phase 3: Typed schemas — adapter-driven type generation
 
@@ -413,16 +490,103 @@ Shared memory doesn't introduce physical risk:
   a sidecar sending garbage over a socket — bad data in, bad response
   out, not memory corruption
 - The mmap region is the boundary, same as the kernel buffer was
-- Torn reads (reading mid-write) produce wrong data, not corruption —
-  same as partial socket reads. Sequence numbers detect this.
-
-Futex cannot corrupt anything. It's an atomic compare-and-wait on a
-32-bit integer. Deadlock = timeout = same recovery as socket disconnect.
+- Sequence numbers + acquire/release ordering prevent torn reads
+  (see Memory ordering section)
 
 The current socket transport has a risk shared memory eliminates: the
 frame parser. Length-prefixed frames can read past buffer bounds on
 malformed input. Shared memory has fixed-size slots at comptime-known
 offsets. Nothing to parse, nothing to overflow.
+
+### Checksums
+
+The socket transport uses CRC-32 on every frame. Shared memory must
+keep this — dropping checksums is a safety regression.
+
+A sidecar bug that writes `response_len = 200000` but only 50 bytes
+of valid data → the server reads 199,950 bytes of uninitialized
+shared memory. A corrupted payload from a serializer bug produces
+wrong HTML silently. TB checksums WAL entries, LSM blocks, and wire
+messages — even data that "can't" be corrupted. The checksum catches
+bugs in the OTHER process's code, not ours.
+
+**Header gains CRC fields:**
+
+```
+Header (64 bytes, cache-line aligned):
+  server_seq:    u32  — request sequence
+  sidecar_seq:   u32  — response sequence
+  request_len:   u32  — payload bytes written
+  response_len:  u32  — payload bytes written
+  request_crc:   u32  — CRC-32 of request_len bytes ++ request payload
+  response_crc:  u32  — CRC-32 of response_len bytes ++ response payload
+  padding to 64 bytes
+```
+
+CRC covers `len_bytes ++ payload_bytes` (same convention as the
+message bus frame format — length is included so a corrupted length
+produces a CRC mismatch). Validated on the read side after the
+acquire load, before accessing the payload. CRC mismatch → treat
+as sidecar error → pipeline failure → same recovery as disconnect.
+
+Cost: CRC-32 of 256KB is ~30μs on a modern CPU. But typical
+payloads are 1-10KB (~0.1-1μs). Negligible compared to the 8μs
+transport overhead. TB: "safety > performance."
+
+### Crash recovery
+
+Socket disconnect is a clean kernel event — the fd becomes invalid,
+epoll fires, the server handles it. Shared memory crashes are
+different: the region persists in an unknown state with no automatic
+notification. Each crash scenario needs explicit handling.
+
+**Sidecar crashes mid-write:**
+- Response slot contains partial/corrupt data
+- `sidecar_seq` may or may not be updated
+- If seq NOT updated: server never sees response → eventfd timeout
+  → treat as sidecar error → pipeline failure. Clean.
+- If seq IS updated (crash between atomic store and process exit):
+  server reads response, CRC mismatch (partial payload) → treat as
+  sidecar error. This is why checksums are mandatory, not optional.
+- Server detects sidecar death via `waitpid`/`SIGCHLD` (server
+  spawns sidecar). On sidecar death: cancel pending exchange,
+  pipeline failure for in-flight request, zero the region header
+  (all seqs = 0), re-spawn sidecar. New sidecar opens existing
+  region (same shm path).
+
+**Server crashes:**
+- `/dev/shm/tiger-sidecar-{pid}` is orphaned
+- PID may be reused by an unrelated process
+- **Fix:** Use a unique name that cannot collide:
+  `/dev/shm/tiger-{pid}-{boot_id}` where `boot_id` is read from
+  `/proc/sys/kernel/random/boot_id` (changes on reboot, eliminates
+  stale regions from previous boots). On startup, the server
+  `shm_unlink`s its own name before `shm_open` with `O_CREAT|O_EXCL`
+  — if the name already exists from a previous crash, unlink it
+  first. The `O_EXCL` flag after unlink guarantees a fresh region.
+- Server passes the shm name to the sidecar as a CLI argument.
+  Sidecar opens read/write. No guessing.
+
+**Sidecar restarts (intentional or crash recovery):**
+- Server zeros region header (all seqs = 0) on sidecar death
+- New sidecar opens the existing region, sees seq = 0
+- Server's `sidecar_seq` tracking resets to 0
+- First exchange starts at seq = 1. Clean slate.
+
+**Region cleanup on normal shutdown:**
+- Server `munmap`s + `shm_unlink`s in shutdown path
+- Sidecar `munmap`s in its shutdown path (unlink is server's job)
+- `shm_unlink` removes the `/dev/shm` entry; the region stays mapped
+  until the last `munmap` (POSIX semantics). Safe for ordered shutdown.
+
+**Invariants (asserted, not hoped):**
+- `server_seq` is always `== sidecar_seq` or `== sidecar_seq + 1`
+  (server is at most one request ahead)
+- `request_len <= frame_max` and `response_len <= frame_max`
+  (comptime-known bounds)
+- CRC matches payload on every read (mandatory, not debug-only)
+- Region size equals `comptime @sizeOf(ShmRegion)` — verified by
+  both processes on mmap with `assert(stat.size == @sizeOf(ShmRegion))`
 
 ## Platform scope
 
@@ -461,7 +625,7 @@ transport changes — only the IO layer and handler implementation.
 
 - **Collapse to 1 RT** — handlers like `complete_order` read post-write state from the database via `ReadView`. The prefetch cache is pre-write only. 1-RT forces handlers to duplicate DB logic. The database is the source of truth — read from it.
 - **Compiled templates** — massive new dependency for ~4μs. TB: "avoiding dependencies acts as a forcing function."
-- **Async sidecar exchange** — blocking window is 8μs. Async adds connection states, cross-tick temporal coupling, and risk of unexpected data visibility between ticks.
+- **Blocking futex** — blocks the event loop. 8μs is the happy path. V8 GC pause or slow handler → entire server frozen. TB never blocks the event loop. The async pipeline exists — use it.
 - **Spin-wait** — burns a core. Violates "put a limit on everything."
   However, the IO parameterization makes this a future opt-in:
   `SharedMemoryIO(.{ .signaling = .spin })`. One comptime line.
@@ -469,10 +633,10 @@ transport changes — only the IO layer and handler implementation.
   sidecars (Zig/Rust/C/Go) where handler compute is ~1-2μs and
   transport dominates:
 
-  | Runtime | Futex (safe) | Spin (burns core) | Gain |
+  | Runtime | eventfd (safe) | Spin (burns core) | Gain |
   |---|---|---|---|
   | Zig/Rust/C/Go | ~34K | ~45K | +32% |
-  | TypeScript (V8) | ~25K | ~27K | +8% |
+  | TypeScript (V8) | ~24K | ~27K | +12% |
   | Python | ~5K | ~5K | ~0% |
 
   Gain is large when handler is fast (transport dominates). Small
@@ -480,7 +644,7 @@ transport changes — only the IO layer and handler implementation.
   interpreted languages. Dangerous but valuable for latency-
   sensitive compiled handlers. Default remains futex.
 - **Spin-then-futex** — two code paths for 3μs. Violates "zero technical debt."
-- **eventfd** — abstraction over futex for epoll integration we don't need.
+- **Pure futex (blocking)** — see "blocking futex" above.
 - **Embedded V8** — massive dependency (Bun is 300K+ lines), single-language.
 - **Multiple sidecar workers** — server is single-threaded, one
   exchange at a time. However, this is a future scaling path when
