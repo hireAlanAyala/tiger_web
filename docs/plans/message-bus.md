@@ -1905,6 +1905,24 @@ Phase 2 implements `SidecarHandlersType` — same interface as
 native handlers, uses sidecar protocol internally. The server
 doesn't change. Only the handler implementation.
 
+After Phase 2, the shared memory transport (`sidecar-shm-transport.md`)
+becomes actionable — swap the IO layer under the bus. Each phase
+enables the next:
+
+```
+Phase 1.5 → pipeline supports .pending on all stages
+    ↓
+Phase 2   → handlers use the bus, return .pending
+    ↓
+shm transport → swap IO layer (mmap + futex), same bus/handlers
+    ↓
+multi-process → N sidecar processes, concurrent pipeline
+```
+
+The shared memory transport can't come before the pipeline because
+handlers need to be async-capable (return `.pending`, resume via
+callback) before there's a bus to swap the IO layer under.
+
 Future protocols add edges (decode/encode), not core paths.
 Workers are just async handlers — no new pipeline stages.
 
