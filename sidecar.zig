@@ -98,8 +98,19 @@ pub fn SidecarClientType(comptime IO: type) type {
 
         /// Submit a CALL frame via the bus. Builds the CALL payload
         /// into a pool message (zero-copy) and sends it.
+        /// Returns false if the bus connection is closed (sidecar
+        /// disconnected) or the frame is too large. The caller
+        /// treats false as busy/fail.
         pub fn call_submit(self: *Self, bus: *Bus, function_name: []const u8, args: []const u8, request_id: u32) bool {
             assert(self.call_state == .idle);
+
+            // Don't submit if the sidecar isn't connected. Without
+            // this check, call_state becomes .receiving but no RESULT
+            // will ever arrive — the pipeline hangs until timeout.
+            if (bus.connection.state != .connected) {
+                log.warn("call: bus not connected for {s}", .{function_name});
+                return false;
+            }
 
             const msg = bus.pool.get_message();
             const call_len = protocol.build_call(
