@@ -1,8 +1,12 @@
 const std = @import("std");
 const stdx = @import("stdx");
+pub const build_options = @import("build_options");
 const IO = @import("framework/io.zig").IO;
 const App = @import("app.zig");
-const StateMachine = App.SM;
+// Resolve Handlers (needs IO for sidecar), then construct SM.
+// Same resolution as the server — SM never sees IO.
+const Handlers = App.HandlersFor(App.Storage, IO);
+const StateMachine = App.StateMachineWith(App.Storage, Handlers);
 const ServerType = @import("framework/server.zig").ServerType;
 const TimeReal = @import("framework/time.zig").TimeReal;
 const auth = @import("framework/auth.zig");
@@ -64,7 +68,14 @@ pub fn main() !void {
     var storage = try App.Storage.init(cli.db);
     defer storage.deinit();
     const sm_seed: u64 = @truncate(std.crypto.random.int(u128));
-    var sm = StateMachine.init(&storage, cli.log_trace, sm_seed, secret_key);
+
+    // Handlers: sidecar pointers are undefined here — Server.init
+    // creates the embedded Bus/Client and wires them into sm.handlers.
+    // For native, Handlers is zero-size (.{} has no fields).
+    var sm = StateMachine.init(&storage, if (App.sidecar_enabled) .{
+        .sidecar_client = undefined,
+        .sidecar_bus = undefined,
+    } else .{}, cli.log_trace, sm_seed, secret_key);
 
     const listen_fd = try IO.open_listener(address);
 
@@ -81,18 +92,20 @@ pub fn main() !void {
     defer wal.deinit();
 
     var time_real = TimeReal{};
-    var server = try Server.init(std.heap.page_allocator, &io, &sm, listen_fd, time_real.time(), &wal);
+    // Server.init creates embedded Bus/Client and wires sm.handlers
+    // (TB pattern: Replica.init creates MessageBus last).
+    const sidecar_path: ?[]const u8 = if (App.sidecar_enabled)
+        (cli.sidecar orelse "/tmp/tiger_web_sidecar.sock")
+    else
+        null;
+    var server = try Server.init(std.heap.page_allocator, &io, &sm, listen_fd, time_real.time(), &wal, sidecar_path);
 
     log.info("storage=sqlite wal=tiger_web.wal tick_interval={d}ms connections={d}", .{
         tick_ns / std.time.ns_per_ms,
         Server.max_connections,
     });
     if (cli.log_debug) log.info("log_level=debug log_trace={}", .{cli.log_trace});
-    // Sidecar mode: Phase 2 will add SidecarHandlersType behind the
-    // handler interface. For now, sidecar flag is parsed but not acted on.
-    if (cli.sidecar != null) {
-        log.info("sidecar mode requested — not yet implemented (Phase 2)", .{});
-    }
+    if (App.sidecar_enabled) log.info("sidecar mode enabled", .{});
 
     log.info("listening on port {d}", .{actual_port});
 

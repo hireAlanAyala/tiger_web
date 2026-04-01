@@ -12,6 +12,11 @@ pub fn build(b: *std.Build) void {
         .root_source_file = b.path("framework/stdx/stdx.zig"),
     });
 
+    // --- Build options ---
+    const sidecar_enabled = b.option(bool, "sidecar", "Enable sidecar handler mode") orelse false;
+    const build_options = b.addOptions();
+    build_options.addOption(bool, "sidecar_enabled", sidecar_enabled);
+
     // --- Main executable ---
     const exe = b.addExecutable(.{
         .name = "tiger-web",
@@ -20,6 +25,7 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
     exe.root_module.addImport("stdx", stdx_module);
+    exe.root_module.addOptions("build_options", build_options);
     exe.linkSystemLibrary("sqlite3");
     exe.linkLibC();
     b.installArtifact(exe);
@@ -176,7 +182,7 @@ pub fn build(b: *std.Build) void {
     }
 
     // Modules that need libc (socketpair for tests) but not sqlite.
-    for ([_][]const u8{"framework/message_bus.zig"}) |mod| {
+    for ([_][]const u8{ "framework/message_bus.zig", "sidecar_handlers.zig" }) |mod| {
         const unit_test = b.addTest(.{
             .root_source_file = b.path(mod),
             .target = target,
