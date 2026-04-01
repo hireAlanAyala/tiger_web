@@ -15,7 +15,7 @@ const WalType = @import("wal.zig").WalType;
 /// App provides the domain types and functions:
 ///   Types: Message, Operation, Status
 ///   Functions: translate, encode_response, HandlersType
-///   Type constructors: StateMachineType(Storage), Wal
+///   Type constructors: StateMachineType(Storage, IO), Wal
 ///
 /// This is the equivalent of TigerBeetle's Replica — it owns all connections,
 /// drives the tick loop, and mediates between network IO and the state machine.
@@ -23,7 +23,8 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
     comptime {
         // Validate App declarations — good errors at the boundary, not inside the guts.
         assert(@hasDecl(App, "Message"));
-        assert(@hasDecl(App, "StateMachineType"));
+        assert(@hasDecl(App, "HandlersFor"));
+        assert(@hasDecl(App, "StateMachineWith"));
         assert(@hasDecl(App, "Wal"));
         assert(@hasDecl(App, "translate"));
         assert(@hasDecl(App, "encode_response"));
@@ -39,8 +40,19 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
     }
 
     const Connection = ConnectionType(IO);
-    const StateMachine = App.StateMachineType(Storage);
+    // Resolved Handlers — native or sidecar, selected at comptime.
+    // The server resolves Handlers (which needs IO for sidecar),
+    // then constructs the SM from Handlers. SM never sees IO.
+    const Handlers = App.HandlersFor(Storage, IO);
+    const StateMachine = App.StateMachineWith(Storage, Handlers);
     const Wal = App.Wal;
+
+    // Sidecar types — resolved from Handlers at comptime.
+    // Bus and Client are embedded in the Server struct (TB pattern:
+    // Replica embeds MessageBus). Callbacks recover Server via
+    // the context pointer set during init.
+    const SidecarBus = if (App.sidecar_enabled) Handlers.BusType else void;
+    const SidecarClient = if (App.sidecar_enabled) Handlers.ClientType else void;
 
     comptime {
         // Validate StateMachine interface — framework calls these in the tick loop.
@@ -62,6 +74,26 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
         comptime {
             assert(max_connections <= std.math.maxInt(u32));
         }
+
+        /// Pipeline stage — serial, one request at a time (TB pattern).
+        /// Guards process_inbox: if not .idle, no new pipeline starts.
+        /// For Zig handlers, all stages complete in one tick (immediate).
+        /// For sidecar handlers, stages may span ticks (async via bus callbacks).
+        const CommitStage = enum {
+            idle,              // No request in pipeline
+            route,             // Resolve raw HTTP to typed Message
+            prefetch,          // SM prefetch (native handlers)
+            handle,            // SM commit + writes in transaction
+            render,            // Render HTML + encode response
+        };
+
+        /// Log metrics every 10,000 ticks (~100s at 10ms/tick).
+        const metrics_interval_ticks = 10_000;
+
+        /// 30 seconds at 10ms/tick.
+        pub const request_timeout_ticks = 3000;
+
+        // --- Fields ---
 
         io: *IO,
         state_machine: *StateMachine,
@@ -91,33 +123,34 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
         /// Pipeline response from handle stage — persists to render stage.
         commit_pipeline_resp: ?StateMachine.PipelineResponse = null,
         /// Prefetch cache — persists from prefetch to render.
-        commit_cache: ?App.HandlersType(Storage).Cache = null,
+        commit_cache: ?Handlers.Cache = null,
         /// Auth identity — persists from prefetch to render.
         commit_identity: ?StateMachine.CommitOutput.Identity = null,
         /// Re-entrancy guard for commit_dispatch (TB pattern).
         /// Prevents nested execution if on_frame fires during dispatch.
         commit_dispatch_entered: bool = false,
 
-        /// Pipeline stage — serial, one request at a time (TB pattern).
-        /// Guards process_inbox: if not .idle, no new pipeline starts.
-        /// For Zig handlers, all stages complete in one tick (immediate).
-        /// For sidecar handlers, stages may span ticks (async in Phase 4).
-        const CommitStage = enum {
-            idle,              // No request in pipeline
-            route,             // Resolve raw HTTP to typed Message
-            prefetch,          // SM prefetch (native handlers)
-            handle,            // SM commit + writes in transaction
-            render,            // Render HTML + encode response
-        };
-
-        /// Log metrics every 10,000 ticks (~100s at 10ms/tick).
-        const metrics_interval_ticks = 10_000;
-
-        /// 30 seconds at 10ms/tick.
-        pub const request_timeout_ticks = 3000;
+        // Sidecar Bus and Client — embedded in the Server (TB pattern:
+        // Replica embeds MessageBus). Callbacks use the context pointer
+        // set during init to recover the Server. Comptime-eliminated
+        // when sidecar_enabled = false (void fields, zero bytes).
+        sidecar_bus: SidecarBus = if (App.sidecar_enabled) undefined else {},
+        sidecar_client: SidecarClient = if (App.sidecar_enabled) undefined else {},
 
         /// Initialize the server. Allocates the connection pool on the heap.
-        pub fn init(allocator: std.mem.Allocator, io: *IO, state_machine: *StateMachine, listen_fd: IO.fd_t, time: Time, wal: ?*Wal) !Server {
+        /// When sidecar_enabled, also initializes the embedded Bus and Client,
+        /// wires them into sm.handlers, and starts listening on the socket path.
+        /// TB pattern: Replica.init creates the MessageBus last, after all
+        /// other state is ready.
+        pub fn init(
+            allocator: std.mem.Allocator,
+            io: *IO,
+            state_machine: *StateMachine,
+            listen_fd: IO.fd_t,
+            time: Time,
+            wal: ?*Wal,
+            sidecar_path: ?[]const u8,
+        ) !Server {
             const connections = try allocator.alloc(Connection, max_connections);
             errdefer allocator.free(connections);
 
@@ -125,7 +158,7 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
                 conn.* = Connection.init_free();
             }
 
-            return Server{
+            var server = Server{
                 .io = io,
                 .state_machine = state_machine,
                 .time = time,
@@ -137,6 +170,27 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
                 .wal = wal,
                 .tick_count = 0,
             };
+
+            // Initialize sidecar Bus and Client last (TB pattern).
+            // Wire them into sm.handlers so the handler methods can
+            // access them via self.sidecar_bus / self.sidecar_client.
+            if (App.sidecar_enabled) {
+                server.sidecar_client = SidecarClient.init();
+                try server.sidecar_bus.init_pool(
+                    allocator,
+                    io,
+                    @ptrCast(&server),
+                    sidecar_on_frame,
+                    sidecar_on_close,
+                );
+                state_machine.handlers.sidecar_client = &server.sidecar_client;
+                state_machine.handlers.sidecar_bus = &server.sidecar_bus;
+                if (sidecar_path) |path| {
+                    server.sidecar_bus.start_listener(path);
+                }
+            }
+
+            return server;
         }
 
         pub fn deinit(server: *Server, allocator: std.mem.Allocator) void {
@@ -160,6 +214,16 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
         pub fn tick(server: *Server) void {
             server.tick_count +%= 1;
             defer server.invariants();
+            // Ordering constraint: sidecar bus tick_accept runs BEFORE
+            // process_inbox. process_inbox calls commit_dispatch (sets
+            // commit_dispatch_entered = true). sidecar_on_frame also
+            // calls commit_dispatch. If tick_accept ran during or after
+            // process_inbox, a bus recv callback could fire while
+            // commit_dispatch_entered is true → assertion failure.
+            // tick_accept only accepts new connections — it never
+            // delivers frames (that happens in IO.run_for_ns, which
+            // runs after tick returns). This ordering is safe.
+            if (App.sidecar_enabled) server.sidecar_bus.tick_accept();
             server.maybe_accept();
             server.process_inbox();
             server.log_metrics();
@@ -283,7 +347,10 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
                         };
                         conn.is_datastar_request = parsed.is_datastar_request;
 
-                        var msg = App.translate(parsed.method, parsed.path, parsed.body) orelse {
+                        var msg = sm.handlers.handler_route(parsed.method, parsed.path, parsed.body) orelse {
+                            // Sidecar: handler_route returns null while pending.
+                            // Native: null means unmapped request.
+                            if (sm.handlers.is_handler_pending()) return;
                             log.mark.warn("unmapped request: {s} {s} fd={d}", .{ @tagName(parsed.method), parsed.path, conn.fd });
                             const resp = unmapped_response(conn);
                             conn.set_response(resp.offset, resp.len);
@@ -364,29 +431,27 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
                     .render => {
                         const msg = server.commit_msg.?;
                         assert(server.commit_pipeline_resp != null);
-                        assert(server.commit_cache != null);
                         assert(server.commit_identity != null);
 
                         const pipeline_resp = server.commit_pipeline_resp.?;
                         const cache = server.commit_cache.?;
                         const identity = server.commit_identity.?;
 
-                        const FwCtx = App.HandlersType(Storage).FwCtx;
-                        const fw = FwCtx{
+                        const fw = Handlers.FwCtx{
                             .identity = identity,
                             .now = sm.now,
                             .is_sse = conn.is_datastar_request,
                         };
 
                         const ro = Storage.ReadView.init(sm.storage);
-                        const html = App.HandlersType(Storage).handler_render(
+                        const html = sm.handlers.handler_render(
                             cache,
                             msg.operation,
                             pipeline_resp.status,
                             fw,
                             &App.render_scratch_buf,
                             ro,
-                        );
+                        ) orelse return; // pending — sidecar render in-flight
 
                         server.encode_and_respond(conn, msg, pipeline_resp, html);
                         return;
@@ -430,15 +495,59 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
         /// NOTE: callers are responsible for stopping/cancelling their own
         /// tracer spans before calling pipeline_reset. The .busy branch
         /// cancels .prefetch, the .render stage stops .execute, etc.
-        /// Phase 2: if .pending leads to external failure (sidecar disconnect),
-        /// the on_close callback must cancel the tracer before calling reset.
         fn pipeline_reset(server: *Server) void {
+            server.state_machine.handlers.reset_handler_state();
             server.commit_stage = .idle;
             server.commit_connection = null;
             server.commit_msg = null;
             server.commit_pipeline_resp = null;
             server.commit_cache = null;
             server.commit_identity = null;
+        }
+
+        // =============================================================
+        // Sidecar bus callbacks — only compiled when sidecar_enabled.
+        //
+        // The bus delivers frames via on_frame_fn. The server processes
+        // them through the sidecar client, then resumes the pipeline
+        // if the CALL completed.
+        //
+        // Callback chain:
+        //   bus.on_frame → sidecar_on_frame → client.on_frame
+        //     → if .complete → commit_dispatch (resume pipeline)
+        // =============================================================
+
+        /// Called by the sidecar bus when a frame is received.
+        /// Context is *Server (set during bus init).
+        pub fn sidecar_on_frame(ctx: *anyopaque, frame: []const u8) void {
+            if (!App.sidecar_enabled) unreachable;
+            const server: *Server = @ptrCast(@alignCast(ctx));
+            server.state_machine.handlers.process_sidecar_frame(frame, server.state_machine.storage);
+            // Resume pipeline if the CALL completed (or failed).
+            if (server.commit_stage != .idle and !server.state_machine.handlers.is_handler_pending()) {
+                server.commit_dispatch();
+            }
+        }
+
+        /// Called when the sidecar bus connection closes.
+        pub fn sidecar_on_close(ctx: *anyopaque) void {
+            if (!App.sidecar_enabled) unreachable;
+            const server: *Server = @ptrCast(@alignCast(ctx));
+            server.state_machine.handlers.on_sidecar_close();
+            if (server.commit_stage != .idle) {
+                // Cancel pipeline if in-flight.
+                const sm = server.state_machine;
+                switch (server.commit_stage) {
+                    .route, .prefetch => sm.tracer.cancel(.prefetch),
+                    .render => sm.tracer.cancel(.execute),
+                    .handle, .idle => {},
+                }
+                server.pipeline_reset();
+            } else {
+                // No pipeline — still reset handler state so the
+                // client's .failed call_state is cleaned up.
+                server.state_machine.handlers.reset_handler_state();
+            }
         }
 
         fn log_metrics(server: *Server) void {
@@ -524,6 +633,18 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
                 if (conn.state == .free or conn.state == .accepting or conn.state == .closing) continue;
                 if (conn.check_timeout(server.tick_count, request_timeout_ticks)) {
                     log.mark.debug("connection timed out fd={d}", .{conn.fd});
+                    // If this connection has a pending pipeline, cancel it
+                    // before closing. Otherwise the pipeline resumes on a
+                    // closing connection — use-after-close.
+                    if (server.commit_connection == conn and server.commit_stage != .idle) {
+                        const sm = server.state_machine;
+                        switch (server.commit_stage) {
+                            .route, .prefetch => sm.tracer.cancel(.prefetch),
+                            .render => sm.tracer.cancel(.execute),
+                            .handle, .idle => {},
+                        }
+                        server.pipeline_reset();
+                    }
                     conn.state = .closing;
                 }
             }
@@ -545,6 +666,7 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
 
         /// Cross-check structural invariants after every tick.
         /// Connection-level invariants are checked by Connection.invariants().
+        /// Handler-level invariants checked by sm.handlers.invariants().
         fn invariants(server: *Server) void {
             var accepting_count: u32 = 0;
             var active_count: u32 = 0;
@@ -567,6 +689,9 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
             if (server.accept_connection != null) {
                 assert(accepting_count == 1);
             }
+
+            // Handler invariants — cross-checks prefetch_phase vs call_state.
+            server.state_machine.handlers.invariants();
         }
     };
 }
