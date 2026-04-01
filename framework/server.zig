@@ -379,6 +379,18 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
                                 continue;
                             },
                             .busy => {
+                                // Sidecar disconnected or storage busy.
+                                // Reset pipeline — the HTTP connection stays
+                                // in .ready. Next tick, process_inbox picks
+                                // it up and re-routes from scratch. This
+                                // retries every 10ms until the sidecar
+                                // reconnects or the HTTP connection times out
+                                // (30s). Re-routing is stateless (parses the
+                                // same recv_buf), so repeated retries are safe.
+                                //
+                                // Optimization opportunity: stay in .prefetch
+                                // and retry without re-routing. Not needed for
+                                // correctness — the route result is deterministic.
                                 sm.tracer.cancel(.prefetch);
                                 server.pipeline_reset();
                                 return;
