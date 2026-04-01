@@ -103,17 +103,16 @@ Document for users: "one CALL cycle, one atomic write set.
 Pre-generate IDs during route. Chain operations via client
 requests, not multi-step transactions in a single handler."
 
-## Response timeout (TODO — not yet implemented)
+## Response timeout
 
-If the sidecar accepts a CALL and never responds, the serial
-pipeline blocks. All requests stall (single-threaded Node).
+5-second deadline (500 ticks at 10ms/tick). If the pipeline has
+been pending (waiting for sidecar RESULT) for this long, SIGKILL
+the sidecar. Checked every tick in `timeout_sidecar_response`.
+Only fires when `is_handler_pending()` is true — the .handle
+stage is synchronous and never triggers this.
 
-Needed: server-side deadline (~5s). Check in tick loop: "has
-pipeline been pending for N ticks?" On timeout: SIGKILL +
-disconnect + 503. Uses existing recovery path.
-
-This is a liveness concern, not a safety concern. Without it,
-a stuck handler makes the server appear up but process nothing.
+Uses the existing recovery path: kill → on_close → disconnect →
+503 or render fallback.
 
 ## Responsibility boundaries
 
