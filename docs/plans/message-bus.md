@@ -1258,348 +1258,132 @@ Execute is permanently synchronous — see commit() doc comment.
 > and render. Execute is permanently synchronous. Handler
 > interface is async-capable. Comptime handler selection ready.
 
-Phase 2 focuses on the sidecar handler implementation and the
-TS wire format — not on server
-pipeline changes.
+### Step 1: SidecarHandlersType — DONE
 
-### Async handle decision
+`sidecar_handlers.zig` implements the full Handlers interface,
+delegating to the sidecar via CALL/RESULT protocol over the
+message bus. TB-audited across two rounds.
 
-The handle phase currently blocks inside a transaction
-(`begin_batch` → `run_to_completion` → `commit_batch`). Making
-it async means the transaction stays open across ticks while
-waiting for the sidecar RESULT.
+**Architecture (TB-audited):**
 
-**This is safe.** The server is single-threaded, single-pipeline.
-No other request touches the database between ticks. SQLite
-handles an open transaction correctly. The transaction stays
-open for 1-2 extra ticks (~1ms) — identical in effect to the
-current blocking behavior. The only difference is the event
-loop can fire during that time (timeouts, metrics, accepts).
+- `Cache = void` — sidecar keeps its own prefetch data. The SM
+  stores/passes the cache opaquely. void is the right primitive.
+- Execute is permanently synchronous. The handle CALL happens
+  during the prefetch stage via multi-phase state machine:
+  `PrefetchPhase { idle → prefetch_pending → handle_pending }`.
+  Execute just applies the parsed writes. No async in execute.
+- Handler_route is async in the `.route` pipeline stage. Server
+  checks `is_handler_pending()` after null from translate.
+- Handler_render returns `?[]const u8`. Null = pending. Native
+  handlers always return non-null. Shared interface.
+- Server resolves `Handlers = App.HandlersFor(Storage, IO)`,
+  then `SM = App.StateMachineWith(Storage, Handlers)`. The SM
+  never sees IO — only the resolved Handlers type.
+- Frame building uses `call_submit` → `protocol.build_call`
+  (bounds checked before writing). `protocol.write_call_header`
+  is the single source of truth for CALL frame format.
+- Pair assertions at boundaries: `assert(prefetch_phase == .idle)`
+  at handler_route and handler_execute entry. Catches stale state
+  from missed resets.
+- Render failure returns visible error HTML, not silent empty page.
+- `parse_handle_result` reads status_name_len as u16 BE (matching
+  protocol test vector format). Unknown session_action rejected.
+- Re-entrancy documented: `process_sidecar_frame` called from
+  bus's `try_drain_recv` loop. Send and recv state independent.
+  `commit_dispatch_entered` guard prevents nested execution.
 
-**TB's principle:** a blocking path in an async system is a bug
-waiting to happen. If the sidecar is slow (GC, bug), blocking
-freezes the entire server. Async handle lets the tick loop
-continue — it can timeout idle connections, log metrics, detect
-the sidecar stall.
+**Files changed:**
 
-**Route stays synchronous.** `handler_route` is called from
-`translate()` during HTTP parsing, before the pipeline. Making
-it async would require a new pipeline stage. Routing is a tiny
-frame, <100μs round-trip. Keep it synchronous with
-`io.run_for_ns(0)` loop until the RESULT arrives. This is an
-acceptable shim because it's outside the pipeline.
+| File | Change |
+|---|---|
+| `sidecar_handlers.zig` | NEW |
+| `app.zig` | `sidecar_enabled`, `HandlersFor`, `StateMachineWith`, `?[]const u8` render |
+| `framework/server.zig` | `Handlers` alias, `.pending` in route/render, sidecar callbacks, timeout handling |
+| `main.zig` | `HandlersFor` + `StateMachineWith` resolution |
+| `sidecar.zig` | `reset_request_state` made public |
+| `protocol.zig` | `write_call_header` added |
+| `build.zig` | `sidecar_handlers.zig` in unit-test step |
 
-### Pipeline changes for async handle
+### Step 2: TS wire format — 8-byte header with CRC
 
-The `.handle` stage in `commit_dispatch` gains `.pending`:
+**Files:**
+- `adapters/call_runtime.ts` — sendFrame, processFrames
+- `generated/serde.ts` — readFrameLength, writeFrameHeader
 
-```
-.handle stage (current):
-  begin_batch → sm.commit(msg) [sync] → WAL → commit_batch → .render
+**Changes:**
+- sendFrame: write `[length: u32 BE][crc32: u32 LE][payload]`
+- processFrames: read 8-byte header, validate CRC before parsing
+- CRC-32 via `zlib.crc32()` (Node.js 22+ built-in)
+- CRC covers `len_bytes ++ payload_bytes` (incremental, two regions)
+- serde.ts: update readFrameLength to read 8 bytes, add CRC check
 
-.handle stage (new — split into two sub-stages):
-  .handle_begin:
-    begin_batch → sm.commit(msg) → if .pending: return
-  .handle_complete (resumed by on_frame):
-    execute writes → WAL → commit_batch → .render
-```
-
-`CommitStage` gains `.handle_pending`:
-
-```zig
-const CommitStage = enum {
-    idle,
-    prefetch,
-    handle,           // begin_batch + sm.commit
-    handle_pending,   // waiting for sidecar RESULT
-    render,
-};
-```
-
-When `sm.commit` returns `.pending` (sidecar CALL in-flight):
-- `commit_stage` transitions to `.handle_pending`
-- `commit_dispatch` returns (event loop runs)
-- Bus delivers RESULT via `on_frame` → `call_state = .complete`
-- `on_frame` calls `server.commit_dispatch()` to resume
-- `commit_dispatch` enters `.handle_pending`:
-  - Calls `sm.commit(msg)` again (idempotent — sees `.complete`)
-  - Executes writes, WAL, `commit_batch`
-  - Transitions to `.render`
-
-The transaction (`begin_batch`) is opened in `.handle` and
-closed (`commit_batch`) when `.handle_pending` completes. The
-batch stays open across ticks — safe for single-threaded.
-
-### SidecarClient parameterized on IO type
-
-`SidecarClient` becomes `SidecarClientType(IO)` — parameterized
-on the IO type, matching the comptime cascade pattern used by
-`ServerType(App, IO, Storage)` and `ConnectionType(IO, Options)`.
-
-**No `anytype` for bus parameters.** TB's principle: the types
-are the documentation. `anytype` hides the interface — you can't
-see what `bus` needs from the type signature. Pay the comptime
-cascade: SidecarClient is parameterized on IO, bus type is
-concrete, every call site has a real type.
-
-The cascade: `ServerType(App, IO, Storage)` creates the bus as
-`MessageBusType(IO, sidecar_options)`. `App` exposes
-`SidecarClientType(IO)`. The server uses both. All types resolve
-at comptime. No runtime cost. Full type safety.
-
-### Handler IO separation
-
-**TB principle: the state machine doesn't do IO. The server does IO.**
-
-Handlers currently do three things in sidecar mode:
-1. State inspection (check call_state)
-2. Wire format encoding (build args bytes)
-3. IO (call_submit, run_to_completion)
-
-The refactor removes #2 and #3. Handlers only inspect state and
-return typed instructions. The server encodes and does IO.
-
-**Handler return types become explicit tagged unions:**
-
-```zig
-// Prefetch: was ?PrefetchCache (null = pending/busy/failed)
-const PrefetchOutcome = union(enum) {
-    cache: PrefetchCache,     // done — data available
-    sidecar_call: SidecarPrefetchArgs, // need IO — server does it
-    pending: void,            // already in flight
-    failed: void,             // error
-    busy: void,               // fault injection
-};
-
-const SidecarPrefetchArgs = struct {
-    operation: Operation,
-    id: u128,
-};
-
-// Execute: was HandleResult (status only)
-const ExecuteOutcome = union(enum) {
-    result: HandleResult,     // done — status + writes executed
-    sidecar_call: SidecarExecuteArgs, // need IO
-    pending: void,
-    failed: void,
-};
-
-// Render: was []const u8 (empty = pending/failed)
-const RenderOutcome = union(enum) {
-    html: []const u8,         // done — rendered HTML
-    sidecar_call: SidecarRenderArgs, // need IO
-    pending: void,
-    failed: void,
-};
-```
-
-**Server interprets instructions:**
-```
-.prefetch:
-  switch (handler_prefetch(...)):
-    .cache => advance to handle
-    .sidecar_call => client.call_submit(bus, "prefetch", encode(args)); return
-    .pending => return (waiting for callback)
-    .failed => pipeline_reset
-    .busy => pipeline_reset
-
-.handle:
-  switch (handler_execute(...)):
-    .result => WAL, commit_batch, advance to render
-    .sidecar_call => begin_batch; client.call_submit(bus, "handle", encode(args)); return
-    .pending => return
-    .failed => rollback, pipeline_reset
-```
-
-Wire format encoding moves to the server's sidecar adapter.
-Handlers have zero knowledge of the bus, protocol, or wire format.
-
-### SidecarClient changes
-
-```zig
-const SidecarBus = MessageBusType(IO, .{ .send_queue_max = 2 });
-
-const SidecarClient = struct {
-    bus: *SidecarBus,
-    // ... existing state (call_state, result_flag, state_buf, etc.)
-
-    /// Consumer callback — receives complete frames via context.
-    /// Re-entrancy: may call bus.send_frame() for QUERY_RESULT.
-    /// May call bus.connection.terminate() on protocol error.
-    fn on_frame(ctx: *anyopaque, frame: []const u8) void {
-        const self: *SidecarClient = @ptrCast(@alignCast(ctx));
-        // Parse tag, dispatch to existing on_recv logic.
-        // QUERY: execute SQL, self.bus.suspend_recv(),
-        //        self.bus.send_frame(QUERY_RESULT).
-        //        self.bus.resume_recv().
-        // RESULT: copy_state(result_data), transition to .complete,
-        //         notify server to resume pipeline.
-    }
-
-    /// Start a CALL — replaces blocking call_submit.
-    fn call_submit(self: *SidecarClient) void {
-        self.bus.send_frame(call_data);
-        self.call_state = .receiving;
-    }
-};
-
-// At init: bus.connection.init(io, fd, @ptrCast(sidecar_client));
-```
-
-### handler_execute — idempotent async pattern
-
-Same pattern as `handler_prefetch` and `handler_render`:
-
-```zig
-pub fn handler_execute(...) HandleResult {
-    if (sidecar) |*client| {
-        switch (client.call_state) {
-            .complete => {
-                // Resume: RESULT arrived. Execute writes, map status.
-                defer client.reset_call_state();
-                if (client.result_flag == .failure) return .{ .status = .storage_error };
-                // ... parse result_data, execute_writes, map status ...
-                return .{ .status = status };
-            },
-            .idle => {
-                // First call: send CALL (non-blocking). Return .pending.
-                client.reset_call_state();
-                if (!client.call_submit("handle", &args)) return .{ .status = .storage_error };
-                return .{ .status = .pending };
-            },
-            .receiving => return .{ .status = .pending },
-            .failed => {
-                client.reset_call_state();
-                return .{ .status = .storage_error };
-            },
-        }
-    }
-    // Native path unchanged.
-}
-```
-
-`HandleResult.status` gains `.pending` variant. The SM returns
-`.pending` to the server, which transitions to `.handle_pending`.
-```
-
-### Server changes
-
-**Delete:**
-- `sidecar_completion: IO.Completion` field
-- `submit_sidecar_recv()` function
-- `sidecar_recv_callback()` function
-- `io.readable()` calls for sidecar fd
-
-**Add:**
-- `tick()` calls `bus.tick_accept()` (before process_inbox)
-- `CommitStage.handle_pending` — new stage for async handle
-- `.handle` stage: if `sm.commit` returns `.pending`, transition
-  to `.handle_pending` and return
-- `.handle_pending` stage: resume `sm.commit` (idempotent),
-  execute writes, WAL, `commit_batch`, transition to `.render`
-- Pipeline pend returns after `call_submit()` — bus recv loop
-  delivers frames automatically, no manual re-registration
-- SidecarClient's `on_frame` calls `server.commit_dispatch()`
-  when exchange completes
-
-### Wire format breaking change
-
-The frame header grows from 4 bytes `[len]` to 8 bytes
-`[len][crc32]`. This is a cross-language wire format change —
-both the Zig server and the TS sidecar must upgrade
-simultaneously.
-
-**TS sidecar changes (`generated/serde.ts`, `generated/dispatch.generated.ts`):**
-- `write_frame`: write 8-byte header (len + CRC) instead of 4
-- `read_frame`: read 8-byte header, validate CRC before parsing
-- CRC-32 computation: use Node.js `zlib.crc32` (built-in since
-  Node 20) or a minimal CRC-32 implementation
-- CRC covers `len_bytes ++ payload_bytes` (incremental, two
-  regions)
+**Deferred from Step 1 — do in Step 2:**
+- Update `call_submit` to accept `request_id` parameter (currently
+  hardcoded to 0). Wire `next_request_id` through SidecarHandlersType.
+  Protocol-level change coordinated with TS side.
 
 **Coordination:** no migration or backward compatibility needed.
 The sidecar is started by the server (`npm run dev`). Both
-sides update in the same commit. There's no rolling upgrade
-scenario — it's one process launching another.
+sides update in the same commit. No rolling upgrade.
 
-### Sidecar fd setup
+### Step 3: End-to-end test + server wiring
 
-**Remove:** `SO_RCVTIMEO`, `SO_SNDTIMEO` (blocking timeouts).
-**Remove:** Blocking `listen_and_accept()` — bus handles accept.
-**Add:** `SOCK_NONBLOCK | SOCK_CLOEXEC` on accepted fd.
-**Add:** `SO_SNDBUF` set to `send_queue_max × send_buf_max`.
+**Deferred from Step 1 — do in Step 3:**
+- Add `sidecar_bus` field to Server struct
+- Init bus with unix socket path in Server.init
+- Call `Handlers.set_sidecar(&client, &bus)` during init
+- Wire bus callbacks to `sidecar_on_frame` / `sidecar_on_close`
+- Flip `sidecar_enabled = true` behind `-Dsidecar` build flag
+
+**Cleanup:**
+- `npm run dev` — start sidecar + server, verify HTTP requests work
+- Delete `protocol.read_frame`, `protocol.write_frame`,
+  `protocol.recv_exact`, `protocol.send_exact` (dead code)
+- Remove `io.readable()` from IO if no other consumers
+- Re-enable sidecar fuzzer (rewrite for SidecarClientType + FuzzIO)
+  OR defer to Phase 3
 
 ### QUERY sub-protocol flow
 
 ```
 Connection delivers QUERY frame via on_frame_fn(context, frame)
   → consumer: parse SQL, execute via query_dispatch_fn
-  → consumer: build QUERY_RESULT in local buffer
-  → bus.suspend_recv()          // don't recv next frame yet
-  → bus.send_frame(QUERY_RESULT)  // pushes to send queue
-  → bus.resume_recv()           // immediate — recv is independent of send
+  → consumer: build QUERY_RESULT in pool message (zero-copy)
+  → bus.send_message(QUERY_RESULT)
   → Connection delivers next frame when available
 ```
 
-`resume_recv()` is called immediately after `send_frame()` — it
-does NOT wait for the send to complete. Recv and send paths are
-fully independent (separate completions, separate submitted
-flags). The sidecar won't send the next frame until it receives
-our QUERY_RESULT, so there's nothing buffered to deliver. The
-suspend/resume is belt-and-suspenders: if the protocol ever
-allows pipelined queries, the interlock prevents delivering a
-frame while a QUERY_RESULT send is still in the queue.
-
-All three calls (`suspend_recv`, `send_frame`, `resume_recv`)
-happen re-entrantly from inside `on_frame_fn` during
-`try_drain_recv`. This is safe because `recv_submitted` is
-already `false` (cleared at top of `recv_callback`) and the
-send path uses a separate completion.
+QUERY_RESULT is built directly into a pool message buffer and
+sent via `bus.send_message`. No suspend/resume needed — the
+QUERY callback executes synchronously and the send queue holds
+the response. The sidecar won't send the next frame until it
+receives the QUERY_RESULT.
 
 ### Checklist
 
-**SidecarClient (sidecar.zig):**
-- [ ] Remove `fd`, `path`, `send_buf`, `recv_buf`. Add `bus: *SidecarBus`.
-- [ ] Remove `listen_and_accept`, `connect`, `close`, `handle_disconnect`,
-  `try_reconnect`, `init` (heap alloc).
-- [ ] `on_frame` replaces `on_recv` — no IO calls, receives CRC-validated frame.
-- [ ] `call_submit` uses `bus.send_frame` instead of `protocol.write_frame`.
-- [ ] QUERY sub-protocol via `bus.suspend_recv` → `bus.send_frame` → `bus.resume_recv`.
-- [ ] Delete `run_to_completion` — no blocking anywhere.
-- [ ] Keep `state_buf`, `copy_state`, `execute_writes`, `skip_params`,
-  `CallState`, `reset_call_state`, `reset_request_state`.
+**Step 1 — DONE:**
+- [x] `sidecar_handlers.zig` — SidecarHandlersType(StorageParam, IO)
+- [x] `app.zig` — `sidecar_enabled`, `HandlersFor`, `StateMachineWith`
+- [x] `framework/server.zig` — Handlers alias, .pending in route/render,
+  sidecar_on_frame/on_close, timeout during .pending
+- [x] `protocol.zig` — write_call_header
+- [x] `main.zig` — HandlersFor + StateMachineWith
+- [x] All unit tests, sim tests, fuzz smoke pass
 
-**Server (framework/server.zig):**
-- [ ] Delete `sidecar_completion`, `submit_sidecar_recv`, `sidecar_recv_callback`.
-- [ ] `tick()` calls `bus.tick_accept()` before `process_inbox`.
-- [ ] Add `CommitStage.handle_pending` to enum.
-- [ ] `.handle` stage: if `sm.commit` returns `.pending`, save batch
-  state, transition to `.handle_pending`, return.
-- [ ] `.handle_pending` stage: resume `sm.commit` (idempotent),
-  execute writes, WAL, `commit_batch`, transition to `.render`.
-- [ ] `on_frame` calls `server.commit_dispatch()` to resume pipeline.
+**Step 2 — TODO:**
+- [ ] TS sidecar: update `sendFrame` to 8-byte header (len + CRC)
+- [ ] TS sidecar: update `processFrames` to validate CRC on receive
+- [ ] TS sidecar: CRC-32 via Node.js `zlib.crc32` (Node 22+)
+- [ ] `call_submit`: accept request_id parameter
+- [ ] Wire next_request_id through SidecarHandlersType
 
-**App (app.zig):**
-- [ ] `handler_execute`: return `.pending` on first call (CALL sent),
-  resume on second call (RESULT arrived, `.complete`). Same
-  idempotent pattern as `handler_prefetch` and `handler_render`.
-- [ ] `handler_route`: keep synchronous with `io.run_for_ns(0)` loop.
-  Route is outside the pipeline — acceptable shim.
-- [ ] `handler_prefetch`, `handler_render`: rewire from `io.readable`
-  to bus (callback drives automatically).
-
-**Wire format (TS + Zig):**
-- [ ] TS sidecar: update `sendFrame` to 8-byte header (len + CRC).
-- [ ] TS sidecar: update `processFrames` to validate CRC on receive.
-- [ ] TS sidecar: CRC-32 via Node.js `zlib.crc32` (Node 22+).
-- [ ] Delete `protocol.read_frame` / `write_frame` / `recv_exact` / `send_exact`.
-- [ ] Remove `io.readable()` if no other consumers.
-
-**Tests:**
-- [ ] All existing unit tests pass.
-- [ ] All sim tests pass.
-- [ ] End-to-end sidecar test passes.
-- [ ] Sidecar fuzzer updated (see Phase 3).
+**Step 3 — TODO:**
+- [ ] Server: add sidecar_bus field, init, set_sidecar, callback wiring
+- [ ] Build flag: `-Dsidecar=true` flips `sidecar_enabled`
+- [ ] End-to-end test: `npm run dev` with sidecar
+- [ ] Delete dead code: protocol.read_frame/write_frame/recv_exact/send_exact
+- [ ] Remove io.readable() if unused
+- [ ] Sidecar fuzzer rewrite (Phase 3)
 
 ## Phase 3: Fuzzers
 
