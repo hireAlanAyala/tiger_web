@@ -203,8 +203,31 @@ Async (eventfd in epoll set, split across ticks, new connection state
   Also: other connections may commit writes between ticks, so the
   sidecar's render reads may see unexpected data.
 
-**Chose blocking.** 128 connections × 8μs = 1ms per tick — well under
-budget. If V8 becomes the bottleneck later, async is the upgrade path.
+**Originally chose blocking.** 128 connections × 8μs = 1ms per tick.
+
+**UPDATE (post message-bus Phase 1.5):** The server pipeline now
+supports async handlers with `.pending` + callback. The blocking
+vs async decision needs revisiting:
+
+- **Blocking futex in handler:** Simpler. Blocks the event loop for
+  ~4μs per futex_wait. Server can't process timeouts, accepts, or
+  metrics during the wait. Acceptable if wait is short.
+- **eventfd + epoll:** Handler writes to shared memory, does
+  futex_wake, returns `.pending`. Sidecar writes response to shared
+  memory, writes to eventfd. Epoll fires callback, handler resumes.
+  One syscall per signal. Fits the IO model. But was rejected as
+  "wrong primitive" (eventfd is an abstraction over futex for epoll
+  bridging). With the async pipeline in place, epoll bridging IS
+  what we need — eventfd becomes the right primitive.
+- **Poll in tick loop:** Check shared memory flag every tick. Adds
+  one tick latency (~10ms). Too slow.
+
+**Recommendation:** Revisit eventfd. The async pipeline changes the
+calculus — the "wrong primitive" argument was based on blocking
+exchange where epoll bridging was unnecessary. With `.pending`
+handlers, epoll bridging is exactly what we need. eventfd is the
+right primitive for "signal an epoll-driven event loop from another
+process via shared memory."
 
 ## Projected performance
 
