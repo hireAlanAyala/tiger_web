@@ -137,6 +137,14 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
         sidecar_bus: SidecarBus = if (App.sidecar_enabled) undefined else {},
         sidecar_client: SidecarClient = if (App.sidecar_enabled) undefined else {},
 
+        /// Binary sidecar state: connected (handshake complete) or not.
+        /// All request routing checks this field. No partial states,
+        /// no retries. Present or absent.
+        sidecar_connected: bool = false,
+        /// Sidecar process ID — from READY handshake. Used for
+        /// SIGKILL on protocol violations.
+        sidecar_pid: u32 = 0,
+
         /// Initialize the server. Allocates the connection pool on the heap.
         /// When sidecar_enabled, also initializes the embedded Bus and Client,
         /// wires them into sm.handlers, and starts listening on the socket path.
@@ -342,8 +350,17 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
                     .idle => return,
 
                     .route => {
+                        // Sidecar not connected → 503 immediately.
+                        // No retries. Binary state: present or absent.
+                        if (App.sidecar_enabled and !server.sidecar_connected) {
+                            const resp = sidecar_unavailable_response(conn);
+                            conn.set_response(resp.offset, resp.len);
+                            conn.keep_alive = false;
+                            server.pipeline_reset();
+                            return;
+                        }
+
                         // Route: parse HTTP and resolve to typed Message.
-                        // Parse from conn.recv_buf (deterministic — same bytes, same result).
                         const parsed = switch (http.parse_request(conn.recv_buf[0..conn.recv_pos])) {
                             .complete => |p| p,
                             .incomplete, .invalid => unreachable,
@@ -533,11 +550,50 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
         // =============================================================
 
         /// Called by the sidecar bus when a frame is received.
-        /// Context is *Server (set during bus init).
+        /// Two modes:
+        /// - Before handshake: expects READY frame. Validates version
+        ///   and stores PID. Sets sidecar_connected = true.
+        /// - After handshake: routes to sidecar client (CALL/RESULT).
         pub fn sidecar_on_frame(ctx: *anyopaque, frame: []const u8) void {
             if (!App.sidecar_enabled) unreachable;
             const server: *Server = @ptrCast(@alignCast(ctx));
+
+            if (!server.sidecar_connected) {
+                // Handshake: expect READY frame.
+                const protocol = @import("../protocol.zig");
+                const ready = protocol.parse_ready_frame(frame) orelse {
+                    log.warn("sidecar: invalid READY frame, killing", .{});
+                    server.kill_sidecar();
+                    return;
+                };
+                if (ready.version != protocol.protocol_version) {
+                    log.warn("sidecar: version mismatch: expected {d}, got {d}", .{
+                        protocol.protocol_version, ready.version,
+                    });
+                    server.kill_sidecar();
+                    return;
+                }
+                server.sidecar_pid = ready.pid;
+                server.sidecar_connected = true;
+                log.info("sidecar: connected (pid={d}, version={d})", .{
+                    ready.pid, ready.version,
+                });
+                return;
+            }
+
+            // Normal operation: route to sidecar client.
             server.state_machine.handlers.process_sidecar_frame(frame, server.state_machine.storage);
+
+            // Protocol violation → kill sidecar immediately.
+            if (App.sidecar_enabled) {
+                const c = server.state_machine.handlers.sidecar_client orelse unreachable;
+                if (c.protocol_violation) {
+                    log.warn("sidecar: protocol violation detected, killing", .{});
+                    server.kill_sidecar();
+                    return;
+                }
+            }
+
             // Resume pipeline if the CALL completed (or failed).
             if (server.commit_stage != .idle and !server.state_machine.handlers.is_handler_pending()) {
                 server.commit_dispatch();
@@ -548,22 +604,66 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
         pub fn sidecar_on_close(ctx: *anyopaque) void {
             if (!App.sidecar_enabled) unreachable;
             const server: *Server = @ptrCast(@alignCast(ctx));
+            server.sidecar_connected = false;
+            server.sidecar_pid = 0;
+            log.info("sidecar: disconnected", .{});
+
             server.state_machine.handlers.on_sidecar_close();
+
+            if (server.commit_stage == .render) {
+                // Render crash: writes already committed. Send
+                // minimal response — never retry pipeline.
+                server.render_crash_fallback();
+                return;
+            }
+
             if (server.commit_stage != .idle) {
-                // Cancel pipeline if in-flight.
+                // Pre-handle crash: full pipeline reset is safe.
                 const sm = server.state_machine;
                 switch (server.commit_stage) {
-                    .route => {}, // no tracer span active during route
+                    .route => {},
                     .prefetch => sm.tracer.cancel(.prefetch),
-                    .render => sm.tracer.cancel(.execute),
+                    .render => unreachable, // handled above
                     .handle, .idle => {},
                 }
                 server.pipeline_reset();
             } else {
-                // No pipeline — still reset handler state so the
-                // client's .failed call_state is cleaned up.
                 server.state_machine.handlers.reset_handler_state();
             }
+        }
+
+        /// Kill the sidecar process — SIGKILL, not SIGTERM.
+        /// Called on protocol violations (corrupt frame, version
+        /// mismatch, request_id mismatch). The hypervisor restarts it.
+        fn kill_sidecar(server: *Server) void {
+            if (!App.sidecar_enabled) unreachable;
+            if (server.sidecar_pid != 0) {
+                log.warn("sidecar: killing pid={d}", .{server.sidecar_pid});
+                std.posix.kill(@intCast(server.sidecar_pid), std.posix.SIG.KILL) catch |err| {
+                    log.warn("sidecar: kill failed: {}", .{err});
+                };
+            }
+            // Terminate the bus connection — on_close will fire,
+            // which sets sidecar_connected = false.
+            if (server.sidecar_bus.connection.state == .connected) {
+                server.sidecar_bus.connection.terminate(.shutdown);
+            }
+        }
+
+        /// Render crash fallback — writes committed, sidecar gone.
+        /// Send a minimal response using committed pipeline data.
+        /// Never retry — retrying re-executes handle → duplicate writes.
+        fn render_crash_fallback(server: *Server) void {
+            const conn = server.commit_connection orelse {
+                server.pipeline_reset();
+                return;
+            };
+            const msg = server.commit_msg.?;
+            const pipeline_resp = server.commit_pipeline_resp.?;
+
+            // Minimal response: operation succeeded, render degraded.
+            const fallback_html = "<html><body>Operation completed. Refresh for full page.</body></html>";
+            server.encode_and_respond(conn, msg, pipeline_resp, fallback_html);
         }
 
         fn log_metrics(server: *Server) void {
@@ -677,6 +777,20 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
                 "Connection: close\r\n" ++
                 "\r\n" ++
                 "invalid request\n";
+            @memcpy(conn.send_buf[0..response.len], response);
+            return .{ .offset = 0, .len = response.len };
+        }
+
+        /// 503-equivalent: sidecar not connected. Distinct from
+        /// unmapped (404-like). Connection: close — client should retry.
+        fn sidecar_unavailable_response(conn: *Connection) struct { offset: u32, len: u32 } {
+            const response =
+                "HTTP/1.1 503 Service Unavailable\r\n" ++
+                "Content-Type: text/plain\r\n" ++
+                "Content-Length: 24\r\n" ++
+                "Connection: close\r\n" ++
+                "\r\n" ++
+                "service unavailable\n";
             @memcpy(conn.send_buf[0..response.len], response);
             return .{ .offset = 0, .len = response.len };
         }
