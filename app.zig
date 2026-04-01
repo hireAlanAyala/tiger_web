@@ -139,14 +139,14 @@ pub fn HandlersType(comptime StorageParam: type) type {
             return ro.query_raw(sql, params_buf, param_count, mode, out_buf);
         }
 
-        /// Pure native execute dispatch. No sidecar knowledge.
-        /// In sidecar mode, the server short-circuits before calling this.
+        /// Execute dispatch. Returns null if handler needs async IO
+        /// (sidecar .pending). Native handlers always return non-null.
         pub fn handler_execute(
             cache: PrefetchCache,
             msg: Message,
             fw: FwCtx,
             db: anytype,
-        ) state_machine.HandleResult {
+        ) ?state_machine.HandleResult {
             return gen_handlers.dispatch_execute(cache, msg, fw, db);
         }
 
