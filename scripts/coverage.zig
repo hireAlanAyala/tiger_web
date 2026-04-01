@@ -74,7 +74,7 @@ fn report(shell: *Shell) !void {
 
     // List kcov run directories and find their coverage.json files.
     const cov_dirs = shell.exec_stdout(
-        "find {dir} -name coverage.json -not -path '*/kcov-merged/*'",
+        "find {dir} -name coverage.json -not -path */kcov-merged/*",
         .{ .dir = output_dir },
     ) catch {
         try stdout.print("\nNo coverage data found.\n", .{});
