@@ -423,6 +423,11 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
         }
 
         /// Reset the pipeline to idle. Called on completion, busy, or failure.
+        /// NOTE: callers are responsible for stopping/cancelling their own
+        /// tracer spans before calling pipeline_reset. The .busy branch
+        /// cancels .prefetch, the .render stage stops .execute, etc.
+        /// Phase 2: if .pending leads to external failure (sidecar disconnect),
+        /// the on_close callback must cancel the tracer before calling reset.
         fn pipeline_reset(server: *Server) void {
             server.commit_stage = .idle;
             server.commit_connection = null;
