@@ -100,21 +100,22 @@ pub var fault_busy_ratio: PRNG.Ratio = PRNG.Ratio.zero();
 // interface.
 // =====================================================================
 
+/// Native handler dispatch — zero-size struct, all state external.
+/// Instance methods take `self` for interface consistency with
+/// SidecarHandlersType (which has fields). Native self is unused.
 pub fn HandlersType(comptime StorageParam: type) type {
     return struct {
-        pub const Cache = PrefetchCache;
+        // No fields — zero-size struct. Native handlers are stateless.
+        // Adding this type as a field on the SM costs zero bytes.
 
-        /// Whether an async handler operation is in-flight.
-        /// Native handlers are always synchronous — returns false.
-        /// SidecarHandlersType overrides this to check call_state.
-        pub fn is_handler_pending() bool {
+        pub const Cache = PrefetchCache;
+        pub const FwCtx = @import("framework/handler.zig").FrameworkCtx(message.PrefetchIdentity);
+
+        pub fn is_handler_pending(_: *const @This()) bool {
             return false;
         }
 
-        /// Native prefetch dispatch. In sidecar mode, the server uses
-        /// SidecarHandlersType instead — same interface, different impl.
-        pub fn handler_prefetch(storage: *StorageParam, msg: *const Message) ?PrefetchCache {
-            // Fault injection for simulation.
+        pub fn handler_prefetch(_: *@This(), storage: *StorageParam, msg: *const Message) ?PrefetchCache {
             if (fault_prng) |prng| {
                 if (prng.chance(fault_busy_ratio)) {
                     log.mark.debug("storage: busy fault injected", .{});
@@ -125,25 +126,14 @@ pub fn HandlersType(comptime StorageParam: type) type {
             return gen_handlers.dispatch_prefetch(ro, msg);
         }
 
-        pub const FwCtx = @import("framework/handler.zig").FrameworkCtx(message.PrefetchIdentity);
-
-        /// QUERY dispatch function for CALL/RESULT protocol.
-        /// Wraps StorageParam.query_raw behind the QueryFn interface.
-        /// Context is *StorageParam (not *ReadView) because ReadView is
-        /// a value type received via anytype — can't take its address for
-        /// *anyopaque. StorageParam is a persistent pointer on the SM.
-        /// ReadView is created fresh inside — it's a thin wrapper, free.
         pub fn query_dispatch_fn(ctx: *anyopaque, sql: []const u8, params_buf: []const u8, param_count: u8, mode: protocol.QueryMode, out_buf: []u8) ?[]const u8 {
             const s: *StorageParam = @ptrCast(@alignCast(ctx));
             const ro = StorageParam.ReadView.init(s);
             return ro.query_raw(sql, params_buf, param_count, mode, out_buf);
         }
 
-        /// Execute dispatch. ALWAYS synchronous — returns HandleResult,
-        /// never null or .pending. All data loaded during prefetch.
-        /// TB pattern: execute never waits. DO NOT make this async.
-        /// If execute needs data from the sidecar, load it in prefetch.
         pub fn handler_execute(
+            _: *@This(),
             cache: PrefetchCache,
             msg: Message,
             fw: FwCtx,
@@ -152,9 +142,7 @@ pub fn HandlersType(comptime StorageParam: type) type {
             return gen_handlers.dispatch_execute(cache, msg, fw, db);
         }
 
-        /// Pure native route dispatch. No sidecar knowledge.
-        /// In sidecar mode, the server short-circuits before calling this.
-        pub fn handler_route(method: http.Method, raw_path: []const u8, body: []const u8) ?Message {
+        pub fn handler_route(_: *@This(), method: http.Method, raw_path: []const u8, body: []const u8) ?Message {
             const parse = @import("framework/parse.zig");
             const gen = @import("generated/routes.generated.zig");
 
@@ -185,23 +173,93 @@ pub fn HandlersType(comptime StorageParam: type) type {
             return result;
         }
 
-        /// Pure native render dispatch. No sidecar knowledge.
-        /// In sidecar mode, the server short-circuits before calling this.
         pub fn handler_render(
+            _: *@This(),
             cache: PrefetchCache,
             operation: Operation,
             status: message.Status,
             fw: FwCtx,
             render_buf: []u8,
             storage: anytype,
-        ) []const u8 {
+        ) ?[]const u8 {
             return gen_handlers.dispatch_render(cache, operation, status, fw, render_buf, storage);
         }
+
+        /// Native handlers have no state — invariants is a no-op.
+        pub fn invariants(_: *const @This()) void {}
+
+        /// Native handlers have no state — reset is a no-op.
+        pub fn reset_handler_state(_: *@This()) void {}
     };
 }
 
-pub fn StateMachineType(comptime StorageParam: type) type {
-    return state_machine.StateMachineType(StorageParam, HandlersType(StorageParam));
+// =====================================================================
+// Comptime handler selection — two paths, one interface.
+//
+// sidecar_enabled selects between native (in-process Zig handlers)
+// and sidecar (external runtime via CALL/RESULT protocol over
+// message bus). Both implement the same Handlers interface.
+//
+// The server resolves HandlersFor(Storage, IO) and passes the concrete
+// Handlers type to StateMachineWith(Storage, Handlers). The SM never
+// sees IO — it receives only the resolved Handlers type. This matches
+// TB's pattern: the Replica resolves types, the SM is pure business logic.
+// Tests use SM (native-only alias) — they don't need sidecar.
+// =====================================================================
+
+/// Construct SM from resolved Handlers type. The server calls this
+/// after resolving Handlers via HandlersFor(Storage, IO). The SM
+/// sees Handlers (its dispatch interface), never IO.
+pub fn StateMachineWith(comptime StorageParam: type, comptime HandlersParam: type) type {
+    return state_machine.StateMachineType(StorageParam, HandlersParam);
+}
+
+/// Build option: true = sidecar handlers, false = native handlers.
+/// Set via `zig build -Dsidecar=true`. Reads from root module's
+/// build_options if available, otherwise defaults to false (native).
+/// Tests and fuzz binaries don't have build_options — always native.
+pub const sidecar_enabled = blk: {
+    const root = @import("root");
+    break :blk if (@hasDecl(root, "build_options"))
+        root.build_options.sidecar_enabled
+    else
+        false;
+};
+
+/// Resolve the Handlers type based on sidecar_enabled.
+/// Native path ignores IO. Sidecar path needs IO for the
+/// comptime cascade: Server → Bus → Connection → SidecarClient.
+pub fn HandlersFor(comptime StorageParam: type, comptime IOParam: type) type {
+    if (sidecar_enabled) {
+        const H = @import("sidecar_handlers.zig").SidecarHandlersType(StorageParam, IOParam);
+        validateHandlersInterface(H);
+        return H;
+    }
+    const H = HandlersType(StorageParam);
+    validateHandlersInterface(H);
+    return H;
+}
+
+/// Comptime assertion that a Handlers type exposes the required interface.
+/// Both native and sidecar handlers must have identical public declarations.
+/// If the compiler can check it, make the compiler check it.
+fn validateHandlersInterface(comptime H: type) void {
+    // Type constants.
+    _ = H.Cache;
+    _ = H.FwCtx;
+
+    // Instance methods — verify they exist and are functions.
+    // The compiler checks parameter/return types at call sites.
+    comptime {
+        assert(@hasDecl(H, "is_handler_pending"));
+        assert(@hasDecl(H, "handler_route"));
+        assert(@hasDecl(H, "handler_prefetch"));
+        assert(@hasDecl(H, "handler_execute"));
+        assert(@hasDecl(H, "handler_render"));
+        assert(@hasDecl(H, "query_dispatch_fn"));
+        assert(@hasDecl(H, "invariants"));
+        assert(@hasDecl(H, "reset_handler_state"));
+    }
 }
 
 // --- Composition root ---
@@ -213,24 +271,22 @@ pub fn StateMachineType(comptime StorageParam: type) type {
 // This is the composition root pattern — one place binds types,
 // everyone else consumes. Same as TigerBeetle's vsr.zig.
 pub const Storage = @import("storage.zig").SqliteStorage;
-pub const SM = StateMachineType(Storage);
+
+/// Pre-computed SM type for native-only consumers (tests, fuzz,
+/// benchmarks). These never use sidecar — they test the SM directly.
+/// The server uses StateMachineType(Storage, IO) for full resolution.
+pub const SM = state_machine.StateMachineType(Storage, HandlersType(Storage));
 
 pub const Wal = @import("framework/wal.zig").WalType(Operation);
-
-// Sidecar mode: Phase 2 will add comptime handler selection here.
-// pub const Handlers = if (sidecar) SidecarHandlersType(Storage) else NativeHandlersType(Storage);
-// For now, only native handlers are available.
 
 /// Translate an HTTP request into a typed Message. Returns null if the
 /// request doesn't map to a valid operation.
 ///
-/// Route dispatch using the generated route table (single source of truth).
-/// The scanner generates routes.generated.zig from // match and // query
-/// annotations. Pattern matching + query param extraction happen here.
-/// Handlers receive pre-extracted params and body — no raw path matching.
-/// Runtime assert catches duplicate matches (two handlers both accepting).
+/// For native handlers only (used by tests that don't have a server).
+/// The server calls sm.handlers.handler_route() directly.
 pub fn translate(method: http.Method, raw_path: []const u8, body: []const u8) ?Message {
-    return HandlersType(Storage).handler_route(method, raw_path, body);
+    var h: HandlersType(Storage) = .{};
+    return h.handler_route(method, raw_path, body);
 }
 
 // =====================================================================
