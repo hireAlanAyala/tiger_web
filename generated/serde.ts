@@ -355,19 +355,27 @@ export function writeWriteQueue(buf: DataView, offset: number, writes: WriteEntr
 }
 
 // --- Frame IO helpers ---
+// Frame format: [payload_len: u32 BE][crc32: u32 LE][payload]
+// CRC covers len_bytes(4) ++ payload_bytes.
+// Header size: 8 bytes.
+
+export const frame_header_size = 8;
 
 /**
- * Read a frame header (4-byte BE length) and return the payload length.
+ * Read a frame header (8-byte: len + crc) and return the payload length.
  * Returns -1 if the buffer doesn't have enough bytes for the header.
+ * CRC validation is caller's responsibility (use validateFrameCrc).
  */
 export function readFrameLength(buf: DataView, offset: number): number {
-  if (buf.byteLength - offset < 4) return -1;
+  if (buf.byteLength - offset < frame_header_size) return -1;
   return buf.getUint32(offset, false);
 }
 
 /**
- * Write a frame header (4-byte BE length) at the given position.
+ * Write a frame header (8-byte: len + crc) at the given position.
+ * CRC must be computed by the caller covering len(4) ++ payload.
  */
-export function writeFrameHeader(buf: DataView, offset: number, payloadLength: number): void {
-  buf.setUint32(offset, payloadLength, false);
+export function writeFrameHeader(buf: DataView, offset: number, payloadLength: number, crc: number): void {
+  buf.setUint32(offset, payloadLength, false);    // len: u32 BE
+  buf.setUint32(offset + 4, crc, true);           // crc: u32 LE
 }

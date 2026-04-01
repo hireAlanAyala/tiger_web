@@ -10,6 +10,7 @@
 // Usage: npx tsx generated/call_runtime.ts <socket-path>
 
 import * as net from "net";
+import { crc32 } from "node:zlib";
 import { readRowSet, writeParams, frame_max, QueryMode } from "../generated/serde.ts";
 
 // --- Protocol constants (match protocol.zig) ---
@@ -40,11 +41,21 @@ import type { HandlerModule, RouteTableEntry } from "../generated/handlers.gener
 const _decoder = new TextDecoder();
 const _encoder = new TextEncoder();
 
+// Frame format: [payload_len: u32 BE][crc32: u32 LE][payload]
+// CRC covers len_bytes(4) ++ payload_bytes (incremental).
+const FRAME_HEADER_SIZE = 8;
+
 function sendFrame(conn: net.Socket, payload: Uint8Array): void {
-  const header = Buffer.alloc(4);
+  const header = Buffer.alloc(FRAME_HEADER_SIZE);
   header.writeUInt32BE(payload.length, 0);
+  // CRC-32 covers len(4) ++ payload — incremental computation.
+  const crcLen = crc32(header.subarray(0, 4));
+  const crcFull = payload.length > 0
+    ? crc32(Buffer.from(payload), crcLen)
+    : crcLen;
+  header.writeUInt32LE(crcFull, 4);
   conn.write(header);
-  if (payload.length > 0) conn.write(payload);
+  if (payload.length > 0) conn.write(Buffer.from(payload));
 }
 
 function buildResult(
@@ -69,10 +80,9 @@ function buildQuery(
   params: unknown[],
 ): Uint8Array {
   const sqlBytes = _encoder.encode(sql);
-  // tag(1) + req_id(4) + query_id(2) + sql_len(2) + sql + mode(1) + param_count(1) + params
-  // Param size: worst case is text/blob with up to cell_value_max bytes (1 + 2 + 4096).
-  // Use a generous estimate: 256 bytes per param covers most practical cases.
-  const buf = new Uint8Array(1 + 4 + 2 + 2 + sqlBytes.length + 1 + 1 + params.length * 256);
+  // Use frame_max as upper bound — the protocol enforces this limit.
+  // Avoids fragile per-param estimation that can silently truncate.
+  const buf = new Uint8Array(frame_max);
   const dv = new DataView(buf.buffer);
   let pos = 0;
 
@@ -165,17 +175,36 @@ const pendingQueries = new Map<number, (data: any) => void>();
 let nextQueryId = 0;
 
 function processFrames(): void {
-  while (pending.length >= 4) {
+  while (pending.length >= FRAME_HEADER_SIZE) {
     const frameLen = pending.readUInt32BE(0);
-    if (pending.length < 4 + frameLen) break;
+    if (frameLen > frame_max) {
+      console.error("[call_runtime] frame too large:", frameLen);
+      conn.destroy();
+      return;
+    }
+    const totalLen = FRAME_HEADER_SIZE + frameLen;
+    if (pending.length < totalLen) break;
+
+    // Validate CRC-32 before parsing. CRC covers len(4) ++ payload.
+    const storedCrc = pending.readUInt32LE(4);
+    const crcLen = crc32(pending.subarray(0, 4));
+    const computedCrc = frameLen > 0
+      ? crc32(pending.subarray(FRAME_HEADER_SIZE, totalLen), crcLen)
+      : crcLen;
+    if ((computedCrc >>> 0) !== (storedCrc >>> 0)) {
+      console.error("[call_runtime] CRC mismatch — frame corrupted");
+      conn.destroy();
+      return;
+    }
+
     // Copy frame data — must not alias pending buffer. When async
     // handlers suspend (await db.query), more data arrives and
     // Buffer.concat replaces the buffer. The old view would be stale.
     const frame = new Uint8Array(pending.buffer.slice(
-      pending.byteOffset + 4,
-      pending.byteOffset + 4 + frameLen,
+      pending.byteOffset + FRAME_HEADER_SIZE,
+      pending.byteOffset + totalLen,
     ));
-    pending = pending.subarray(4 + frameLen);
+    pending = pending.subarray(totalLen);
 
     const tag = frame[0];
 
@@ -269,7 +298,8 @@ async function handleCall(frame: Uint8Array): Promise<void> {
 
 // --- Route CALL ---
 // Args: [method: u8][path_len: u16 BE][path][body_len: u16 BE][body]
-// Result: [found: u8][operation: u8][id: u128 BE]
+// Result (success): [operation: u8][id: 16 bytes LE]
+// Result (failure): not found — empty payload, ResultFlag.failure
 
 import { matchRoute } from "../generated/routing.ts";
 
@@ -327,8 +357,8 @@ function dispatchRoute(requestId: number, args: Uint8Array): void {
   }
 
   if (!result) {
-    // Not found — send result with found=0.
-    sendFrame(conn, buildResult(requestId, ResultFlag.success, new Uint8Array([0])));
+    // Not found — signal via RESULT failure flag. No payload needed.
+    sendFrame(conn, buildResult(requestId, ResultFlag.failure, new Uint8Array(0)));
     return;
   }
 
@@ -338,17 +368,16 @@ function dispatchRoute(requestId: number, args: Uint8Array): void {
   requestState.body = typeof body === "string" && body.length > 0 ? JSON.parse(body) : {};
   requestState.params = result.params || {};
 
-  // Build result: [found: u8][operation: u8][id: u128 BE]
+  // Build result: [operation: u8][id: 16 bytes LE]
+  // No found byte — found/not-found signaled via RESULT flag.
+  // ID written little-endian to match Zig's readInt(u128, .little).
   const opValue = (OperationValues as any)[matchedOp];
-  const resultBuf = new Uint8Array(1 + 1 + 16);
-  const resultDv = new DataView(resultBuf.buffer);
-  resultBuf[0] = 1; // found
-  resultBuf[1] = opValue;
-  // ID as u128 BE — parse hex string to 16 bytes. Strip hyphens
-  // (path params like :id come with UUID hyphens).
+  const resultBuf = new Uint8Array(1 + 16);
+  resultBuf[0] = opValue;
+  // ID as u128 LE — parse hex string to 16 bytes, reversed.
   const idHex = (result.id || "0".repeat(32)).replace(/-/g, "").padStart(32, "0");
   for (let i = 0; i < 16; i++) {
-    resultBuf[2 + i] = parseInt(idHex.substr(i * 2, 2), 16);
+    resultBuf[1 + i] = parseInt(idHex.substr((15 - i) * 2, 2), 16);
   }
 
   sendFrame(conn, buildResult(requestId, ResultFlag.success, resultBuf));
@@ -392,18 +421,26 @@ async function dispatchPrefetch(requestId: number, args: Uint8Array): Promise<vo
 
 // --- Handle CALL ---
 // Args: [operation: u8][id: u128 BE]
-// Result: [status_len: u16 BE][status_str][write_count: u8][writes...]
+// Result: [status_len: u16 BE][status_str][session_action: u8][write_count: u8][writes...]
+// Session action: 0=none, 1=set_authenticated, 2=clear
+
+const SessionAction = {
+  none: 0,
+  set_authenticated: 1,
+  clear: 2,
+} as const;
 
 function dispatchHandle(requestId: number, _args: Uint8Array): void {
   const mod = modules[requestState.operation];
   if (!mod?.handle) {
-    // No handle function — return "ok" with no writes.
+    // No handle function — return "ok" with no writes, no session action.
     const statusBytes = _encoder.encode("ok");
-    const resultBuf = new Uint8Array(2 + statusBytes.length + 1);
+    const resultBuf = new Uint8Array(2 + statusBytes.length + 1 + 1);
     const resultDv = new DataView(resultBuf.buffer);
     resultDv.setUint16(0, statusBytes.length, false);
     resultBuf.set(statusBytes, 2);
-    resultBuf[2 + statusBytes.length] = 0; // write_count
+    resultBuf[2 + statusBytes.length] = SessionAction.none;
+    resultBuf[2 + statusBytes.length + 1] = 0; // write_count
     sendFrame(conn, buildResult(requestId, ResultFlag.success, resultBuf));
     return;
   }
@@ -424,9 +461,27 @@ function dispatchHandle(requestId: number, _args: Uint8Array): void {
     prefetched: requestState.prefetched,
   };
 
-  const status = mod.handle(ctx, db) || "ok";
+  // Handle returns status string, or { status, sessionAction } object.
+  const handleResult = mod.handle(ctx, db);
+  let status: string;
+  let sessionAction: number = SessionAction.none;
+  if (typeof handleResult === "string") {
+    status = handleResult || "ok";
+  } else if (handleResult && typeof handleResult === "object") {
+    status = (handleResult as any).status || "ok";
+    const rawAction = (handleResult as any).sessionAction;
+    if (rawAction !== undefined) {
+      const mapped = SessionAction[rawAction as keyof typeof SessionAction];
+      if (mapped === undefined) {
+        throw new Error(`unknown sessionAction: '${rawAction}'`);
+      }
+      sessionAction = mapped;
+    }
+  } else {
+    status = "ok";
+  }
 
-  // Build result: [status_len: u16 BE][status_str][write_count: u8][writes...]
+  // Build result: [status_len: u16 BE][status_str][session_action: u8][write_count: u8][writes...]
   const statusBytes = _encoder.encode(status);
   // Calculate total write size.
   let writeSize = 0;
@@ -446,7 +501,7 @@ function dispatchHandle(requestId: number, _args: Uint8Array): void {
     }
   }
 
-  const resultBuf = new Uint8Array(2 + statusBytes.length + 1 + writeSize);
+  const resultBuf = new Uint8Array(2 + statusBytes.length + 1 + 1 + writeSize);
   const resultDv = new DataView(resultBuf.buffer);
   let pos = 0;
 
@@ -454,6 +509,8 @@ function dispatchHandle(requestId: number, _args: Uint8Array): void {
   pos += 2;
   resultBuf.set(statusBytes, pos);
   pos += statusBytes.length;
+  resultBuf[pos] = sessionAction;
+  pos += 1;
   resultBuf[pos] = writes.length;
   pos += 1;
 
