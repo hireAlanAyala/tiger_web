@@ -459,4 +459,26 @@ transport changes — only the IO layer and handler implementation.
 - **Spin-then-futex** — two code paths for 3μs. Violates "zero technical debt."
 - **eventfd** — abstraction over futex for epoll integration we don't need.
 - **Embedded V8** — massive dependency (Bun is 300K+ lines), single-language.
-- **Multiple sidecar workers** — server is single-threaded, one exchange at a time.
+- **Multiple sidecar workers** — server is single-threaded, one
+  exchange at a time. However, this is a future scaling path when
+  the runtime is the bottleneck. The server dispatches CALLs to N
+  sidecar processes via N MessageBus connections. While sidecar A
+  computes, the next request goes to sidecar B. The sidecars run
+  in parallel on separate cores. The server round-robins.
+
+  | Runtime | 1 process | 2 processes | 4 processes |
+  |---|---|---|---|
+  | Python | ~5K | ~10K | ~20K |
+  | TypeScript (V8) | ~25K | ~50K | ~100K |
+  | Rust/Go | ~34K | ~68K | ~136K |
+
+  This uses the connection pool extension point from message-bus.md.
+  The handler interface is unchanged — the dispatcher picks which
+  bus. Requires the concurrent pipeline (multiple `commit_stage`
+  slots) from network-storage.md so the server can have multiple
+  requests in-flight. Without concurrent pipeline, the server
+  blocks on each sidecar response.
+
+  Not doing this now — single-process sidecar is sufficient.
+  Build when a user needs more throughput than one runtime process
+  can deliver.
