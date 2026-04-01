@@ -984,24 +984,50 @@ is also new — wraps `posix.shutdown`, SimIO marks the connection.
 ### Architecture
 
 ```
-Edge (decode):  HTTP → parse → Message
-                                  ↓
-Core (single):  SM pipeline: prefetch → handle → render
+Edge (decode):  HTTP → parse request
+                          ↓
+Core (single):  SM pipeline: route → prefetch → handle → render
                 Handler impl: native (sync) OR sidecar (async)
-                                  ↓
-Edge (encode):  Message → HTTP response
+                All four stages async-capable.
+                          ↓
+Edge (encode):  HTTP response
 ```
 
 The edges decode/encode external protocols. The core processes
-Messages through one pipeline. The handler implementation is
-pluggable — native handlers query SQLite (sync), sidecar handlers
-send CALL frames (async). The SM handles both through the same
-`.pending` + callback mechanism.
+requests through one pipeline of four stages. Every stage uses
+the same interface: call handler → if `.pending`, return →
+callback resumes → call again (idempotent) → complete → advance.
+
+In native mode, all four stages return synchronously. In sidecar
+mode, all four return `.pending` and resume via callback. Same
+interface, same pipeline, no shims, no blocking.
+
+**Route is a pipeline stage, not a pre-pipeline function.**
+`translate()` moves from `process_inbox` (called before the
+pipeline) into the pipeline as the first stage. `process_inbox`
+passes the raw parsed HTTP data to the pipeline. The route
+handler resolves it to a typed Message (native: pattern matching,
+sidecar: CALL "route"). No `io.run_for_ns(0)` shim.
 
 **Future protocols (WebSocket, gRPC, admin CLI) add new edges,
-not new core paths.** Each edge decodes its protocol into a
-Message, feeds the SM pipeline, and encodes the response back.
+not new core paths.** Each edge decodes its protocol into raw
+request data, feeds the SM pipeline, and encodes the response.
 The pipeline and handlers don't change.
+
+### What all-async unlocks
+
+1. **Worker integration is trivial.** A worker handler is just
+   another async handler. `handler_fulfill_order()` sends a CALL
+   to the worker, returns `.pending`. No new stages.
+2. **Hybrid native + sidecar.** Per-operation handler selection.
+   Some ops handled by Zig (sync), others by sidecar (async).
+3. **Route testable through pipeline.** Fuzzer exercises the full
+   path: route → prefetch → handle → render.
+4. **Zero blocking.** No `io.run_for_ns(0)` shim. Every stage
+   returns control to the event loop. Foundation for concurrent
+   pipeline (network-storage.md).
+5. **Simpler SidecarHandlersType.** Every handler method has the
+   same pattern. No special case for route being sync.
 
 ### What changes
 
@@ -1051,24 +1077,51 @@ handler interface, not a sidecar-specific side channel.
 
 **Server `commit_dispatch` has ONE set of stages.**
 
-No `sidecar_route`, `sidecar_prefetch`, `sidecar_handle`,
-`sidecar_render`. The pipeline is:
-
 ```
-.prefetch → .handle → .render
+.route → .prefetch → .handle → .render
 ```
 
-Same for native and sidecar. The handler implementation decides
-sync vs async. The server doesn't know.
+Four stages, all async-capable. Same for native and sidecar.
+No `sidecar_*` stages. The handler implementation decides sync
+vs async. The server doesn't know.
 
-**Server sidecar stages are deleted.**
+**`CommitStage` enum:**
 
-The `sidecar_*` stages in `commit_dispatch` are replaced by
-the SM's `.pending` result. When `sm.prefetch()` returns
-`.pending`, the server returns from `commit_dispatch`. The bus
-callback fires `on_frame`, which calls `commit_dispatch` to
-resume. The SM calls the handler again (idempotent), handler
-sees `.complete`, returns the cache. Pipeline advances.
+```zig
+const CommitStage = enum {
+    idle,
+    route,     // Resolve raw HTTP to typed Message
+    prefetch,  // Load data for the operation
+    handle,    // Execute business logic + writes
+    render,    // Produce response (HTML/JSON)
+};
+```
+
+**Server pipeline flow:**
+
+When `sm.route()` / `sm.prefetch()` / etc. returns `.pending`:
+- Server returns from `commit_dispatch`
+- Bus callback fires `on_frame` → handler state updates
+- `on_frame` calls `commit_dispatch` to resume
+- SM calls handler again (idempotent) → `.complete` → advance
+
+**`process_inbox` simplifies:**
+
+```zig
+fn process_inbox(server: *Server) void {
+    for (connections) |*conn| {
+        if (conn.state != .ready) continue;
+        if (server.commit_stage != .idle) break;
+
+        const parsed = http.parse_request(conn.recv_buf);
+        // Don't call translate — route is a pipeline stage now.
+        server.commit_stage = .route;
+        server.commit_connection = conn;
+        server.commit_parsed = parsed;  // raw HTTP data
+        server.commit_dispatch();
+    }
+}
+```
 
 ### What this eliminates
 
@@ -1118,20 +1171,43 @@ This phase requires:
 
 ### Checklist
 
-- [ ] Restore `PrefetchResult.pending` to SM.
-- [ ] SM `prefetch()` calls handler, returns `.pending` if handler
-  returns null and `is_handler_pending()` is true.
+**SM pipeline:**
+- [ ] Add `.route` stage to `CommitStage` enum.
+- [ ] Restore `PrefetchResult.pending` (or generalize to
+  `StageResult { complete, busy, pending }`).
+- [ ] SM gains `route()` method — calls handler, returns result.
+- [ ] All four stages (route, prefetch, handle, render) return
+  the same result type with `.pending` support.
 - [ ] SM callback mechanism: handler completes async →
-  `commit_dispatch_resume()`.
+  `commit_dispatch_resume()` via `on_frame`.
+- [ ] `process_inbox` — don't call `translate()`, start pipeline
+  at `.route` with raw parsed HTTP data.
+
+**Handler interface:**
+- [ ] `handler_route(method, path, body)` — async-capable.
+  Native: pattern match + return. Sidecar: CALL "route" → pending.
+- [ ] `handler_prefetch(storage, msg)` — async-capable (already).
+- [ ] `handler_execute(cache, msg, fw, db)` — async-capable.
+- [ ] `handler_render(cache, op, status, fw, buf, storage)` —
+  async-capable.
+- [ ] All four use same pattern: check state → if idle, start →
+  if pending, return null → if complete, return result.
+- [ ] `is_handler_pending()` — generic, not sidecar-specific.
+
+**Comptime handler selection:**
 - [ ] `SidecarHandlersType(Storage, SidecarClient)` — implements
   same interface as native handlers using sidecar protocol.
 - [ ] `App` composition root selects handlers at comptime.
-- [ ] Server `commit_dispatch` — delete all `sidecar_*` stages.
-- [ ] Server `commit_dispatch` — `.pending` result triggers return,
-  callback resumes.
-- [ ] Delete `sidecar_mode` flag — comptime handler selection.
-- [ ] Route: synchronous in both modes (native: App.translate,
-  sidecar: io.run_for_ns(0) shim — outside pipeline).
+- [ ] Delete `sidecar_mode` runtime flag.
+- [ ] No `if (sidecar_mode)` checks anywhere.
+
+**Server:**
+- [ ] `commit_dispatch` — four stages: route, prefetch, handle,
+  render. No sidecar-specific stages.
+- [ ] `.pending` result → return from dispatch. Callback resumes.
+- [ ] Delete all `sidecar_*` stages.
+- [ ] Delete sidecar bus/client fields from server (move to
+  SidecarHandlersType or App).
 - [ ] All existing tests pass.
 - [ ] Sim tests pass.
 
@@ -1807,25 +1883,30 @@ If the frame arrives, it's valid. Faults affect *whether* and
 ```
 Phase 0:   MessagePool + Connection (*Message pointers) ✓ DONE
 Phase 1:   Connection + MessageBus (transport primitive) ✓ DONE
-Phase 1.5: Consolidated pipeline (async handler interface)
+Phase 1.5: Consolidated pipeline
+           - Route as pipeline stage (no shim)
+           - All stages async-capable
+           - Comptime handler selection
+           - Delete sidecar_* stages from server
     ↓
-Phase 2:   Sidecar integration (SidecarHandlersType + TS wire format)
+Phase 2:   Sidecar handlers (SidecarHandlersType + TS wire format)
     ↓
 Phase 3:   MessageBus Fuzzer (can start during Phase 2)
     ↓
 Phase 4:   SimSidecar
 ```
 
-Phase 1.5 restores `.pending` to the SM, makes handlers async-
-capable, and deletes the sidecar stages from the server. The
-pipeline becomes single-path: prefetch → handle → render, same
-for native and sidecar. Handler implementation is pluggable.
+Phase 1.5 is the architectural pivot. The SM pipeline becomes
+the single protocol: route → prefetch → handle → render. All
+four stages async-capable. Handler implementation pluggable at
+comptime. Server has one commit_dispatch with one set of stages.
 
-Phase 2 implements `SidecarHandlersType` and the TS wire format.
-The server doesn't change — only the handler implementation.
+Phase 2 implements `SidecarHandlersType` — same interface as
+native handlers, uses sidecar protocol internally. The server
+doesn't change. Only the handler implementation.
 
 Future protocols add edges (decode/encode), not core paths.
-The SM pipeline is the single protocol.
+Workers are just async handlers — no new pipeline stages.
 
 ## TB audit result
 
