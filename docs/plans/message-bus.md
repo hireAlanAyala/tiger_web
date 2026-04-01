@@ -1498,51 +1498,44 @@ with FuzzIO fault injection.
 
 ### sidecar_fuzz checklist
 
-- [ ] Replace socketpair + thread with Connection + FuzzIO.
-- [ ] SidecarClient receives frames via bus, not `on_recv`.
+**Scope: protocol state machine only.** No server, no reconnect.
+Recovery testing requires the full stack — deferred to sim.zig.
+
+- [ ] Replace socketpair + thread with ConnectionType(FuzzIO).
+- [ ] SidecarClient receives frames via bus on_frame callback.
+- [ ] Valid CALL/RESULT exchange (call_submit → inject RESULT).
 - [ ] QUERY sub-protocol via real send path (bus.send_message).
-- [ ] FuzzIO fault injection: partial delivery, disconnect.
-- [ ] Compaction after RESULT: inject trailing bytes after RESULT
-  frame so compaction runs after on_frame. Assert result_data
-  (in state_buf) matches expected payload. Catches aliasing bugs.
-- [ ] Protocol content tests preserved (valid/corrupt/truncated).
-- [ ] Query limit exceeded tests preserved.
+- [ ] Corrupt/truncated/wrong-tag RESULT → .failed.
+- [ ] Request_id mismatch detection → .failed.
+- [ ] Query count exceeded → .failed.
+- [ ] Recovery after failure (reset_call_state → new CALL).
+- [ ] Suspend/resume during QUERY — frame delivered after resume,
+  stale-slice-after-compaction tested.
+- [ ] Multi-call sequencing — multiple exchanges on same client,
+  stale RESULT from call N injected during call N+1.
+- [ ] copy_state overflow — QUERY results approaching state_buf_max.
+- [ ] Compaction after RESULT: trailing bytes after RESULT frame,
+  result_data in state_buf survives recv buffer compaction.
 - [ ] Register updated fuzzer in `fuzz_tests.zig`.
 
-**Recovery path testing (web server resilience):**
+### Recovery testing — sim.zig (separate concern)
 
-The sidecar fuzzer must test the recovery path that the transport
-fuzzer cannot: sidecar disconnect → pipeline .busy → sidecar
-reconnect → pipeline resumes → request succeeds.
+Recovery requires Server + SM + MessageBus — wrong level for
+the sidecar fuzzer. Connection terminates on error and never
+reconnects. Recovery is a lifecycle concern, not a protocol concern.
 
-This is architecturally different from TB. TB's Replica has
-consensus — one connection failure is not a system failure. A
-web server must recover from sidecar crashes because:
+| Layer | Behavior | Tested by |
+|---|---|---|
+| Connection | Terminates on error | message_bus_fuzz |
+| MessageBus | tick_accept re-accepts | sim.zig (future) |
+| call_submit | Returns false when disconnected | sidecar_fuzz |
+| Server pipeline | Retries next tick if .busy | sim.zig (future) |
+| HTTP connection | Survives until 30s timeout | sim.zig (future) |
 
-- The sidecar can be restarted while work is queued.
-- HTTP requests should retry, not fail, if the sidecar recovers
-  within the request timeout (30s).
-- The server should crash only after exhausting retries, not on
-  first error.
-
-The layers handle this separately:
-
-| Layer | Behavior |
-|---|---|
-| Connection | Terminates on error (correct — broken socket is broken) |
-| MessageBus | tick_accept re-accepts when sidecar reconnects |
-| call_submit | Returns false when bus not connected (pipeline .busy) |
-| Server pipeline | Retries prefetch next tick if .busy |
-| HTTP connection | Survives — stays in .ready until 30s timeout |
-
-The transport fuzzer tests layer 1 (Connection terminates correctly).
-The sidecar fuzzer must test layers 2-5 (system recovers from
-termination):
-
-- [ ] Disconnect sidecar mid-CALL → pipeline returns .busy
-- [ ] Reconnect sidecar → next tick retries → CALL succeeds
-- [ ] Multiple disconnect/reconnect cycles within one HTTP request
-- [ ] HTTP request timeout while sidecar is down → error response
+Sim scenarios to add (Phase 4 / SimSidecar):
+- [ ] Disconnect mid-CALL → pipeline .busy → reconnect → resume
+- [ ] Multiple disconnect/reconnect within one HTTP request
+- [ ] HTTP timeout while sidecar down → error response
 - [ ] Sidecar reconnect after timeout → next request succeeds
 
 ### After Phase 3: delete TestIO from message_bus.zig
