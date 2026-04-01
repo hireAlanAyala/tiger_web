@@ -120,15 +120,16 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
         /// For sidecar handlers, stages may span ticks (async in Phase 4).
         const CommitStage = enum {
             idle,              // No request in pipeline
-            // Native pipeline stages:
+            route,             // Resolve raw HTTP to typed Message
             prefetch,          // SM prefetch (native handlers)
             handle,            // SM commit + writes in transaction
             render,            // Render HTML + encode response
             // Sidecar pipeline stages (server owns IO):
-            sidecar_route,     // CALL "route" sent, waiting for RESULT
-            sidecar_prefetch,  // CALL "prefetch" sent, waiting for RESULT
-            sidecar_handle,    // CALL "handle" sent, waiting for RESULT
-            sidecar_render,    // CALL "render" sent, waiting for RESULT
+            // TODO: delete in Step 3 — replaced by async handler interface
+            sidecar_route,
+            sidecar_prefetch,
+            sidecar_handle,
+            sidecar_render,
         };
 
         /// Log metrics every 10,000 ticks (~100s at 10ms/tick).
@@ -328,32 +329,11 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
 
                 conn.is_datastar_request = parsed.is_datastar_request;
 
-                if (App.sidecar_mode and SidecarClient != void) {
-                    // Sidecar mode: route via bus. The sidecar does routing.
-                    // Start with .sidecar_route — commit_dispatch sends the
-                    // CALL and waits for RESULT.
-                    server.commit_stage = .sidecar_route;
-                    server.commit_connection = conn;
-                    // commit_msg set after route RESULT arrives.
-                    server.commit_dispatch();
-                } else {
-                    // Native mode: route locally via translate.
-                    var msg = App.translate(parsed.method, parsed.path, parsed.body) orelse {
-                        log.mark.warn("unmapped request: {s} {s} fd={d}", .{ @tagName(parsed.method), parsed.path, conn.fd });
-                        const resp = unmapped_response(conn);
-                        conn.set_response(resp.offset, resp.len);
-                        conn.keep_alive = false;
-                        continue;
-                    };
-                    msg.set_credential(parsed.identity_cookie);
-
-                    server.commit_stage = .prefetch;
-                    server.commit_connection = conn;
-                    server.commit_msg = msg;
-
-                    server.state_machine.tracer.start(.prefetch);
-                    server.commit_dispatch();
-                }
+                // Start pipeline at .route — routing is the first stage.
+                // commit_dispatch handles translate + advance to prefetch.
+                server.commit_stage = .route;
+                server.commit_connection = conn;
+                server.commit_dispatch();
             }
         }
 
@@ -379,6 +359,30 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
             while (true) {
                 switch (server.commit_stage) {
                     .idle => return,
+
+                    .route => {
+                        // Route: resolve raw HTTP to typed Message.
+                        // Re-parse from conn.recv_buf (deterministic).
+                        const parsed = switch (http.parse_request(conn.recv_buf[0..conn.recv_pos])) {
+                            .complete => |p| p,
+                            .incomplete, .invalid => unreachable,
+                        };
+
+                        var msg = App.translate(parsed.method, parsed.path, parsed.body) orelse {
+                            log.mark.warn("unmapped request: {s} {s} fd={d}", .{ @tagName(parsed.method), parsed.path, conn.fd });
+                            const resp = unmapped_response(conn);
+                            conn.set_response(resp.offset, resp.len);
+                            conn.keep_alive = false;
+                            server.pipeline_reset();
+                            return;
+                        };
+                        msg.set_credential(parsed.identity_cookie);
+
+                        server.commit_msg = msg;
+                        server.commit_stage = .prefetch;
+                        sm.tracer.start(.prefetch);
+                        continue;
+                    },
 
                     .prefetch => {
                         const msg = server.commit_msg.?;
