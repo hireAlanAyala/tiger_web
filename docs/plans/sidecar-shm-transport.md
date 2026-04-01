@@ -409,6 +409,31 @@ support — it's already Linux-only. Cross-platform (macOS kqueue,
 Windows IOCP) is a separate future gate; sidecar signaling slots into
 that same platform layer (futex → os_unfair_lock → WaitOnAddress).
 
+## Relationship to message bus plan
+
+This plan was written before the message bus work (`message-bus.md`).
+The message bus replaces raw `protocol.read_frame`/`write_frame` with
+`ConnectionType(IO)` + `MessageBusType(IO)` — parameterized on IO.
+
+The shared memory transport is cleaner with the bus in place:
+- Replace the IO layer, not raw socket calls. `ConnectionType` calls
+  `self.io.recv/send/send_now`. A shared memory IO implementation
+  provides the same interface — `recv` reads from mmap, `send` writes
+  to mmap, `send_now` writes + futex_wake. The Connection, MessageBus,
+  SidecarClient, and handlers don't change.
+- The MessagePool provides buffer ownership. Shared memory slots can
+  be pool messages directly — the mmap region IS the pool's buffer
+  backing. Zero-copy from shared memory to handler.
+- `SidecarHandlersType` (comptime handler selection from message-bus.md)
+  implements the handler interface using the sidecar protocol. The
+  transport (unix socket vs shared memory) is behind the IO parameter.
+  Swapping transport is a one-line IO type change, not a protocol change.
+
+Dependency: message-bus.md Phase 1.5 (consolidated pipeline with
+async handlers) should complete before this plan starts. The async
+handler interface means the server pipeline doesn't change when the
+transport changes — only the IO layer and handler implementation.
+
 ## What we're NOT doing
 
 - **Collapse to 1 RT** — handlers like `complete_order` read post-write state from the database via `ReadView`. The prefetch cache is pre-write only. 1-RT forces handlers to duplicate DB logic. The database is the source of truth — read from it.
