@@ -63,8 +63,12 @@ pub fn SidecarHandlersType(comptime StorageParam: type, comptime IO: type) type 
         // Inspectable by invariants(). Reset by reset_handler_state().
         // =============================================================
 
-        sidecar_client: *SidecarClient,
-        sidecar_bus: *Bus,
+        /// Optional until Server.init wires them to the embedded
+        /// Bus/Client. Null = not yet wired. Every handler method
+        /// unwraps with .? — panics on null instead of UB from
+        /// undefined. Server.init sets these before the first tick.
+        sidecar_client: ?*SidecarClient = null,
+        sidecar_bus: ?*Bus = null,
 
         prefetch_phase: PrefetchPhase = .idle,
 
@@ -88,7 +92,8 @@ pub fn SidecarHandlersType(comptime StorageParam: type, comptime IO: type) type 
 
         /// Whether a sidecar CALL is in-flight.
         pub fn is_handler_pending(self: *const Self) bool {
-            return self.sidecar_client.call_state == .receiving;
+            const c = self.sidecar_client orelse return false; // not wired yet
+            return c.call_state == .receiving;
         }
 
         /// Reset handler state. Called by the server on pipeline_reset.
@@ -96,8 +101,10 @@ pub fn SidecarHandlersType(comptime StorageParam: type, comptime IO: type) type 
         /// produces a compile error here, not a silent stale-state bug.
         /// Pointer fields (sidecar_client, sidecar_bus) are preserved.
         pub fn reset_handler_state(self: *Self) void {
-            self.sidecar_client.reset_call_state();
-            self.sidecar_client.reset_request_state();
+            if (self.sidecar_client) |c| {
+                c.reset_call_state();
+                c.reset_request_state();
+            }
             self.* = .{
                 .sidecar_client = self.sidecar_client,
                 .sidecar_bus = self.sidecar_bus,
@@ -111,11 +118,11 @@ pub fn SidecarHandlersType(comptime StorageParam: type, comptime IO: type) type 
         /// Args format: [method: u8][path_len: u16 BE][path][body_len: u16 BE][body]
         /// Result format: [operation: u8][id: 16 bytes LE][body: N bytes]
         pub fn handler_route(self: *Self, method_val: http.Method, raw_path: []const u8, body: []const u8) ?message.Message {
-            // Pair assertion: prefetch must not be in progress when a new
-            // route starts. Catches stale state from a missed reset.
             assert(self.prefetch_phase == .idle);
+            const c = self.sidecar_client.?;
+            const b = self.sidecar_bus.?;
 
-            switch (self.sidecar_client.call_state) {
+            switch (c.call_state) {
                 .idle => {
                     // Build args: [method: u8][path_len: u16 BE][path][body_len: u16 BE][body]
                     // Max size bounded by HTTP parser: path ≤ max_header_size, body ≤ body_max.
@@ -136,21 +143,20 @@ pub fn SidecarHandlersType(comptime StorageParam: type, comptime IO: type) type 
                         pos += body.len;
                     }
 
-                    // call_submit checks bounds via build_call before writing.
-                    if (!self.sidecar_client.call_submit(self.sidecar_bus, "route", args_buf[0..pos], self.next_request_id)) {
+                    if (!c.call_submit(b, "route", args_buf[0..pos], self.next_request_id)) {
                         return null;
                     }
                     self.next_request_id +%= 1;
                     return null; // pending
                 },
-                .receiving => return null, // still pending
+                .receiving => return null,
                 .complete => {
-                    defer self.sidecar_client.reset_call_state();
-                    if (self.sidecar_client.result_flag != .success) return null;
-                    return parse_route_result(self.sidecar_client.result_data);
+                    defer c.reset_call_state();
+                    if (c.result_flag != .success) return null;
+                    return parse_route_result(c.result_data);
                 },
                 .failed => {
-                    self.sidecar_client.reset_call_state();
+                    c.reset_call_state();
                     return null;
                 },
             }
@@ -161,65 +167,53 @@ pub fn SidecarHandlersType(comptime StorageParam: type, comptime IO: type) type 
         ///   Phase 2: CALL "handle"   — sidecar runs handler.handle(db)
         /// Returns null while pending. Returns void cache when complete.
         pub fn handler_prefetch(self: *Self, storage: *StorageParam, msg: *const message.Message) ?Cache {
-            _ = storage; // Storage accessed via query_dispatch_fn during QUERY sub-protocol
+            _ = storage;
+            const c = self.sidecar_client.?;
 
-            switch (self.sidecar_client.call_state) {
+            switch (c.call_state) {
                 .idle => {
                     if (self.prefetch_phase == .idle) {
-                        if (!self.submit_operation_call("prefetch", msg)) {
-                            return null;
-                        }
+                        if (!self.submit_operation_call("prefetch", msg)) return null;
                         self.prefetch_phase = .prefetch_pending;
-                        return null; // pending
+                        return null;
                     }
                     if (self.prefetch_phase == .prefetch_pending) {
-                        // Prefetch complete, transition to handle.
                         if (!self.submit_operation_call("handle", msg)) {
                             self.prefetch_phase = .idle;
                             return null;
                         }
                         self.prefetch_phase = .handle_pending;
-                        return null; // pending
+                        return null;
                     }
-                    // Invariant: handle_pending can't reach call_state == .idle
-                    // without going through .complete (which resets prefetch_phase
-                    // to .idle) or .failed (which also resets to .idle).
                     unreachable;
                 },
-                .receiving => return null, // still pending
+                .receiving => return null,
                 .complete => {
                     if (self.prefetch_phase == .prefetch_pending) {
-                        // Prefetch RESULT received. The sidecar keeps its own
-                        // prefetch data — the Zig side doesn't need it. Reset
-                        // call_state and submit CALL "handle".
-                        self.sidecar_client.reset_call_state();
+                        c.reset_call_state();
                         if (!self.submit_operation_call("handle", msg)) {
                             self.prefetch_phase = .idle;
                             return null;
                         }
                         self.prefetch_phase = .handle_pending;
-                        return null; // pending
+                        return null;
                     }
                     if (self.prefetch_phase == .handle_pending) {
-                        // Parse handle result — status + writes.
                         self.parse_handle_result();
-                        self.sidecar_client.reset_call_state();
+                        c.reset_call_state();
                         self.prefetch_phase = .idle;
-                        return {}; // void cache — data in client state
+                        return {};
                     }
-                    // Same invariant as .idle branch.
                     unreachable;
                 },
                 .failed => {
-                    self.sidecar_client.reset_call_state();
+                    c.reset_call_state();
                     self.prefetch_phase = .idle;
-                    return null; // busy/fail — SM retries
+                    return null;
                 },
             }
         }
 
-        /// Execute: ALWAYS synchronous. Applies writes from handle RESULT.
-        /// No sidecar IO. The handle CALL already ran during prefetch.
         pub fn handler_execute(
             self: *Self,
             cache: Cache,
@@ -227,14 +221,13 @@ pub fn SidecarHandlersType(comptime StorageParam: type, comptime IO: type) type 
             fw: FwCtx,
             db: anytype,
         ) state_machine.HandleResult {
-            // Pair assertion: the multi-call prefetch sequence must have
-            // completed before execute runs.
             assert(self.prefetch_phase == .idle);
             _ = cache;
             _ = msg;
             _ = fw;
+            const c = self.sidecar_client.?;
 
-            if (!self.sidecar_client.execute_writes(db)) {
+            if (!c.execute_writes(db)) {
                 return .{ .status = .storage_error };
             }
 
@@ -244,8 +237,6 @@ pub fn SidecarHandlersType(comptime StorageParam: type, comptime IO: type) type 
             };
         }
 
-        /// Render: CALL "render" → HTML.
-        /// Returns null when pending. Returns HTML slice when complete.
         pub fn handler_render(
             self: *Self,
             cache: Cache,
@@ -258,26 +249,28 @@ pub fn SidecarHandlersType(comptime StorageParam: type, comptime IO: type) type 
             _ = cache;
             _ = fw;
             _ = storage;
+            const c = self.sidecar_client.?;
+            const b = self.sidecar_bus.?;
 
-            switch (self.sidecar_client.call_state) {
+            switch (c.call_state) {
                 .idle => {
                     var args_buf: [2]u8 = undefined;
                     args_buf[0] = @intFromEnum(operation);
                     args_buf[1] = @intFromEnum(status);
 
-                    if (!self.sidecar_client.call_submit(self.sidecar_bus, "render", &args_buf, self.next_request_id)) {
+                    if (!c.call_submit(b, "render", &args_buf, self.next_request_id)) {
                         return render_error(render_buf);
                     }
                     self.next_request_id +%= 1;
-                    return null; // pending
+                    return null;
                 },
                 .receiving => return null,
                 .complete => {
-                    defer self.sidecar_client.reset_call_state();
-                    if (self.sidecar_client.result_flag != .success) {
+                    defer c.reset_call_state();
+                    if (c.result_flag != .success) {
                         return render_error(render_buf);
                     }
-                    const html = self.sidecar_client.result_data;
+                    const html = c.result_data;
                     if (html.len > render_buf.len) {
                         log.warn("render: HTML too large ({d} > {d})", .{ html.len, render_buf.len });
                         return render_error(render_buf);
@@ -286,14 +279,13 @@ pub fn SidecarHandlersType(comptime StorageParam: type, comptime IO: type) type 
                     return render_buf[0..html.len];
                 },
                 .failed => {
-                    self.sidecar_client.reset_call_state();
+                    c.reset_call_state();
                     return render_error(render_buf);
                 },
             }
         }
 
-        /// QUERY dispatch function for CALL/RESULT protocol.
-        /// Same as native — wraps StorageParam.query_raw.
+        /// QUERY dispatch — wraps StorageParam.query_raw.
         pub fn query_dispatch_fn(ctx: *anyopaque, sql: []const u8, params_buf: []const u8, param_count: u8, mode: protocol.QueryMode, out_buf: []u8) ?[]const u8 {
             const s: *StorageParam = @ptrCast(@alignCast(ctx));
             const ro = StorageParam.ReadView.init(s);
@@ -301,59 +293,36 @@ pub fn SidecarHandlersType(comptime StorageParam: type, comptime IO: type) type 
         }
 
         /// Process a frame received from the sidecar bus.
-        /// Called by the server's sidecar_on_frame callback.
-        ///
-        /// Re-entrancy note: called from inside the bus's try_drain_recv
-        /// loop (via on_frame_fn). The handler may call bus.send_message
-        /// (for QUERY_RESULT) which modifies the send queue — but send
-        /// and recv state are independent. After return, the server may
-        /// call commit_dispatch (guarded by commit_dispatch_entered).
+        /// Re-entrancy note: called from bus's try_drain_recv loop.
+        /// Send and recv state are independent. commit_dispatch_entered
+        /// guards against nested pipeline execution.
         pub fn process_sidecar_frame(self: *Self, frame: []const u8, storage: *StorageParam) void {
-            self.sidecar_client.on_frame(self.sidecar_bus, frame, query_dispatch_fn, @ptrCast(storage), SidecarClient.max_queries_per_call);
+            const c = self.sidecar_client.?;
+            const b = self.sidecar_bus.?;
+            c.on_frame(b, frame, query_dispatch_fn, @ptrCast(storage), SidecarClient.max_queries_per_call);
         }
 
         /// Called when the sidecar bus connection closes.
-        /// Sets call_state to .failed if a CALL was in-flight.
-        /// Does NOT reset handler state — the server's pipeline_reset
-        /// (called after this) handles that via reset_handler_state().
-        /// Keeping reset in one place avoids double-reset.
         pub fn on_sidecar_close(self: *Self) void {
-            self.sidecar_client.on_close();
+            const c = self.sidecar_client.?;
+            c.on_close();
         }
 
-        /// Cross-check structural invariants. Called by the server's
-        /// invariants() via sm.handlers.invariants().
-        ///
-        /// Verifies the relationship between prefetch_phase (handler
-        /// state) and call_state (protocol state). These are maintained
-        /// by different code paths — pair assertions catch drift.
-        /// Cross-check structural invariants. Called by the server's
-        /// invariants() via sm.handlers.invariants().
-        ///
-        /// Verifies the relationship between prefetch_phase (handler
-        /// state) and call_state (protocol state). These are maintained
-        /// by different code paths — pair assertions catch drift.
+        /// Cross-check structural invariants.
         pub fn invariants(self: *const Self) void {
-            const cs = self.sidecar_client.call_state;
+            const c = self.sidecar_client orelse return; // not wired yet
+            const cs = c.call_state;
             switch (self.prefetch_phase) {
                 .idle => {
-                    // When prefetch is idle and call_state is also idle,
-                    // the full pipeline is idle — handle result must be
-                    // at defaults. If call_state is non-idle, a route or
-                    // render CALL may be in-flight (valid).
                     if (cs == .idle) {
                         assert(self.handle_status == .ok);
                         assert(self.handle_session_action == .none);
                     }
                 },
                 .prefetch_pending => {
-                    // CALL "prefetch" submitted — call_state must be
-                    // receiving (waiting) or complete/failed (result arrived,
-                    // not yet processed by next handler_prefetch call).
                     assert(cs == .receiving or cs == .complete or cs == .failed);
                 },
                 .handle_pending => {
-                    // CALL "handle" submitted — same valid states.
                     assert(cs == .receiving or cs == .complete or cs == .failed);
                 },
             }
@@ -364,10 +333,12 @@ pub fn SidecarHandlersType(comptime StorageParam: type, comptime IO: type) type 
         // =============================================================
 
         fn submit_operation_call(self: *Self, function_name: []const u8, msg: *const message.Message) bool {
+            const c = self.sidecar_client.?;
+            const b = self.sidecar_bus.?;
             var args_buf: [17]u8 = undefined;
             args_buf[0] = @intFromEnum(msg.operation);
             std.mem.writeInt(u128, args_buf[1..17], msg.id, .little);
-            if (!self.sidecar_client.call_submit(self.sidecar_bus, function_name, &args_buf, self.next_request_id)) {
+            if (!c.call_submit(b, function_name, &args_buf, self.next_request_id)) {
                 return false;
             }
             self.next_request_id +%= 1;
@@ -399,7 +370,8 @@ pub fn SidecarHandlersType(comptime StorageParam: type, comptime IO: type) type 
         /// Format: [status_name_len: u16 BE][status_name][session_action: u8]
         ///         [write_count: u8][writes...]
         fn parse_handle_result(self: *Self) void {
-            const data = self.sidecar_client.result_data;
+            const c = self.sidecar_client.?;
+            const data = c.result_data;
 
             // Minimum: status_name_len(2) + session_action(1) + write_count(1) = 4.
             // Status name can be 0 bytes (empty name → from_string fails → error).
@@ -442,15 +414,15 @@ pub fn SidecarHandlersType(comptime StorageParam: type, comptime IO: type) type 
             pos += 1;
 
             // Write count — mandatory. Write data follows.
-            self.sidecar_client.handle_write_count = data[pos];
+            c.handle_write_count = data[pos];
             pos += 1;
-            if (self.sidecar_client.handle_write_count > 0 and pos >= data.len) {
-                log.warn("handle: write_count={d} but no write data", .{self.sidecar_client.handle_write_count});
+            if (c.handle_write_count > 0 and pos >= data.len) {
+                log.warn("handle: write_count={d} but no write data", .{c.handle_write_count});
                 self.handle_status = .storage_error;
                 return;
             }
-            self.sidecar_client.handle_writes = if (pos < data.len)
-                self.sidecar_client.copy_state(data[pos..])
+            c.handle_writes = if (pos < data.len)
+                c.copy_state(data[pos..])
             else
                 "";
         }

@@ -69,13 +69,10 @@ pub fn main() !void {
     defer storage.deinit();
     const sm_seed: u64 = @truncate(std.crypto.random.int(u128));
 
-    // Handlers: sidecar pointers are undefined here — Server.init
-    // creates the embedded Bus/Client and wires them into sm.handlers.
+    // Handlers: sidecar pointers default to null — Server.init
+    // creates the embedded Bus/Client and wires them before first tick.
     // For native, Handlers is zero-size (.{} has no fields).
-    var sm = StateMachine.init(&storage, if (App.sidecar_enabled) .{
-        .sidecar_client = undefined,
-        .sidecar_bus = undefined,
-    } else .{}, cli.log_trace, sm_seed, secret_key);
+    var sm = StateMachine.init(&storage, .{}, cli.log_trace, sm_seed, secret_key);
 
     const listen_fd = try IO.open_listener(address);
 
