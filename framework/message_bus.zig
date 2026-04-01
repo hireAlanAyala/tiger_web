@@ -195,6 +195,9 @@ pub fn ConnectionType(comptime IO: type, comptime options: Options) type {
         }
 
         /// Stop submitting io.recv — consumer needs time to process.
+        /// Must only be called when recv is not in-flight (recv_submitted
+        /// = false). In practice, called from on_frame_fn during
+        /// try_drain_recv where recv_submitted is already cleared.
         pub fn suspend_recv(self: *Self) void {
             assert(self.state == .connected);
             assert(!self.recv_suspended);
