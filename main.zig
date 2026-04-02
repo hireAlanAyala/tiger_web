@@ -43,6 +43,23 @@ pub fn main() !void {
     var args = std.process.args();
     const cli = stdx.flags(&args, CliArgs);
 
+    // Collect sidecar command argv from extended args after `--`.
+    // tiger-web -- node dispatch.js → sidecar_argv = {"node", "dispatch.js"}
+    var sidecar_argv_buf: [16][]const u8 = undefined;
+    var sidecar_argc: usize = 0;
+    while (args.next()) |arg| {
+        if (sidecar_argc >= sidecar_argv_buf.len) {
+            log.err("too many sidecar command arguments (max {d})", .{sidecar_argv_buf.len});
+            std.process.exit(1);
+        }
+        sidecar_argv_buf[sidecar_argc] = arg;
+        sidecar_argc += 1;
+    }
+    const sidecar_argv: ?[]const []const u8 = if (sidecar_argc > 0)
+        sidecar_argv_buf[0..sidecar_argc]
+    else
+        null;
+
     if (cli.log_trace and !cli.log_debug) {
         log.err("--log-debug must be provided when using --log-trace", .{});
         std.process.exit(1);
@@ -104,12 +121,13 @@ pub fn main() !void {
     // Supervisor: spawn and manage the sidecar process.
     // The server owns the connection, the supervisor owns the process.
     // main.zig wires them by reading public state from both.
-    const sidecar_argv: []const []const u8 = &.{
-        "node", "examples/ecommerce-ts/dist/dispatch.generated.js",
-    };
     var supervisor: Supervisor = undefined;
     if (App.sidecar_enabled) {
-        supervisor = Supervisor.init(std.heap.page_allocator, sidecar_argv);
+        const argv = sidecar_argv orelse {
+            log.err("sidecar mode requires a command after '--' (e.g., tiger-web -- node dispatch.js)", .{});
+            std.process.exit(1);
+        };
+        supervisor = Supervisor.init(std.heap.page_allocator, argv);
         try supervisor.spawn();
     }
 
@@ -164,4 +182,7 @@ const CliArgs = struct {
     log_trace: bool = false,
     sidecar: ?[]const u8 = null,
     db: [:0]const u8 = "tiger_web.db",
+    /// Extended args after `--` are the sidecar command argv.
+    /// tiger-web --sidecar=/tmp/sock -- node dispatch.js
+    @"--": void,
 };
