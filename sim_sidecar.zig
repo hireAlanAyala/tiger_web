@@ -110,10 +110,12 @@ const SimSidecar = struct {
 
         const new_data = client.recv_buf[self.recv_pos..client.recv_len];
         const space = self.frame_buf.len - self.frame_len;
-        const copy_len = @min(new_data.len, space);
-        @memcpy(self.frame_buf[self.frame_len..][0..copy_len], new_data[0..copy_len]);
-        self.frame_len += @intCast(copy_len);
-        self.recv_pos += @intCast(copy_len);
+        // In sim, frames are always smaller than frame_buf (frame_max + 8).
+        // Overflow means a bug in the test or protocol, not partial delivery.
+        assert(new_data.len <= space);
+        @memcpy(self.frame_buf[self.frame_len..][0..new_data.len], new_data);
+        self.frame_len += @intCast(new_data.len);
+        self.recv_pos += @intCast(new_data.len);
 
         // Try to parse a complete CRC frame.
         self.try_process_frame();

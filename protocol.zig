@@ -825,6 +825,26 @@ test "parse rejects truncated frame" {
     try std.testing.expect(parse_sidecar_frame(&buf) == null);
 }
 
+test "READY frame parse" {
+    const frame = [_]u8{ @intFromEnum(CallTag.ready), 0x00, 0x01 }; // version=1
+    const ready = parse_ready_frame(&frame).?;
+    try std.testing.expectEqual(@as(u16, 1), ready.version);
+}
+
+test "READY frame rejects truncated version" {
+    const frame = [_]u8{ @intFromEnum(CallTag.ready), 0x00 }; // only 2 bytes
+    try std.testing.expect(parse_ready_frame(&frame) == null);
+}
+
+test "READY frame rejects wrong tag" {
+    const frame = [_]u8{ @intFromEnum(CallTag.call), 0x00, 0x01 };
+    try std.testing.expect(parse_ready_frame(&frame) == null);
+}
+
+test "READY frame rejects empty" {
+    try std.testing.expect(parse_ready_frame(&[_]u8{}) == null);
+}
+
 test "cross-language CALL/RESULT vector — write to /tmp for TS reader" {
     // Write known CALL/RESULT/QUERY/QUERY_RESULT frames to a file.
     // The TS test reads the same file and verifies agreement.

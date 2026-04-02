@@ -850,6 +850,17 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
                 assert(accepting_count == 1);
             }
 
+            // Pipeline cross-invariants — commit_stage and its associated
+            // fields must be consistent. Pair assertion with commit_dispatch
+            // which sets them and pipeline_reset which clears them.
+            if (server.commit_stage != .idle) {
+                assert(server.commit_connection != null);
+            } else {
+                assert(server.commit_connection == null);
+                assert(server.commit_msg == null);
+                assert(server.commit_cache == null);
+            }
+
             // Handler invariants — cross-checks prefetch_phase vs call_state.
             server.state_machine.handlers.invariants();
         }
