@@ -1977,7 +1977,7 @@ they need the full server stack:
   request succeeds (200)
 - [ ] Disconnect during .render → render_crash_fallback
   (200 with degraded HTML, no duplicate writes)
-- [ ] Response timeout (5s) → SIGKILL → 503
+- [ ] Response timeout (5s) → terminate connection → 503
 - [ ] Sidecar down at startup → all requests get 503
   until READY handshake completes
 
@@ -1985,11 +1985,11 @@ they need the full server stack:
 - [ ] Partial CALL frame delivery — SimSidecar accumulates
   bytes across multiple ticks before processing
 - [ ] Protocol violation — SimSidecar injects malformed RESULT
-  (wrong request_id, bad CRC) → server kills, recovers
+  (wrong request_id, bad CRC) → server terminates connection, recovers
 - [ ] Multiple HTTP requests during disconnect — all get 503
 - [ ] Connect then disconnect before READY — server stays
   sidecar_connected = false, returns 503
-- [ ] READY with wrong version → server rejects, kills
+- [ ] READY with wrong version → server rejects, terminates connection
 
 ### Fault injection
 
@@ -2096,7 +2096,34 @@ Phase 2:   Sidecar handlers (SidecarHandlersType + TS wire format)
 Phase 3:   MessageBus Fuzzer (can start during Phase 2)
     ↓
 Phase 4:   SimSidecar
+Phase 4.5: Supervisor integration test
 ```
+
+### Phase 4.5: Supervisor integration test
+
+End-to-end test with real processes. Exercises the full loop:
+supervisor spawns process → process connects → server routes
+requests → process crashes → supervisor respawns → process
+reconnects → server routes again.
+
+**Test sidecar binary** — a minimal Zig program that speaks the
+sidecar protocol. Connects to the unix socket, sends READY,
+echoes CALL→RESULT. No handler logic — just protocol compliance.
+Compiled as a separate executable in build.zig.
+
+**Test structure:**
+1. Build test sidecar binary
+2. Start real IO + real server
+3. Supervisor spawns test sidecar with `-- zig-out/bin/test-sidecar`
+4. Verify: HTTP request → 200 (full pipeline via real process)
+5. Kill the sidecar (SIGKILL from test, not supervisor)
+6. Verify: next HTTP request → 503 (sidecar down)
+7. Wait for supervisor to respawn
+8. Verify: HTTP request → 200 (recovery complete)
+
+**Depends on:** Phase 4 (SimSidecar recovery sim tests) — the
+connection lifecycle must be tested first. The integration test
+adds the process lifecycle on top.
 
 Phase 1.5 is the architectural pivot. The SM pipeline becomes
 the single protocol: route → prefetch → handle → render. All
