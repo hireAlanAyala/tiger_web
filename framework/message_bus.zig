@@ -72,7 +72,7 @@ pub fn ConnectionType(comptime IO: type, comptime options: Options) type {
 
         /// Why the connection closed. Passed to on_close_fn so the
         /// consumer can log, set metrics, or choose a recovery strategy
-        /// (e.g., sidecar: kill on crc_error, reconnect on eof).
+        /// (e.g., sidecar: terminate on crc_error, reconnect on eof).
         ///
         /// Design note: we considered making error events non-terminal
         /// ("consumer decides whether to terminate") but rejected it:
@@ -163,7 +163,7 @@ pub fn ConnectionType(comptime IO: type, comptime options: Options) type {
         // Consumer should reset any in-flight state (e.g. call_state
         // to .failed). Called once, after all IO is drained.
         // CloseReason tells the consumer WHY — for logging, metrics,
-        // or kill decisions (sidecar: crc_error → SIGKILL).
+        // or close decisions (sidecar: crc_error → terminate).
         // May be null if consumer doesn't need close notification.
         on_close_fn: ?*const fn (context: *anyopaque, reason: CloseReason) void,
         close_reason: CloseReason = .shutdown,

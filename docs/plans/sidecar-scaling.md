@@ -47,7 +47,7 @@ On crash of A:
 - `sidecar_bus` becomes `sidecar_buses: [max_sidecars]SidecarBus`
 - `sidecar_client` becomes `sidecar_clients: [max_sidecars]SidecarClient`
 - `sidecar_connected` becomes `sidecar_connected: [max_sidecars]bool`
-- `sidecar_pid` becomes `sidecar_pids: [max_sidecars]u32`
+- Supervisor manages pids (from Child.id), not the server
 - `active_sidecar: u8` — index of the bus to dispatch to
 - `sidecar_count: u8` — from CLI `--sidecar-count`
 - `wire_sidecar` becomes `wire_sidecar_at(index)`

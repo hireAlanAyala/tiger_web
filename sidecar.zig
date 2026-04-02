@@ -49,7 +49,7 @@ pub fn SidecarClientType(comptime Bus: type) type {
         expected_request_id: u32 = 0,
         /// Set to true on protocol violations (invalid frame, request_id
         /// mismatch, query limit exceeded). The server checks this after
-        /// process_sidecar_frame and kills the sidecar process.
+        /// process_sidecar_frame and terminates the connection.
         protocol_violation: bool = false,
         result_flag: protocol.ResultFlag = .success,
         result_data: []const u8 = "",

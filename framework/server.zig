@@ -95,7 +95,7 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
 
         /// Sidecar response deadline: 5 seconds at 10ms/tick.
         /// If the pipeline has been pending (waiting for sidecar
-        /// RESULT) for this many ticks, SIGKILL the sidecar.
+        /// RESULT) for this many ticks, terminate the connection.
         /// A stuck handler (infinite loop, deadlocked await, long GC)
         /// blocks the serial pipeline — all requests stall.
         const sidecar_response_timeout_ticks: u32 = 500;
@@ -653,7 +653,7 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
             server.sidecar_bus.terminate();
         }
 
-        /// Sidecar response timeout — kill the sidecar if the pipeline
+        /// Sidecar response timeout — terminate the connection if the pipeline
         /// has been pending for too long. A stuck handler (infinite loop,
         /// deadlocked await, long GC) blocks the serial pipeline.
         /// Uses existing recovery: kill → on_close → 503 or render fallback.
