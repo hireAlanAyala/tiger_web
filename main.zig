@@ -127,8 +127,10 @@ pub fn main() !void {
             log.err("sidecar mode requires a command after '--' (e.g., tiger-web -- node dispatch.js)", .{});
             std.process.exit(1);
         };
-        supervisor = Supervisor.init(std.heap.page_allocator, argv);
-        try supervisor.spawn();
+        // Spawn one process per bus connection slot.
+        const count = Handlers.BusType.connections_max;
+        supervisor = try Supervisor.init(std.heap.page_allocator, argv, count);
+        try supervisor.spawn_all();
     }
 
     log.info("storage=sqlite wal=tiger_web.wal tick_interval={d}ms connections={d}", .{
