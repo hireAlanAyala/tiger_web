@@ -1652,9 +1652,86 @@ asserts on external input. It reports. The consumer (which knows
 the trust model) decides. Unsolicited frames, send queue overflow,
 CRC mismatches — all reported as events, not assert-crashes.
 
+### Terminate call sites to convert (6 total)
+
+From `message_bus.zig` ConnectionType:
+
+1. `recv_callback` result < 0 → `Event.recv_error`
+2. `recv_callback` result == 0 → `Event.eof`
+3. `recv_callback` buffer full + incomplete → `Event.oversized` (keep terminate — malicious)
+4. `advance()` len > frame_max → `Event.oversized`
+5. `advance()` CRC mismatch → `Event.crc_error`
+6. `send_callback` result <= 0 → `Event.send_error`
+
+Site 3 is the only one that should still terminate internally
+(buffer full with incomplete frame = peer filling buffer without
+completing a frame = malicious). All others → report to consumer.
+
+### Connection state after event
+
+The Connection stays `.connected` after reporting an event.
+The consumer calls `terminate()` if it wants to close. This
+means the Connection must handle: event reported → consumer
+does NOT terminate → recv/send loop continues.
+
+For `recv_error` and `send_error`: the Connection should NOT
+re-submit the failed operation. The consumer decides whether
+to retry or terminate. The Connection stays in a "paused"
+state until the consumer either calls `terminate()` or resumes.
+
+For `crc_error`: the Connection advances past the bad frame
+(skips the bytes) and continues `advance()`. The next valid
+frame is delivered normally.
+
+For `eof`: the consumer almost always terminates. But the
+Connection doesn't assume this — it reports and waits.
+
+### Implementation steps
+
+1. Add `Event` union to ConnectionType (new type).
+2. Change `on_frame_fn` to `on_event_fn` on Connection fields.
+3. Convert `recv_callback` sites 1-2 to report events.
+4. Convert `advance()` sites 4-5 to report events.
+5. Convert `send_callback` site 6 to report event.
+6. Keep site 3 (buffer full) as internal terminate.
+7. Update server.zig HTTP connection consumer — terminate on
+   all events (preserves current behavior for HTTP clients).
+8. Update server.zig sidecar_on_frame — handle events:
+   - `frame` → process (current behavior)
+   - `crc_error` → protocol_violation, kill
+   - `eof` → sidecar_on_close (current behavior)
+   - `recv_error` → kill sidecar
+   - `send_error` → kill sidecar
+   - `oversized` → kill sidecar
+9. Update message_bus_fuzz.zig — FuzzContext handles events.
+10. Update sidecar_fuzz.zig — SidecarFuzzCtx handles events.
+11. Update deterministic unit tests.
+12. Update FuzzIO tick helpers (no change — they fire callbacks
+    with i32 results, Connection converts to events).
+
+### Files affected
+
+| File | Change |
+|---|---|
+| framework/message_bus.zig | Event union, on_event_fn, convert 6 terminate sites |
+| framework/server.zig | HTTP consumer (terminate on all), sidecar consumer (per-event) |
+| message_bus_fuzz.zig | FuzzContext.on_event handles Event union |
+| sidecar_fuzz.zig | SidecarFuzzCtx.on_event handles Event union |
+| sidecar_handlers.zig | process_sidecar_frame receives Event, not raw frame |
+| fuzz_io.zig | No change (fires i32 results, Connection wraps) |
+
+### Verification
+
+```bash
+./zig/zig build unit-test    # connection tests + re-entrancy tests
+./zig/zig build test         # sim tests (HTTP connections — all terminate)
+./zig/zig build fuzz -- smoke # both fuzzers with Event handling
+./zig/zig build -Dsidecar=true # sidecar mode compiles
+```
+
 ### What this doesn't fix
 
-**Root cause 2 (implicit callback wiring):** See below.
+**Root cause 2 (implicit callback wiring):** See Phase 3.5b below.
 **Root cause 4 (process lifecycle):** See section below.
 
 ## Sidecar process lifecycle (root cause 4)
