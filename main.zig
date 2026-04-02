@@ -42,29 +42,64 @@ pub const std_options: std.Options = .{
 pub fn main() !void {
     var args = std.process.args();
     const cli = stdx.flags(&args, CliArgs);
+    const sidecar_argv = collect_sidecar_argv(&args);
+    const secret_key = validate_config(cli);
 
-    // Collect sidecar command argv from extended args after `--`.
-    // tiger-web -- node dispatch.js → sidecar_argv = {"node", "dispatch.js"}
-    var sidecar_argv_buf: [16][]const u8 = undefined;
-    var sidecar_argc: usize = 0;
+    var io = try IO.init();
+    defer io.deinit();
+
+    var storage = try App.Storage.init(cli.db);
+    defer storage.deinit();
+
+    var sm = StateMachine.init(
+        &storage,
+        .{},
+        cli.log_trace,
+        @truncate(std.crypto.random.int(u128)),
+        secret_key,
+    );
+
+    const listen_fd = try io.open_listener(try std.net.Address.parseIp4("0.0.0.0", cli.port));
+    const actual_port = resolve_port(listen_fd, cli.port);
+
+    var wal = App.Wal.init("tiger_web.wal");
+    defer wal.deinit();
+
+    var time_real = TimeReal{};
+    var server = try Server.init(std.heap.page_allocator, &io, &sm, listen_fd, time_real.time(), &wal);
+
+    try wire_sidecar(&server, cli);
+    var supervisor = try init_supervisor(sidecar_argv);
+
+    log_startup(cli, actual_port);
+    emit_readiness_signal(cli.port, actual_port);
+
+    run_loop(&server, &io, &supervisor);
+}
+
+// --- Init helpers (each under 70 lines) ---
+
+/// Collect sidecar command argv from extended args after `--`.
+fn collect_sidecar_argv(args: *std.process.ArgIterator) ?[]const []const u8 {
+    var buf: [16][]const u8 = undefined;
+    var argc: usize = 0;
     while (args.next()) |arg| {
-        if (sidecar_argc >= sidecar_argv_buf.len) {
-            log.err("too many sidecar command arguments (max {d})", .{sidecar_argv_buf.len});
+        if (argc >= buf.len) {
+            log.err("too many sidecar command arguments (max {d})", .{buf.len});
             std.process.exit(1);
         }
-        sidecar_argv_buf[sidecar_argc] = arg;
-        sidecar_argc += 1;
+        buf[argc] = arg;
+        argc += 1;
     }
-    const sidecar_argv: ?[]const []const u8 = if (sidecar_argc > 0)
-        sidecar_argv_buf[0..sidecar_argc]
-    else
-        null;
+    return if (argc > 0) buf[0..argc] else null;
+}
 
+/// Validate CLI config and return the secret key.
+fn validate_config(cli: CliArgs) *const [auth.key_length]u8 {
     if (cli.log_trace and !cli.log_debug) {
         log.err("--log-debug must be provided when using --log-trace", .{});
         std.process.exit(1);
     }
-
     log_level_runtime = if (cli.log_debug) .debug else .info;
 
     const dev_default_key = "tiger-web-dev-default-key-0!!!!!";
@@ -76,83 +111,59 @@ pub fn main() !void {
         log.err("SECRET_KEY must be exactly {d} bytes, got {d}", .{ auth.key_length, secret_env.len });
         std.process.exit(1);
     }
-    const secret_key: *const [auth.key_length]u8 = secret_env[0..auth.key_length];
+    return secret_env[0..auth.key_length];
+}
 
-    const address = try std.net.Address.parseIp4("0.0.0.0", cli.port);
+/// Read back the actual port when port=0 (OS-assigned).
+fn resolve_port(listen_fd: IO.fd_t, requested: u16) u16 {
+    if (requested != 0) return requested;
+    var bound_addr = std.net.Address.initIp4(.{ 0, 0, 0, 0 }, 0);
+    var addr_len = bound_addr.getOsSockLen();
+    std.posix.getsockname(listen_fd, &bound_addr.any, &addr_len) catch unreachable;
+    return bound_addr.getPort();
+}
 
-    var io = try IO.init();
-    defer io.deinit();
-
-    var storage = try App.Storage.init(cli.db);
-    defer storage.deinit();
-    const sm_seed: u64 = @truncate(std.crypto.random.int(u128));
-
-    // Handlers: sidecar pointers default to null — Server.init
-    // creates the embedded Bus/Client and wires them before first tick.
-    // For native, Handlers is zero-size (.{} has no fields).
-    var sm = StateMachine.init(&storage, .{}, cli.log_trace, sm_seed, secret_key);
-
-    const listen_fd = try io.open_listener(address);
-
-    // When port=0, the OS assigns a free port. Read it back via getsockname.
-    // Used by load_driver.zig to spawn the server on an ephemeral port.
-    const actual_port: u16 = if (cli.port == 0) blk: {
-        var bound_addr = std.net.Address.initIp4(.{ 0, 0, 0, 0 }, 0);
-        var addr_len = bound_addr.getOsSockLen();
-        std.posix.getsockname(listen_fd, &bound_addr.any, &addr_len) catch unreachable;
-        break :blk bound_addr.getPort();
-    } else cli.port;
-
-    var wal = App.Wal.init("tiger_web.wal");
-    defer wal.deinit();
-
-    var time_real = TimeReal{};
-    var server = try Server.init(std.heap.page_allocator, &io, &sm, listen_fd, time_real.time(), &wal);
-
-    // Wire sidecar Bus/Client AFTER server is at its final address.
-    // Two-phase init: Server.init returns the struct, wire_sidecar
-    // takes &server — pointers to embedded fields are now stable.
+/// Wire sidecar bus after server is at its final address.
+fn wire_sidecar(server: *Server, cli: CliArgs) !void {
     const sidecar_path: ?[]const u8 = if (App.sidecar_enabled)
         (cli.sidecar orelse "/tmp/tiger_web_sidecar.sock")
     else
         null;
     try server.wire_sidecar(std.heap.page_allocator, sidecar_path);
+}
 
-    // Supervisor: spawn and manage the sidecar process.
-    // The server owns the connection, the supervisor owns the process.
-    // main.zig wires them by reading public state from both.
-    // Supervisor: spawn and manage sidecar processes.
-    // Optional — if no command after '--', the server listens on the
-    // socket but doesn't spawn processes (external supervision mode).
-    var supervisor: ?Supervisor = null;
-    if (App.sidecar_enabled) {
-        if (sidecar_argv) |argv| {
-            const count = Handlers.BusType.connections_max;
-            var sup = try Supervisor.init(std.heap.page_allocator, argv, count);
-            try sup.spawn_all();
-            supervisor = sup;
-        }
-    }
+/// Init supervisor if sidecar argv was provided.
+/// Optional — no `--` args means external supervision mode.
+fn init_supervisor(sidecar_argv: ?[]const []const u8) !?Supervisor {
+    if (!App.sidecar_enabled) return null;
+    const argv = sidecar_argv orelse return null;
+    const count = Handlers.BusType.connections_max;
+    var sup = try Supervisor.init(std.heap.page_allocator, argv, count);
+    try sup.spawn_all();
+    return sup;
+}
 
+fn log_startup(cli: CliArgs, actual_port: u16) void {
     log.info("storage=sqlite wal=tiger_web.wal tick_interval={d}ms connections={d}", .{
         tick_ns / std.time.ns_per_ms,
         Server.max_connections,
     });
     if (cli.log_debug) log.info("log_level=debug log_trace={}", .{cli.log_trace});
     if (App.sidecar_enabled) log.info("sidecar mode enabled", .{});
-
     log.info("listening on port {d}", .{actual_port});
+}
 
-    // Readiness signal: write the port to stdout as a bare number + newline.
-    // This is the data channel — load_driver.zig reads it to know the server
-    // is bound and ready. Separate from the stderr log line which is for humans.
-    // Matches TigerBeetle's benchmark_driver pattern: stdout for machine-readable
-    // data, stderr for logs.
-    if (cli.port == 0) {
+/// Readiness signal: write the port to stdout as a bare number.
+/// load_driver.zig reads this to know the server is bound.
+fn emit_readiness_signal(requested_port: u16, actual_port: u16) void {
+    if (requested_port == 0) {
         std.io.getStdOut().writer().print("{d}\n", .{actual_port}) catch {};
     }
+}
 
-    // Main event loop.
+// --- Main event loop ---
+
+fn run_loop(server: *Server, io: *IO, supervisor: *?Supervisor) void {
     var was_sidecar_connected: bool = false;
     while (true) {
         server.tick();
@@ -161,18 +172,13 @@ pub fn main() !void {
         // No cross-references — main.zig reads public state from both.
         // The supervisor watches processes via waitpid — no "restart"
         // signal needed. The sidecar detects the closed socket and exits.
-        if (App.sidecar_enabled) {
-            if (supervisor) |*sup| {
-                const connected = server.sidecar_is_connected();
-
-                // READY completed → reset supervisor backoff.
-                if (!was_sidecar_connected and connected) {
-                    sup.notify_connected();
-                }
-
-                was_sidecar_connected = connected;
-                sup.tick(server.tick_count);
+        if (supervisor.*) |*sup| {
+            const connected = server.sidecar_is_connected();
+            if (!was_sidecar_connected and connected) {
+                sup.notify_connected();
             }
+            was_sidecar_connected = connected;
+            sup.tick(server.tick_count);
         }
 
         io.run_for_ns(tick_ns);
