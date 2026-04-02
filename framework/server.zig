@@ -147,12 +147,26 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
         sidecar_bus: SidecarBus = if (App.sidecar_enabled) undefined else {},
         sidecar_client: SidecarClient = if (App.sidecar_enabled) undefined else {},
 
-        /// Binary sidecar state: connected (handshake complete) or not.
-        /// All request routing checks this field. No partial states,
-        /// no retries. Present or absent. Read by main.zig's
-        /// composition root to wire disconnect→supervisor.request_restart
-        /// and READY→supervisor.notify_connected.
-        sidecar_connected: bool = false,
+        /// Per-connection READY state. Each connection validates its
+        /// own READY handshake independently. A connection is usable
+        /// only when its slot is true here AND the bus has it as active.
+        /// Comptime-eliminated when sidecar is disabled.
+        sidecar_connections_ready: if (App.sidecar_enabled)
+            [SidecarBus.connections_max]bool
+        else
+            void = if (App.sidecar_enabled)
+            .{false} ** SidecarBus.connections_max
+        else {},
+
+        /// Whether any sidecar connection is active and ready.
+        /// Computed from bus.active + sidecar_connections_ready.
+        /// Read by main.zig's composition root for supervisor wiring
+        /// and by commit_dispatch for 503 routing.
+        pub fn sidecar_is_connected(server: *const Server) bool {
+            if (!App.sidecar_enabled) return false;
+            const active = server.sidecar_bus.active orelse return false;
+            return server.sidecar_connections_ready[active];
+        }
 
         /// Initialize the server. Allocates the connection pool on the heap.
         /// When sidecar_enabled, also initializes the embedded Bus and Client,
@@ -381,7 +395,7 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
                         // The right answer is Stage 2 (hot standby): the
                         // request re-routes to the standby sidecar on the
                         // same tick. Zero gap, zero held requests.
-                        if (App.sidecar_enabled and !server.sidecar_connected) {
+                        if (App.sidecar_enabled and !server.sidecar_is_connected()) {
                             const resp = sidecar_unavailable_response(conn);
                             conn.set_response(resp.offset, resp.len);
                             conn.keep_alive = false;
@@ -582,14 +596,15 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
         /// Called by the sidecar bus when a frame is received.
         /// Two modes:
         /// - Before handshake: expects READY frame. Validates version.
-        ///   Sets sidecar_connected = true.
+        ///   Marks slot ready, sets active if first.
         /// - After handshake: routes to sidecar client (CALL/RESULT).
         pub fn sidecar_on_frame(ctx: *anyopaque, connection_index: u8, frame: []const u8) void {
             if (!App.sidecar_enabled) unreachable;
             const server: *Server = @ptrCast(@alignCast(ctx));
 
-            if (!server.sidecar_connected) {
-                // Handshake: expect READY frame.
+            if (!server.sidecar_connections_ready[connection_index]) {
+                // Per-connection READY handshake. Each connection
+                // validates independently.
                 const protocol = @import("../protocol.zig");
                 const ready = protocol.parse_ready_frame(frame) orelse {
                     log.warn("sidecar: invalid READY frame on slot {d}, terminating", .{connection_index});
@@ -603,9 +618,12 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
                     server.sidecar_bus.terminate_connection(connection_index);
                     return;
                 }
-                server.sidecar_connected = true;
-                server.sidecar_bus.set_active(connection_index);
-                log.info("sidecar: connected slot={d} (version={d})", .{ connection_index, ready.version });
+                server.sidecar_connections_ready[connection_index] = true;
+                // First ready connection becomes active.
+                if (server.sidecar_bus.active == null) {
+                    server.sidecar_bus.set_active(connection_index);
+                }
+                log.info("sidecar: slot {d} ready (version={d})", .{ connection_index, ready.version });
                 return;
             }
 
@@ -644,31 +662,36 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
             const server: *Server = @ptrCast(@alignCast(ctx));
             log.info("sidecar: slot {d} disconnected (reason={s})", .{ connection_index, @tagName(reason) });
 
-            // If the closed connection was active, clear active.
-            // For Stage 2+, find_next_ready would switch to standby.
-            if (server.sidecar_bus.active) |active| {
-                if (active == connection_index) {
-                    server.sidecar_bus.set_active(null);
-                    server.sidecar_connected = false;
-                }
-            }
+            // Clear per-connection ready state.
+            server.sidecar_connections_ready[connection_index] = false;
 
+            // If a standby closes, no pipeline impact — just log.
+            const was_active = if (server.sidecar_bus.active) |active|
+                active == connection_index
+            else
+                false;
+
+            if (!was_active) return;
+
+            // Active connection closed. Clear active, find standby.
+            server.sidecar_bus.set_active(
+                server.find_next_ready_slot(connection_index),
+            );
+
+            // Pipeline recovery — only for the active connection.
             server.state_machine.handlers.on_sidecar_close();
 
             if (server.commit_stage == .render) {
-                // Render crash: writes already committed. Send
-                // minimal response — never retry pipeline.
                 server.render_crash_fallback();
                 return;
             }
 
             if (server.commit_stage != .idle) {
-                // Pre-handle crash: full pipeline reset is safe.
                 const sm = server.state_machine;
                 switch (server.commit_stage) {
                     .route => {},
                     .prefetch => sm.tracer.cancel(.prefetch),
-                    .render => unreachable, // handled above
+                    .render => unreachable,
                     .handle, .idle => {},
                 }
                 server.pipeline_reset();
@@ -677,9 +700,20 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
             }
         }
 
+        /// Find the next ready slot after excluding `skip_index`.
+        /// Returns null if no other slot is ready.
+        fn find_next_ready_slot(server: *Server, skip_index: u8) ?u8 {
+            if (!App.sidecar_enabled) return null;
+            for (server.sidecar_connections_ready, 0..) |ready, i| {
+                if (i == skip_index) continue;
+                if (ready) return @intCast(i);
+            }
+            return null;
+        }
+
         /// Terminate the sidecar bus connection. The server owns the
         /// connection, not the process. on_close will fire, setting
-        /// sidecar_connected = false. main.zig's composition root
+        /// active = null. main.zig's composition root
         /// detects the disconnect and tells the supervisor to restart.
         fn terminate_sidecar(server: *Server) void {
             if (!App.sidecar_enabled) unreachable;
@@ -692,7 +726,7 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
         /// Uses existing recovery: kill → on_close → 503 or render fallback.
         fn timeout_sidecar_response(server: *Server) void {
             if (server.commit_stage == .idle) return;
-            if (!server.sidecar_connected) return;
+            if (!server.sidecar_is_connected()) return;
 
             // Only timeout when actually waiting for sidecar response.
             // .handle is synchronous — no sidecar involvement.

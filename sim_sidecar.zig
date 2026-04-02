@@ -342,11 +342,11 @@ const TestHarness = struct {
     }
 
     fn sidecar_connected(h: *TestHarness) bool {
-        return h.server.sidecar_connected;
+        return h.server.sidecar_is_connected();
     }
 
     fn sidecar_disconnected(h: *TestHarness) bool {
-        return !h.server.sidecar_connected;
+        return !h.server.sidecar_is_connected();
     }
 
     fn handler_pending(h: *TestHarness) bool {
@@ -479,7 +479,7 @@ test "sidecar: basic request-response" {
     defer h.deinit();
 
     h.connect_sidecar();
-    try std.testing.expect(h.server.sidecar_connected);
+    try std.testing.expect(h.server.sidecar_is_connected());
 
     h.connect_http();
     h.inject_post();
@@ -494,7 +494,7 @@ test "sidecar: down at startup → 503" {
     defer h.deinit();
 
     // Don't connect sidecar — server has no sidecar.
-    try std.testing.expect(!h.server.sidecar_connected);
+    try std.testing.expect(!h.server.sidecar_is_connected());
 
     h.connect_http();
     h.inject_post();
@@ -543,7 +543,7 @@ test "sidecar: reconnect after disconnect → 200" {
 
     // Reconnect sidecar.
     h.connect_sidecar();
-    try std.testing.expect(h.server.sidecar_connected);
+    try std.testing.expect(h.server.sidecar_is_connected());
 
     // New request succeeds.
     h.prepare_next_request();
@@ -584,7 +584,7 @@ test "sidecar: connect then disconnect before READY → 503" {
     h.sidecar.disconnect();
     h.run_server_until(TestHarness.bus_closed);
 
-    try std.testing.expect(!h.server.sidecar_connected);
+    try std.testing.expect(!h.server.sidecar_is_connected());
 
     h.connect_http();
     h.inject_post();

@@ -157,7 +157,7 @@ pub fn main() !void {
         // Composition root wiring: server ↔ supervisor.
         // No cross-references — main.zig reads public state from both.
         if (App.sidecar_enabled) {
-            const connected = server.sidecar_connected;
+            const connected = server.sidecar_is_connected();
 
             // Disconnect detected → tell supervisor to restart.
             if (was_sidecar_connected and !connected) {

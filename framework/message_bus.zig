@@ -818,7 +818,10 @@ pub fn MessageBusType(comptime IO: type, comptime options: Options) type {
         /// Set which connection send_message routes to.
         /// Called by the server after READY handshake or failover.
         pub fn set_active(self: *Self, index: ?u8) void {
-            if (index) |i| assert(i < connections_max);
+            if (index) |i| {
+                assert(i < connections_max);
+                assert(self.connections[i].state == .connected);
+            }
             self.active = index;
         }
 
