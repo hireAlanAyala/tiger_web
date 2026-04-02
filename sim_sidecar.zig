@@ -76,6 +76,7 @@ const SimSidecar = struct {
     /// Just marks the SimIO client as connected. The caller must run
     /// ticks for the accept to complete, then call inject_ready().
     fn connect(self: *SimSidecar) void {
+        assert(!self.io.clients[self.slot].connected);
         self.io.connect_client(self.slot, self.listen_fd);
         self.frame_len = 0;
         self.recv_pos = 0;
@@ -448,6 +449,28 @@ const TestHarness = struct {
 
 test {
     std.testing.log_level = .err;
+}
+
+test "CRC wire frame: SimSidecar build agrees with Connection validate" {
+    // Pair assertion: build_wire_frame_into (SimSidecar's encoder) must
+    // produce frames that Connection.advance (the real decoder) accepts.
+    // Both hash [len BE] ++ [payload], store CRC as [LE] at offset 4.
+    const payload = "test payload data";
+    var buf: [128]u8 = undefined;
+    const total = build_wire_frame_into(&buf, payload);
+
+    // Verify structure: [len: u32 BE][crc: u32 LE][payload]
+    const len = std.mem.readInt(u32, buf[0..4], .big);
+    try std.testing.expectEqual(@as(u32, payload.len), len);
+    try std.testing.expectEqual(@as(usize, 8 + payload.len), total);
+    try std.testing.expect(std.mem.eql(u8, buf[8..][0..payload.len], payload));
+
+    // Recompute CRC the same way Connection.advance does and verify match.
+    const stored_crc = std.mem.readInt(u32, buf[4..8], .little);
+    var crc = Crc32.init();
+    crc.update(buf[0..4]); // len bytes
+    crc.update(buf[8..][0..len]); // payload bytes
+    try std.testing.expectEqual(crc.final(), stored_crc);
 }
 
 test "sidecar: basic request-response" {
