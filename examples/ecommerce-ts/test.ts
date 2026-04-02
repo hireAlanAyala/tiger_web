@@ -28,6 +28,10 @@ const t = new TestRunner();
 let sidecar: ChildProcess | null = null;
 let server: ChildProcess | null = null;
 
+// tsx loader paths — used for direct node spawn (no npx wrapper).
+const tsxPreflight = `${PROJ}/examples/ecommerce-ts/node_modules/tsx/dist/preflight.cjs`;
+const tsxLoader = `${PROJ}/examples/ecommerce-ts/node_modules/tsx/dist/loader.mjs`;
+
 function assert(ok: boolean, msg: string): void {
   t.assert(ok, msg);
 }
@@ -68,7 +72,13 @@ async function startServer(): Promise<void> {
   }
 
   // Sidecar connects to the server's unix socket.
-  sidecar = spawn("npx", ["tsx", `${PROJ}/adapters/call_runtime.ts`, SOCK], {
+  // Spawn node directly (not via npx tsx) so kill(pid) kills the
+  // actual process holding the socket, not a wrapper.
+  sidecar = spawn("node", [
+    "--require", tsxPreflight,
+    "--import", `file://${tsxLoader}`,
+    `${PROJ}/adapters/call_runtime.ts`, SOCK,
+  ], {
     cwd: `${PROJ}/examples/ecommerce-ts`,
     stdio: "pipe",
   });
@@ -402,27 +412,33 @@ async function testSidecarAlive(): Promise<void> {
 async function testSidecarCrashRecovery(): Promise<void> {
   // Kill the sidecar — server should return 503.
   assert(sidecar !== null, "sidecar exists before kill");
+  // Direct node process — kill(pid) kills the socket holder.
   sidecar!.kill("SIGKILL");
+  sidecar = null;
   await sleep(200); // Let the OS clean up the socket
 
-  // KNOWN ISSUE: the server does not detect sidecar disconnect until
-  // the next CALL attempt fails. The bus connection's recv is pending
-  // in epoll, but the EOF event from the killed socket is not being
-  // delivered to the recv_callback. This is an IO/epoll integration
-  // bug that needs investigation.
+  // Kill the actual sidecar process, not the npx wrapper. The sidecar
+  // sends its PID in the READY handshake — the server uses it for
+  // SIGKILL. For the test, we read stdout to find the reported PID.
+  // Alternatively, kill the entire process group.
   //
-  // For now, skip the 503 assertion. The response timeout (5s) will
-  // eventually kill the sidecar and recover, but it's too slow for
-  // this test.
-  //
-  // TODO: Fix epoll delivery for unix socket EOF on the bus connection.
-  // After fix, uncomment the 503 check below.
-  await sleep(500);
-  // const r503 = await req("GET", "/products");
-  // assert(r503.status === 503, `crash recovery: 503 after sidecar killed (got ${r503.status})`);
+  // Poll for 503: the server detects disconnect when the bus recv
+  // returns EOF (epoll delivers EPOLLHUP). This happens within one
+  // tick (10ms) after the socket closes.
+  let got503 = false;
+  for (let i = 0; i < 30; i++) {
+    const r = await req("GET", "/products");
+    if (r.status === 503) { got503 = true; break; }
+    await sleep(200);
+  }
+  assert(got503, "crash recovery: 503 after sidecar killed");
 
   // Restart sidecar — server should re-accept and route again.
-  sidecar = spawn("npx", ["tsx", `${PROJ}/adapters/call_runtime.ts`, SOCK], {
+  sidecar = spawn("node", [
+    "--require", tsxPreflight,
+    "--import", `file://${tsxLoader}`,
+    `${PROJ}/adapters/call_runtime.ts`, SOCK,
+  ], {
     cwd: `${PROJ}/examples/ecommerce-ts`,
     stdio: "pipe",
   });
