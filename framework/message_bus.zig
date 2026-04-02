@@ -774,21 +774,26 @@ pub fn MessageBusType(comptime IO: type, comptime options: Options) type {
             const self: *Self = @ptrCast(@alignCast(ctx));
 
             if (result < 0) {
-                // Find which slot this accept was for and clear its pending flag.
-                // On error, no fd was assigned — just retry next tick.
-                for (&self.accept_pending) |*pending| {
-                    // We can't match by completion pointer here because
-                    // accept_callback doesn't receive it. Clear all
-                    // pending flags for closed connections — they'll
-                    // re-submit on the next tick_accept.
-                    pending.* = false;
+                // Clear ONE pending flag for a closed slot. We can't
+                // identify which completion errored (callback doesn't
+                // receive the completion pointer), but exactly one
+                // outstanding accept failed. Clear the first match so
+                // tick_accept can resubmit it.
+                for (&self.connections, &self.accept_pending) |*conn, *pending| {
+                    if (conn.state == .closed and pending.*) {
+                        pending.* = false;
+                        break;
+                    }
                 }
                 return;
             }
 
             const accepted_fd: IO.fd_t = result;
 
-            // Find the first closed slot waiting for an accept.
+            // Assign the fd to the first available slot. Accepts on a
+            // listen socket are fungible — any accept returns the next
+            // incoming fd. Slot assignment is arbitrary because sidecars
+            // are interchangeable (no identity).
             for (&self.connections, &self.accept_pending, 0..) |*conn, *pending, i| {
                 if (conn.state == .closed and pending.*) {
                     pending.* = false;
@@ -797,7 +802,8 @@ pub fn MessageBusType(comptime IO: type, comptime options: Options) type {
                     return;
                 }
             }
-            // No slot available — shouldn't happen (tick_accept only submits for closed slots).
+            // No slot available — shouldn't happen (tick_accept only
+            // submits accepts for closed+non-pending slots).
             unreachable;
         }
 
