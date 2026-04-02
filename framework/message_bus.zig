@@ -140,6 +140,19 @@ pub fn ConnectionType(comptime IO: type, comptime options: Options) type {
         send_submitted: bool,
 
         // --- Consumer callbacks ---
+        //
+        // Uses *anyopaque + function pointers, not a typed Consumer
+        // struct parameter. We investigated typed consumers
+        // (ConnectionType(IO, Consumer, options)) but rejected it:
+        // causes comptime cascade — SidecarClientType needs Consumer,
+        // SidecarHandlersType needs Consumer, the Server IS the
+        // Consumer → circular dependency.
+        //
+        // TB uses the same pattern: MessageBus stores a typed callback
+        // function, not a typed consumer struct. The function pointer
+        // breaks the circular dependency. Consumers use @fieldParentPtr
+        // to recover themselves from the embedded Connection.
+        //
         // on_frame_fn: Called with complete, CRC-validated frame data.
         // Frame data points into recv_message.buffer — valid during
         // this callback only. Consumer must copy data it needs to
