@@ -183,6 +183,10 @@ const CliArgs = struct {
     sidecar: ?[]const u8 = null,
     db: [:0]const u8 = "tiger_web.db",
     /// Extended args after `--` are the sidecar command argv.
-    /// tiger-web --sidecar=/tmp/sock -- node dispatch.js
+    /// The full command is visible in `ps aux` — explicit, no
+    /// hidden config files. Standard Unix convention (docker,
+    /// kubectl, ssh all use `--` for sub-commands).
+    ///   tiger-web -- node dispatch.js
+    ///   tiger-web -- ./my-rust-sidecar
     @"--": void,
 };
