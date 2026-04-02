@@ -655,15 +655,15 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
             if (!App.sidecar_enabled) unreachable;
             if (server.sidecar_pid != 0) {
                 log.warn("sidecar: killing pid={d}", .{server.sidecar_pid});
-                std.posix.kill(@intCast(server.sidecar_pid), std.posix.SIG.KILL) catch |err| {
-                    log.warn("sidecar: kill failed: {}", .{err});
-                };
+                // Best-effort kill — uses raw syscall because Zig's
+                // posix.kill maps EPERM/ESRCH to unreachable (which
+                // crashes on SimIO's fake pids). Process management is
+                // a one-off, not a hot path.
+                _ = std.c.kill(@intCast(server.sidecar_pid), std.posix.SIG.KILL);
             }
             // Terminate the bus connection — on_close will fire,
             // which sets sidecar_connected = false.
-            if (server.sidecar_bus.connection.state == .connected) {
-                server.sidecar_bus.connection.terminate(.shutdown, .shutdown);
-            }
+            server.sidecar_bus.terminate();
         }
 
         /// Sidecar response timeout — kill the sidecar if the pipeline

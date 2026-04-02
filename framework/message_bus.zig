@@ -791,6 +791,15 @@ pub fn MessageBusType(comptime IO: type, comptime options: Options) type {
             self.pool.unref(message);
         }
 
+        /// Terminate the bus connection if connected. Triggers the
+        /// 3-phase close: shutdown → wait for IO → close → on_close.
+        /// Consumers call this instead of reaching into bus.connection.
+        pub fn terminate(self: *Self) void {
+            if (self.connection.state == .connected) {
+                self.connection.terminate(.shutdown, .shutdown);
+            }
+        }
+
         /// Connect an existing fd — used by fuzzers that create socket
         /// pairs and need to attach one end to the bus without going
         /// through the accept path. Encapsulates connection init so
