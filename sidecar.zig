@@ -116,13 +116,14 @@ pub fn SidecarClientType(comptime IO: type) type {
             // Don't submit if the sidecar isn't connected. Without
             // this check, call_state becomes .receiving but no RESULT
             // will ever arrive — the pipeline hangs until timeout.
-            if (bus.connection.state != .connected) {
+            // TB pattern: call bus methods, never reach into bus.connection.
+            if (!bus.is_connected()) {
                 log.warn("call: bus not connected for {s}", .{function_name});
                 return false;
             }
 
             // Don't submit if the send queue is full.
-            if (bus.connection.send_queue.full()) {
+            if (!bus.can_send()) {
                 log.warn("call: send queue full for {s}", .{function_name});
                 return false;
             }
@@ -222,7 +223,7 @@ pub fn SidecarClientType(comptime IO: type) type {
 
                     // Check send queue before allocating — a rogue sidecar
                     // bursting QUERYs must not assert-crash the server.
-                    if (bus.connection.send_queue.full()) {
+                    if (!bus.can_send()) {
                         log.warn("call: send queue full, cannot queue QUERY_RESULT", .{});
                         self.call_state = .failed;
                         self.protocol_violation = true;

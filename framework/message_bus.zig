@@ -797,6 +797,20 @@ pub fn MessageBusType(comptime IO: type, comptime options: Options) type {
         pub fn resume_recv(self: *Self) void {
             self.connection.resume_recv();
         }
+
+        /// Whether the sidecar connection is established.
+        /// Consumers use this instead of bus.connection.state —
+        /// the bus is the interface, connection is internal.
+        /// TB pattern: Replica calls bus methods, never reaches
+        /// into bus.connection.
+        pub fn is_connected(self: *const Self) bool {
+            return self.connection.state == .connected;
+        }
+
+        /// Whether the send queue can accept another message.
+        pub fn can_send(self: *const Self) bool {
+            return !self.connection.send_queue.full();
+        }
     };
 }
 
