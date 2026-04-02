@@ -1855,96 +1855,100 @@ pipeline through the real Server + SM + MessageBus stack with
 PRNG-driven fault injection. Tests recovery scenarios that the
 protocol fuzzer can't (disconnect → 503 → reconnect → 200).
 
-### How SimIO currently works
+### Key insight: sidecar is just a client slot
 
-SimIO has `clients: [8]SimClient`. Each client has send_buf
-(test injects HTTP) and recv_buf (server's response). The
-server's IO operations (accept, recv, send) are intercepted:
-- `accept`: finds connected-but-unaccepted client, returns fd
-- `recv`: delivers bytes from client's send_buf (partial, PRNG)
-- `send`: captures bytes to client's recv_buf (partial, PRNG)
-- `run_for_ns`: processes all pending completions synchronously
+SimIO already has `clients: [8]SimClient` with bidirectional
+buffers, partial delivery, fault injection, disconnect/reconnect.
+The sidecar bus uses the SAME SimIO instance. The sidecar
+connection IS a client from SimIO's perspective.
 
-The sidecar bus uses the SAME SimIO instance. When the server
-calls `io.recv(sidecar_fd, ...)` or `io.send(sidecar_fd, ...)`,
-SimIO routes it based on fd. Currently, SimIO only knows about
-client fds (10, 11, 12...). The sidecar bus fd is different
-(assigned by the bus accept path).
+**No SimIO modifications needed.** Reserve one client slot
+(index 0) for the sidecar. SimSidecar uses the existing API:
+- `connect_client(0)` → sidecar connects to unix socket
+- `inject_bytes(0, READY_frame)` → READY handshake
+- `inject_bytes(0, RESULT_frame)` → deliver RESULT
+- `read_response(0)` → read CALL frames sent by server
+- `disconnect_client(0)` → simulate sidecar crash
+- `connect_client(0)` again → simulate restart
 
-### Design: SimSidecar as a SimIO extension
-
-SimIO gains a sidecar channel — a bidirectional buffer pair
-(like SimClient but for the sidecar bus connection). When the
-server sends a CALL frame to the sidecar fd, SimIO captures
-the bytes. SimSidecar processes them (parses CALL, builds
-RESULT) and injects the response. SimIO delivers the response
-bytes on the next recv for that fd.
-
-```
-SimIO changes:
-  sidecar_fd: fd_t               // assigned during accept
-  sidecar_send_buf: [buf_max]u8  // server → sidecar (CALL frames)
-  sidecar_send_len: u32
-  sidecar_send_pos: u32
-  sidecar_recv_buf: [buf_max]u8  // sidecar → server (RESULT frames)
-  sidecar_recv_len: u32
-  sidecar_connected: bool
-  sidecar_sim: ?*SimSidecar      // processes CALLs, produces RESULTs
-```
-
-The accept/recv/send handlers check: is fd == sidecar_fd?
-If yes, route to sidecar buffers. If no, route to client
-buffers (existing behavior).
+The bus's `tick_accept` finds the connected-but-unaccepted
+client, accepts it, creates a Connection on that fd. All
+existing SimIO mechanisms apply: partial delivery via PRNG,
+recv/send faults, disconnect detection.
 
 ### SimSidecar struct
 
 ```zig
 const SimSidecar = struct {
     prng: *PRNG,
+    io: *SimIO,
+    sidecar_slot: usize,          // client index (0)
 
-    // PRNG-driven fault injection (swarm-tested per seed).
-    disconnect_probability: Ratio,
-    response_delay_max: u32,      // 0..N ticks before RESULT
+    // Frame accumulation — partial delivery means CALLs
+    // may arrive in chunks across multiple ticks.
+    recv_buf: [frame_max + 8]u8,
+    recv_len: u32,
 
     // Pending response state.
     response_buf: [frame_max + 8]u8,
     response_len: u32,
-    response_delay: u32,          // ticks remaining
+    response_delay: u32,          // ticks remaining before delivery
 
-    pub fn process_call(self: *SimSidecar, call_frame: []const u8) void;
-    pub fn tick(self: *SimSidecar) void;  // countdown delay
-    pub fn has_response(self: *const SimSidecar) bool;
-    pub fn take_response(self: *SimSidecar) []const u8;
+    // PRNG-driven fault injection (swarm-tested per seed).
+    disconnect_probability: Ratio,
+    response_delay_max: u32,      // 0..N ticks
+
+    pub fn tick(self: *SimSidecar) void;
+    pub fn connect(self: *SimSidecar) void;
+    pub fn disconnect(self: *SimSidecar) void;
+    fn try_read_frame(self: *SimSidecar) ?[]const u8;
+    fn process_call(self: *SimSidecar, frame: []const u8) void;
+    fn build_result(self: *SimSidecar, name: []const u8, request_id: u32) void;
 };
 ```
+
+SimSidecar accumulates bytes from SimIO's client recv_buf
+(server's sends land there). When a complete CRC-framed CALL
+arrives, process_call parses it and builds a RESULT using
+protocol.zig primitives (pair assertion with decoder).
+
+Hardcoded responses per operation — not real TS execution.
+Tests the framework pipeline, not handler logic. V8 is
+non-deterministic; sim tests must be fully deterministic.
 
 ### How it works
 
 ```
-1. Server tick:
-   commit_dispatch → .route → handler_route → call_submit
+1. SimSidecar.connect():
+   io.connect_client(0) → bus.tick_accept accepts fd
+   → SimSidecar injects READY frame via io.inject_bytes(0, ...)
+   → Server tick → bus recv → sidecar_on_frame → handshake complete
+
+2. Test injects HTTP request:
+   io.inject_post(1, "/products", body) → server tick
+   → commit_dispatch → .route → handler_route → call_submit
    → bus.send_message → io.send(sidecar_fd, CALL frame)
+   → SimIO captures to client[0].recv_buf
 
-2. SimIO.complete(.send):
-   fd == sidecar_fd → capture bytes to sidecar_send_buf
-   → callback(context, bytes_written)
-
-3. SimIO.run_for_ns (same or next cycle):
-   Check sidecar_send_buf for complete frame
-   → SimSidecar.process_call(frame)
-   → SimSidecar builds RESULT, stores in response_buf
+3. SimSidecar.tick():
+   try_read_frame() — accumulate bytes from io.read_response(0)
+   → When complete frame: process_call(frame)
+   → Parse CALL name, build RESULT using protocol.zig
    → Set response_delay from PRNG
 
-4. SimSidecar.tick() (called from run_for_ns):
+4. SimSidecar.tick() (subsequent):
    Countdown response_delay
-   → When 0: copy response to sidecar_recv_buf
-   → Next recv on sidecar_fd delivers the RESULT
+   → When 0: io.inject_bytes(0, RESULT frame)
+   → SimIO delivers on next recv for sidecar fd
+   → bus recv_callback → sidecar_on_frame → pipeline resumes
 
-5. Server tick:
-   io.run_for_ns → bus recv_callback fires
-   → sidecar_on_frame → client.on_frame → .complete
-   → commit_dispatch resumes pipeline
+5. Test reads HTTP response:
+   io.read_response(1) → verify 200 + HTML
 ```
+
+SimSidecar.tick() is called by the test between server ticks.
+The test drives: server.tick() → sim_sidecar.tick() → io.run_for_ns().
+Deterministic — same seed, same delays, same faults.
 
 ### READY handshake in sim
 
@@ -1977,6 +1981,16 @@ they need the full server stack:
 - [ ] Sidecar down at startup → all requests get 503
   until READY handshake completes
 
+**Additional scenarios (from TB audit):**
+- [ ] Partial CALL frame delivery — SimSidecar accumulates
+  bytes across multiple ticks before processing
+- [ ] Protocol violation — SimSidecar injects malformed RESULT
+  (wrong request_id, bad CRC) → server kills, recovers
+- [ ] Multiple HTTP requests during disconnect — all get 503
+- [ ] Connect then disconnect before READY — server stays
+  sidecar_connected = false, returns 503
+- [ ] READY with wrong version → server rejects, kills
+
 ### Fault injection
 
 PRNG-driven, swarm-tested per seed:
@@ -1992,54 +2006,77 @@ PRNG-driven, swarm-tested per seed:
 No content corruption — SimSidecar produces valid RESULT frames.
 Faults affect whether and when frames arrive.
 
+### Compilation: sidecar_enabled in test binary
+
+Test binaries don't have build_options → sidecar_enabled
+defaults to false. Sidecar sim tests need it true.
+
+**Solution:** Add a build step in build.zig that compiles
+sim_sidecar.zig with `-Dsidecar=true` via build_options.
+Same pattern as the main exe. The test binary gets its own
+build_options module with sidecar_enabled = true.
+
+sim_sidecar.zig exports `pub const build_options = .{
+    .sidecar_enabled = true,
+};` so app.zig reads it from root.
+
 ### Implementation steps
 
-1. **SimSidecar struct** — process_call parses CALL, builds
-   RESULT (hardcoded valid responses per operation). tick
-   counts down delay. take_response returns frame bytes.
+1. **build.zig: sidecar sim test step** — new test binary
+   `sim_sidecar.zig` compiled with sidecar_enabled = true.
+   Links sqlite3 + libc. Separate from existing `test` step.
 
-2. **SimIO sidecar channel** — sidecar_fd, send_buf, recv_buf.
-   accept/recv/send check fd and route to sidecar or client.
+2. **SimSidecar struct** — in sim_sidecar.zig. Frame
+   accumulation (partial delivery), CALL parsing, RESULT
+   building using protocol.zig primitives, PRNG delay,
+   READY frame injection. Hardcoded responses per operation.
 
-3. **READY injection** — after accept, SimSidecar injects READY
-   frame into recv_buf. Server processes handshake.
+3. **SimSidecar.connect/disconnect** — uses existing SimIO
+   connect_client/disconnect_client. No SimIO modifications.
+   Reserve client slot 0 for sidecar.
 
-4. **Wire into sim tests** — Server is built with -Dsidecar=true
-   equivalent. SimIO has SimSidecar. Existing sim tests exercise
-   the sidecar pipeline instead of native.
+4. **Basic sim test** — connect sidecar, inject HTTP request,
+   SimSidecar processes CALL + injects RESULT, verify HTTP
+   response. Full pipeline: route → prefetch → handle → render.
 
-   BUT: existing sim tests use App.SM which is native-only. For
-   sidecar sim tests, need App.StateMachineWith(Storage, Handlers)
-   where Handlers = SidecarHandlersType. This requires the build
-   to set sidecar_enabled = true.
+5. **Recovery sim tests** — 10 scenarios from the checklist.
+   Each is a test function: setup → fault → verify.
 
-   Two approaches:
-   a) Separate sim test file for sidecar tests (new file, new
-      Server type with sidecar enabled)
-   b) Comptime flag in sim.zig that toggles sidecar mode
+6. **QUERY sub-protocol** — SimSidecar receives QUERY from
+   server (via client slot recv_buf), builds QUERY_RESULT,
+   injects back via inject_bytes. Synchronous — no delay.
 
-   Approach (a) is cleaner — don't modify existing sim tests.
+### Disconnect/reconnect sequence (critical path)
 
-5. **Recovery sim tests** — new test functions exercising
-   disconnect/reconnect/timeout scenarios.
-
-6. **QUERY sub-protocol** — SimSidecar handles QUERY frames
-   for prefetch and render operations.
+```
+1. SimSidecar is connected (slot 0, fd assigned, READY done)
+2. HTTP request in-flight (CALL sent to sidecar)
+3. sim_sidecar.disconnect() → io.disconnect_client(0)
+4. Server tick → io.run_for_ns → bus recv returns -1
+   → bus Connection terminate → on_close fires
+   → server.sidecar_connected = false
+5. Next HTTP request → .route → sidecar not connected → 503
+6. sim_sidecar.connect() → io.connect_client(0) (new fd)
+7. Server tick → bus.tick_accept → accepts new fd
+8. sim_sidecar injects READY → server.sidecar_on_frame
+   → handshake validates → sidecar_connected = true
+9. Next HTTP request → routes to sidecar → 200
+```
 
 ### Files affected
 
 | File | Change |
 |---|---|
-| sim.zig (SimIO) | Sidecar channel (fd, buffers, routing) |
-| sim_sidecar.zig | NEW — SimSidecar struct + sidecar sim tests |
-| build.zig | Sidecar sim test compilation step |
+| sim_sidecar.zig | NEW — SimSidecar + sidecar sim tests |
+| build.zig | New test-sidecar step with sidecar_enabled = true |
+| sim.zig | NO CHANGES — existing sim tests untouched |
 
 ### Verification
 
 ```bash
-./zig/zig build unit-test    # existing tests unchanged
-./zig/zig build test         # existing sim tests unchanged
-./zig/zig build test-sidecar # new sidecar sim tests
+./zig/zig build unit-test     # existing tests unchanged
+./zig/zig build test          # existing sim tests unchanged
+./zig/zig build test-sidecar  # new sidecar sim tests
 ./zig/zig build fuzz -- smoke # fuzzers unchanged
 ```
 
