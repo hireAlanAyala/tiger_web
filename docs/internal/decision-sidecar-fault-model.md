@@ -54,6 +54,46 @@ A GC pause does NOT cause a protocol violation. It causes a
 response timeout (separate concern). These have different kill
 triggers: violation = broken code, timeout = degraded environment.
 
+### Why SIGKILL is always correct
+
+Every error on a unix domain socket means one of:
+
+1. **Kernel bug / hardware fault** — machine is broken. Restart
+   won't help, but SIGKILL is harmless. Hypervisor restart
+   counter trips, escalates to human.
+
+2. **Sidecar memory corruption** — V8 heap corruption (native
+   addon bug, JIT bug, prototype pollution). Restart WILL help
+   — fresh address space, clean heap. Not killing risks silent
+   data corruption (wrong writes applied to database).
+
+3. **Sidecar code bug** (e.g., sendFrame builds a bad frame) —
+   restart won't help (same code, same bug). But SIGKILL is
+   harmless — hypervisor restart counter trips after repeated
+   failures, escalates to human.
+
+You can't distinguish case 2 from case 3 without debugging.
+Case 2 is the one where SIGKILL + restart IS the recovery.
+The cost of unnecessary SIGKILL: 500ms-2s of 503s. The cost
+of not killing a corrupted process: wrong writes applied to
+the database. Safety > availability.
+
+### Why "drop bad frame, stay connected" is impossible
+
+We considered having the Connection survive CRC errors by
+skipping the bad frame and continuing. This requires finding
+the next frame boundary after a CRC failure. But the protocol
+uses length-prefixed framing with no sync markers. After a CRC
+failure, the declared length can't be trusted — it might be the
+corrupted field. Skipping `len` bytes could land in the middle
+of the next frame. Every subsequent read is garbage.
+
+Adding sync markers (HDLC-style flag bytes between frames)
+would make recovery possible but adds wire format complexity
+and escape byte handling in both Zig and TS. For unix domain
+sockets where CRC errors are near-impossible, the trade-off
+isn't worth it.
+
 ## Handshake before routing
 
 The sidecar sends a READY frame after connecting:
