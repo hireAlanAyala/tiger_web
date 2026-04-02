@@ -177,7 +177,7 @@ const SimSidecar = struct {
 
         // Result data depends on function name.
         if (std.mem.eql(u8, name, "route")) {
-            pos += self.build_route_result(result_payload[pos..], args);
+            pos += build_route_result(result_payload[pos..], args);
         } else if (std.mem.eql(u8, name, "prefetch")) {
             // Empty result — just success flag (already written).
         } else if (std.mem.eql(u8, name, "handle")) {
@@ -197,7 +197,7 @@ const SimSidecar = struct {
     }
 
     /// Build route RESULT data: [operation: u8][id: 16 bytes LE][body]
-    fn build_route_result(_: *SimSidecar, buf: []u8, args: []const u8) usize {
+    fn build_route_result(buf: []u8, args: []const u8) usize {
         // Args: [method: u8][path_len: u16 BE][path][body_len: u16 BE][body]
         assert(args.len >= 5);
         var apos: usize = 0;
