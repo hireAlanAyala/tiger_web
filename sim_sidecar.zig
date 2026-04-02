@@ -283,7 +283,8 @@ const TestHarness = struct {
     /// Caller: `var h: TestHarness = undefined; try h.init();`
     fn init(h: *TestHarness) !void {
         h.allocator = std.testing.allocator;
-        h.io = SimIO.init(12345);
+        var seed_prng = PRNG.from_seed_testing();
+        h.io = SimIO.init(seed_prng.int(u64));
         h.storage = try Storage.init(":memory:");
 
         var time_sim = TimeSim{};
@@ -297,6 +298,7 @@ const TestHarness = struct {
 
     fn deinit(h: *TestHarness) void {
         // Disconnect sidecar and drain until bus connection closes.
+        // The 3-phase terminate needs IO completions to drain.
         if (h.io.clients[sidecar_slot].connected) {
             h.sidecar.disconnect();
         }
@@ -304,8 +306,7 @@ const TestHarness = struct {
             h.server.tick();
             h.io.run_for_ns(10 * std.time.ns_per_ms);
         }
-        h.server.sidecar_bus.deinit(h.allocator);
-        h.server.deinit(h.allocator);
+        h.server.deinit(h.allocator); // deinits sidecar bus too
         h.storage.deinit();
     }
 
@@ -362,16 +363,6 @@ fn run_ticks(server: *Server, sidecar: *SimSidecar, io: *SimIO, n: usize) void {
         sidecar.tick();
         io.run_for_ns(10 * std.time.ns_per_ms);
     }
-}
-
-fn run_until_response(server: *Server, sidecar: *SimSidecar, io: *SimIO, client_index: usize, max_ticks: usize) ?SimIO.HttpResponse {
-    for (0..max_ticks) |_| {
-        server.tick();
-        sidecar.tick();
-        io.run_for_ns(10 * std.time.ns_per_ms);
-        if (io.read_response(client_index)) |resp| return resp;
-    }
-    return null;
 }
 
 // =====================================================================

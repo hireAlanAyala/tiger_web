@@ -218,6 +218,9 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
         }
 
         pub fn deinit(server: *Server, allocator: std.mem.Allocator) void {
+            if (App.sidecar_enabled) {
+                server.sidecar_bus.deinit(allocator);
+            }
             for (server.connections) |*conn| {
                 if (conn.fd > 0) {
                     server.io.close(conn.fd);
