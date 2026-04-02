@@ -47,13 +47,14 @@ failover decisions.
 | Frame delivery | Bus | on_frame_fn(context, connection_index, frame) |
 | Close notification | Bus | on_close_fn(context, connection_index, reason) |
 | READY tracking | Server | connections_ready[N] per-connection bools |
-| Active routing | Server | sidecar_active_index, dispatch policy |
+| Active routing | Server sets, Bus stores | server calls bus.set_active(index) |
 | Failover | Server | sidecar_on_close switches active to standby |
 | Process lifecycle | Supervisor | spawn N, reap, restart |
 | Wiring | main.zig | reads server + supervisor state, no cross-refs |
 
-The bus never decides what "active" means. The server never manages
-connections. main.zig never stores pointers to either. Clean seams.
+The bus stores active but never decides its value. The server sets
+active but never manages connections. main.zig never stores pointers
+to either. Clean seams.
 
 ## Three stages
 
@@ -152,6 +153,30 @@ fn tick_accept(self: *Self) void {
     }
 }
 ```
+
+**accept_callback with N connections:**
+Each accept completion must know which slot it's filling. Current
+accept_callback recovers `*Self` (the bus) via `@ptrCast(ctx)`.
+With N slots, each slot needs its own completion struct so the
+callback can recover the slot index. TB uses `@fieldParentPtr`
+to recover the Connection from the completion. We do the same:
+
+```zig
+fn accept_callback(ctx: *anyopaque, result: i32) void {
+    const self: *Self = @ptrCast(@alignCast(ctx));
+    // Find which slot this accept was for by matching the completion pointer
+    const index = for (self.accept_completions, 0..) |*ac, i| {
+        if (ac == completion) break i;
+    } else unreachable;
+    self.accept_pending[index] = false;
+    if (result < 0) return;
+    self.connections[index].init(self.io, &self.pool, result, ...);
+}
+```
+
+Or simpler: store N context pointers, one per slot, each carrying
+the bus pointer + slot index. Either works — the key is that the
+callback knows the slot.
 
 **Bus interface — what changes, what doesn't:**
 ```zig
@@ -386,5 +411,5 @@ the sidecar process on the multi-connection bus.
 | Callback connection index | Stage 2 (foundation) |
 | Multi-connection bus | Stage 2 |
 | Server per-connection state | Stage 2 |
-| SidecarClient pairing | Stage 2 |
 | Concurrent pipeline | Stage 3 |
+| N SidecarClients | Stage 3 |
