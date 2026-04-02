@@ -613,12 +613,12 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
         }
 
         /// Called when the sidecar bus connection closes.
-        pub fn sidecar_on_close(ctx: *anyopaque) void {
+        pub fn sidecar_on_close(ctx: *anyopaque, reason: Handlers.BusType.Connection.CloseReason) void {
             if (!App.sidecar_enabled) unreachable;
             const server: *Server = @ptrCast(@alignCast(ctx));
             server.sidecar_connected = false;
             server.sidecar_pid = 0;
-            log.info("sidecar: disconnected", .{});
+            log.info("sidecar: disconnected (reason={s})", .{@tagName(reason)});
 
             server.state_machine.handlers.on_sidecar_close();
 
@@ -658,7 +658,7 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
             // Terminate the bus connection — on_close will fire,
             // which sets sidecar_connected = false.
             if (server.sidecar_bus.connection.state == .connected) {
-                server.sidecar_bus.connection.terminate(.shutdown);
+                server.sidecar_bus.connection.terminate(.shutdown, .shutdown);
             }
         }
 

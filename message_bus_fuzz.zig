@@ -209,7 +209,7 @@ pub fn main(allocator: std.mem.Allocator, args: FuzzArgs) !void {
             },
             .terminate => {
                 if (conn.state != .connected) continue;
-                conn.terminate(.shutdown);
+                conn.terminate(.shutdown, .shutdown);
                 stats.terminates += 1;
             },
             .disconnect => {
@@ -251,7 +251,7 @@ pub fn main(allocator: std.mem.Allocator, args: FuzzArgs) !void {
 
     // Clean termination.
     if (conn.state == .connected) {
-        conn.terminate(.shutdown);
+        conn.terminate(.shutdown, .shutdown);
     }
     for (0..100) |_| {
         if (conn.state == .closed) break;
@@ -377,7 +377,7 @@ const FuzzContext = struct {
         if (self.conn.state == .connected and
             self.prng.chance(self.terminate_from_callback_probability))
         {
-            self.conn.terminate(.shutdown);
+            self.conn.terminate(.shutdown, .shutdown);
             self.reentrant_terminates += 1;
         }
     }

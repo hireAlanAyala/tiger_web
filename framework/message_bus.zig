@@ -70,6 +70,50 @@ pub fn ConnectionType(comptime IO: type, comptime options: Options) type {
             terminating,
         };
 
+        /// Why the connection closed. Passed to on_close_fn so the
+        /// consumer can log, set metrics, or choose a recovery strategy
+        /// (e.g., sidecar: kill on crc_error, reconnect on eof).
+        ///
+        /// Design note: we considered making error events non-terminal
+        /// ("consumer decides whether to terminate") but rejected it:
+        ///
+        /// - CRC error: the byte stream is desynchronized. Length-prefixed
+        ///   framing has no sync markers — after a CRC failure, the
+        ///   Connection can't find the next frame boundary. Continuing
+        ///   reads garbage. TB terminates on CRC error for this reason.
+        ///
+        /// - recv/send error: the socket is broken. Nothing to "stay
+        ///   connected" to. Both TB and web servers must terminate.
+        ///
+        /// - Half-duplex (recv dead, send alive): requires new Connection
+        ///   states (recv_dead, send_dead) that the state machine has
+        ///   never modeled. The complexity buys nothing — the consumer
+        ///   almost always terminates on any error.
+        ///
+        /// The Connection's terminate-on-error behavior is correct for
+        /// framed byte streams. Recovery happens above: MessageBus
+        /// re-accepts, server retries. The consumer needs to know WHY
+        /// the connection closed (for logging/metrics/kill decisions),
+        /// not WHETHER to close it.
+        pub const CloseReason = enum {
+            /// recv returned 0 — peer closed gracefully.
+            eof,
+            /// recv returned -1 — socket error.
+            recv_error,
+            /// send returned <= 0 — socket error.
+            send_error,
+            /// CRC-32 mismatch — frame corrupted in transit.
+            crc_error,
+            /// Frame declares length > frame_max — malicious or
+            /// protocol mismatch.
+            oversized,
+            /// recv buffer full with incomplete frame — peer sending
+            /// data without completing a frame (slow-fill attack).
+            buffer_full,
+            /// Consumer called terminate() explicitly.
+            shutdown,
+        };
+
         io: *IO,
         pool: *Pool,
         state: State,
@@ -105,8 +149,11 @@ pub fn ConnectionType(comptime IO: type, comptime options: Options) type {
         // on_close_fn: Called when the connection closes (terminate_close).
         // Consumer should reset any in-flight state (e.g. call_state
         // to .failed). Called once, after all IO is drained.
+        // CloseReason tells the consumer WHY — for logging, metrics,
+        // or kill decisions (sidecar: crc_error → SIGKILL).
         // May be null if consumer doesn't need close notification.
-        on_close_fn: ?*const fn (context: *anyopaque) void,
+        on_close_fn: ?*const fn (context: *anyopaque, reason: CloseReason) void,
+        close_reason: CloseReason = .shutdown,
         context: *anyopaque,
 
         // =====================================================================
@@ -123,7 +170,7 @@ pub fn ConnectionType(comptime IO: type, comptime options: Options) type {
             fd: IO.fd_t,
             context: *anyopaque,
             on_frame_fn: *const fn (*anyopaque, []const u8) void,
-            on_close_fn: ?*const fn (*anyopaque) void,
+            on_close_fn: ?*const fn (*anyopaque, CloseReason) void,
         ) void {
             assert(self.state == .closed);
             assert(self.recv_message == null);
@@ -224,10 +271,11 @@ pub fn ConnectionType(comptime IO: type, comptime options: Options) type {
         ///
         /// .shutdown: call posix.shutdown (signal peer, e.g. on error)
         /// .no_shutdown: skip shutdown (peer already closed, orderly)
-        pub fn terminate(self: *Self, how: enum { shutdown, no_shutdown }) void {
+        pub fn terminate(self: *Self, how: enum { shutdown, no_shutdown }, reason: CloseReason) void {
             if (self.state == .terminating) return;
             assert(self.state != .closed);
             defer self.invariants();
+            self.close_reason = reason;
             if (how == .shutdown) {
                 self.io.shutdown(self.fd, .both);
             }
@@ -271,11 +319,11 @@ pub fn ConnectionType(comptime IO: type, comptime options: Options) type {
             assert(self.state == .connected);
 
             if (result < 0) {
-                self.terminate(.shutdown);
+                self.terminate(.shutdown, .recv_error);
                 return;
             }
             if (result == 0) {
-                self.terminate(.no_shutdown);
+                self.terminate(.no_shutdown, .eof);
                 return;
             }
 
@@ -285,7 +333,7 @@ pub fn ConnectionType(comptime IO: type, comptime options: Options) type {
 
             // Buffer full with incomplete frame — peer is stuck or malicious.
             if (self.recv_pos == buf_max and self.advance_pos < self.recv_pos) {
-                self.terminate(.shutdown);
+                self.terminate(.shutdown, .buffer_full);
                 return;
             }
 
@@ -303,7 +351,7 @@ pub fn ConnectionType(comptime IO: type, comptime options: Options) type {
                 if (self.recv_pos - frame_start < 4) return;
                 const len = std.mem.readInt(u32, buf[frame_start..][0..4], .big);
                 if (len > frame_max) {
-                    self.terminate(.shutdown);
+                    self.terminate(.shutdown, .oversized);
                     return;
                 }
 
@@ -317,7 +365,7 @@ pub fn ConnectionType(comptime IO: type, comptime options: Options) type {
                 crc.update(buf[frame_start..][0..4]);
                 crc.update(buf[frame_start + 8 ..][0..total - 8]);
                 if (crc.final() != stored_crc) {
-                    self.terminate(.shutdown);
+                    self.terminate(.shutdown, .crc_error);
                     return;
                 }
 
@@ -424,7 +472,7 @@ pub fn ConnectionType(comptime IO: type, comptime options: Options) type {
             assert(self.state == .connected);
 
             if (result <= 0) {
-                self.terminate(.no_shutdown);
+                self.terminate(.no_shutdown, .send_error);
                 return;
             }
 
@@ -484,9 +532,9 @@ pub fn ConnectionType(comptime IO: type, comptime options: Options) type {
             self.send_pos = 0;
             self.state = .closed;
 
-            // Notify consumer that the connection closed.
+            // Notify consumer that the connection closed, with reason.
             if (self.on_close_fn) |on_close| {
-                on_close(self.context);
+                on_close(self.context, self.close_reason);
             }
         }
 
@@ -574,7 +622,7 @@ pub fn MessageBusType(comptime IO: type, comptime options: Options) type {
 
         // Consumer callbacks — stored here, passed to connection on init.
         on_frame_fn: *const fn (*anyopaque, []const u8) void,
-        on_close_fn: ?*const fn (*anyopaque) void,
+        on_close_fn: ?*const fn (*anyopaque, Connection.CloseReason) void,
         context: *anyopaque,
 
         /// Pool sizing: recv buffer (1) + send queue (send_queue_max) + burst (1).
@@ -591,7 +639,7 @@ pub fn MessageBusType(comptime IO: type, comptime options: Options) type {
             io: *IO,
             context: *anyopaque,
             on_frame_fn: *const fn (*anyopaque, []const u8) void,
-            on_close_fn: ?*const fn (*anyopaque) void,
+            on_close_fn: ?*const fn (*anyopaque, Connection.CloseReason) void,
         ) !void {
             self.io = io;
             self.pool = try Pool.init(allocator, messages_max);
@@ -632,7 +680,7 @@ pub fn MessageBusType(comptime IO: type, comptime options: Options) type {
             path: []const u8,
             context: *anyopaque,
             on_frame_fn: *const fn (*anyopaque, []const u8) void,
-            on_close_fn: ?*const fn (*anyopaque) void,
+            on_close_fn: ?*const fn (*anyopaque, Connection.CloseReason) void,
         ) !void {
             try self.init_pool(allocator, io, context, on_frame_fn, on_close_fn);
             self.start_listener(path);
@@ -1187,7 +1235,7 @@ test "Connection: re-entrancy — terminate from on_frame" {
         fn on_frame(ctx_ptr: *anyopaque, _: []const u8) void {
             const self: *@This() = @ptrCast(@alignCast(ctx_ptr));
             if (self.conn_ptr.state == .connected) {
-                self.conn_ptr.terminate(.no_shutdown);
+                self.conn_ptr.terminate(.no_shutdown, .shutdown);
                 self.terminated = true;
             }
         }
