@@ -6,22 +6,24 @@ Every handler has a declared timeout. The framework enforces it.
 The user declares, the framework enforces. Neither side trusts
 the other. Both are explicit.
 
-**Route handlers** are pure functions (read DB, compute, return).
-The framework provides a default timeout (5 seconds). The user
-doesn't need to think about it. Overridable with `@timeout`.
-
-**Background handlers** do arbitrary work (image processing, API
-calls, report generation). `@timeout` is mandatory — the
-annotation scanner rejects `@background` without it.
+All handlers get a 5s default timeout. Heavy handlers override
+with `@timeout(ms)`. The scanner generates comptime constants.
+The server enforces per-CALL. The compiler rejects invalid values.
 
 ```typescript
 @route("POST", "/products")
 export function createProduct(ctx) { ... }  // default 5s
 
-@background
-@timeout(300_000)  // mandatory — scanner rejects without it
+@route("POST", "/reports/generate")
+@timeout(30_000)  // heavy query, needs more time
 export function generateReport(ctx) { ... }
 ```
+
+No `@background` annotation — the CALL/RESULT protocol is
+synchronous (every CALL gets a RESULT). Background work is a
+handler that writes to a table and returns immediately. The SSE
+connection pushes the result when a later CALL processes the queue.
+No protocol change needed.
 
 ## Why
 
@@ -76,11 +78,11 @@ the server — the bound is structural, not behavioral.
 
 ## What's deferred
 
-- `@background` annotation + background dispatch
 - Per-handler `@timeout` (overriding the 5s default)
 - Scanner generates timeout constants in handlers.generated.zig
 - Supervisor health bound derived from generated comptime constants
 - Per-CALL timeout enforcement (currently global 5s)
+- See docs/plans/handler-timeout.md
 
 ## The stuck process gap
 

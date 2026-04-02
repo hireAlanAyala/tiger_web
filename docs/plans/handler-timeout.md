@@ -1,38 +1,41 @@
-# Background Dispatch — @timeout + @background
+# Handler Timeout — @timeout
 
-> Handler timeout contract: the user declares limits, the
-> framework enforces them, the supervisor recovers from violations.
+> The user declares limits, the framework enforces them,
+> the supervisor recovers from violations.
 
 ## What this is
 
-Per-handler `@timeout` annotation. `@background` annotation for
-work that doesn't block the HTTP response. Scanner-enforced at
-build time. Server-enforced per-CALL at runtime.
+Per-handler `@timeout` annotation. Scanner-enforced at build time.
+Server-enforced per-CALL at runtime. Default 5s for all handlers,
+overridable per handler.
+
+No `@background` annotation — the CALL/RESULT protocol is
+synchronous (every CALL gets a RESULT). Background work is a
+handler that writes to a table and returns immediately. The SSE
+connection pushes the result when a later CALL processes the queue.
+No protocol change needed.
 
 ## The contract
-
-**Route handlers** are pure functions (read DB, compute, return).
-Framework provides default timeout (5s). Overridable with `@timeout`.
-
-**Background handlers** do arbitrary work (image processing, API
-calls, report generation). `@timeout` is mandatory — scanner
-rejects `@background` without it.
 
 ```typescript
 @route("POST", "/products")
 export function createProduct(ctx) { ... }  // default 5s
 
-@background
-@timeout(300_000)  // mandatory — scanner rejects without this
+@route("POST", "/reports/generate")
+@timeout(30_000)  // heavy query, needs more time
 export function generateReport(ctx) { ... }
 ```
+
+All handlers get the 5s default. Heavy handlers override with
+`@timeout`. The scanner generates comptime constants. The server
+enforces per-CALL. The compiler rejects invalid values.
 
 ## Comptime enforcement (TB pattern)
 
 Scanner generates comptime constants in handlers.generated.zig
 — not a manifest file. The timeout is a comptime constant on the
 handler. The server reads it at comptime. The compiler IS the
-enforcement. If the timeout is missing, the code doesn't compile.
+enforcement.
 
 Same pattern as routes.generated.zig — one source of truth, zero
 runtime trust.
@@ -62,8 +65,7 @@ the generated code, not a signal.
 2. Scanner generates timeout_ms comptime constant per handler
 3. Server reads per-handler timeout from generated code
 4. Server enforces per-CALL timeout (replaces global 5s)
-5. `@background` annotation + background CALL dispatch
-6. Supervisor health bound from max(all timeouts)
+5. Supervisor health bound from max(all timeouts)
 
 ## Dependencies
 
@@ -71,7 +73,6 @@ the generated code, not a signal.
 |---|---|
 | Annotation scanner @timeout | All |
 | handlers.generated.zig timeout constants | Server enforcement |
-| Background dispatch in server | @background annotation |
 | Supervisor health check | Stuck process recovery |
 
 ## Related
