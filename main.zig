@@ -158,13 +158,11 @@ pub fn main() !void {
 
         // Composition root wiring: server ↔ supervisor.
         // No cross-references — main.zig reads public state from both.
+        // The supervisor watches processes via waitpid — no "restart"
+        // signal needed. The sidecar detects the closed socket and exits.
         if (App.sidecar_enabled) {
             const connected = server.sidecar_is_connected();
 
-            // Disconnect detected → tell supervisor to restart.
-            if (was_sidecar_connected and !connected) {
-                supervisor.request_restart(server.tick_count);
-            }
             // READY completed → reset supervisor backoff.
             if (!was_sidecar_connected and connected) {
                 supervisor.notify_connected();

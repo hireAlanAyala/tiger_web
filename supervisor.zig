@@ -50,12 +50,8 @@ pub const Supervisor = struct {
         for (self.processes) |*p| p.tick(tick_count, self.argv, self.allocator);
     }
 
-    /// Request restart for all running processes.
-    pub fn request_restart(self: *Supervisor, tick_count: u64) void {
-        for (self.processes) |*p| p.request_restart(tick_count);
-    }
-
-    /// Reset backoff for all processes.
+    /// Reset backoff for all processes. Called by main.zig when
+    /// a sidecar completes the READY handshake.
     pub fn notify_connected(self: *Supervisor) void {
         for (self.processes) |*p| p.notify_connected();
     }
@@ -75,8 +71,6 @@ pub const Process = struct {
     restart_at: u64,
     restart_count: u32,
 
-    // Grace period for stuck process kill.
-    kill_deadline: ?u64,
 
     pub const State = enum {
         idle,
@@ -85,7 +79,6 @@ pub const Process = struct {
         stopped,
     };
 
-    const grace_ticks: u64 = 50;
     const max_backoff_ticks: u64 = 100;
 
     pub fn init() Process {
@@ -94,7 +87,6 @@ pub const Process = struct {
             .state = .idle,
             .restart_at = 0,
             .restart_count = 0,
-            .kill_deadline = null,
         };
     }
 
@@ -111,7 +103,6 @@ pub const Process = struct {
         log.info("spawned sidecar pid={d}", .{child.id});
         self.child = child;
         self.state = .running;
-        self.kill_deadline = null;
     }
 
     /// One tick. Bridges IO with the pure state machine (step).
@@ -120,7 +111,6 @@ pub const Process = struct {
         const action = self.step(tick_count, child_exited);
         switch (action) {
             .none => {},
-            .do_kill => self.do_kill(),
             .do_spawn => self.spawn(argv, allocator) catch |err| {
                 log.warn("sidecar spawn failed: {}, retrying", .{err});
                 self.restart_count += 1;
@@ -130,7 +120,11 @@ pub const Process = struct {
     }
 
     /// Pure state machine — no IO. Testable without real processes.
-    pub const Action = enum { none, do_kill, do_spawn };
+    /// Phase 1 (reap): child exited → schedule restart with backoff.
+    /// Phase 2 (restart): backoff expired → spawn.
+    /// No kill phase — the sidecar detects the closed socket and
+    /// exits on its own. The supervisor just watches via waitpid.
+    pub const Action = enum { none, do_spawn };
 
     pub fn step(self: *Process, tick_count: u64, child_exited: bool) Action {
         switch (self.state) {
@@ -139,15 +133,7 @@ pub const Process = struct {
                     log.info("sidecar exited, will restart after backoff", .{});
                     self.state = .exited;
                     self.restart_at = tick_count + self.backoff_ticks();
-                    self.kill_deadline = null;
                     return .none;
-                }
-                if (self.kill_deadline) |deadline| {
-                    if (tick_count >= deadline) {
-                        log.warn("sidecar stuck, sending SIGKILL", .{});
-                        self.kill_deadline = null;
-                        return .do_kill;
-                    }
                 }
             },
             .exited => {
@@ -158,12 +144,6 @@ pub const Process = struct {
             .idle, .stopped => {},
         }
         return .none;
-    }
-
-    pub fn request_restart(self: *Process, tick_count: u64) void {
-        if (self.state != .running) return;
-        if (self.kill_deadline != null) return;
-        self.kill_deadline = tick_count + grace_ticks;
     }
 
     pub fn notify_connected(self: *Process) void {
@@ -200,13 +180,6 @@ pub const Process = struct {
         return true;
     }
 
-    fn do_kill(self: *Process) void {
-        assert(self.state == .running);
-        const child = self.child.?;
-        log.warn("killing sidecar pid={d}", .{child.id});
-        _ = posix.kill(child.id, posix.SIG.KILL) catch {};
-    }
-
     /// Create a Process in .running state without spawning a real
     /// process. For state machine tests only.
     fn init_running() Process {
@@ -237,26 +210,6 @@ test "notify_connected resets backoff" {
     try std.testing.expectEqual(@as(u64, 1), p.backoff_ticks());
 }
 
-test "request_restart sets kill deadline" {
-    var p = Process.init_running();
-    p.request_restart(100);
-    try std.testing.expectEqual(@as(?u64, 100 + Process.grace_ticks), p.kill_deadline);
-}
-
-test "request_restart no-op when not running" {
-    var p = Process.init();
-    p.state = .exited;
-    p.request_restart(100);
-    try std.testing.expectEqual(@as(?u64, null), p.kill_deadline);
-}
-
-test "request_restart no-op when already pending" {
-    var p = Process.init_running();
-    p.request_restart(100);
-    p.request_restart(200);
-    try std.testing.expectEqual(@as(?u64, 100 + Process.grace_ticks), p.kill_deadline);
-}
-
 test "step: child exited → state .exited, schedule restart" {
     var p = Process.init_running();
     const action = p.step(1000, true);
@@ -270,22 +223,6 @@ test "step: child still running, no deadline → none" {
     const action = p.step(1000, false);
     try std.testing.expectEqual(Process.Action.none, action);
     try std.testing.expectEqual(Process.State.running, p.state);
-}
-
-test "step: grace period expired → do_kill" {
-    var p = Process.init_running();
-    p.kill_deadline = 100;
-    const action = p.step(100, false);
-    try std.testing.expectEqual(Process.Action.do_kill, action);
-    try std.testing.expectEqual(@as(?u64, null), p.kill_deadline);
-}
-
-test "step: grace period not expired → none" {
-    var p = Process.init_running();
-    p.kill_deadline = 100;
-    const action = p.step(99, false);
-    try std.testing.expectEqual(Process.Action.none, action);
-    try std.testing.expectEqual(@as(?u64, 100), p.kill_deadline);
 }
 
 test "step: exited, backoff expired → do_spawn" {
@@ -324,23 +261,6 @@ test "full cycle: running → exited → backoff → spawn" {
 
     const a3 = p.step(101, false);
     try std.testing.expectEqual(Process.Action.do_spawn, a3);
-}
-
-test "full cycle: request_restart → grace period → kill" {
-    var p = Process.init_running();
-
-    p.request_restart(200);
-    try std.testing.expectEqual(@as(?u64, 250), p.kill_deadline);
-
-    const a1 = p.step(249, false);
-    try std.testing.expectEqual(Process.Action.none, a1);
-
-    const a2 = p.step(250, false);
-    try std.testing.expectEqual(Process.Action.do_kill, a2);
-
-    const a3 = p.step(251, true);
-    try std.testing.expectEqual(Process.Action.none, a3);
-    try std.testing.expectEqual(Process.State.exited, p.state);
 }
 
 test "backoff increases across consecutive crashes" {
