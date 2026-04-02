@@ -611,43 +611,61 @@ pub fn ConnectionType(comptime IO: type, comptime options: Options) type {
 }
 
 pub const Options = struct {
-    /// Max queued outgoing frames. Sidecar: 2 (serial).
+    /// Max queued outgoing frames per connection. Sidecar: 2 (serial).
     /// Worker: 4 (concurrent dispatch). Must be >= 2 for
     /// CALL + QUERY_RESULT to coexist.
     send_queue_max: u32 = 4,
     /// Max frame payload size. Consumer sets this to match their
     /// protocol's frame_max. No default — must be explicit.
     frame_max: u32,
+    /// Max connections. Stage 1: 1 (default). Stage 2: 2 (hot standby).
+    /// Stage 3: N (round-robin). Each connection gets its own recv
+    /// message and send queue from the shared pool.
+    connections_max: u8 = 1,
 };
 
-/// Lifecycle manager. Owns one Connection and a MessagePool.
-/// Handles listen, accept, reconnect-on-disconnect.
+/// Lifecycle manager. Owns N Connections and a shared MessagePool.
+/// Handles listen, accept into slots, reconnect-on-disconnect.
 /// The Connection doesn't know it exists.
 ///
 /// Parameterized at comptime so each consumer declares its bounds:
 ///   const SidecarBus = MessageBusType(IO, .{ .send_queue_max = 2, .frame_max = 256 * 1024 });
+///   const SidecarBus = MessageBusType(IO, .{ .send_queue_max = 2, .frame_max = 256 * 1024, .connections_max = 2 });
 pub fn MessageBusType(comptime IO: type, comptime options: Options) type {
     return struct {
         const Self = @This();
         pub const Connection = ConnectionType(IO, options);
         const Pool = Connection.Pool;
 
+        pub const connections_max = options.connections_max;
+
         io: *IO,
         pool: Pool,
-        connection: Connection,
+        connections: [connections_max]Connection,
 
-        // Listen/accept — one connection only.
+        // Listen/accept — fills all empty slots.
         listen_fd: IO.fd_t,
-        accept_completion: IO.Completion,
-        accept_pending: bool,
+        accept_completions: [connections_max]IO.Completion,
+        accept_pending: [connections_max]bool,
+
+        /// Which connection to route send_message() to. Set by the
+        /// server via set_active(). null = no active connection
+        /// (send silently drops). The bus stores active but never
+        /// decides its value — the server owns the routing decision.
+        active: ?u8,
 
         // Consumer callbacks — stored here, passed to connection on init.
         on_frame_fn: *const fn (*anyopaque, u8, []const u8) void,
         on_close_fn: ?*const fn (*anyopaque, u8, Connection.CloseReason) void,
         context: *anyopaque,
 
-        /// Pool sizing: recv buffer (1) + send queue (send_queue_max) + burst (1).
-        const messages_max: u32 = 1 + options.send_queue_max + 1;
+        /// Pool sizing: N recv buffers + N * send_queue + burst.
+        const messages_max: u32 = connections_max * (1 + options.send_queue_max) + 1;
+
+        comptime {
+            assert(connections_max >= 1);
+            assert(connections_max <= 8); // bounded — no unbounded arrays
+        }
 
         /// Initialize pool and state. Does NOT start listening.
         /// Call start_listener() after the callback context is available.
@@ -664,30 +682,33 @@ pub fn MessageBusType(comptime IO: type, comptime options: Options) type {
         ) !void {
             self.io = io;
             self.pool = try Pool.init(allocator, messages_max);
-            self.connection = .{
-                .io = io,
-                .pool = &self.pool,
-                .state = .closed,
-                .fd = -1,
-                .recv_message = null,
-                .recv_pos = 0,
-                .advance_pos = 0,
-                .process_pos = 0,
-                .recv_completion = .{},
-                .recv_submitted = false,
-                .recv_suspended = false,
-                .send_queue = Connection.SendQueue.init(),
-                .send_pos = 0,
-                .send_completion = .{},
-                .send_submitted = false,
-                .on_frame_fn = on_frame_fn,
-                .on_close_fn = on_close_fn,
-                .connection_index = 0, // Stage 1: single connection
-                .context = context,
-            };
+            for (&self.connections, 0..) |*conn, i| {
+                conn.* = .{
+                    .io = io,
+                    .pool = &self.pool,
+                    .state = .closed,
+                    .fd = -1,
+                    .recv_message = null,
+                    .recv_pos = 0,
+                    .advance_pos = 0,
+                    .process_pos = 0,
+                    .recv_completion = .{},
+                    .recv_submitted = false,
+                    .recv_suspended = false,
+                    .send_queue = Connection.SendQueue.init(),
+                    .send_pos = 0,
+                    .send_completion = .{},
+                    .send_submitted = false,
+                    .on_frame_fn = on_frame_fn,
+                    .on_close_fn = on_close_fn,
+                    .connection_index = @intCast(i),
+                    .context = context,
+                };
+            }
             self.listen_fd = -1;
-            self.accept_completion = .{};
-            self.accept_pending = false;
+            for (&self.accept_completions) |*ac| ac.* = .{};
+            for (&self.accept_pending) |*p| p.* = false;
+            self.active = null;
             self.on_frame_fn = on_frame_fn;
             self.on_close_fn = on_close_fn;
             self.context = context;
@@ -716,7 +737,9 @@ pub fn MessageBusType(comptime IO: type, comptime options: Options) type {
         }
 
         pub fn deinit(self: *Self, allocator: std.mem.Allocator) void {
-            assert(self.connection.state == .closed);
+            for (&self.connections) |*conn| {
+                assert(conn.state == .closed);
+            }
             self.pool.deinit(allocator);
         }
 
@@ -724,7 +747,7 @@ pub fn MessageBusType(comptime IO: type, comptime options: Options) type {
         /// All POSIX syscalls live in IO.open_unix_listener — the bus
         /// never calls posix directly. TB pattern: IO owns the kernel seam.
         fn listen(self: *Self, path: []const u8) void {
-            assert(self.connection.state == .closed);
+            for (&self.connections) |*conn| assert(conn.state == .closed);
             self.listen_fd = self.io.open_unix_listener(path) catch |err| {
                 log.warn("listen: {}", .{err});
                 return;
@@ -734,94 +757,141 @@ pub fn MessageBusType(comptime IO: type, comptime options: Options) type {
 
         pub fn tick_accept(self: *Self) void {
             if (self.listen_fd == -1) return;
-            if (self.connection.state != .closed) return;
-            if (self.accept_pending) return;
-            self.accept_pending = true;
-            self.io.accept(
-                self.listen_fd,
-                &self.accept_completion,
-                @ptrCast(self),
-                accept_callback,
-            );
+            for (&self.connections, &self.accept_pending, &self.accept_completions) |*conn, *pending, *completion| {
+                if (conn.state != .closed) continue;
+                if (pending.*) continue;
+                pending.* = true;
+                self.io.accept(
+                    self.listen_fd,
+                    completion,
+                    @ptrCast(self),
+                    accept_callback,
+                );
+            }
         }
 
         fn accept_callback(ctx: *anyopaque, result: i32) void {
             const self: *Self = @ptrCast(@alignCast(ctx));
-            self.accept_pending = false;
 
-            if (result < 0) return;
+            if (result < 0) {
+                // Find which slot this accept was for and clear its pending flag.
+                // On error, no fd was assigned — just retry next tick.
+                for (&self.accept_pending) |*pending| {
+                    // We can't match by completion pointer here because
+                    // accept_callback doesn't receive it. Clear all
+                    // pending flags for closed connections — they'll
+                    // re-submit on the next tick_accept.
+                    pending.* = false;
+                }
+                return;
+            }
 
             const accepted_fd: IO.fd_t = result;
 
-            log.info("accepted fd={d}", .{accepted_fd});
-            self.connection.init(self.io, &self.pool, accepted_fd, self.context, self.on_frame_fn, self.on_close_fn);
+            // Find the first closed slot waiting for an accept.
+            for (&self.connections, &self.accept_pending, 0..) |*conn, *pending, i| {
+                if (conn.state == .closed and pending.*) {
+                    pending.* = false;
+                    log.info("accepted fd={d} slot={d}", .{ accepted_fd, i });
+                    conn.init(self.io, &self.pool, accepted_fd, self.context, self.on_frame_fn, self.on_close_fn);
+                    return;
+                }
+            }
+            // No slot available — shouldn't happen (tick_accept only submits for closed slots).
+            unreachable;
         }
 
-        // --- Delegation to connection ---
+        // --- Active connection routing ---
+        //
+        // send_message, is_connected, can_send route to connections[active].
+        // If active is null, they silently fail (send drops, is_connected
+        // returns false). TB pattern: bus.send_message_to_replica(N) drops
+        // if replicas[N] is null.
+
+        /// Set which connection send_message routes to.
+        /// Called by the server after READY handshake or failover.
+        pub fn set_active(self: *Self, index: ?u8) void {
+            if (index) |i| assert(i < connections_max);
+            self.active = index;
+        }
 
         pub fn send_frame(self: *Self, data: []const u8) void {
-            self.connection.send_frame(data);
+            const conn = self.active_connection() orelse return;
+            conn.send_frame(data);
         }
 
         pub fn send_message(self: *Self, message: *Connection.Message, payload_len: u32) void {
-            self.connection.send_message(message, payload_len);
+            const conn = self.active_connection() orelse {
+                self.pool.unref(message);
+                return;
+            };
+            conn.send_message(message, payload_len);
         }
 
         pub fn suspend_recv(self: *Self) void {
-            self.connection.suspend_recv();
+            const conn = self.active_connection() orelse return;
+            conn.suspend_recv();
         }
 
         pub fn resume_recv(self: *Self) void {
-            self.connection.resume_recv();
+            const conn = self.active_connection() orelse return;
+            conn.resume_recv();
         }
 
-        /// Whether the sidecar connection is established.
-        /// Consumers use this instead of bus.connection.state —
-        /// the bus is the interface, connection is internal.
-        /// TB pattern: Replica calls bus methods, never reaches
-        /// into bus.connection.
+        /// Whether the active connection is established.
         pub fn is_connected(self: *const Self) bool {
-            return self.connection.state == .connected;
+            const i = self.active orelse return false;
+            return self.connections[i].state == .connected;
         }
 
-        /// Whether the send queue can accept another message.
+        /// Whether the active connection's send queue can accept a message.
         pub fn can_send(self: *const Self) bool {
-            return !self.connection.send_queue.full();
+            const i = self.active orelse return false;
+            return !self.connections[i].send_queue.full();
         }
 
-        /// Get a message from the pool. TB pattern: bus wraps pool
-        /// access so consumers never reach into bus.pool directly.
+        /// Get a message from the shared pool.
         pub fn get_message(self: *Self) *Connection.Message {
             return self.pool.get_message();
         }
 
-        /// Return a message to the pool. TB pattern: bus wraps pool.
+        /// Return a message to the shared pool.
         pub fn unref(self: *Self, message: *Connection.Message) void {
             self.pool.unref(message);
         }
 
-        /// Terminate the bus connection if connected. Triggers the
-        /// 3-phase close: shutdown → wait for IO → close → on_close.
-        /// Consumers call this instead of reaching into bus.connection.
+        /// Terminate the active connection.
         pub fn terminate(self: *Self) void {
-            if (self.connection.state == .connected) {
-                self.connection.terminate(.shutdown, .shutdown);
+            const conn = self.active_connection() orelse return;
+            if (conn.state == .connected) {
+                conn.terminate(.shutdown, .shutdown);
             }
         }
 
-        /// Connect an existing fd — used by fuzzers that create socket
-        /// pairs and need to attach one end to the bus without going
-        /// through the accept path. Encapsulates connection init so
-        /// fuzzers don't reach into bus.connection directly.
+        /// Terminate a specific connection by index.
+        pub fn terminate_connection(self: *Self, index: u8) void {
+            assert(index < connections_max);
+            if (self.connections[index].state == .connected) {
+                self.connections[index].terminate(.shutdown, .shutdown);
+            }
+        }
+
+        /// Connect an existing fd to connection slot 0.
+        /// Used by fuzzers — single connection only.
         pub fn connect_fd(self: *Self, fd: IO.fd_t) void {
-            assert(self.connection.state == .closed);
-            self.connection.init(self.io, &self.pool, fd, self.context, self.on_frame_fn, self.on_close_fn);
+            assert(self.connections[0].state == .closed);
+            self.connections[0].init(self.io, &self.pool, fd, self.context, self.on_frame_fn, self.on_close_fn);
+            self.active = 0;
         }
 
         /// Frame header size — re-exported so consumers don't reach
-        /// into Bus.Connection for a constant. SimSidecarBus provides
-        /// this directly without needing a Connection type.
+        /// into Bus.Connection for a constant.
         pub const frame_header_size = Connection.frame_header_size;
+
+        fn active_connection(self: *Self) ?*Connection {
+            const i = self.active orelse return null;
+            return &self.connections[i];
+        }
     };
 }
 

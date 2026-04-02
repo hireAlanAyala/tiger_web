@@ -585,7 +585,6 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
         ///   Sets sidecar_connected = true.
         /// - After handshake: routes to sidecar client (CALL/RESULT).
         pub fn sidecar_on_frame(ctx: *anyopaque, connection_index: u8, frame: []const u8) void {
-            _ = connection_index; // Stage 1: single connection (always 0)
             if (!App.sidecar_enabled) unreachable;
             const server: *Server = @ptrCast(@alignCast(ctx));
 
@@ -593,21 +592,26 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
                 // Handshake: expect READY frame.
                 const protocol = @import("../protocol.zig");
                 const ready = protocol.parse_ready_frame(frame) orelse {
-                    log.warn("sidecar: invalid READY frame, terminating", .{});
-                    server.terminate_sidecar();
+                    log.warn("sidecar: invalid READY frame on slot {d}, terminating", .{connection_index});
+                    server.sidecar_bus.terminate_connection(connection_index);
                     return;
                 };
                 if (ready.version != protocol.protocol_version) {
                     log.warn("sidecar: version mismatch: expected {d}, got {d}", .{
                         protocol.protocol_version, ready.version,
                     });
-                    server.terminate_sidecar();
+                    server.sidecar_bus.terminate_connection(connection_index);
                     return;
                 }
                 server.sidecar_connected = true;
-                log.info("sidecar: connected (version={d})", .{ready.version});
+                server.sidecar_bus.set_active(connection_index);
+                log.info("sidecar: connected slot={d} (version={d})", .{ connection_index, ready.version });
                 return;
             }
+
+            // Only route frames from the active connection. Standby
+            // connections are connected but idle — ignore their frames.
+            if (server.sidecar_bus.active != connection_index) return;
 
             // Normal operation: route to sidecar client.
             server.state_machine.handlers.process_sidecar_frame(frame, server.state_machine.storage);
@@ -631,11 +635,18 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
 
         /// Called when the sidecar bus connection closes.
         pub fn sidecar_on_close(ctx: *anyopaque, connection_index: u8, reason: Handlers.BusType.Connection.CloseReason) void {
-            _ = connection_index; // Stage 1: single connection (always 0)
             if (!App.sidecar_enabled) unreachable;
             const server: *Server = @ptrCast(@alignCast(ctx));
-            server.sidecar_connected = false;
-            log.info("sidecar: disconnected (reason={s})", .{@tagName(reason)});
+            log.info("sidecar: slot {d} disconnected (reason={s})", .{ connection_index, @tagName(reason) });
+
+            // If the closed connection was active, clear active.
+            // For Stage 2+, find_next_ready would switch to standby.
+            if (server.sidecar_bus.active) |active| {
+                if (active == connection_index) {
+                    server.sidecar_bus.set_active(null);
+                    server.sidecar_connected = false;
+                }
+            }
 
             server.state_machine.handlers.on_sidecar_close();
 
