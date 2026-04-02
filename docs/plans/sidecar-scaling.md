@@ -106,39 +106,45 @@ On crash of A:
 
 #### Bus changes (transport layer)
 
-The bus gains multi-connection support. It is a dumb pool — no
-routing policy, no "active" concept. TB pattern: the bus manages
-connections, the consumer (server) manages routing.
+The bus gains multi-connection support and a default active route.
+TB pattern: bus stores `replicas[N]` and routes `send_message_to_replica(N)`
+to the right connection. Our equivalent: bus stores `connections[N]`
+and routes `send_message()` to `connections[active]`.
+
+The bus knows which connection is active — set by the server via
+`bus.set_active(index)`. This means `send_message()` doesn't change
+signature. The SidecarClient is oblivious to multi-connection.
 
 ```zig
-// connections array replaces single connection field
 connections: [max_connections]Connection,
-connections_count: u8,  // from options, set at init
+connections_count: u8,       // from options, set at init
+active: ?u8 = null,          // set by server, used by send_message
+accept_pending: [max_connections]bool,
+accept_completions: [max_connections]IO.Completion,
 
 // Pool sized for N connections:
 // N recv messages + N * send_queue_max + 1 burst
 const messages_max = connections_count * (1 + send_queue_max) + 1;
 ```
 
+**Why active is on the bus, not the server:**
+TB's `send_message_to_replica(N)` is a bus method that routes by
+index. Our `send_message()` routes by `self.active`. The client
+calls `bus.send_message(msg, len)` — unchanged from Stage 1.
+The bus routes internally. If active is null, send silently drops
+(returns false). TB does the same: if `replicas[N]` is null,
+the message is dropped with a debug log.
+
 **Callback signatures gain connection index:**
 ```zig
-// Before (single connection):
-on_frame_fn: *const fn (*anyopaque, []const u8) void,
-on_close_fn: ?*const fn (*anyopaque, CloseReason) void,
-
-// After (N connections):
 on_frame_fn: *const fn (*anyopaque, u8, []const u8) void,
 on_close_fn: ?*const fn (*anyopaque, u8, CloseReason) void,
 ```
 
-The connection index tells the server which connection sent the
-frame or closed. Without this, READY handshake per-connection
-and failover routing are impossible.
-
 **tick_accept fills ALL empty slots:**
 ```zig
 fn tick_accept(self: *Self) void {
-    for (self.connections[0..self.connections_count]) |*conn, i| {
+    for (self.connections[0..self.connections_count], 0..) |*conn, i| {
         if (conn.state == .closed and !self.accept_pending[i]) {
             self.accept_pending[i] = true;
             self.io.accept(self.listen_fd, &self.accept_completions[i], ...);
@@ -147,45 +153,55 @@ fn tick_accept(self: *Self) void {
 }
 ```
 
-Current bus accepts one connection at a time. With N slots, multiple
-sidecars might connect on the same tick (e.g., supervisor spawns 2).
-
-**Bus interface additions:**
+**Bus interface — what changes, what doesn't:**
 ```zig
-pub fn is_connection_ready(self, index: u8) bool;
-pub fn send_to_connection(self, index: u8, msg, len) void;
+// Unchanged (client calls these — oblivious to multi-connection):
+pub fn send_message(self, msg, len) void;  // routes to connections[active]
+pub fn is_connected(self) bool;            // connections[active].state == .connected
+pub fn can_send(self) bool;                // connections[active] send queue
+pub fn get_message(self) *Message;         // shared pool
+pub fn unref(self, msg) void;              // shared pool
+pub const frame_header_size;               // unchanged
+
+// New:
+pub fn set_active(self, index: ?u8) void;  // server sets after READY/failover
 pub fn terminate_connection(self, index: u8) void;
-pub fn get_message(self) *Message;  // unchanged (shared pool)
-pub fn unref(self, msg) void;       // unchanged
+pub fn connection_count(self) u8;
 ```
 
-Stage 1 compatibility: `is_connected()`, `send_message()` etc.
-delegate to connection[0] when connections_count == 1. No breaking
-change for single-connection usage.
+Stage 1 compatibility: `connections_count = 1`, `active = 0`.
+All existing methods work unchanged.
 
 #### Server changes (routing + failover)
 
-The server owns routing and failover. The bus doesn't know what
-"active" means.
+The server owns READY tracking and failover decisions. The bus
+owns the active route (set by server). SidecarClient is unchanged.
 
 ```zig
-// Replace single bool with per-connection + active tracking
-sidecar_active: ?u8 = null,           // which connection to dispatch to
-sidecar_connections_ready: [max]bool,  // READY handshake complete per slot
+// Per-connection READY tracking (replaces single sidecar_connected bool)
+sidecar_connections_ready: [max]bool,
 ```
+
+`sidecar_connected` becomes a computed property:
+`bus.active != null and sidecar_connections_ready[bus.active.?]`
 
 **sidecar_on_frame(ctx, connection_index, frame):**
 ```zig
 fn sidecar_on_frame(ctx, index: u8, frame: []const u8) void {
     if (!server.sidecar_connections_ready[index]) {
         // READY handshake for THIS connection
-        validate_ready(frame) → sidecar_connections_ready[index] = true;
-        if (server.sidecar_active == null) {
-            server.sidecar_active = index;  // first ready = active
+        validate_ready(frame);
+        server.sidecar_connections_ready[index] = true;
+        if (server.sidecar_bus.active == null) {
+            server.sidecar_bus.set_active(index);  // first ready = active
         }
         return;
     }
-    // Normal frame: route to sidecar client
+    // Only route frames from the ACTIVE connection to the client.
+    // Standby connections are connected but idle — they don't
+    // send unsolicited frames. If one does, ignore it.
+    if (index != server.sidecar_bus.active.?) return;
+
     handlers.process_sidecar_frame(frame, storage);
 }
 ```
@@ -194,34 +210,78 @@ fn sidecar_on_frame(ctx, index: u8, frame: []const u8) void {
 ```zig
 fn sidecar_on_close(ctx, index: u8, reason) void {
     server.sidecar_connections_ready[index] = false;
-    if (server.sidecar_active == index) {
-        // Active connection crashed — find standby
-        server.sidecar_active = find_next_ready(server);
-        // If null: no ready connections, 503 until reconnect
+
+    if (server.sidecar_bus.active != null and
+        server.sidecar_bus.active.? == index)
+    {
+        // Active connection crashed — find standby.
+        const next = find_next_ready(server);
+        server.sidecar_bus.set_active(next);
+        // If null: no ready connections, 503 until reconnect.
     }
-    // Pipeline recovery: same as Stage 1
+
+    // Pipeline recovery — same as Stage 1.
+    // Reset client state. TB pattern: client timeout + retry.
+    // Our serial pipeline just resets — the next tick re-dispatches
+    // (or returns 503 if no active connection).
+    handlers.on_sidecar_close();
     if (commit_stage == .render) render_crash_fallback();
     else if (commit_stage != .idle) pipeline_reset();
 }
 ```
 
-#### SidecarClient per-connection pairing
+**In-flight CALL during failover (TB pattern):**
+When the active connection dies mid-CALL:
+1. `sidecar_on_close` resets client state (call_state → idle)
+2. `sidecar_on_close` switches active to standby
+3. `pipeline_reset` clears the pipeline
+4. Next tick: `process_inbox` re-enters commit_dispatch
+5. If active is non-null: re-dispatches the CALL on the standby
+6. If active is null: returns 503
 
-The SidecarClient has one `call_state` — it tracks one in-flight
-CALL at a time (serial pipeline). With N connections, the client
-must know WHICH connection the CALL was sent on.
+The SidecarClient doesn't track connections. It gets reset on
+close, then reused for the next CALL on whatever connection the
+bus routes to. TB's client works the same way — timeout, reset,
+resend.
 
-```zig
-// Add to SidecarClient:
-active_connection_index: ?u8 = null,
-```
+**No re-dispatch in Stage 2** — pipeline_reset returns 503.
+The NEXT request goes to the standby. The user who hit the crash
+gets 503; the next user gets 200. This is acceptable for Stage 2
+(serial pipeline). Stage 3 (concurrent) could re-dispatch.
 
-`call_submit` stores the index. `on_frame` validates the frame
-came from the expected connection. `on_close` resets if the closed
-connection was the one with the in-flight CALL.
+#### SidecarClient — unchanged
+
+The client calls `bus.send_message()`. The bus routes to
+`connections[active]`. The client doesn't know about connections,
+indices, or failover. It's a protocol state machine: submit CALL,
+process RESULT. Same code as Stage 1.
 
 One client is sufficient for Stage 2 (serial pipeline — one CALL
-at a time). Stage 3 (concurrent pipeline) needs N clients.
+at a time). Stage 3 needs N clients (one per pipeline slot).
+
+#### Invariants
+
+```zig
+// In server.invariants():
+
+// Active connection must be ready.
+if (server.sidecar_bus.active) |active| {
+    assert(server.sidecar_connections_ready[active]);
+}
+
+// Pipeline in-flight requires an active connection (or native handlers).
+if (App.sidecar_enabled and server.commit_stage != .idle) {
+    // Active may be null if the connection just crashed
+    // and on_close hasn't run yet. This is transient.
+}
+
+// Ready count <= connections count.
+var ready_count: u8 = 0;
+for (server.sidecar_connections_ready[0..bus.connections_count]) |r| {
+    if (r) ready_count += 1;
+}
+assert(ready_count <= bus.connections_count);
+```
 
 #### Supervisor changes
 
@@ -277,17 +337,20 @@ HTTP → Server (1 core) → Bus (4 connections)
 3. **Callback signature** — on_frame_fn and on_close_fn gain
    connection_index parameter. Single-connection callers pass 0.
    This is the foundation — everything else depends on it.
-4. **Multi-connection bus** — connections array, per-slot accept,
-   pool sizing for N, send_to_connection(index), terminate_connection(index)
+4. **Multi-connection bus** — connections array, active index,
+   per-slot accept, pool sizing for N, set_active(index),
+   send_message routes to connections[active]
 5. **Server per-connection state** — sidecar_connections_ready[N],
-   sidecar_active index, sidecar_on_frame/on_close with index
-6. **SidecarClient connection pairing** — active_connection_index
-   field, reset on disconnect of paired connection
-7. **Supervisor N children** — processes array, --sidecar-count
-8. **Hot standby failover** — on_close switches active to standby.
-   Sim test: kill A, next request hits B without 503.
-9. **Concurrent pipeline** (separate plan) — Stage 3
-10. **Round-robin dispatch** — Stage 3
+   sidecar_on_frame/on_close with index, set_active on READY/failover
+6. **Supervisor N children** — processes array, --sidecar-count
+7. **Hot standby sim tests** — two SimSidecars on two slots.
+   Kill A, next request hits B. Verify no 503 during failover.
+8. **Concurrent pipeline** (separate plan) — Stage 3
+9. **Round-robin dispatch** — Stage 3
+
+Note: SidecarClient is UNCHANGED for Stage 2. It calls
+bus.send_message() which routes to connections[active].
+The client is a protocol state machine, not a routing layer.
 
 ## Why there's no "worker"
 
