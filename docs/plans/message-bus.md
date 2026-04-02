@@ -1655,7 +1655,45 @@ CRC mismatches — all reported as events, not assert-crashes.
 ### What this doesn't fix
 
 **Root cause 2 (implicit callback wiring):** See below.
-**Root cause 4 (process lifecycle):** See `decision-sidecar-lifecycle.md`.
+**Root cause 4 (process lifecycle):** See section below.
+
+## Sidecar process lifecycle (root cause 4)
+
+> **Deferred** until second adapter (Python/Go). See also:
+> `docs/internal/decision-sidecar-lifecycle.md`.
+
+### The problem
+
+The server knows the sidecar's PID (from READY handshake) but
+doesn't control how the process was spawned. `kill(pid, SIGKILL)`
+may kill a wrapper (npx, poetry) while the actual process holding
+the socket survives as an orphan.
+
+### Current state
+
+- READY frame carries `[version: u16 BE][pid: u32 BE]`
+- Server calls `kill(pid, SIGKILL)` on protocol violations
+- E2e test spawns node directly (no wrapper) to avoid the issue
+- The hypervisor (systemd, docker) should ensure PID accuracy
+
+### Future fix: flags byte in READY
+
+```
+[tag: 0x20][version: u16 BE][pid: u32 BE][flags: u8]
+```
+
+- bit 0: `kill_group` — use `kill(-pid)` (process group kill)
+- bit 1-7: reserved
+
+The adapter sets flags based on its runtime. The server reads
+them. Each language adapter declares its own kill semantics.
+
+### Alternative: server spawns sidecar
+
+If the server spawns the sidecar itself (not the hypervisor),
+it can `setsid()` to create a new process group. Then
+`kill(-pid, SIGKILL)` always works. But this means the server
+owns process management — more complexity, less separation.
 
 ## Connection redesign: typed consumer (root cause 2)
 
