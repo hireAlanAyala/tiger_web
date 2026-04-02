@@ -550,6 +550,13 @@ pub const SimIO = struct {
                 }
                 for (&self.clients) |*client| {
                     if (client.connected and client.fd == completion.fd) {
+                        // After shutdown, recv returns -1 (connection reset).
+                        // Models real behavior: shutdown(SHUT_BOTH) → recv
+                        // returns 0/EOF. This unblocks terminate_join.
+                        if (client.server_closed) {
+                            completion.callback(completion.context, -1);
+                            return;
+                        }
                         const remaining = client.send_len - client.send_pos;
                         if (remaining == 0) {
                             completion.operation = .recv;

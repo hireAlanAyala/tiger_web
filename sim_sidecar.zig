@@ -52,6 +52,11 @@ const SimSidecar = struct {
     response_len: u32,
     response_pending: bool,
 
+    /// Count of CALLs processed. Tests use this to detect pipeline
+    /// progress (e.g., wait until handle CALL is done before
+    /// injecting a fault during render).
+    calls_processed: u32,
+
     fn init(io: *SimIO, slot: usize, listen_fd: SimIO.fd_t) SimSidecar {
         return .{
             .io = io,
@@ -63,6 +68,7 @@ const SimSidecar = struct {
             .response_buf = undefined,
             .response_len = 0,
             .response_pending = false,
+            .calls_processed = 0,
         };
     }
 
@@ -187,6 +193,7 @@ const SimSidecar = struct {
         // Wrap in CRC wire frame and queue for injection.
         self.response_len = @intCast(build_wire_frame_into(&self.response_buf, result_payload[0..pos]));
         self.response_pending = true;
+        self.calls_processed += 1;
     }
 
     /// Build route RESULT data: [operation: u8][id: 16 bytes LE][body]
@@ -492,5 +499,138 @@ test "sidecar: connect then disconnect before READY → 503" {
     h.connect_http();
     h.inject_post();
     const resp = h.wait_response(500) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(u16, 503), resp.status_code);
+}
+
+test "sidecar: response timeout → terminate → 503" {
+    var h: TestHarness = undefined;
+    try h.init();
+    defer h.deinit();
+
+    h.connect_sidecar();
+    h.connect_http();
+    h.inject_post();
+
+    // Run enough ticks for the HTTP request to be fully received
+    // (partial delivery) and the pipeline to start. The server
+    // sends the route CALL to the sidecar.
+    for (0..50) |_| {
+        h.server.tick();
+        h.io.run_for_ns(10 * std.time.ns_per_ms);
+        if (h.server.state_machine.handlers.is_handler_pending()) break;
+    }
+
+    // Verify the pipeline is pending — sidecar CALL is in-flight.
+    try std.testing.expect(h.server.sidecar_connected);
+    try std.testing.expect(h.server.state_machine.handlers.is_handler_pending());
+
+    // Tick past the 500-tick timeout WITHOUT ticking the sidecar.
+    for (0..600) |_| {
+        h.server.tick();
+        h.io.run_for_ns(10 * std.time.ns_per_ms);
+    }
+
+    // Server should have terminated the connection after timeout.
+    try std.testing.expect(!h.server.sidecar_connected);
+
+    // The original request's connection was closed during timeout.
+    // Reconnect and verify 503 (sidecar is disconnected).
+    h.reconnect_http();
+    h.inject_post();
+    const resp = h.wait_response(100) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(u16, 503), resp.status_code);
+}
+
+test "sidecar: disconnect during render → fallback HTML" {
+    var h: TestHarness = undefined;
+    try h.init();
+    defer h.deinit();
+
+    h.connect_sidecar();
+    h.connect_http();
+    h.inject_post();
+
+    // Tick until route + prefetch + handle CALLs are done (3 calls).
+    // The sidecar responds normally to these. Then the server enters
+    // the render stage and sends the render CALL.
+    for (0..500) |_| {
+        h.server.tick();
+        h.sidecar.tick();
+        h.io.run_for_ns(10 * std.time.ns_per_ms);
+
+        // 3 calls = route + prefetch + handle. The render CALL
+        // has been sent but the sidecar hasn't responded yet
+        // (response_pending is set on the next tick).
+        if (h.sidecar.calls_processed >= 3) break;
+    }
+    try std.testing.expectEqual(@as(u32, 3), h.sidecar.calls_processed);
+
+    // The handle RESULT is pending in the sidecar (built but not
+    // injected). Tick the sidecar once to inject it. The render
+    // CALL hasn't been sent yet (server hasn't processed handle
+    // RESULT), so the sidecar won't read the render CALL.
+    h.sidecar.tick();
+
+    // Now tick the server to process the handle RESULT → execute
+    // (sync) → enter render → send render CALL.
+    for (0..20) |_| {
+        h.server.tick();
+        h.io.run_for_ns(10 * std.time.ns_per_ms);
+    }
+
+    // The server is in .render, render CALL is in the sidecar's
+    // recv_buf but the sidecar hasn't processed it (we didn't tick).
+    // Disconnect during render. Writes are already committed.
+    // The server must NOT retry (would duplicate writes). It sends
+    // fallback HTML instead.
+    h.sidecar.disconnect();
+    for (0..20) |_| {
+        h.server.tick();
+        h.io.run_for_ns(10 * std.time.ns_per_ms);
+    }
+
+    const resp = h.wait_response(100) orelse return error.TestUnexpectedResult;
+    // Fallback response is 200 (operation succeeded, render degraded).
+    try std.testing.expectEqual(@as(u16, 200), resp.status_code);
+    // Body contains the fallback text, not the sidecar's "<div>sim</div>".
+    try std.testing.expect(std.mem.indexOf(u8, resp.body, "Operation completed") != null);
+}
+
+test "sidecar: protocol violation → terminate → 503" {
+    var h: TestHarness = undefined;
+    try h.init();
+    defer h.deinit();
+
+    h.connect_sidecar();
+    h.connect_http();
+    h.inject_post();
+
+    // Let the server send the CALL to the sidecar.
+    for (0..10) |_| {
+        h.server.tick();
+        // Don't tick sidecar — we'll inject a bad response manually.
+        h.io.run_for_ns(10 * std.time.ns_per_ms);
+    }
+
+    // Inject a malformed RESULT with wrong request_id.
+    // The sidecar client validates request_id and sets protocol_violation.
+    var result_payload: [6]u8 = undefined;
+    result_payload[0] = @intFromEnum(protocol.CallTag.result);
+    std.mem.writeInt(u32, result_payload[1..5], 0xDEADBEEF, .big); // wrong id
+    result_payload[5] = @intFromEnum(protocol.ResultFlag.success);
+    var wire_buf: [14]u8 = undefined;
+    const wire = build_wire_frame(&wire_buf, &result_payload);
+    h.io.inject_bytes(TestHarness.sidecar_slot, wire);
+
+    // Tick to deliver the bad frame.
+    h.run(20);
+
+    // Server detected protocol violation → terminated connection.
+    try std.testing.expect(!h.server.sidecar_connected);
+
+    // Next request gets 503.
+    h.reconnect_http();
+    h.inject_post();
+    const resp = h.wait_response(100) orelse return error.TestUnexpectedResult;
     try std.testing.expectEqual(@as(u16, 503), resp.status_code);
 }
