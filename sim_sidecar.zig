@@ -7,7 +7,6 @@
 //! framework pipeline, not handler logic.
 //!
 //! This binary is compiled with sidecar_enabled = true (via build_options).
-//! The root module re-exports build_options so app.zig reads it.
 
 const std = @import("std");
 const assert = std.debug.assert;
@@ -176,9 +175,9 @@ const SimSidecar = struct {
         } else if (std.mem.eql(u8, name, "handle")) {
             pos += build_handle_result(result_payload[pos..]);
         } else if (std.mem.eql(u8, name, "render")) {
-            const html = "<div>sim</div>";
-            @memcpy(result_payload[pos..][0..html.len], html);
-            pos += html.len;
+            const html_content = "<div>sim</div>";
+            @memcpy(result_payload[pos..][0..html_content.len], html_content);
+            pos += html_content.len;
         } else {
             // Unknown function — still return success with empty data.
         }
@@ -189,7 +188,6 @@ const SimSidecar = struct {
     }
 
     /// Build route RESULT data: [operation: u8][id: 16 bytes LE][body]
-    /// Parses the route args to extract method + path, maps to an operation.
     fn build_route_result(_: *SimSidecar, buf: []u8, args: []const u8) usize {
         // Args: [method: u8][path_len: u16 BE][path][body_len: u16 BE][body]
         assert(args.len >= 5);
@@ -204,7 +202,6 @@ const SimSidecar = struct {
         apos += 2;
         const body = args[apos..][0..body_len];
 
-        // Simple path → operation mapping for sim.
         const op: message.Operation = if (std.mem.eql(u8, path, "/products"))
             .create_product
         else
@@ -213,10 +210,8 @@ const SimSidecar = struct {
         var pos: usize = 0;
         buf[pos] = @intFromEnum(op);
         pos += 1;
-        // id: 16 bytes LE (zero UUID).
-        @memset(buf[pos..][0..16], 0);
+        @memset(buf[pos..][0..16], 0); // zero UUID
         pos += 16;
-        // Copy body if present.
         if (body.len > 0) {
             @memcpy(buf[pos..][0..body.len], body);
             pos += body.len;
@@ -245,8 +240,6 @@ const SimSidecar = struct {
 // CRC wire frame helpers
 // =====================================================================
 
-/// Build a CRC wire frame into a caller-provided buffer.
-/// Returns the total frame length (8 + payload.len).
 fn build_wire_frame_into(buf: []u8, payload: []const u8) usize {
     const len: u32 = @intCast(payload.len);
     const total = 8 + payload.len;
@@ -263,15 +256,105 @@ fn build_wire_frame_into(buf: []u8, payload: []const u8) usize {
     return total;
 }
 
-/// Build a CRC wire frame — returns a slice into the provided buffer.
 fn build_wire_frame(buf: []u8, payload: []const u8) []const u8 {
     const total = build_wire_frame_into(buf, payload);
     return buf[0..total];
 }
 
 // =====================================================================
-// Test infrastructure
+// Test harness — shared setup/teardown for all sidecar sim tests
 // =====================================================================
+
+const TestHarness = struct {
+    io: SimIO,
+    storage: Storage,
+    sm: StateMachine,
+    server: Server,
+    sidecar: SimSidecar,
+    allocator: std.mem.Allocator,
+
+    const http_listen_fd: SimIO.fd_t = 1;
+    const sidecar_listen_fd: SimIO.fd_t = 2;
+    const sidecar_slot: usize = 0;
+    const http_slot: usize = 1;
+
+    /// In-place init — the harness must be at its final address
+    /// before init because Server stores &io and &sm pointers.
+    /// Caller: `var h: TestHarness = undefined; try h.init();`
+    fn init(h: *TestHarness) !void {
+        h.allocator = std.testing.allocator;
+        h.io = SimIO.init(12345);
+        h.storage = try Storage.init(":memory:");
+
+        var time_sim = TimeSim{};
+        h.sm = StateMachine.init(&h.storage, .{}, false, 0, test_key);
+        h.server = try Server.init(h.allocator, &h.io, &h.sm, http_listen_fd, time_sim.time(), null);
+        try h.server.wire_sidecar(h.allocator, null);
+        h.server.sidecar_bus.listen_fd = sidecar_listen_fd;
+
+        h.sidecar = SimSidecar.init(&h.io, sidecar_slot, sidecar_listen_fd);
+    }
+
+    fn deinit(h: *TestHarness) void {
+        // Disconnect sidecar and drain until bus connection closes.
+        if (h.io.clients[sidecar_slot].connected) {
+            h.sidecar.disconnect();
+        }
+        for (0..50) |_| {
+            h.server.tick();
+            h.io.run_for_ns(10 * std.time.ns_per_ms);
+        }
+        h.server.sidecar_bus.deinit(h.allocator);
+        h.server.deinit(h.allocator);
+        h.storage.deinit();
+    }
+
+    /// Connect sidecar and complete READY handshake.
+    fn connect_sidecar(h: *TestHarness) void {
+        h.sidecar.connect();
+        h.run(10); // accept
+        h.sidecar.inject_ready();
+        h.run(10); // READY delivered
+    }
+
+    /// Connect HTTP client on http_slot.
+    fn connect_http(h: *TestHarness) void {
+        h.io.connect_client(http_slot, http_listen_fd);
+        h.run(5); // accept
+    }
+
+    /// Reconnect HTTP client (after Connection: close response).
+    fn reconnect_http(h: *TestHarness) void {
+        h.io.clear_response(http_slot);
+        h.run(10); // let close complete
+        h.io.connect_client(http_slot, http_listen_fd);
+        h.run(5); // accept
+    }
+
+    /// Inject a POST to /products.
+    fn inject_post(h: *TestHarness) void {
+        const body = "{\"id\":\"aabbccdd11223344aabbccdd11223344\",\"name\":\"Widget\",\"price_cents\":100}";
+        h.io.inject_post(http_slot, "/products", body);
+    }
+
+    /// Run N ticks (server + sidecar + IO).
+    fn run(h: *TestHarness, n: usize) void {
+        run_ticks(&h.server, &h.sidecar, &h.io, n);
+    }
+
+    /// Run until HTTP response or timeout. Tries both keep-alive and
+    /// close responses (503 uses Connection: close).
+    fn wait_response(h: *TestHarness, max_ticks: usize) ?SimIO.HttpResponse {
+        for (0..max_ticks) |_| {
+            h.server.tick();
+            h.sidecar.tick();
+            h.io.run_for_ns(10 * std.time.ns_per_ms);
+            if (h.io.read_response(http_slot)) |resp| return resp;
+            if (h.io.read_close_response(http_slot)) |resp| return resp;
+        }
+        return null;
+    }
+};
 
 fn run_ticks(server: *Server, sidecar: *SimSidecar, io: *SimIO, n: usize) void {
     for (0..n) |_| {
@@ -291,18 +374,6 @@ fn run_until_response(server: *Server, sidecar: *SimSidecar, io: *SimIO, client_
     return null;
 }
 
-/// Write "Cookie: <name>=<signed_value>\r\n" into buf.
-fn write_cookie_header(buf: []u8) usize {
-    const prefix = "Cookie: " ++ auth.cookie_name ++ "=";
-    @memcpy(buf[0..prefix.len], prefix);
-    var cookie_buf: [auth.cookie_value_max]u8 = undefined;
-    const cookie_val = auth.sign_cookie(&cookie_buf, 1, .authenticated, test_key);
-    @memcpy(buf[prefix.len..][0..cookie_val.len], cookie_val);
-    const crlf = "\r\n";
-    @memcpy(buf[prefix.len + cookie_val.len ..][0..crlf.len], crlf);
-    return prefix.len + cookie_val.len + crlf.len;
-}
-
 // =====================================================================
 // Tests
 // =====================================================================
@@ -312,61 +383,121 @@ test {
 }
 
 test "sidecar: basic request-response" {
-    const allocator = std.testing.allocator;
-    var sim_io = SimIO.init(12345);
-    var storage = try Storage.init(":memory:");
-    defer storage.deinit();
+    var h: TestHarness = undefined;
+    try h.init();
+    defer h.deinit();
 
-    const http_listen_fd: SimIO.fd_t = 1;
-    const sidecar_listen_fd: SimIO.fd_t = 2;
+    h.connect_sidecar();
+    try std.testing.expect(h.server.sidecar_connected);
 
-    var sm = StateMachine.init(&storage, .{}, false, 0, test_key);
-    var time_sim = TimeSim{};
-    var server = try Server.init(allocator, &sim_io, &sm, http_listen_fd, time_sim.time(), null);
-    defer server.deinit(allocator);
+    h.connect_http();
+    h.inject_post();
 
-    // Wire sidecar bus. null path = sim mode — set listen_fd directly.
-    try server.wire_sidecar(allocator, null);
-    server.sidecar_bus.listen_fd = sidecar_listen_fd;
-
-    // Connect sidecar — accept, then READY handshake.
-    var sidecar = SimSidecar.init(&sim_io, 0, sidecar_listen_fd);
-    defer {
-        // Disconnect the sidecar client and drain until the bus
-        // connection closes. The 3-phase terminate needs IO
-        // completions to drain (recv returns -1 → terminate_join
-        // → terminate_close).
-        if (sim_io.clients[0].connected) {
-            sidecar.disconnect();
-        }
-        for (0..50) |_| {
-            server.tick();
-            sim_io.run_for_ns(10 * std.time.ns_per_ms);
-        }
-        server.sidecar_bus.deinit(allocator);
-    }
-    sidecar.connect();
-    run_ticks(&server, &sidecar, &sim_io, 10); // accept completes
-    sidecar.inject_ready();
-    run_ticks(&server, &sidecar, &sim_io, 10); // READY delivered
-
-    // Verify sidecar is connected.
-    try std.testing.expect(server.sidecar_connected);
-
-    // Connect HTTP client and inject request.
-    sim_io.connect_client(1, http_listen_fd);
-    run_ticks(&server, &sidecar, &sim_io, 5);
-
-    // Inject a POST to /products (will be routed as create_product by SimSidecar).
-    const body = "{\"id\":\"aabbccdd11223344aabbccdd11223344\",\"name\":\"Widget\",\"price_cents\":100}";
-    sim_io.inject_post(1, "/products", body);
-
-    // Run until we get an HTTP response.
-    const resp = run_until_response(&server, &sidecar, &sim_io, 1, 500) orelse
-        return error.TestUnexpectedResult;
-
-    // Sidecar pipeline completed — we got a response.
-    // The status code depends on whether the sidecar render returned valid HTML.
-    // With our hardcoded "<div>sim</div>", the server should return 200.
+    const resp = h.wait_response(500) orelse return error.TestUnexpectedResult;
     try std.testing.expectEqual(@as(u16, 200), resp.status_code);
+}
+
+test "sidecar: down at startup → 503" {
+    var h: TestHarness = undefined;
+    try h.init();
+    defer h.deinit();
+
+    // Don't connect sidecar — server has no sidecar.
+    try std.testing.expect(!h.server.sidecar_connected);
+
+    h.connect_http();
+    h.inject_post();
+
+    const resp = h.wait_response(500) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(u16, 503), resp.status_code);
+}
+
+test "sidecar: disconnect mid-request → 503" {
+    var h: TestHarness = undefined;
+    try h.init();
+    defer h.deinit();
+
+    h.connect_sidecar();
+    h.connect_http();
+    h.inject_post();
+
+    // Let the server start processing (CALL sent to sidecar).
+    h.run(5);
+
+    // Disconnect sidecar mid-exchange.
+    h.sidecar.disconnect();
+    h.run(20); // drain disconnect, on_close fires, pipeline resets
+
+    // Server should return 503 (pipeline was reset).
+    const resp = h.wait_response(500) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(u16, 503), resp.status_code);
+}
+
+test "sidecar: reconnect after disconnect → 200" {
+    var h: TestHarness = undefined;
+    try h.init();
+    defer h.deinit();
+
+    h.connect_sidecar();
+    h.connect_http();
+
+    // First request succeeds.
+    h.inject_post();
+    const resp1 = h.wait_response(500) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(u16, 200), resp1.status_code);
+
+    // Disconnect sidecar.
+    h.sidecar.disconnect();
+    h.run(20); // drain disconnect
+    try std.testing.expect(!h.server.sidecar_connected);
+
+    // Reconnect sidecar.
+    h.connect_sidecar();
+    try std.testing.expect(h.server.sidecar_connected);
+
+    // New request succeeds.
+    h.reconnect_http();
+    h.inject_post();
+    const resp2 = h.wait_response(500) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(u16, 200), resp2.status_code);
+}
+
+test "sidecar: multiple requests during disconnect → all 503" {
+    var h: TestHarness = undefined;
+    try h.init();
+    defer h.deinit();
+
+    // Don't connect sidecar.
+    h.connect_http();
+
+    // First request → 503.
+    h.inject_post();
+    const resp1 = h.wait_response(500) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(u16, 503), resp1.status_code);
+
+    // Second request → 503 (reconnect because Connection: close).
+    h.reconnect_http();
+    h.inject_post();
+    const resp2 = h.wait_response(500) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(u16, 503), resp2.status_code);
+}
+
+test "sidecar: connect then disconnect before READY → 503" {
+    var h: TestHarness = undefined;
+    try h.init();
+    defer h.deinit();
+
+    // Connect sidecar but don't send READY.
+    h.sidecar.connect();
+    h.run(10); // accept completes
+    // Disconnect before READY.
+    h.sidecar.disconnect();
+    h.run(20); // drain
+
+    try std.testing.expect(!h.server.sidecar_connected);
+
+    h.connect_http();
+    h.inject_post();
+    const resp = h.wait_response(500) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(u16, 503), resp.status_code);
 }
