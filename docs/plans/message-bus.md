@@ -1596,6 +1596,80 @@ either:
 Then delete `TestIO` and `TestContext` from `message_bus.zig`.
 Two IO implementations (production + simulation), not three.
 
+## Connection redesign: "report, don't decide"
+
+> **Not yet scheduled.** Do before Phase 4 if time allows,
+> otherwise after. Fixes root causes 1 and 3 from Phase 3 audit.
+
+### The problem
+
+The Connection terminates on every error: CRC mismatch, recv
+returning -1, send returning 0, oversized frame. TB does this
+because TB has consensus — losing one connection is a non-event.
+A web server needs availability — every terminated connection
+is a failed request.
+
+The sidecar protocol is stateless per-request. Each CALL/RESULT
+is independent. A corrupt RESULT doesn't corrupt the next one.
+TCP guarantees ordering — a CRC mismatch is a one-off, not a
+stream desync. Terminating the entire connection is too aggressive.
+
+### The fix: Connection reports, consumer decides
+
+Replace `on_frame_fn: fn(*anyopaque, []const u8)` with
+`on_event_fn: fn(*anyopaque, Event)`:
+
+```zig
+const Event = union(enum) {
+    frame: []const u8,   // valid CRC-checked frame payload
+    crc_error,           // frame failed CRC — data available but corrupt
+    oversized: u32,      // frame claims size > frame_max
+    eof,                 // peer closed (recv returned 0)
+    recv_error,          // recv returned -1
+    send_error,          // send returned -1 or 0
+};
+```
+
+The Connection never calls `terminate`. The consumer switches on
+the event and decides:
+
+- `frame` → process it (current behavior)
+- `crc_error` → sidecar: set protocol_violation, kill. HTTP: drop, continue
+- `oversized` → terminate (malicious peer)
+- `eof` → terminate (peer gone)
+- `recv_error` → sidecar: retry or kill. HTTP: close connection
+- `send_error` → terminate (can't send response)
+
+### What this fixes
+
+**Root cause 1 (fragile transport):** The fuzzer can sustain long
+exchanges because one CRC error doesn't kill the connection. The
+consumer drops the bad frame and continues. No weight caps, no
+error-free drain.
+
+**Root cause 3 (assert at trust boundary):** The Connection never
+asserts on external input. It reports. The consumer (which knows
+the trust model) decides. Unsolicited frames, send queue overflow,
+CRC mismatches — all reported as events, not assert-crashes.
+
+### What this doesn't fix
+
+**Root cause 2 (implicit callback wiring):** Still `*anyopaque`.
+**Root cause 4 (process lifecycle):** Separate concern.
+
+### Implementation scope
+
+- Change `on_frame_fn` to `on_event_fn` on ConnectionType
+- Update `advance()` to report crc_error instead of terminate
+- Update `recv_callback` to report eof/recv_error
+- Update `send_callback` to report send_error
+- Update all consumers: server HTTP connections, sidecar bus
+- Update FuzzIO tick helpers
+- Update fuzzers and unit tests
+
+This is a significant refactor — every consumer changes. But it's
+the right primitive for a web server with external sidecar.
+
 ## Phase 4: SimSidecar
 
 Simulation primitive for sim tests. Replaces the current no-op
