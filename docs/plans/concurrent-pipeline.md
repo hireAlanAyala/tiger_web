@@ -29,6 +29,19 @@ HTTP → Server (1 core) → Bus (4 connections)
 | 2 | ~50K req/s | 3 | ~110MB |
 | 4 | ~100K req/s | 5 | ~210MB |
 
+## Architecture matches TB
+
+```
+TB:   prefetch (async) → execute (sync, exclusive) → compact (async)
+Ours: prefetch (async) → handle (sync, exclusive) → render (async)
+```
+
+Both have a fast synchronous exclusive step between two async steps.
+Both serialize writes while overlapping reads. Both are single-threaded
+with no locks — just a stage gate. TB uses io_uring for storage IO,
+we use sidecar CALL/RESULT for handler IO. Both callback-driven,
+non-blocking.
+
 ## TB patterns applied
 
 ### 1. Reads overlap, writes are exclusive
