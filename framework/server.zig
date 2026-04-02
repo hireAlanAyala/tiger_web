@@ -149,11 +149,10 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
 
         /// Binary sidecar state: connected (handshake complete) or not.
         /// All request routing checks this field. No partial states,
-        /// no retries. Present or absent.
+        /// no retries. Present or absent. Read by main.zig's
+        /// composition root to wire disconnect→supervisor.request_restart
+        /// and READY→supervisor.notify_connected.
         sidecar_connected: bool = false,
-        /// Sidecar process ID — from READY handshake. Used for
-        /// SIGKILL on protocol violations.
-        sidecar_pid: u32 = 0,
 
         /// Initialize the server. Allocates the connection pool on the heap.
         /// When sidecar_enabled, also initializes the embedded Bus and Client,
@@ -567,8 +566,8 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
 
         /// Called by the sidecar bus when a frame is received.
         /// Two modes:
-        /// - Before handshake: expects READY frame. Validates version
-        ///   and stores PID. Sets sidecar_connected = true.
+        /// - Before handshake: expects READY frame. Validates version.
+        ///   Sets sidecar_connected = true.
         /// - After handshake: routes to sidecar client (CALL/RESULT).
         pub fn sidecar_on_frame(ctx: *anyopaque, frame: []const u8) void {
             if (!App.sidecar_enabled) unreachable;
@@ -578,34 +577,32 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
                 // Handshake: expect READY frame.
                 const protocol = @import("../protocol.zig");
                 const ready = protocol.parse_ready_frame(frame) orelse {
-                    log.warn("sidecar: invalid READY frame, killing", .{});
-                    server.kill_sidecar();
+                    log.warn("sidecar: invalid READY frame, terminating", .{});
+                    server.terminate_sidecar();
                     return;
                 };
                 if (ready.version != protocol.protocol_version) {
                     log.warn("sidecar: version mismatch: expected {d}, got {d}", .{
                         protocol.protocol_version, ready.version,
                     });
-                    server.kill_sidecar();
+                    server.terminate_sidecar();
                     return;
                 }
-                server.sidecar_pid = ready.pid;
                 server.sidecar_connected = true;
-                log.info("sidecar: connected (pid={d}, version={d})", .{
-                    ready.pid, ready.version,
-                });
+                log.info("sidecar: connected (version={d})", .{ready.version});
                 return;
             }
 
             // Normal operation: route to sidecar client.
             server.state_machine.handlers.process_sidecar_frame(frame, server.state_machine.storage);
 
-            // Protocol violation → kill sidecar immediately.
+            // Protocol violation → terminate connection.
+            // The supervisor detects the exit and restarts.
             if (App.sidecar_enabled) {
                 const c = server.state_machine.handlers.sidecar_client orelse unreachable;
                 if (c.protocol_violation) {
-                    log.warn("sidecar: protocol violation detected, killing", .{});
-                    server.kill_sidecar();
+                    log.warn("sidecar: protocol violation detected, terminating", .{});
+                    server.terminate_sidecar();
                     return;
                 }
             }
@@ -621,7 +618,6 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
             if (!App.sidecar_enabled) unreachable;
             const server: *Server = @ptrCast(@alignCast(ctx));
             server.sidecar_connected = false;
-            server.sidecar_pid = 0;
             log.info("sidecar: disconnected (reason={s})", .{@tagName(reason)});
 
             server.state_machine.handlers.on_sidecar_close();
@@ -648,19 +644,12 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
             }
         }
 
-        /// Kill the sidecar process — SIGKILL, not SIGTERM.
-        /// Called on protocol violations (corrupt frame, version
-        /// mismatch, request_id mismatch). The hypervisor restarts it.
-        fn kill_sidecar(server: *Server) void {
+        /// Terminate the sidecar bus connection. The server owns the
+        /// connection, not the process. on_close will fire, setting
+        /// sidecar_connected = false. main.zig's composition root
+        /// detects the disconnect and tells the supervisor to restart.
+        fn terminate_sidecar(server: *Server) void {
             if (!App.sidecar_enabled) unreachable;
-            if (server.sidecar_pid != 0) {
-                log.warn("sidecar: killing pid={d}", .{server.sidecar_pid});
-                std.posix.kill(@intCast(server.sidecar_pid), std.posix.SIG.KILL) catch |err| {
-                    log.warn("sidecar: kill failed: {}", .{err});
-                };
-            }
-            // Terminate the bus connection — on_close will fire,
-            // which sets sidecar_connected = false.
             server.sidecar_bus.terminate();
         }
 
@@ -682,8 +671,8 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
 
             const elapsed = server.tick_count -% server.commit_pending_since;
             if (elapsed >= sidecar_response_timeout_ticks) {
-                log.warn("sidecar: response timeout ({d} ticks), killing", .{elapsed});
-                server.kill_sidecar();
+                log.warn("sidecar: response timeout ({d} ticks), terminating", .{elapsed});
+                server.terminate_sidecar();
             }
         }
 

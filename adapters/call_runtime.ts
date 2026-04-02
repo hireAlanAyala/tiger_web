@@ -142,15 +142,14 @@ let pending = Buffer.alloc(0);
 
 const conn = net.createConnection(socketPath, () => {
   console.log("[call_runtime] connected to", socketPath);
-  // Send READY handshake frame: [tag: 0x20][version: u16 BE][pid: u32 BE]
+  // Send READY handshake frame: [tag: 0x20][version: u16 BE]
   const PROTOCOL_VERSION = 1;
-  const readyPayload = new Uint8Array(7);
+  const readyPayload = new Uint8Array(3);
   readyPayload[0] = 0x20; // CallTag.ready
   const readyDv = new DataView(readyPayload.buffer);
   readyDv.setUint16(1, PROTOCOL_VERSION, false); // version BE
-  readyDv.setUint32(3, process.pid, false);       // pid BE
   sendFrame(conn, readyPayload);
-  console.log(`[call_runtime] sent READY (version=${PROTOCOL_VERSION}, pid=${process.pid})`);
+  console.log(`[call_runtime] sent READY (version=${PROTOCOL_VERSION})`);
 });
 
 conn.on("data", (chunk: Buffer) => {

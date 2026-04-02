@@ -158,30 +158,27 @@ pub const CallTag = enum(u8) {
 // validate this before marking the sidecar as connected. Until then,
 // all HTTP requests get 503.
 //
-// Layout: [tag: 0x20][version: u16 BE][pid: u32 BE]
+// Layout: [tag: 0x20][version: u16 BE]
 //
 // version: protocol version (currently 1). Server rejects mismatches.
-// pid:     sidecar process ID. Server uses this for SIGKILL on
-//          protocol violations.
+//
+// No pid — the supervisor owns the process and already has the pid
+// from std.process.Child.id. The server owns the connection, not
+// the process. Stage 2 (multi-sidecar) adds a sidecar_index field
+// for correlating which process connected to which bus.
 // =====================================================================
 
 pub const protocol_version: u16 = 1;
 
 pub const ReadyPayload = struct {
     version: u16,
-    pid: u32,
 };
 
 pub fn parse_ready_frame(frame: []const u8) ?ReadyPayload {
-    // Frame is the payload after CRC validation (no tag prefix —
-    // the tag is stripped by parse_sidecar_frame or checked before).
-    // But READY is the first frame, parsed before the CALL/RESULT
-    // protocol. The full frame includes the tag.
-    if (frame.len < 7) return null; // tag(1) + version(2) + pid(4)
+    if (frame.len < 3) return null; // tag(1) + version(2)
     if (frame[0] != @intFromEnum(CallTag.ready)) return null;
     const version = std.mem.readInt(u16, frame[1..3], .big);
-    const pid = std.mem.readInt(u32, frame[3..7], .big);
-    return .{ .version = version, .pid = pid };
+    return .{ .version = version };
 }
 
 /// Maximum function name length (e.g., "handle_create_product").

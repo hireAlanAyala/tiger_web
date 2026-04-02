@@ -80,12 +80,11 @@ const SimSidecar = struct {
     /// Inject the READY handshake frame. Call after the bus has accepted
     /// the connection (client is accepted, Connection is connected).
     fn inject_ready(self: *SimSidecar) void {
-        // READY frame: [tag=0x20][version: u16 BE][pid: u32 BE]
-        var ready_payload: [7]u8 = undefined;
+        // READY frame: [tag=0x20][version: u16 BE]
+        var ready_payload: [3]u8 = undefined;
         ready_payload[0] = @intFromEnum(protocol.CallTag.ready);
         std.mem.writeInt(u16, ready_payload[1..3], protocol.protocol_version, .big);
-        std.mem.writeInt(u32, ready_payload[3..7], 0, .big); // pid=0: no process in sim
-        var wire_buf: [15]u8 = undefined; // 8 header + 7 payload
+        var wire_buf: [11]u8 = undefined; // 8 header + 3 payload
         const wire = build_wire_frame(&wire_buf, &ready_payload);
         self.io.inject_bytes(self.slot, wire);
     }

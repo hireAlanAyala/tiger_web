@@ -12,6 +12,7 @@ const TimeReal = @import("framework/time.zig").TimeReal;
 const auth = @import("framework/auth.zig");
 
 const Server = ServerType(App, IO, App.Storage);
+const Supervisor = @import("supervisor.zig").Supervisor;
 const marks = @import("framework/marks.zig");
 const log = marks.wrap_log(std.log.scoped(.main));
 
@@ -100,6 +101,18 @@ pub fn main() !void {
         null;
     try server.wire_sidecar(std.heap.page_allocator, sidecar_path);
 
+    // Supervisor: spawn and manage the sidecar process.
+    // The server owns the connection, the supervisor owns the process.
+    // main.zig wires them by reading public state from both.
+    const sidecar_argv: []const []const u8 = &.{
+        "node", "examples/ecommerce-ts/dist/dispatch.generated.js",
+    };
+    var supervisor: Supervisor = undefined;
+    if (App.sidecar_enabled) {
+        supervisor = Supervisor.init(std.heap.page_allocator, sidecar_argv);
+        try supervisor.spawn();
+    }
+
     log.info("storage=sqlite wal=tiger_web.wal tick_interval={d}ms connections={d}", .{
         tick_ns / std.time.ns_per_ms,
         Server.max_connections,
@@ -118,9 +131,29 @@ pub fn main() !void {
         std.io.getStdOut().writer().print("{d}\n", .{actual_port}) catch {};
     }
 
-    // Main event loop. No signal handling — let the OS kill the process.
+    // Main event loop.
+    var was_sidecar_connected: bool = false;
     while (true) {
         server.tick();
+
+        // Composition root wiring: server ↔ supervisor.
+        // No cross-references — main.zig reads public state from both.
+        if (App.sidecar_enabled) {
+            const connected = server.sidecar_connected;
+
+            // Disconnect detected → tell supervisor to restart.
+            if (was_sidecar_connected and !connected) {
+                supervisor.request_restart(server.tick_count);
+            }
+            // READY completed → reset supervisor backoff.
+            if (!was_sidecar_connected and connected) {
+                supervisor.notify_connected();
+            }
+
+            was_sidecar_connected = connected;
+            supervisor.tick(server.tick_count);
+        }
+
         io.run_for_ns(tick_ns);
     }
 }
