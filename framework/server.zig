@@ -368,7 +368,19 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
 
                     .route => {
                         // Sidecar not connected → 503 immediately.
-                        // No retries. Binary state: present or absent.
+                        //
+                        // Why not hold requests until the sidecar reconnects?
+                        // Holding is worse than failing:
+                        // - Serial pipeline: one slot. Holding blocks ALL
+                        //   connections. The server is down, just silently.
+                        // - Connection exhaustion: 128 slots fill in <10ms
+                        //   at 25K req/s. Then we drop requests anyway.
+                        // - Client backpressure: 503 in <1ms is honest.
+                        //   Silent holding → client timeout → ambiguous.
+                        //
+                        // The right answer is Stage 2 (hot standby): the
+                        // request re-routes to the standby sidecar on the
+                        // same tick. Zero gap, zero held requests.
                         if (App.sidecar_enabled and !server.sidecar_connected) {
                             const resp = sidecar_unavailable_response(conn);
                             conn.set_response(resp.offset, resp.len);
