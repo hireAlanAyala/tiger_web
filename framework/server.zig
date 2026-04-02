@@ -738,7 +738,11 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
 
             const elapsed = server.tick_count -% server.commit_pending_since;
             if (elapsed >= sidecar_response_timeout_ticks) {
-                log.warn("sidecar: response timeout ({d} ticks), terminating", .{elapsed});
+                log.warn("sidecar: response timeout ({d} ticks, stage={s}, op={s}), terminating", .{
+                    elapsed,
+                    @tagName(server.commit_stage),
+                    if (server.commit_msg) |msg| @tagName(msg.operation) else "unknown",
+                });
                 server.terminate_sidecar();
             }
         }
