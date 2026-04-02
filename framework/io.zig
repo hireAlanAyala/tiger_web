@@ -131,21 +131,6 @@ pub const IO = struct {
         self.register(completion);
     }
 
-    /// Submit a readability notification. The callback fires when the fd
-    /// has data available to read, without consuming any data. Used for
-    /// the sidecar fd — the callback calls on_recv which reads via
-    /// read_frame (its own buffered read).
-    pub fn readable(self: *IO, fd: fd_t, completion: *Completion, context: *anyopaque, callback: *const fn (*anyopaque, i32) void) void {
-        assert(completion.operation == .none);
-        completion.* = .{
-            .fd = fd,
-            .operation = .readable,
-            .context = context,
-            .callback = callback,
-        };
-        self.register(completion);
-    }
-
     /// Non-blocking send — try to send immediately without epoll.
     /// Returns bytes sent, or null if the send cannot complete now.
     /// Used by the message bus send_now fast path to skip epoll

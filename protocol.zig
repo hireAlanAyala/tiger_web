@@ -206,7 +206,7 @@ pub const QueryMode = enum(u8) {
 
 /// Column descriptor — type tag + name.
 /// Name is a slice into the frame buffer — aliases recv_buf.
-/// Consume before next read_frame call.
+/// Consume before the buffer is reused.
 pub const Column = struct {
     type_tag: TypeTag,
     name: []const u8,
@@ -370,60 +370,6 @@ pub fn read_value(buf: []const u8, pos_in: usize, type_tag: TypeTag) ?struct { v
             return .{ .value = .{ .null = {} }, .pos = pos };
         },
     }
-}
-
-// =====================================================================
-// Frame IO — length-prefixed binary frames over unix socket
-// =====================================================================
-
-/// Read a length-prefixed frame from fd into buf.
-/// Returns the payload slice, or null on EOF/error.
-pub fn read_frame(fd: std.posix.fd_t, buf: []u8) ?[]const u8 {
-    assert(buf.len >= frame_max + 4);
-
-    var header: [4]u8 = undefined;
-    if (!recv_exact(fd, &header)) return null;
-
-    const len = std.mem.readInt(u32, &header, .big);
-    if (len == 0) return "";
-    if (len > frame_max) return null;
-
-    if (!recv_exact(fd, buf[0..len])) return null;
-    return buf[0..len];
-}
-
-/// Write a length-prefixed frame to fd. Returns false on error.
-pub fn write_frame(fd: std.posix.fd_t, payload: []const u8) bool {
-    assert(payload.len <= frame_max);
-
-    var header: [4]u8 = undefined;
-    std.mem.writeInt(u32, &header, @intCast(payload.len), .big);
-
-    if (!send_exact(fd, &header)) return false;
-    if (payload.len > 0) {
-        if (!send_exact(fd, payload)) return false;
-    }
-    return true;
-}
-
-fn recv_exact(fd: std.posix.fd_t, buf: []u8) bool {
-    var recvd: usize = 0;
-    while (recvd < buf.len) {
-        const n = std.posix.recv(fd, buf[recvd..], 0) catch return false;
-        if (n == 0) return false;
-        recvd += n;
-    }
-    return true;
-}
-
-fn send_exact(fd: std.posix.fd_t, bytes: []const u8) bool {
-    var sent: usize = 0;
-    while (sent < bytes.len) {
-        const n = std.posix.send(fd, bytes[sent..], std.posix.MSG.NOSIGNAL) catch return false;
-        if (n == 0) return false;
-        sent += n;
-    }
-    return true;
 }
 
 // =====================================================================
@@ -717,25 +663,6 @@ test "read_value rejects truncated text" {
     std.mem.writeInt(u16, buf[0..2], 100, .big); // claims 100 bytes
     // but buffer only has 4 bytes total
     try std.testing.expect(read_value(&buf, 0, .text) == null);
-}
-
-// Frame IO tests require libc (socketpair). They run when protocol.zig
-// is tested directly via `zig build unit-test` with -lc, and in the
-// sidecar test modules. Guarded to avoid compile errors when included
-// as a dependency of non-libc modules.
-test "frame round trip" {
-    if (!@import("builtin").link_libc) return error.SkipZigTest;
-    const pair = test_socketpair();
-    defer std.posix.close(pair[1]);
-
-    const payload = "test payload bytes";
-    try std.testing.expect(write_frame(pair[0], payload));
-
-    var buf: [frame_max + 4]u8 = undefined;
-    const result = read_frame(pair[1], &buf);
-    try std.testing.expect(result != null);
-    try std.testing.expectEqualStrings(payload, result.?);
-    std.posix.close(pair[0]);
 }
 
 test "cross-language test vector — write to /tmp for TS reader" {
