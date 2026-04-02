@@ -14,8 +14,10 @@ pub fn build(b: *std.Build) void {
 
     // --- Build options ---
     const sidecar_enabled = b.option(bool, "sidecar", "Enable sidecar handler mode") orelse false;
+    const sidecar_count: u8 = b.option(u8, "sidecar-count", "Number of sidecar connections (default 1)") orelse 1;
     const build_options = b.addOptions();
     build_options.addOption(bool, "sidecar_enabled", sidecar_enabled);
+    build_options.addOption(u8, "sidecar_count", sidecar_count);
 
     // --- Main executable ---
     const exe = b.addExecutable(.{
@@ -109,6 +111,7 @@ pub fn build(b: *std.Build) void {
     // the CALL/RESULT protocol deterministically.
     const sidecar_sim_options = b.addOptions();
     sidecar_sim_options.addOption(bool, "sidecar_enabled", true);
+    sidecar_sim_options.addOption(u8, "sidecar_count", 2); // hot standby tests need 2
 
     const sidecar_sim = b.addTest(.{
         .root_source_file = b.path("sim_sidecar.zig"),

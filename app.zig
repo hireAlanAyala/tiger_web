@@ -225,6 +225,7 @@ pub fn StateMachineWith(comptime StorageParam: type, comptime HandlersParam: typ
 /// hack needed. This is the right primitive: each binary declares its
 /// sidecar mode explicitly.
 pub const sidecar_enabled = @import("build_options").sidecar_enabled;
+pub const sidecar_count: u8 = @import("build_options").sidecar_count;
 
 /// Resolve the Handlers type based on sidecar_enabled.
 /// Native path ignores IO. Sidecar path resolves Bus from IO
@@ -238,6 +239,7 @@ pub fn HandlersFor(comptime StorageParam: type, comptime IOParam: type) type {
         const bus_options: message_bus.Options = .{
             .send_queue_max = 1 + protocol.queries_max,
             .frame_max = protocol.frame_max,
+            .connections_max = sidecar_count,
         };
         const Bus = message_bus.MessageBusType(IOParam, bus_options);
         const H = @import("sidecar_handlers.zig").SidecarHandlersType(StorageParam, Bus);
