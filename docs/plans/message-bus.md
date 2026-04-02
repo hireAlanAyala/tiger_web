@@ -1596,10 +1596,10 @@ either:
 Then delete `TestIO` and `TestContext` from `message_bus.zig`.
 Two IO implementations (production + simulation), not three.
 
-## Connection redesign: "report, don't decide"
+## Phase 3.5: Connection redesign — "report, don't decide"
 
-> **Not yet scheduled.** Do before Phase 4 if time allows,
-> otherwise after. Fixes root causes 1 and 3 from Phase 3 audit.
+> Fixes root causes 1 and 3 from Phase 3 audit.
+> Do before Phase 4 (SimSidecar).
 
 ### The problem
 
@@ -1695,11 +1695,10 @@ it can `setsid()` to create a new process group. Then
 `kill(-pid, SIGKILL)` always works. But this means the server
 owns process management — more complexity, less separation.
 
-## Connection redesign: typed consumer (root cause 2)
+## Phase 3.5b: Connection redesign — typed consumer (root cause 2)
 
-> **Not yet scheduled.** Can be combined with "report, don't decide"
-> above, or done separately. Lower priority — current wiring works,
-> just not compile-time checked.
+> Can be combined with Phase 3.5 or done separately.
+> Lower priority — current wiring works, not compile-time checked.
 
 ### The problem
 
