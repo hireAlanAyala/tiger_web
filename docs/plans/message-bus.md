@@ -1654,8 +1654,51 @@ CRC mismatches — all reported as events, not assert-crashes.
 
 ### What this doesn't fix
 
-**Root cause 2 (implicit callback wiring):** Still `*anyopaque`.
-**Root cause 4 (process lifecycle):** Separate concern.
+**Root cause 2 (implicit callback wiring):** See below.
+**Root cause 4 (process lifecycle):** See `decision-sidecar-lifecycle.md`.
+
+## Connection redesign: typed consumer (root cause 2)
+
+> **Not yet scheduled.** Can be combined with "report, don't decide"
+> above, or done separately. Lower priority — current wiring works,
+> just not compile-time checked.
+
+### The problem
+
+The callback chain is `bus.on_frame_fn → server.sidecar_on_frame →
+client.on_frame`. Wired at runtime with `*anyopaque` and function
+pointers. If you wire it wrong (null callback, wrong context, wrong
+function), the compiler doesn't catch it — silent frame drops or
+crash at runtime. The sidecar fuzzer hit this twice (dummy_on_frame,
+null query_fn).
+
+### The fix: comptime consumer parameter
+
+```zig
+pub fn ConnectionType(
+    comptime IO: type,
+    comptime Consumer: type,  // must have on_frame, on_close
+    comptime options: Options,
+) type
+```
+
+The Connection stores `consumer: *Consumer` (typed pointer, not
+anyopaque). Calls `self.consumer.on_frame(frame)` directly. No
+function pointers. No casting. Missing `on_frame` → compile error.
+
+### Trade-off
+
+Changes the ConnectionType signature — every consumer (server HTTP,
+sidecar bus, fuzzers) becomes a comptime parameter. Larger refactor.
+Only two consumers today (HTTP server + sidecar bus). The
+`validateHandlersInterface` comptime check pattern could be applied
+as a lighter alternative.
+
+### Pragmatic interim
+
+Add `assert(on_frame_fn != undefined)` in Connection.init. Catches
+null/undefined wiring at init time, not at frame delivery time.
+Not as good as comptime, but prevents the silent-drop class.
 
 ### Implementation scope
 
