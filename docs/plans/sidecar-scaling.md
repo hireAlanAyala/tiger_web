@@ -359,19 +359,19 @@ HTTP → Server (1 core) → Bus (4 connections)
 
 1. ~~**Process spawning**~~ ✓ DONE — supervisor.zig, `--` CLI
 2. ~~**Recovery sim tests**~~ ✓ DONE — 10 tests
-3. **Callback signature** — on_frame_fn and on_close_fn gain
-   connection_index parameter. Single-connection callers pass 0.
-   This is the foundation — everything else depends on it.
-4. **Multi-connection bus** — connections array, active index,
-   per-slot accept, pool sizing for N, set_active(index),
-   send_message routes to connections[active]
-5. **Server per-connection state** — sidecar_connections_ready[N],
-   sidecar_on_frame/on_close with index, set_active on READY/failover
-6. **Supervisor N children** — processes array, --sidecar-count
-7. **Hot standby sim tests** — two SimSidecars on two slots.
-   Kill A, next request hits B. Verify no 503 during failover.
-8. **Concurrent pipeline** (separate plan) — Stage 3
-9. **Round-robin dispatch** — Stage 3
+3. ~~**Callback signature**~~ ✓ DONE — connection_index on all callbacks
+4. ~~**Multi-connection bus**~~ ✓ DONE — connections array, active index,
+   per-slot accept, pool sizing, set_active, send routes to active
+5. ~~**Server per-connection state**~~ ✓ DONE — sidecar_connections_ready[N],
+   per-connection READY, guarded on_close, find_next_ready_slot
+6. ~~**Supervisor N children**~~ ✓ DONE — processes array, -Dsidecar-count
+7. ~~**Hot standby sim test**~~ ✓ DONE — kill active, standby takes over, 200
+8. **Handler timeout contract** — per-handler `@timeout`, `@background`
+   annotation, scanner enforcement. See decision-handler-timeout-contract.md
+9. **Supervisor health check** — derived from max(all timeouts) in manifest.
+   Kills stuck processes that don't respond within the bound.
+10. **Concurrent pipeline** (separate plan) — Stage 3
+11. **Round-robin dispatch** — Stage 3
 
 Note: SidecarClient is UNCHANGED for Stage 2. It calls
 bus.send_message() which routes to connections[active].
@@ -408,8 +408,11 @@ the sidecar process on the multi-connection bus.
 |---|---|
 | Supervisor | All stages ✓ DONE |
 | Recovery sim tests | Stage 1 ✓ DONE |
-| Callback connection index | Stage 2 (foundation) |
-| Multi-connection bus | Stage 2 |
-| Server per-connection state | Stage 2 |
+| Callback connection index | Stage 2 ✓ DONE |
+| Multi-connection bus | Stage 2 ✓ DONE |
+| Server per-connection state | Stage 2 ✓ DONE |
+| Hot standby sim test | Stage 2 ✓ DONE |
+| Handler timeout contract | Post Stage 2 |
+| Supervisor health check | Post Stage 2 |
 | Concurrent pipeline | Stage 3 |
 | N SidecarClients | Stage 3 |
