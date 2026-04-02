@@ -33,7 +33,36 @@
    — blocked from deletion by old sidecar_fuzz.zig test. Can now be
    deleted since sidecar_fuzz.zig was rewritten.
 
-6. **Adapter lifecycle flags** — DEFERRED
+6. **N+1 sidecar process manager** — DEFERRED
+   Server spawns N sidecar processes. Each connects, handshakes,
+   gets its own bus. Two modes:
+
+   **Hot standby (simple, no concurrent pipeline):**
+   Dispatch to sidecar A. If A dies, instantly switch to B
+   (already connected). Zero downtime on crash. Same throughput
+   (serial pipeline), double availability. `--sidecar-count=2`.
+
+   **Round-robin (requires concurrent pipeline):**
+   N in-flight pipelines, dispatch to whichever sidecar is free.
+   Throughput scales linearly: 1 sidecar = 25K, 2 = 50K, 4 = 100K.
+   Requires multiple `commit_stage` slots (network-storage.md).
+
+   Hot standby first. Round-robin after concurrent pipeline.
+   Handler code unchanged — pure functions, no shared state.
+
+   Pieces that already exist:
+   - MessageBus with tick_accept
+   - READY handshake per connection (PID + version)
+   - Binary state (connected/disconnected)
+   - Pure function handlers
+
+   Pieces needed:
+   - `std.process.Child` to spawn/respawn sidecars (~30 lines)
+   - Array of bus connections instead of single embedded bus
+   - `next_sidecar_index` for round-robin dispatch
+   - Concurrent pipeline for round-robin mode (separate plan)
+
+7. **Adapter lifecycle flags** — DEFERRED
    READY handshake flags byte for runtime-specific kill semantics
    (process group kill for npx/poetry). See decision doc:
    `docs/internal/decision-sidecar-lifecycle.md`.
