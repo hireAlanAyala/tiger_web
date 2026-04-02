@@ -4,8 +4,9 @@
 //! socket communication. This module processes frames delivered by
 //! the bus and builds frames for sending.
 //!
-//! Parameterized on IO type (comptime cascade): the bus type is
-//! concrete, not anytype. Types are documentation.
+//! Parameterized on Bus type (comptime): the caller resolves the
+//! concrete bus. Production: MessageBusType(IO, options). Sim:
+//! SimSidecarBus. Matches TigerBeetle's ClientType(MessageBus).
 //!
 //! State machine: call_submit → on_frame (loop) → complete/failed.
 //! The server's bus callback drives on_frame when frames arrive.
@@ -14,25 +15,13 @@ const std = @import("std");
 const assert = std.debug.assert;
 const message = @import("message.zig");
 const protocol = @import("protocol.zig");
-const message_bus = @import("framework/message_bus.zig");
-const Options = message_bus.Options;
 
 const log = std.log.scoped(.sidecar);
 
-/// Sidecar protocol state machine, parameterized on IO type.
-/// The IO type flows through from ServerType → MessageBusType →
-/// ConnectionType → SidecarClientType. All types resolve at comptime.
-pub fn SidecarClientType(comptime IO: type) type {
-    // Bus options — sized for worst-case: 1 CALL + queries_max QUERY_RESULTs.
-    // The sidecar protocol is serial (one QUERY at a time), but the
-    // transport must not assert-crash if a rogue sidecar bursts QUERYs.
-    const bus_options: Options = .{
-        .send_queue_max = 1 + protocol.queries_max,
-        .frame_max = protocol.frame_max,
-    };
-
-    const Bus = message_bus.MessageBusType(IO, bus_options);
-
+/// Sidecar protocol state machine, parameterized on Bus type.
+/// The caller resolves the Bus: app.zig for production (MessageBusType),
+/// sim for testing (SimSidecarBus). This module never imports message_bus.
+pub fn SidecarClientType(comptime Bus: type) type {
     return struct {
         const Self = @This();
 
@@ -128,15 +117,15 @@ pub fn SidecarClientType(comptime IO: type) type {
                 return false;
             }
 
-            const msg = bus.pool.get_message();
+            const msg = bus.get_message();
             const call_len = protocol.build_call(
-                msg.buffer[Bus.Connection.frame_header_size..],
+                msg.buffer[Bus.frame_header_size..],
                 request_id,
                 function_name,
                 args,
             ) orelse {
                 log.warn("call: frame too large for {s}", .{function_name});
-                bus.pool.unref(msg);
+                bus.unref(msg);
                 return false;
             };
 
@@ -231,8 +220,8 @@ pub fn SidecarClientType(comptime IO: type) type {
                     }
 
                     // Build QUERY_RESULT into a pool message (zero-copy).
-                    const msg = bus.pool.get_message();
-                    const qr_buf = msg.buffer[Bus.Connection.frame_header_size..];
+                    const msg = bus.get_message();
+                    const qr_buf = msg.buffer[Bus.frame_header_size..];
 
                     // QUERY_RESULT: [tag][request_id: u32 BE][query_id: u16 BE]
                     qr_buf[0] = @intFromEnum(protocol.CallTag.query_result);

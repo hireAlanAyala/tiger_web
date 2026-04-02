@@ -197,6 +197,10 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
         /// Two-phase init: Server.init returns the struct, then
         /// wire_sidecar takes addresses of the embedded fields.
         /// This avoids dangling pointers from return-by-value.
+        ///
+        /// sidecar_path: unix socket path for the sidecar listener.
+        ///   Non-null: calls start_listener (production — creates socket).
+        ///   Null: no listener (sim — test sets listen_fd directly after).
         pub fn wire_sidecar(server: *Server, allocator: std.mem.Allocator, sidecar_path: ?[]const u8) !void {
             if (!App.sidecar_enabled) return;
             server.sidecar_client = SidecarClient.init();

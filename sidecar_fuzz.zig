@@ -1,6 +1,6 @@
 //! CALL/RESULT protocol fuzzer.
 //!
-//! Exercises SidecarClientType(FuzzIO) through real
+//! Exercises SidecarClientType(Bus) through real
 //! ConnectionType(FuzzIO). Protocol state machine only — no server,
 //! no reconnect. One client per seed.
 //!
@@ -26,8 +26,13 @@ const FuzzIO = @import("fuzz_io.zig").FuzzIO;
 
 const log = std.log.scoped(.fuzz);
 
-const SidecarClient = sidecar.SidecarClientType(FuzzIO);
-const Bus = SidecarClient.BusType;
+// Bus resolved here — the fuzzer is a composition root, same as app.zig.
+// Options match production: 1 CALL + queries_max QUERY_RESULTs.
+const Bus = message_bus.MessageBusType(FuzzIO, .{
+    .send_queue_max = 1 + protocol.queries_max,
+    .frame_max = protocol.frame_max,
+});
+const SidecarClient = sidecar.SidecarClientType(Bus);
 const Connection = Bus.Connection;
 
 pub fn main(allocator: std.mem.Allocator, args: FuzzArgs) !void {
@@ -47,11 +52,7 @@ pub fn main(allocator: std.mem.Allocator, args: FuzzArgs) !void {
 
     var bus: Bus = undefined;
     try bus.init_pool(allocator, &io, @ptrCast(&fuzz_ctx), SidecarFuzzCtx.on_bus_frame, null);
-    bus.connection.state = .closed;
-    bus.connection.recv_message = null;
-    bus.connection.recv_completion = .{};
-    bus.connection.send_completion = .{};
-    bus.connection.init(&io, &bus.pool, pair[0], @ptrCast(&fuzz_ctx), SidecarFuzzCtx.on_bus_frame, null);
+    bus.connect_fd(pair[0]);
     defer bus.deinit(allocator);
 
     var client = SidecarClient.init();
@@ -76,7 +77,7 @@ pub fn main(allocator: std.mem.Allocator, args: FuzzArgs) !void {
     if (weights.call_valid_result == 0) weights.call_valid_result = 1;
 
     for (0..events_max) |_| {
-        if (bus.connection.state == .closed) break;
+        if (!bus.is_connected()) break;
 
         const event = prng.enum_weighted(Event, weights);
 
@@ -94,7 +95,7 @@ pub fn main(allocator: std.mem.Allocator, args: FuzzArgs) !void {
 
                 // Tick until complete or closed.
                 for (0..100) |_| {
-                    if (bus.connection.state == .closed) break;
+                    if (!bus.is_connected()) break;
                     if (client.call_state == .complete or client.call_state == .failed) break;
                     tick_connection(&io, &bus.connection);
                 }
@@ -124,16 +125,16 @@ pub fn main(allocator: std.mem.Allocator, args: FuzzArgs) !void {
 
                 // Tick — client should process QUERY and send QUERY_RESULT.
                 for (0..100) |_| {
-                    if (bus.connection.state == .closed) break;
+                    if (!bus.is_connected()) break;
                     if (client.call_state != .receiving) break;
                     tick_connection(&io, &bus.connection);
                 }
 
                 // Now inject RESULT to complete the exchange.
-                if (bus.connection.state != .closed and client.call_state == .receiving) {
+                if (bus.is_connected() and client.call_state == .receiving) {
                     if (inject_result_frame(&io, pair[1], request_id - 1, .success, "query_done")) {
                         for (0..100) |_| {
-                            if (bus.connection.state == .closed) break;
+                            if (!bus.is_connected()) break;
                             if (client.call_state == .complete or client.call_state == .failed) break;
                             tick_connection(&io, &bus.connection);
                         }
@@ -167,7 +168,7 @@ pub fn main(allocator: std.mem.Allocator, args: FuzzArgs) !void {
                 _ = io.inject_data(pair[1], wire);
 
                 for (0..100) |_| {
-                    if (bus.connection.state == .closed) break;
+                    if (!bus.is_connected()) break;
                     if (client.call_state != .receiving) break;
                     tick_connection(&io, &bus.connection);
                 }
@@ -192,7 +193,7 @@ pub fn main(allocator: std.mem.Allocator, args: FuzzArgs) !void {
                 _ = io.inject_data(pair[1], wire);
 
                 for (0..100) |_| {
-                    if (bus.connection.state == .closed) break;
+                    if (!bus.is_connected()) break;
                     if (client.call_state != .receiving) break;
                     tick_connection(&io, &bus.connection);
                 }
@@ -217,7 +218,7 @@ pub fn main(allocator: std.mem.Allocator, args: FuzzArgs) !void {
                 _ = io.inject_data(pair[1], wire);
 
                 for (0..100) |_| {
-                    if (bus.connection.state == .closed) break;
+                    if (!bus.is_connected()) break;
                     if (client.call_state != .receiving) break;
                     tick_connection(&io, &bus.connection);
                 }
@@ -240,7 +241,7 @@ pub fn main(allocator: std.mem.Allocator, args: FuzzArgs) !void {
                 if (!inject_result_frame(&io, pair[1], wrong_id, .success, "stale")) continue;
 
                 for (0..100) |_| {
-                    if (bus.connection.state == .closed) break;
+                    if (!bus.is_connected()) break;
                     if (client.call_state != .receiving) break;
                     tick_connection(&io, &bus.connection);
                 }
@@ -258,7 +259,7 @@ pub fn main(allocator: std.mem.Allocator, args: FuzzArgs) !void {
 
                 if (inject_result_frame(&io, pair[1], 0, .success, "unsolicited")) {
                     for (0..100) |_| {
-                        if (bus.connection.state == .closed) break;
+                        if (!bus.is_connected()) break;
                         tick_connection(&io, &bus.connection);
                     }
 
@@ -275,7 +276,7 @@ pub fn main(allocator: std.mem.Allocator, args: FuzzArgs) !void {
                 const count = prng.range_inclusive(u32, 2, 5);
                 var completed: u32 = 0;
                 for (0..count) |_| {
-                    if (bus.connection.state == .closed) break;
+                    if (!bus.is_connected()) break;
                     if (client.call_state != .idle) break;
 
                     if (!client.call_submit(&bus, "multi", "args", request_id)) break;
@@ -284,7 +285,7 @@ pub fn main(allocator: std.mem.Allocator, args: FuzzArgs) !void {
                     if (!inject_result_frame(&io, pair[1], request_id - 1, .success, "multi_ok")) break;
 
                     for (0..100) |_| {
-                        if (bus.connection.state == .closed) break;
+                        if (!bus.is_connected()) break;
                         if (client.call_state == .complete or client.call_state == .failed) break;
                         tick_connection(&io, &bus.connection);
                     }
@@ -303,7 +304,7 @@ pub fn main(allocator: std.mem.Allocator, args: FuzzArgs) !void {
             .disconnect => {
                 io.close_peer(pair[1]);
                 for (0..100) |_| {
-                    if (bus.connection.state == .closed) break;
+                    if (!bus.is_connected()) break;
                     tick_connection(&io, &bus.connection);
                 }
                 stats.disconnects += 1;
@@ -330,7 +331,7 @@ pub fn main(allocator: std.mem.Allocator, args: FuzzArgs) !void {
         stats.disconnects,
     });
 
-    assert(stats.valid_results > 0 or stats.disconnects > 0 or bus.connection.state == .closed);
+    assert(stats.valid_results > 0 or stats.disconnects > 0 or !bus.is_connected());
 }
 
 const Stats = struct {

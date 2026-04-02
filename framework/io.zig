@@ -48,7 +48,7 @@ pub const IO = struct {
     }
 
     /// Create a non-blocking TCP listening socket bound to the given address.
-    pub fn open_listener(address: std.net.Address) !fd_t {
+    pub fn open_listener(_: *IO, address: std.net.Address) !fd_t {
         const fd = try posix.socket(
             address.any.family,
             posix.SOCK.STREAM | posix.SOCK.NONBLOCK | posix.SOCK.CLOEXEC,
@@ -66,6 +66,33 @@ pub const IO = struct {
         try posix.listen(fd, 128);
 
         log.info("listener bound fd={d}", .{fd});
+        return fd;
+    }
+
+    /// Create a unix socket listener. All POSIX syscalls (socket, bind,
+    /// listen) live here — the bus never calls posix directly. SimIO
+    /// provides a version that returns a synthetic fd from next_fd.
+    pub fn open_unix_listener(_: *IO, path: []const u8) !fd_t {
+        assert(path.len > 0);
+        assert(path.len < 108);
+
+        // Unlink any stale socket file.
+        var unlink_path: [108]u8 = undefined;
+        @memcpy(unlink_path[0..path.len], path);
+        unlink_path[path.len] = 0;
+        posix.unlinkZ(@ptrCast(unlink_path[0 .. path.len + 1])) catch {};
+
+        const fd = try posix.socket(posix.AF.UNIX, posix.SOCK.STREAM | posix.SOCK.NONBLOCK | posix.SOCK.CLOEXEC, 0);
+        errdefer posix.close(fd);
+
+        var addr: posix.sockaddr.un = .{ .path = undefined };
+        @memcpy(addr.path[0..path.len], path);
+        addr.path[path.len] = 0;
+
+        try posix.bind(fd, @ptrCast(&addr), @sizeOf(posix.sockaddr.un));
+        try posix.listen(fd, 1);
+
+        log.info("unix listener bound on {s} fd={d}", .{ path, fd });
         return fd;
     }
 

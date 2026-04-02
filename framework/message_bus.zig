@@ -711,38 +711,15 @@ pub fn MessageBusType(comptime IO: type, comptime options: Options) type {
             self.pool.deinit(allocator);
         }
 
+        /// Create a unix socket listener via the IO layer.
+        /// All POSIX syscalls live in IO.open_unix_listener — the bus
+        /// never calls posix directly. TB pattern: IO owns the kernel seam.
         fn listen(self: *Self, path: []const u8) void {
             assert(self.connection.state == .closed);
-            assert(path.len > 0);
-            assert(path.len < 108);
-
-            var unlink_path: [108]u8 = undefined;
-            @memcpy(unlink_path[0..path.len], path);
-            unlink_path[path.len] = 0;
-            posix.unlinkZ(@ptrCast(unlink_path[0 .. path.len + 1])) catch {};
-
-            const fd = posix.socket(posix.AF.UNIX, posix.SOCK.STREAM | posix.SOCK.NONBLOCK | posix.SOCK.CLOEXEC, 0) catch |err| {
-                log.warn("socket: {}", .{err});
-                return;
-            };
-
-            var addr: posix.sockaddr.un = .{ .path = undefined };
-            @memcpy(addr.path[0..path.len], path);
-            addr.path[path.len] = 0;
-
-            posix.bind(fd, @ptrCast(&addr), @sizeOf(posix.sockaddr.un)) catch |err| {
-                log.warn("bind: {}", .{err});
-                posix.close(fd);
-                return;
-            };
-
-            posix.listen(fd, 1) catch |err| {
+            self.listen_fd = self.io.open_unix_listener(path) catch |err| {
                 log.warn("listen: {}", .{err});
-                posix.close(fd);
                 return;
             };
-
-            self.listen_fd = fd;
             log.info("listening on {s}", .{path});
         }
 
@@ -766,15 +743,6 @@ pub fn MessageBusType(comptime IO: type, comptime options: Options) type {
             if (result < 0) return;
 
             const accepted_fd: IO.fd_t = result;
-
-            // Set SO_SNDBUF to hold the full send queue.
-            const sndbuf_size: c_int = @intCast(Connection.send_queue_max * Connection.buf_max);
-            posix.setsockopt(
-                accepted_fd,
-                posix.SOL.SOCKET,
-                posix.SO.SNDBUF,
-                &std.mem.toBytes(sndbuf_size),
-            ) catch {};
 
             log.info("accepted fd={d}", .{accepted_fd});
             self.connection.init(self.io, &self.pool, accepted_fd, self.context, self.on_frame_fn, self.on_close_fn);
@@ -811,6 +779,31 @@ pub fn MessageBusType(comptime IO: type, comptime options: Options) type {
         pub fn can_send(self: *const Self) bool {
             return !self.connection.send_queue.full();
         }
+
+        /// Get a message from the pool. TB pattern: bus wraps pool
+        /// access so consumers never reach into bus.pool directly.
+        pub fn get_message(self: *Self) *Connection.Message {
+            return self.pool.get_message();
+        }
+
+        /// Return a message to the pool. TB pattern: bus wraps pool.
+        pub fn unref(self: *Self, message: *Connection.Message) void {
+            self.pool.unref(message);
+        }
+
+        /// Connect an existing fd — used by fuzzers that create socket
+        /// pairs and need to attach one end to the bus without going
+        /// through the accept path. Encapsulates connection init so
+        /// fuzzers don't reach into bus.connection directly.
+        pub fn connect_fd(self: *Self, fd: IO.fd_t) void {
+            assert(self.connection.state == .closed);
+            self.connection.init(self.io, &self.pool, fd, self.context, self.on_frame_fn, self.on_close_fn);
+        }
+
+        /// Frame header size — re-exported so consumers don't reach
+        /// into Bus.Connection for a constant. SimSidecarBus provides
+        /// this directly without needing a Connection type.
+        pub const frame_header_size = Connection.frame_header_size;
     };
 }
 

@@ -94,12 +94,35 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
     sim_tests.root_module.addImport("stdx", stdx_module);
+    sim_tests.root_module.addOptions("build_options", build_options);
     sim_tests.linkSystemLibrary("sqlite3");
     sim_tests.linkLibC();
     const run_sim_tests = b.addRunArtifact(sim_tests);
     run_sim_tests.setEnvironmentVariable("ZIG_EXE", b.graph.zig_exe);
     const test_step = b.step("test", "Run simulation tests");
     test_step.dependOn(&run_sim_tests.step);
+
+    // --- Sidecar simulation tests ---
+    // Separate binary with sidecar_enabled = true. Exercises the full
+    // sidecar pipeline (route → prefetch → handle → render) through
+    // the real Server + SM + MessageBus stack with SimSidecar driving
+    // the CALL/RESULT protocol deterministically.
+    const sidecar_sim_options = b.addOptions();
+    sidecar_sim_options.addOption(bool, "sidecar_enabled", true);
+
+    const sidecar_sim = b.addTest(.{
+        .root_source_file = b.path("sim_sidecar.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    sidecar_sim.root_module.addImport("stdx", stdx_module);
+    sidecar_sim.root_module.addOptions("build_options", sidecar_sim_options);
+    sidecar_sim.linkSystemLibrary("sqlite3");
+    sidecar_sim.linkLibC();
+    const run_sidecar_sim = b.addRunArtifact(sidecar_sim);
+    run_sidecar_sim.setEnvironmentVariable("ZIG_EXE", b.graph.zig_exe);
+    const sidecar_test_step = b.step("test-sidecar", "Run sidecar simulation tests");
+    sidecar_test_step.dependOn(&run_sidecar_sim.step);
 
     // --- Fuzz test dispatcher ---
     const fuzz_exe = b.addExecutable(.{
@@ -109,6 +132,7 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
     fuzz_exe.root_module.addImport("stdx", stdx_module);
+    fuzz_exe.root_module.addOptions("build_options", build_options);
     fuzz_exe.linkSystemLibrary("sqlite3");
     fuzz_exe.linkLibC();
     b.installArtifact(fuzz_exe);
@@ -176,6 +200,7 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
         });
         unit_test.root_module.addImport("stdx", stdx_module);
+        unit_test.root_module.addOptions("build_options", build_options);
         const run_unit_test = b.addRunArtifact(unit_test);
         run_unit_test.setEnvironmentVariable("ZIG_EXE", b.graph.zig_exe);
         unit_test_step.dependOn(&run_unit_test.step);
@@ -189,6 +214,7 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
         });
         unit_test.root_module.addImport("stdx", stdx_module);
+        unit_test.root_module.addOptions("build_options", build_options);
         unit_test.linkLibC();
         const run_ut = b.addRunArtifact(unit_test);
         run_ut.setEnvironmentVariable("ZIG_EXE", b.graph.zig_exe);
@@ -203,6 +229,7 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
         });
         unit_test.root_module.addImport("stdx", stdx_module);
+        unit_test.root_module.addOptions("build_options", build_options);
         unit_test.linkSystemLibrary("sqlite3");
         unit_test.linkLibC();
         const run_ut = b.addRunArtifact(unit_test);
@@ -218,6 +245,7 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
         });
         load_test.root_module.addImport("stdx", stdx_module);
+        load_test.root_module.addOptions("build_options", build_options);
         load_test.linkLibC();
         const run_load_test = b.addRunArtifact(load_test);
         run_load_test.setEnvironmentVariable("ZIG_EXE", b.graph.zig_exe);
@@ -241,6 +269,7 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
         });
         unit_test.root_module.addImport("stdx", stdx_module);
+        unit_test.root_module.addOptions("build_options", build_options);
         const run_fw_test = b.addRunArtifact(unit_test);
         run_fw_test.setEnvironmentVariable("ZIG_EXE", b.graph.zig_exe);
         unit_test_step.dependOn(&run_fw_test.step);
@@ -253,6 +282,7 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
     shell_test.root_module.addImport("stdx", stdx_module);
+    shell_test.root_module.addOptions("build_options", build_options);
     const run_shell_test = b.addRunArtifact(shell_test);
     run_shell_test.setEnvironmentVariable("ZIG_EXE", b.graph.zig_exe);
     unit_test_step.dependOn(&run_shell_test.step);
@@ -263,6 +293,7 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
     scripts_test.root_module.addImport("stdx", stdx_module);
+    scripts_test.root_module.addOptions("build_options", build_options);
     const run_scripts_test = b.addRunArtifact(scripts_test);
     run_scripts_test.setEnvironmentVariable("ZIG_EXE", b.graph.zig_exe);
     unit_test_step.dependOn(&run_scripts_test.step);
@@ -289,6 +320,7 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
     bench_smoke.root_module.addImport("stdx", stdx_module);
+    bench_smoke.root_module.addOptions("build_options", build_options);
     bench_smoke.root_module.addOptions("bench_options", bench_smoke_options);
     bench_smoke.linkSystemLibrary("sqlite3");
     bench_smoke.linkLibC();
@@ -305,6 +337,7 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
     bench_real.root_module.addImport("stdx", stdx_module);
+    bench_real.root_module.addOptions("build_options", build_options);
     bench_real.root_module.addOptions("bench_options", bench_real_options);
     bench_real.linkSystemLibrary("sqlite3");
     bench_real.linkLibC();

@@ -25,14 +25,10 @@ const message = @import("message.zig");
 const protocol = @import("protocol.zig");
 const state_machine = @import("state_machine.zig");
 const http = @import("framework/http.zig");
-const message_bus = @import("framework/message_bus.zig");
-
 const log = std.log.scoped(.sidecar_handlers);
 
-pub fn SidecarHandlersType(comptime StorageParam: type, comptime IO: type) type {
-    const SidecarClient = @import("sidecar.zig").SidecarClientType(IO);
-    // Bus type from SidecarClient — single source of truth for options.
-    const Bus = SidecarClient.BusType;
+pub fn SidecarHandlersType(comptime StorageParam: type, comptime Bus: type) type {
+    const SidecarClient = @import("sidecar.zig").SidecarClientType(Bus);
 
     return struct {
         const Self = @This();

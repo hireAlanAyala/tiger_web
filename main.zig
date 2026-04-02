@@ -74,7 +74,7 @@ pub fn main() !void {
     // For native, Handlers is zero-size (.{} has no fields).
     var sm = StateMachine.init(&storage, .{}, cli.log_trace, sm_seed, secret_key);
 
-    const listen_fd = try IO.open_listener(address);
+    const listen_fd = try io.open_listener(address);
 
     // When port=0, the OS assigns a free port. Read it back via getsockname.
     // Used by load_driver.zig to spawn the server on an ephemeral port.

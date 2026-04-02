@@ -14,6 +14,7 @@ const auth = @import("framework/auth.zig");
 const marks = @import("framework/marks.zig");
 const PRNG = @import("stdx").PRNG;
 pub const SidecarClientType = @import("sidecar.zig").SidecarClientType;
+const message_bus = @import("framework/message_bus.zig");
 
 const log = marks.wrap_log(std.log.scoped(.app));
 
@@ -218,20 +219,28 @@ pub fn StateMachineWith(comptime StorageParam: type, comptime HandlersParam: typ
 /// Set via `zig build -Dsidecar=true`. Reads from root module's
 /// build_options if available, otherwise defaults to false (native).
 /// Tests and fuzz binaries don't have build_options — always native.
-pub const sidecar_enabled = blk: {
-    const root = @import("root");
-    break :blk if (@hasDecl(root, "build_options"))
-        root.build_options.sidecar_enabled
-    else
-        false;
-};
+/// Build option: true = sidecar handlers, false = native handlers.
+/// Set via `zig build -Dsidecar=true`. Every compilation unit has
+/// build_options wired via addOptions in build.zig — no @import("root")
+/// hack needed. This is the right primitive: each binary declares its
+/// sidecar mode explicitly.
+pub const sidecar_enabled = @import("build_options").sidecar_enabled;
 
 /// Resolve the Handlers type based on sidecar_enabled.
-/// Native path ignores IO. Sidecar path needs IO for the
-/// comptime cascade: Server → Bus → Connection → SidecarClient.
+/// Native path ignores IO. Sidecar path resolves Bus from IO
+/// here — the composition root — then passes Bus to handlers.
+/// Matches TB: Replica resolves MessageBus, passes it to Client.
 pub fn HandlersFor(comptime StorageParam: type, comptime IOParam: type) type {
     if (sidecar_enabled) {
-        const H = @import("sidecar_handlers.zig").SidecarHandlersType(StorageParam, IOParam);
+        // Bus options — sized for worst-case: 1 CALL + queries_max QUERY_RESULTs.
+        // The sidecar protocol is serial (one QUERY at a time), but the
+        // transport must not assert-crash if a rogue sidecar bursts QUERYs.
+        const bus_options: message_bus.Options = .{
+            .send_queue_max = 1 + protocol.queries_max,
+            .frame_max = protocol.frame_max,
+        };
+        const Bus = message_bus.MessageBusType(IOParam, bus_options);
+        const H = @import("sidecar_handlers.zig").SidecarHandlersType(StorageParam, Bus);
         validateHandlersInterface(H);
         return H;
     }
