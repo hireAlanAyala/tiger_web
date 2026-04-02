@@ -297,7 +297,10 @@ pub const SimIO = struct {
         }
     };
 
-    /// Read the HTTP response received by a simulated client.
+    /// Read an HTTP response with Content-Length (keep-alive).
+    /// For Connection: close responses (e.g., 503), use
+    /// read_close_response instead — it waits for server_closed.
+    /// Sidecar sim tests use both: 200 is keep-alive, 503 is close.
     pub fn read_response(self: *SimIO, client_index: usize) ?HttpResponse {
         assert(client_index < max_clients);
         const client = &self.clients[client_index];
@@ -331,8 +334,9 @@ pub const SimIO = struct {
         };
     }
 
-    /// Read a Connection: close response (no Content-Length).
-    /// Waits until the server has closed the fd, then returns the full body.
+    /// Read a Connection: close response. Waits until the server
+    /// has closed the fd (server_closed = true), then returns the
+    /// full body. Used for 503 and SSE responses.
     pub fn read_close_response(self: *SimIO, client_index: usize) ?HttpResponse {
         assert(client_index < max_clients);
         const client = &self.clients[client_index];
