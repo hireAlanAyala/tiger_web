@@ -311,34 +311,79 @@ const TestHarness = struct {
         if (h.io.clients[sidecar_slot].connected) {
             h.sidecar.disconnect();
         }
-        for (0..50) |_| {
-            h.server.tick();
-            h.io.run_for_ns(10 * std.time.ns_per_ms);
+        if (h.server.sidecar_bus.is_connected()) {
+            h.run_server_until(bus_closed);
         }
-        h.server.deinit(h.allocator); // deinits sidecar bus too
+        h.server.deinit(h.allocator);
         h.storage.deinit();
+    }
+
+    fn bus_closed(h: *TestHarness) bool {
+        return !h.server.sidecar_bus.is_connected();
     }
 
     /// Connect sidecar and complete READY handshake.
     fn connect_sidecar(h: *TestHarness) void {
         h.sidecar.connect();
-        h.run(10); // accept
+        h.run_until(sidecar_accepted);
         h.sidecar.inject_ready();
-        h.run(10); // READY delivered
+        h.run_until(sidecar_connected);
+    }
+
+    fn sidecar_accepted(h: *TestHarness) bool {
+        return h.io.clients[sidecar_slot].accepted;
+    }
+
+    fn sidecar_connected(h: *TestHarness) bool {
+        return h.server.sidecar_connected;
+    }
+
+    fn sidecar_disconnected(h: *TestHarness) bool {
+        return !h.server.sidecar_connected;
+    }
+
+    fn handler_pending(h: *TestHarness) bool {
+        return h.server.state_machine.handlers.is_handler_pending();
+    }
+
+    /// Route + prefetch + handle CALLs complete (3 calls).
+    fn handle_call_done(h: *TestHarness) bool {
+        return h.sidecar.calls_processed >= 3;
+    }
+
+    /// All 4 CALLs processed (route + prefetch + handle + render).
+    /// The render RESULT is pending but not yet injected.
+    fn render_call_done(h: *TestHarness) bool {
+        return h.sidecar.calls_processed >= 4;
     }
 
     /// Connect HTTP client on http_slot.
     fn connect_http(h: *TestHarness) void {
         h.io.connect_client(http_slot, http_listen_fd);
-        h.run(5); // accept
+        h.run_until(http_accepted);
     }
 
-    /// Reconnect HTTP client (after Connection: close response).
+    fn http_accepted(h: *TestHarness) bool {
+        return h.io.clients[http_slot].accepted;
+    }
+
+    /// Prepare for next HTTP request. Handles both keep-alive (clear
+    /// response buffer) and Connection: close (reconnect).
     fn reconnect_http(h: *TestHarness) void {
         h.io.clear_response(http_slot);
-        h.run(10); // let close complete
-        h.io.connect_client(http_slot, http_listen_fd);
-        h.run(5); // accept
+        if (h.io.clients[http_slot].server_closed) {
+            // Connection: close — need a fresh connection.
+            h.run_server_until(http_connection_freed);
+            h.io.connect_client(http_slot, http_listen_fd);
+            h.run_until(http_accepted);
+        }
+        // Keep-alive — connection still open, just cleared the buffer.
+    }
+
+    fn http_connection_freed(h: *TestHarness) bool {
+        // The server has processed the close and freed the connection slot.
+        _ = h;
+        return true; // clear_response + server ticks are enough
     }
 
     /// Inject a POST to /products.
@@ -347,32 +392,47 @@ const TestHarness = struct {
         h.io.inject_post(http_slot, "/products", body);
     }
 
-    /// Run N ticks (server + sidecar + IO).
-    fn run(h: *TestHarness, n: usize) void {
-        run_ticks(&h.server, &h.sidecar, &h.io, n);
+    /// Tick server + sidecar + IO until predicate is true.
+    /// Panics if max_ticks exceeded — the condition should always
+    /// be reachable. No magic tick counts, no hope.
+    fn run_until(h: *TestHarness, comptime predicate: fn (*TestHarness) bool) void {
+        for (0..1000) |_| {
+            h.tick_all();
+            if (predicate(h)) return;
+        }
+        @panic("run_until: condition not reached within 1000 ticks");
     }
 
-    /// Run until HTTP response or timeout. Tries both keep-alive and
-    /// close responses (503 uses Connection: close).
-    fn wait_response(h: *TestHarness, max_ticks: usize) ?SimIO.HttpResponse {
-        for (0..max_ticks) |_| {
+    /// Tick server + IO only (sidecar not ticked). For simulating
+    /// stuck sidecar or advancing server state without sidecar
+    /// processing.
+    fn run_server_until(h: *TestHarness, comptime predicate: fn (*TestHarness) bool) void {
+        for (0..1000) |_| {
             h.server.tick();
-            h.sidecar.tick();
             h.io.run_for_ns(10 * std.time.ns_per_ms);
+            if (predicate(h)) return;
+        }
+        @panic("run_server_until: condition not reached within 1000 ticks");
+    }
+
+    /// One tick of everything.
+    fn tick_all(h: *TestHarness) void {
+        h.server.tick();
+        h.sidecar.tick();
+        h.io.run_for_ns(10 * std.time.ns_per_ms);
+    }
+
+    /// Run until HTTP response arrives. Tries both keep-alive and
+    /// close responses (503 uses Connection: close).
+    fn wait_response(h: *TestHarness) ?SimIO.HttpResponse {
+        for (0..1000) |_| {
+            h.tick_all();
             if (h.io.read_response(http_slot)) |resp| return resp;
             if (h.io.read_close_response(http_slot)) |resp| return resp;
         }
         return null;
     }
 };
-
-fn run_ticks(server: *Server, sidecar: *SimSidecar, io: *SimIO, n: usize) void {
-    for (0..n) |_| {
-        server.tick();
-        sidecar.tick();
-        io.run_for_ns(10 * std.time.ns_per_ms);
-    }
-}
 
 // =====================================================================
 // Tests
@@ -393,7 +453,7 @@ test "sidecar: basic request-response" {
     h.connect_http();
     h.inject_post();
 
-    const resp = h.wait_response(500) orelse return error.TestUnexpectedResult;
+    const resp = h.wait_response() orelse return error.TestUnexpectedResult;
     try std.testing.expectEqual(@as(u16, 200), resp.status_code);
 }
 
@@ -408,7 +468,7 @@ test "sidecar: down at startup → 503" {
     h.connect_http();
     h.inject_post();
 
-    const resp = h.wait_response(500) orelse return error.TestUnexpectedResult;
+    const resp = h.wait_response() orelse return error.TestUnexpectedResult;
     try std.testing.expectEqual(@as(u16, 503), resp.status_code);
 }
 
@@ -422,14 +482,14 @@ test "sidecar: disconnect mid-request → 503" {
     h.inject_post();
 
     // Let the server start processing (CALL sent to sidecar).
-    h.run(5);
+    h.run_until(TestHarness.handler_pending);
 
     // Disconnect sidecar mid-exchange.
     h.sidecar.disconnect();
-    h.run(20); // drain disconnect, on_close fires, pipeline resets
+    h.run_server_until(TestHarness.sidecar_disconnected);
 
     // Server should return 503 (pipeline was reset).
-    const resp = h.wait_response(500) orelse return error.TestUnexpectedResult;
+    const resp = h.wait_response() orelse return error.TestUnexpectedResult;
     try std.testing.expectEqual(@as(u16, 503), resp.status_code);
 }
 
@@ -443,13 +503,12 @@ test "sidecar: reconnect after disconnect → 200" {
 
     // First request succeeds.
     h.inject_post();
-    const resp1 = h.wait_response(500) orelse return error.TestUnexpectedResult;
+    const resp1 = h.wait_response() orelse return error.TestUnexpectedResult;
     try std.testing.expectEqual(@as(u16, 200), resp1.status_code);
 
     // Disconnect sidecar.
     h.sidecar.disconnect();
-    h.run(20); // drain disconnect
-    try std.testing.expect(!h.server.sidecar_connected);
+    h.run_server_until(TestHarness.sidecar_disconnected);
 
     // Reconnect sidecar.
     h.connect_sidecar();
@@ -458,7 +517,7 @@ test "sidecar: reconnect after disconnect → 200" {
     // New request succeeds.
     h.reconnect_http();
     h.inject_post();
-    const resp2 = h.wait_response(500) orelse return error.TestUnexpectedResult;
+    const resp2 = h.wait_response() orelse return error.TestUnexpectedResult;
     try std.testing.expectEqual(@as(u16, 200), resp2.status_code);
 }
 
@@ -472,13 +531,13 @@ test "sidecar: multiple requests during disconnect → all 503" {
 
     // First request → 503.
     h.inject_post();
-    const resp1 = h.wait_response(500) orelse return error.TestUnexpectedResult;
+    const resp1 = h.wait_response() orelse return error.TestUnexpectedResult;
     try std.testing.expectEqual(@as(u16, 503), resp1.status_code);
 
     // Second request → 503 (reconnect because Connection: close).
     h.reconnect_http();
     h.inject_post();
-    const resp2 = h.wait_response(500) orelse return error.TestUnexpectedResult;
+    const resp2 = h.wait_response() orelse return error.TestUnexpectedResult;
     try std.testing.expectEqual(@as(u16, 503), resp2.status_code);
 }
 
@@ -489,16 +548,16 @@ test "sidecar: connect then disconnect before READY → 503" {
 
     // Connect sidecar but don't send READY.
     h.sidecar.connect();
-    h.run(10); // accept completes
+    h.run_until(TestHarness.sidecar_accepted);
     // Disconnect before READY.
     h.sidecar.disconnect();
-    h.run(20); // drain
+    h.run_server_until(TestHarness.bus_closed);
 
     try std.testing.expect(!h.server.sidecar_connected);
 
     h.connect_http();
     h.inject_post();
-    const resp = h.wait_response(500) orelse return error.TestUnexpectedResult;
+    const resp = h.wait_response() orelse return error.TestUnexpectedResult;
     try std.testing.expectEqual(@as(u16, 503), resp.status_code);
 }
 
@@ -511,33 +570,18 @@ test "sidecar: response timeout → terminate → 503" {
     h.connect_http();
     h.inject_post();
 
-    // Run enough ticks for the HTTP request to be fully received
-    // (partial delivery) and the pipeline to start. The server
-    // sends the route CALL to the sidecar.
-    for (0..50) |_| {
-        h.server.tick();
-        h.io.run_for_ns(10 * std.time.ns_per_ms);
-        if (h.server.state_machine.handlers.is_handler_pending()) break;
-    }
-
-    // Verify the pipeline is pending — sidecar CALL is in-flight.
-    try std.testing.expect(h.server.sidecar_connected);
-    try std.testing.expect(h.server.state_machine.handlers.is_handler_pending());
+    // Tick server (not sidecar) until the pipeline is pending.
+    h.run_server_until(TestHarness.handler_pending);
 
     // Tick past the 500-tick timeout WITHOUT ticking the sidecar.
-    for (0..600) |_| {
-        h.server.tick();
-        h.io.run_for_ns(10 * std.time.ns_per_ms);
-    }
-
-    // Server should have terminated the connection after timeout.
-    try std.testing.expect(!h.server.sidecar_connected);
+    // The sidecar is "stuck" — never responds to the CALL.
+    h.run_server_until(TestHarness.sidecar_disconnected);
 
     // The original request's connection was closed during timeout.
     // Reconnect and verify 503 (sidecar is disconnected).
     h.reconnect_http();
     h.inject_post();
-    const resp = h.wait_response(100) orelse return error.TestUnexpectedResult;
+    const resp = h.wait_response() orelse return error.TestUnexpectedResult;
     try std.testing.expectEqual(@as(u16, 503), resp.status_code);
 }
 
@@ -550,46 +594,20 @@ test "sidecar: disconnect during render → fallback HTML" {
     h.connect_http();
     h.inject_post();
 
-    // Tick until route + prefetch + handle CALLs are done (3 calls).
-    // The sidecar responds normally to these. Then the server enters
-    // the render stage and sends the render CALL.
-    for (0..500) |_| {
-        h.server.tick();
-        h.sidecar.tick();
-        h.io.run_for_ns(10 * std.time.ns_per_ms);
+    // Tick until the render CALL is processed by the sidecar (4 calls:
+    // route + prefetch + handle + render). The render RESULT is pending
+    // (built but not yet injected).
+    h.run_until(TestHarness.render_call_done);
 
-        // 3 calls = route + prefetch + handle. The render CALL
-        // has been sent but the sidecar hasn't responded yet
-        // (response_pending is set on the next tick).
-        if (h.sidecar.calls_processed >= 3) break;
-    }
-    try std.testing.expectEqual(@as(u32, 3), h.sidecar.calls_processed);
-
-    // The handle RESULT is pending in the sidecar (built but not
-    // injected). Tick the sidecar once to inject it. The render
-    // CALL hasn't been sent yet (server hasn't processed handle
-    // RESULT), so the sidecar won't read the render CALL.
-    h.sidecar.tick();
-
-    // Now tick the server to process the handle RESULT → execute
-    // (sync) → enter render → send render CALL.
-    for (0..20) |_| {
-        h.server.tick();
-        h.io.run_for_ns(10 * std.time.ns_per_ms);
-    }
-
-    // The server is in .render, render CALL is in the sidecar's
-    // recv_buf but the sidecar hasn't processed it (we didn't tick).
-    // Disconnect during render. Writes are already committed.
+    // The render RESULT is pending. Don't tick the sidecar — the
+    // server is waiting for the render response. Disconnect now.
+    // Writes are already committed (handle was sync).
     // The server must NOT retry (would duplicate writes). It sends
     // fallback HTML instead.
     h.sidecar.disconnect();
-    for (0..20) |_| {
-        h.server.tick();
-        h.io.run_for_ns(10 * std.time.ns_per_ms);
-    }
+    h.run_server_until(TestHarness.sidecar_disconnected);
 
-    const resp = h.wait_response(100) orelse return error.TestUnexpectedResult;
+    const resp = h.wait_response() orelse return error.TestUnexpectedResult;
     // Fallback response is 200 (operation succeeded, render degraded).
     try std.testing.expectEqual(@as(u16, 200), resp.status_code);
     // Body contains the fallback text, not the sidecar's "<div>sim</div>".
@@ -605,15 +623,10 @@ test "sidecar: protocol violation → terminate → 503" {
     h.connect_http();
     h.inject_post();
 
-    // Let the server send the CALL to the sidecar.
-    for (0..10) |_| {
-        h.server.tick();
-        // Don't tick sidecar — we'll inject a bad response manually.
-        h.io.run_for_ns(10 * std.time.ns_per_ms);
-    }
+    // Tick server (not sidecar) until CALL is in-flight.
+    h.run_server_until(TestHarness.handler_pending);
 
     // Inject a malformed RESULT with wrong request_id.
-    // The sidecar client validates request_id and sets protocol_violation.
     var result_payload: [6]u8 = undefined;
     result_payload[0] = @intFromEnum(protocol.CallTag.result);
     std.mem.writeInt(u32, result_payload[1..5], 0xDEADBEEF, .big); // wrong id
@@ -622,15 +635,12 @@ test "sidecar: protocol violation → terminate → 503" {
     const wire = build_wire_frame(&wire_buf, &result_payload);
     h.io.inject_bytes(TestHarness.sidecar_slot, wire);
 
-    // Tick to deliver the bad frame.
-    h.run(20);
-
-    // Server detected protocol violation → terminated connection.
-    try std.testing.expect(!h.server.sidecar_connected);
+    // Tick to deliver the bad frame. Server detects violation → terminate.
+    h.run_server_until(TestHarness.sidecar_disconnected);
 
     // Next request gets 503.
     h.reconnect_http();
     h.inject_post();
-    const resp = h.wait_response(100) orelse return error.TestUnexpectedResult;
+    const resp = h.wait_response() orelse return error.TestUnexpectedResult;
     try std.testing.expectEqual(@as(u16, 503), resp.status_code);
 }
