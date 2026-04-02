@@ -252,8 +252,19 @@ SQLite WAL mode:
 
 ## Implementation order
 
-1. **PipelineSlot struct** — extract commit state from server scalars
-   into per-slot struct. Single slot first (backward compatible).
+1. **PipelineSlot struct** — extract these fields from server.zig
+   (lines 125-141) into a PipelineSlot struct:
+   - `commit_stage` → `slot.stage`
+   - `commit_connection` → `slot.connection`
+   - `commit_msg` → `slot.msg`
+   - `commit_pipeline_resp` → `slot.pipeline_resp`
+   - `commit_cache` → `slot.cache`
+   - `commit_identity` → `slot.identity`
+   - `commit_dispatch_entered` → `slot.dispatch_entered`
+   - `commit_pending_since` → `slot.pending_since`
+   Server gets `pipeline_slots: [1]PipelineSlot` (single slot,
+   backward compatible). All `server.commit_*` refs become
+   `slot.*` (~30 sites in commit_dispatch and helpers).
 2. **Per-slot commit_dispatch** — dispatch takes a slot pointer, not
    server scalars. Stage 2 uses slot[0] only.
 3. **Per-slot SidecarClient** — each slot has its own client. Client
