@@ -609,9 +609,14 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
                 return;
             }
 
-            // Only route frames from the active connection. Standby
-            // connections are connected but idle — ignore their frames.
-            if (server.sidecar_bus.active != connection_index) return;
+            // Only the active connection should send frames after READY.
+            // Standby connections are connected but idle. If a standby
+            // sends an unsolicited frame, terminate it — it's buggy.
+            if (server.sidecar_bus.active != connection_index) {
+                log.warn("sidecar: unsolicited frame from standby slot {d}, terminating", .{connection_index});
+                server.sidecar_bus.terminate_connection(connection_index);
+                return;
+            }
 
             // Normal operation: route to sidecar client.
             server.state_machine.handlers.process_sidecar_frame(frame, server.state_machine.storage);

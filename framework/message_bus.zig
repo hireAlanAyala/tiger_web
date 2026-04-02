@@ -659,7 +659,8 @@ pub fn MessageBusType(comptime IO: type, comptime options: Options) type {
         on_close_fn: ?*const fn (*anyopaque, u8, Connection.CloseReason) void,
         context: *anyopaque,
 
-        /// Pool sizing: N recv buffers + N * send_queue + burst.
+        /// Pool sizing: per connection 1 recv buffer + send_queue_max
+        /// send entries. Plus 1 shared burst for send_frame allocations.
         const messages_max: u32 = connections_max * (1 + options.send_queue_max) + 1;
 
         comptime {
