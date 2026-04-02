@@ -125,11 +125,9 @@ HTTP → Server (1 core) → Bus[0] → Sidecar A (1 core)
 ## Implementation order
 
 1. ~~**Process spawning**~~ ✓ DONE — supervisor.zig, `--` CLI
-2. **Recovery sim tests** — disconnect → 503 → reconnect → 200,
-   render crash fallback, timeout, protocol violations (Phase 4 step 5)
-3. **Supervisor integration test** — test sidecar binary (Zig),
-   real spawn/crash/respawn cycle (Phase 4.5)
-4. **Multi-bus** — array of buses, accept on each, READY per
+2. ~~**Recovery sim tests**~~ ✓ DONE — 10 tests: disconnect → 503,
+   reconnect → 200, render crash fallback, timeout, protocol violation
+3. **Multi-bus** — array of buses, accept on each, READY per
    connection. `active_sidecar` index for dispatch.
 5. **Hot standby failover** — on_close switches active index.
    Zero downtime. Verify with e2e test (kill A, request hits B).

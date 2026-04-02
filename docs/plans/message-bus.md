@@ -2096,34 +2096,40 @@ Phase 2:   Sidecar handlers (SidecarHandlersType + TS wire format)
 Phase 3:   MessageBus Fuzzer (can start during Phase 2)
     ↓
 Phase 4:   SimSidecar
-Phase 4.5: Supervisor integration test
 ```
 
-### Phase 4.5: Supervisor integration test
+### Phase 4.5: Supervisor integration test — DEFERRED
 
-End-to-end test with real processes. Exercises the full loop:
-supervisor spawns process → process connects → server routes
-requests → process crashes → supervisor respawns → process
-reconnects → server routes again.
+Deferred because the cost exceeds the value at this stage:
 
-**Test sidecar binary** — a minimal Zig program that speaks the
-sidecar protocol. Connects to the unix socket, sends READY,
-echoes CALL→RESULT. No handler logic — just protocol compliance.
-Compiled as a separate executable in build.zig.
+**What it would test:** READY handshake over a real unix socket
+with a real spawned process. The only path not covered by sim
+tests or supervisor unit tests.
 
-**Test structure:**
-1. Build test sidecar binary
-2. Start real IO + real server
-3. Supervisor spawns test sidecar with `-- zig-out/bin/test-sidecar`
-4. Verify: HTTP request → 200 (full pipeline via real process)
-5. Kill the sidecar (SIGKILL from test, not supervisor)
-6. Verify: next HTTP request → 503 (sidecar down)
-7. Wait for supervisor to respawn
-8. Verify: HTTP request → 200 (recovery complete)
+**Why we don't need it now:**
+- Sim tests (sim_sidecar.zig, 10 tests) cover every connection
+  lifecycle path: disconnect → 503 → reconnect → 200, render
+  crash fallback, timeout, protocol violation.
+- Supervisor unit tests (supervisor.zig, 16 tests) cover every
+  state machine path: backoff, grace period, restart.
+- The real socket path is exercised by developers on every
+  `npm run dev` session. If READY fails, they see it immediately.
+- The untested code is three posix wrappers (spawn, waitpid,
+  kill) — trivial one-liners.
 
-**Depends on:** Phase 4 (SimSidecar recovery sim tests) — the
-connection lifecycle must be tested first. The integration test
-adds the process lifecycle on top.
+**Why it's costly:**
+- Real processes introduce non-determinism — the thing TB's
+  architecture is designed to avoid.
+- Build dependency ordering (test needs a built binary).
+- Process cleanup on test failure (defer kill).
+- CI compatibility (some environments restrict fork/exec).
+- Flaky failures at 3am: "is it my code or the OS?"
+- Sim tests: <1s, deterministic, never flake.
+  Integration test: 2-3s, non-deterministic, will flake.
+
+**When to build it:** When a production bug proves the sim
+missed something, or when CI confidence for the real socket
+path becomes a shipping requirement.
 
 Phase 1.5 is the architectural pivot. The SM pipeline becomes
 the single protocol: route → prefetch → handle → render. All

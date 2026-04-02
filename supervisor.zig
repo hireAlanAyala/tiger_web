@@ -11,6 +11,12 @@
 //! waitpid(WNOHANG) for non-blocking reap, no signal handlers.
 //!
 //! Stage 1: single sidecar. Stage 2 generalizes for N processes.
+//!
+//! Testing: the state machine (step) is unit tested below (16 tests).
+//! The syscall wrappers (spawn, waitpid, kill) are NOT integration
+//! tested — they're trivial one-liners delegating to std.process.Child.
+//! The real socket path is exercised by developers on every run.
+//! See docs/plans/message-bus.md "Phase 4.5" for the full rationale.
 
 const std = @import("std");
 const assert = std.debug.assert;
