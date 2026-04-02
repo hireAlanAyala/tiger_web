@@ -1780,10 +1780,23 @@ it can `setsid()` to create a new process group. Then
 `kill(-pid, SIGKILL)` always works. But this means the server
 owns process management — more complexity, less separation.
 
-## Phase 3.5b: Connection redesign — typed consumer (root cause 2)
+## Phase 3.5b: Typed consumer — REJECTED
 
-> Can be combined with Phase 3.5 or done separately.
-> Lower priority — current wiring works, not compile-time checked.
+> Investigated adding comptime Consumer type parameter to
+> ConnectionType. Rejected: causes comptime cascade explosion.
+> SidecarClientType needs Consumer, SidecarHandlersType needs
+> Consumer, HandlersFor needs Consumer, Server IS the Consumer
+> → circular dependency.
+>
+> TB avoids this: MessageBus takes a typed callback FUNCTION,
+> not a typed Consumer STRUCT. The function pointer breaks the
+> circular dependency. The callback uses @fieldParentPtr to
+> recover the consumer from the embedded Connection.
+>
+> Current *anyopaque + function pointers work. Misconfigurations
+> are caught by fuzzers at runtime (zero frames delivered =
+> obvious). Only two consumers (server + fuzzers). Not worth
+> the comptime cascade.
 
 ### The problem
 
