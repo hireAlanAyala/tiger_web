@@ -14,23 +14,40 @@
    Remove session_action from HandleResult. Session changes via
    db.execute on a sessions table. Only logout uses session_action.
 
-4. **SimSidecar** — DEFERRED
-   Separate simulation primitive for the sidecar (not SimIO — that's
-   HTTP clients). SimSidecar speaks CALL/RESULT frames, controls
-   when RESULTs arrive (PRNG-driven delays, failures), and exercises
-   the async pend/resume path (commit_dispatch stages, epoll-driven
-   on_recv, pipeline resume). Same pattern as TB's SimStorage —
-   each simulated component has its own type. The server sees it as
-   a normal sidecar fd. Currently covered by protocol fuzzer (state
-   machine level) and manual e2e.
+4. **Phase 4: SimSidecar** — NEXT
+   Simulation primitive for sim tests with full sidecar pipeline.
+   Exercises Server + SM + MessageBus + SidecarHandlers together.
+   Recovery scenarios: disconnect → 503 → reconnect → 200.
+   SimSidecar speaks CALL/RESULT frames via FuzzIO, controls
+   when RESULTs arrive (PRNG-driven delays, failures).
+   Same pattern as TB's SimStorage. Currently covered by:
+   - Protocol fuzzer (sidecar_fuzz.zig — state machine level)
+   - Transport fuzzer (message_bus_fuzz.zig — connection level)
+   - Manual e2e (npm run dev + curl)
+   - Integration test (examples/ecommerce-ts/test.ts — 67/75 pass)
 
-5. **Non-blocking sidecar frame IO** — DEFERRED
-   `sidecar_recv_callback` calls `on_recv` which does blocking
-   `read_frame`/`write_frame` inside the epoll event loop. Works
-   for unix domain sockets (microseconds) but violates the principle
-   that IO callbacks must not block. Fix: make sidecar fd non-blocking,
-   handle EAGAIN/partial reads in a buffered frame reader, use the
-   IO layer's recv/send instead of read_frame/write_frame.
+5. **Non-blocking sidecar frame IO** — DONE (message bus replaced it)
+   The old blocking `read_frame`/`write_frame` was replaced by
+   MessageBusType(IO) with async recv/send in Phase 1. Dead code
+   still in protocol.zig (read_frame/write_frame/recv_exact/send_exact)
+   — blocked from deletion by old sidecar_fuzz.zig test. Can now be
+   deleted since sidecar_fuzz.zig was rewritten.
+
+6. **Adapter lifecycle flags** — DEFERRED
+   READY handshake flags byte for runtime-specific kill semantics
+   (process group kill for npx/poetry). See decision doc:
+   `docs/internal/decision-sidecar-lifecycle.md`.
+   Defer until second adapter (Python/Go) is added.
+
+7. **E2e test handler failures** — 8 handler logic bugs
+   update/search/dashboard rendering failures in sidecar mode.
+   Not transport issues — handler TS code needs fixes.
+   See: `examples/ecommerce-ts/test.ts` (67/75 pass).
+
+8. **Delete dead protocol code** — cleanup
+   `protocol.read_frame`, `write_frame`, `recv_exact`, `send_exact`
+   are dead code (replaced by message bus). `io.readable()` has no
+   callers. Can delete now that sidecar_fuzz.zig is rewritten.
 
 ---
 
