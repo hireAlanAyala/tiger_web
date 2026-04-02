@@ -367,9 +367,15 @@ HTTP → Server (1 core) → Bus (4 connections)
 6. ~~**Supervisor N children**~~ ✓ DONE — processes array, -Dsidecar-count
 7. ~~**Hot standby sim test**~~ ✓ DONE — kill active, standby takes over, 200
 8. **Handler timeout contract** — per-handler `@timeout`, `@background`
-   annotation, scanner enforcement. See decision-handler-timeout-contract.md
-9. **Supervisor health check** — derived from max(all timeouts) in manifest.
-   Kills stuck processes that don't respond within the bound.
+   annotation. `@timeout` mandatory on `@background`, default 5s on
+   `@route`. Scanner generates comptime constants in handlers.generated.zig
+   (not a manifest file — compiler IS the enforcement). Server reads
+   timeout at comptime, enforces per-CALL at runtime.
+   See decision-handler-timeout-contract.md
+9. **Supervisor health check** — derived from max(all handler timeouts)
+   at comptime. If a process runs longer than max_timeout + grace
+   without any CALL completing, supervisor kills it. No coupling to
+   server — the bound comes from the generated code, not a signal.
 10. **Concurrent pipeline** (separate plan) — Stage 3
 11. **Round-robin dispatch** — Stage 3
 

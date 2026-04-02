@@ -40,12 +40,28 @@ wiki page needed.
 - Supervisor reaps dead processes, respawns with backoff
 - Hot standby failover (no 503 during restart)
 
+## Comptime enforcement (TB pattern)
+
+The scanner generates comptime constants in handlers.generated.zig
+— not a manifest file. The timeout is a comptime constant on the
+handler. The server reads it at comptime. No manifest to get stale.
+No runtime parsing. The compiler IS the enforcement. If the timeout
+is missing, the code doesn't compile.
+
+We already do this for routes — routes.generated.zig is generated
+Zig, not JSON. @timeout follows the same pattern: one source of
+truth, zero runtime trust.
+
+The supervisor derives its health bound from the generated code
+at comptime: `max(all handler timeouts) + grace`. No coupling to
+the server — the bound is structural, not behavioral.
+
 ## What's deferred
 
 - `@background` annotation + background dispatch
 - Per-handler `@timeout` (overriding the 5s default)
-- Annotation scanner enforcement (reject @background without @timeout)
-- Supervisor health check derived from max(all timeouts) in manifest
+- Scanner generates timeout constants in handlers.generated.zig
+- Supervisor health bound derived from generated comptime constants
 - Per-CALL timeout enforcement (currently global 5s)
 
 ## The stuck process gap
