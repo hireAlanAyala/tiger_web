@@ -371,6 +371,10 @@ HTTP → Server (1 core) → Bus (4 connections)
    `@route`. Scanner generates comptime constants in handlers.generated.zig
    (not a manifest file — compiler IS the enforcement). Server reads
    timeout at comptime, enforces per-CALL at runtime.
+   Timeout log format includes the declared limit:
+   `sidecar: handler "createProduct" timed out (5000ms limit, stage=prefetch, op=create_product)`
+   Today (without per-handler @timeout):
+   `sidecar: response timeout (500 ticks, stage=prefetch, op=create_product), terminating`
    See decision-handler-timeout-contract.md
 9. **Supervisor health check** — derived from max(all handler timeouts)
    at comptime. If a process runs longer than max_timeout + grace

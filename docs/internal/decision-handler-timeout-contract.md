@@ -33,10 +33,28 @@ The timeout IS the documentation. `@timeout(5000)` tells the
 next developer: this handler must complete in 5 seconds. No
 wiki page needed.
 
+## Log format
+
+Today (global 5s timeout):
+```
+sidecar: response timeout (500 ticks, stage=prefetch, op=create_product), terminating
+```
+
+With per-handler @timeout (future):
+```
+sidecar: handler "createProduct" timed out (5000ms limit, stage=prefetch, op=create_product)
+```
+
+The handler name and declared limit come from comptime constants
+in handlers.generated.zig. The developer sees exactly what timed
+out, what the limit was, and where in the pipeline it happened.
+No "502 Bad Gateway" from three layers of proxies.
+
 ## What exists today
 
 - Server-side 5s timeout on all request-path CALLs
   (timeout_sidecar_response in server.zig)
+- Timeout log includes stage and operation (not handler name yet)
 - Supervisor reaps dead processes, respawns with backoff
 - Hot standby failover (no 503 during restart)
 
