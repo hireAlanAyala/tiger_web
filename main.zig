@@ -121,16 +121,17 @@ pub fn main() !void {
     // Supervisor: spawn and manage the sidecar process.
     // The server owns the connection, the supervisor owns the process.
     // main.zig wires them by reading public state from both.
-    var supervisor: Supervisor = undefined;
+    // Supervisor: spawn and manage sidecar processes.
+    // Optional — if no command after '--', the server listens on the
+    // socket but doesn't spawn processes (external supervision mode).
+    var supervisor: ?Supervisor = null;
     if (App.sidecar_enabled) {
-        const argv = sidecar_argv orelse {
-            log.err("sidecar mode requires a command after '--' (e.g., tiger-web -- node dispatch.js)", .{});
-            std.process.exit(1);
-        };
-        // Spawn one process per bus connection slot.
-        const count = Handlers.BusType.connections_max;
-        supervisor = try Supervisor.init(std.heap.page_allocator, argv, count);
-        try supervisor.spawn_all();
+        if (sidecar_argv) |argv| {
+            const count = Handlers.BusType.connections_max;
+            var sup = try Supervisor.init(std.heap.page_allocator, argv, count);
+            try sup.spawn_all();
+            supervisor = sup;
+        }
     }
 
     log.info("storage=sqlite wal=tiger_web.wal tick_interval={d}ms connections={d}", .{
@@ -161,15 +162,17 @@ pub fn main() !void {
         // The supervisor watches processes via waitpid — no "restart"
         // signal needed. The sidecar detects the closed socket and exits.
         if (App.sidecar_enabled) {
-            const connected = server.sidecar_is_connected();
+            if (supervisor) |*sup| {
+                const connected = server.sidecar_is_connected();
 
-            // READY completed → reset supervisor backoff.
-            if (!was_sidecar_connected and connected) {
-                supervisor.notify_connected();
+                // READY completed → reset supervisor backoff.
+                if (!was_sidecar_connected and connected) {
+                    sup.notify_connected();
+                }
+
+                was_sidecar_connected = connected;
+                sup.tick(server.tick_count);
             }
-
-            was_sidecar_connected = connected;
-            supervisor.tick(server.tick_count);
         }
 
         io.run_for_ns(tick_ns);

@@ -5,8 +5,7 @@
   },
   "scripts": {
     "build": "../../tiger-web build",
-    "dev": "../../tiger-web dev",
-    "test": "npx tsx test.ts"
+    "dev": "../../tiger-web dev"
   },
   "devDependencies": {
     "tsx": "^4",

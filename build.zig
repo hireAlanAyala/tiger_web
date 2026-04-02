@@ -302,10 +302,20 @@ pub fn build(b: *std.Build) void {
     run_scripts_test.setEnvironmentVariable("ZIG_EXE", b.graph.zig_exe);
     unit_test_step.dependOn(&run_scripts_test.step);
 
-    // --- Adapter test (opt-in, requires npx tsx) ---
-    const adapter_test_cmd = b.addSystemCommand(&.{ "npx", "-y", "tsx", "adapters/typescript_test.ts" });
-    const adapter_test_step = b.step("test-adapter", "Run TypeScript adapter test");
-    adapter_test_step.dependOn(&adapter_test_cmd.step);
+    // --- Cross-language adapter tests (requires npx tsx) ---
+    // These read binary vectors written by Zig unit tests (/tmp/tiger_*.bin).
+    // CI must run unit-test BEFORE test-adapter to generate the vectors.
+    {
+        const adapter_test_step = b.step("test-adapter", "Run TypeScript cross-language tests");
+        for ([_][]const u8{
+            "generated/serde_test.ts",
+            "generated/call_test.ts",
+            "generated/routing_test.ts",
+        }) |test_file| {
+            const cmd = b.addSystemCommand(&.{ "npx", "-y", "tsx", test_file });
+            adapter_test_step.dependOn(&cmd.step);
+        }
+    }
 
     // --- CI pipeline (zig build ci -- <mode>) ---
     // Matches TB's pattern: build step that invokes other build steps as subprocesses.
@@ -422,7 +432,7 @@ fn build_ci(
     }
 
     if (default or all or mode == .clients) {
-        // Adapter test (Level 1: binary protocol boundary).
+        // Cross-language tests (Level 1: binary protocol boundary).
         build_ci_step(b, step_ci, &.{"test-adapter"});
         // Example project integration test (Level 2: full handler logic).
         build_ci_script(b, step_ci, scripts, &.{"ci"}, options.zig_exe);
