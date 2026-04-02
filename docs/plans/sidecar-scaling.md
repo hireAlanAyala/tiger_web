@@ -56,6 +56,38 @@ The bus stores active but never decides its value. The server sets
 active but never manages connections. main.zig never stores pointers
 to either. Clean seams.
 
+### Sidecar slot lifecycle
+
+No cross-component state machine — each component owns its own
+state (Connection, Process, pipeline). Callbacks enforce transitions.
+invariants() catches violations. See decision-no-cross-component-state-machine.md.
+
+```
+  Supervisor spawns process
+          ↓
+  Process connects to unix socket
+          ↓
+  Bus accepts → connection[i].state = .connected
+          ↓
+  Sidecar sends READY → server: connections_ready[i] = true
+          ↓
+  First ready → server: bus.set_active(i)
+          ↓
+  Serving requests (CALL/RESULT on active connection)
+          ↓
+  Crash / timeout / protocol violation
+          ↓
+  Server: bus.terminate() → connection closes → on_close fires
+          ↓
+  Server: connections_ready[i] = false, find_next_ready
+          ↓
+  Sidecar detects closed socket → exits
+          ↓
+  Supervisor: waitpid reaps → schedules respawn
+          ↓
+  (cycle repeats)
+```
+
 ## Three stages
 
 ### Stage 1: Single sidecar — DONE
