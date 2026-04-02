@@ -1596,10 +1596,18 @@ either:
 Then delete `TestIO` and `TestContext` from `message_bus.zig`.
 Two IO implementations (production + simulation), not three.
 
-## Phase 3.5: Connection redesign — "report, don't decide"
+## Phase 3.5: Connection CloseReason — DONE
 
-> Fixes root causes 1 and 3 from Phase 3 audit.
-> Do before Phase 4 (SimSidecar).
+> Investigated "report, don't decide" (consumer chooses whether
+> to terminate). Rejected: CRC errors can't be skipped (no sync
+> markers), recv/send errors mean broken socket, half-duplex
+> requires new states. Terminate-on-error is correct for framed
+> byte streams. Recovery happens above (MessageBus, server).
+>
+> Implemented: CloseReason on terminate + on_close_fn. Consumer
+> knows WHY the connection closed (eof, recv_error, send_error,
+> crc_error, oversized, buffer_full, shutdown) for logging,
+> metrics, and kill decisions.
 
 ### The problem
 
