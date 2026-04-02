@@ -164,8 +164,11 @@ pub const Supervisor = struct {
 
     /// Non-blocking child reap. Returns true if child exited.
     /// TB's LoggedProcess.wait_nonblocking pattern.
+    /// Caller guarantees state == .running → child != null (pair
+    /// assertion with spawn which sets both).
     fn wait_nonblocking(self: *Supervisor) bool {
-        const child = &(self.child orelse return false);
+        assert(self.state == .running);
+        const child = &(self.child.?); // spawn guarantees non-null
         const result = posix.waitpid(child.id, posix.W.NOHANG);
         if (result.pid == 0) return false; // still running
         self.child = null;
@@ -173,10 +176,11 @@ pub const Supervisor = struct {
     }
 
     /// Send SIGKILL to the child process.
+    /// Caller guarantees state == .running → child != null.
     fn do_kill(self: *Supervisor) void {
-        if (self.child) |child| {
-            log.warn("killing sidecar pid={d}", .{child.id});
-            _ = posix.kill(child.id, posix.SIG.KILL) catch {};
-        }
+        assert(self.state == .running);
+        const child = self.child.?;
+        log.warn("killing sidecar pid={d}", .{child.id});
+        _ = posix.kill(child.id, posix.SIG.KILL) catch {};
     }
 };
