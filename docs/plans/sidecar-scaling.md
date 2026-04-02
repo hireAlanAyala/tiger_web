@@ -23,10 +23,6 @@ Same bus. Same connection. Same protocol. Same supervisor. Same
 process model. The dispatch policy is a server concern, not a
 transport concern.
 
-This means multi-connection bus serves all async work: N
-request-path sidecars, hot standby failover, AND background
-work dispatch. One primitive, not two.
-
 ## Architecture
 
 ```
@@ -39,12 +35,25 @@ HTTP → Server (1 core) → Bus (1 listen socket, N connections)
 ```
 
 The bus is the connection multiplexer (TB pattern). One listen
-socket, one pool, N connections. The server asks the bus for the
-active connection. Failover is a bus concern — the server says
-"send this CALL", the bus picks the connection.
+socket, one pool, N connections. The bus is transport — it doesn't
+know which connection is "active." The server owns routing and
+failover decisions.
 
-NOT N buses (each with its own pool, listen socket, accept loop).
-One bus, N connections. Same as TB's MessageBus managing N replicas.
+## Responsibility seam (Stage 2)
+
+| Concern | Owner | Mechanism |
+|---|---|---|
+| Connection pool | Bus | connections array, accept fills slots |
+| Frame delivery | Bus | on_frame_fn(context, connection_index, frame) |
+| Close notification | Bus | on_close_fn(context, connection_index, reason) |
+| READY tracking | Server | connections_ready[N] per-connection bools |
+| Active routing | Server | sidecar_active_index, dispatch policy |
+| Failover | Server | sidecar_on_close switches active to standby |
+| Process lifecycle | Supervisor | spawn N, reap, restart |
+| Wiring | main.zig | reads server + supervisor state, no cross-refs |
+
+The bus never decides what "active" means. The server never manages
+connections. main.zig never stores pointers to either. Clean seams.
 
 ## Three stages
 
@@ -62,17 +71,14 @@ HTTP → Server (1 core) → Bus (1 connection) → Sidecar A (1 core)
 ```
 
 **What exists:**
-- Supervisor (supervisor.zig): spawn, reap (waitpid WNOHANG),
-  restart with exponential backoff, kill stuck after grace period
-- CLI: `tiger-web -- node dispatch.js` (any runtime, `--` separator)
+- Supervisor (supervisor.zig): spawn, reap, restart, kill stuck
+- CLI: `tiger-web -- node dispatch.js` (`--` separator)
 - Server: terminate_sidecar (connection only, no process kill)
-- main.zig wiring: server.sidecar_connected → supervisor.request_restart /
-  notify_connected. No cross-references.
-- READY frame: [tag][version] — no pid (supervisor has Child.id)
-- SimSidecar: 10 recovery sim tests
-- Supervisor unit tests: 16 state machine tests (step function)
+- main.zig wiring: no cross-references
 - Bus interface: get_message, unref, send_message, is_connected,
   can_send, terminate, connect_fd, frame_header_size
+- SimSidecar: 10 recovery sim tests
+- Supervisor: 16 state machine unit tests
 
 ### Stage 2: Hot standby (no concurrent pipeline)
 
@@ -91,41 +97,149 @@ HTTP → Server (1 core) → Bus (2 connections)
 ```
 
 On crash of A:
-1. Bus connection[0] closes → on_close fires
-2. Bus switches active to connection[1] (already READY)
+1. Bus connection[0] closes → on_close_fn(ctx, 0, reason) fires
+2. Server sees index 0 was active → switches to connection[1]
 3. Next request routes to B — no 503, no delay
 4. Supervisor detects exit, respawns A in background
-5. A connects, READY handshake, becomes new standby
+5. A connects to bus (fills empty slot), READY handshake
+6. Server marks connection slot as ready, A becomes standby
 
-**What changes from Stage 1:**
+#### Bus changes (transport layer)
 
-Bus (multi-connection):
-- `connection` becomes `connections: [max_connections]Connection`
-- `connections_ready: [max_connections]bool` (READY handshake done)
-- `active: ?u8` — index of connection to dispatch to
-- `tick_accept` fills next empty connection slot
-- `on_close` callback includes connection index
-- Pool sized for N connections: `N * (1 + send_queue_max) + 1`
-- One listen socket (unchanged)
+The bus gains multi-connection support. It is a dumb pool — no
+routing policy, no "active" concept. TB pattern: the bus manages
+connections, the consumer (server) manages routing.
 
-Server:
-- `sidecar_bus.send_message()` routes to active connection
-- `sidecar_on_close(index)` → if active crashed, switch to standby
-- No array of buses, no array of clients — one bus, one client
-  (client state is per-request, not per-connection)
+```zig
+// connections array replaces single connection field
+connections: [max_connections]Connection,
+connections_count: u8,  // from options, set at init
 
-Supervisor:
-- Manages N children (array of Process)
-- `--sidecar-count=N` from CLI
+// Pool sized for N connections:
+// N recv messages + N * send_queue_max + 1 burst
+const messages_max = connections_count * (1 + send_queue_max) + 1;
+```
+
+**Callback signatures gain connection index:**
+```zig
+// Before (single connection):
+on_frame_fn: *const fn (*anyopaque, []const u8) void,
+on_close_fn: ?*const fn (*anyopaque, CloseReason) void,
+
+// After (N connections):
+on_frame_fn: *const fn (*anyopaque, u8, []const u8) void,
+on_close_fn: ?*const fn (*anyopaque, u8, CloseReason) void,
+```
+
+The connection index tells the server which connection sent the
+frame or closed. Without this, READY handshake per-connection
+and failover routing are impossible.
+
+**tick_accept fills ALL empty slots:**
+```zig
+fn tick_accept(self: *Self) void {
+    for (self.connections[0..self.connections_count]) |*conn, i| {
+        if (conn.state == .closed and !self.accept_pending[i]) {
+            self.accept_pending[i] = true;
+            self.io.accept(self.listen_fd, &self.accept_completions[i], ...);
+        }
+    }
+}
+```
+
+Current bus accepts one connection at a time. With N slots, multiple
+sidecars might connect on the same tick (e.g., supervisor spawns 2).
+
+**Bus interface additions:**
+```zig
+pub fn is_connection_ready(self, index: u8) bool;
+pub fn send_to_connection(self, index: u8, msg, len) void;
+pub fn terminate_connection(self, index: u8) void;
+pub fn get_message(self) *Message;  // unchanged (shared pool)
+pub fn unref(self, msg) void;       // unchanged
+```
+
+Stage 1 compatibility: `is_connected()`, `send_message()` etc.
+delegate to connection[0] when connections_count == 1. No breaking
+change for single-connection usage.
+
+#### Server changes (routing + failover)
+
+The server owns routing and failover. The bus doesn't know what
+"active" means.
+
+```zig
+// Replace single bool with per-connection + active tracking
+sidecar_active: ?u8 = null,           // which connection to dispatch to
+sidecar_connections_ready: [max]bool,  // READY handshake complete per slot
+```
+
+**sidecar_on_frame(ctx, connection_index, frame):**
+```zig
+fn sidecar_on_frame(ctx, index: u8, frame: []const u8) void {
+    if (!server.sidecar_connections_ready[index]) {
+        // READY handshake for THIS connection
+        validate_ready(frame) → sidecar_connections_ready[index] = true;
+        if (server.sidecar_active == null) {
+            server.sidecar_active = index;  // first ready = active
+        }
+        return;
+    }
+    // Normal frame: route to sidecar client
+    handlers.process_sidecar_frame(frame, storage);
+}
+```
+
+**sidecar_on_close(ctx, connection_index, reason):**
+```zig
+fn sidecar_on_close(ctx, index: u8, reason) void {
+    server.sidecar_connections_ready[index] = false;
+    if (server.sidecar_active == index) {
+        // Active connection crashed — find standby
+        server.sidecar_active = find_next_ready(server);
+        // If null: no ready connections, 503 until reconnect
+    }
+    // Pipeline recovery: same as Stage 1
+    if (commit_stage == .render) render_crash_fallback();
+    else if (commit_stage != .idle) pipeline_reset();
+}
+```
+
+#### SidecarClient per-connection pairing
+
+The SidecarClient has one `call_state` — it tracks one in-flight
+CALL at a time (serial pipeline). With N connections, the client
+must know WHICH connection the CALL was sent on.
+
+```zig
+// Add to SidecarClient:
+active_connection_index: ?u8 = null,
+```
+
+`call_submit` stores the index. `on_frame` validates the frame
+came from the expected connection. `on_close` resets if the closed
+connection was the one with the in-flight CALL.
+
+One client is sufficient for Stage 2 (serial pipeline — one CALL
+at a time). Stage 3 (concurrent pipeline) needs N clients.
+
+#### Supervisor changes
+
+Manages N children instead of one:
+```zig
+processes: [max_processes]Process,
+count: u8,  // from --sidecar-count
+```
+
+Each process is independent — own spawn, reap, backoff.
+main.zig wiring loops over all processes.
 
 **What doesn't change:**
 - Handler interface (same pure functions)
 - Pipeline (serial, one commit_stage)
 - State machine, storage, WAL, auth
 - Wire format, CALL/RESULT protocol
-- SidecarClientType (one client per request, not per connection)
-- Fuzzers (test one connection — connection behavior is the same)
-- SimSidecar tests (test one connection lifecycle)
+- Fuzzers (test one connection — behavior is the same)
 
 ### Stage 3: Round-robin (requires concurrent pipeline)
 
@@ -153,28 +267,27 @@ HTTP → Server (1 core) → Bus (4 connections)
 **Requires concurrent pipeline (from network-storage.md):**
 - Multiple `commit_stage` slots (one per in-flight request)
 - Each pipeline slot paired with a bus connection
-- SQLite transactions serial (begin/commit one at a time)
-  but prefetch + render overlap across pipelines
-
-**Dispatch strategy:**
-- Round-robin: `next_index = (next_index + 1) % connected_count`
-- Skip disconnected sidecars
-- If all busy, request waits in .ready until a pipeline frees
-- Background CALLs dispatched to any free connection
+- SQLite transactions serial but prefetch + render overlap
+- N SidecarClients (one per pipeline slot)
 
 ## Implementation order
 
 1. ~~**Process spawning**~~ ✓ DONE — supervisor.zig, `--` CLI
 2. ~~**Recovery sim tests**~~ ✓ DONE — 10 tests
-3. **Multi-connection bus** — connections array, active index,
-   pool sizing for N, tick_accept fills slots, on_close with index
-4. **Hot standby failover** — on_close switches active.
-   Zero downtime. Sim test: kill A, next request hits B.
-5. **CLI flag** — `--sidecar-count=N`. Default 1.
-6. **Concurrent pipeline** (separate plan, network-storage.md) —
-   multiple commit_stage slots. Required for round-robin.
-7. **Round-robin dispatch** — distribute across N sidecars.
-   Background CALLs use the same dispatch.
+3. **Callback signature** — on_frame_fn and on_close_fn gain
+   connection_index parameter. Single-connection callers pass 0.
+   This is the foundation — everything else depends on it.
+4. **Multi-connection bus** — connections array, per-slot accept,
+   pool sizing for N, send_to_connection(index), terminate_connection(index)
+5. **Server per-connection state** — sidecar_connections_ready[N],
+   sidecar_active index, sidecar_on_frame/on_close with index
+6. **SidecarClient connection pairing** — active_connection_index
+   field, reset on disconnect of paired connection
+7. **Supervisor N children** — processes array, --sidecar-count
+8. **Hot standby failover** — on_close switches active to standby.
+   Sim test: kill A, next request hits B without 503.
+9. **Concurrent pipeline** (separate plan) — Stage 3
+10. **Round-robin dispatch** — Stage 3
 
 ## Why there's no "worker"
 
@@ -189,14 +302,7 @@ of (or in addition to) request-path CALLs. The dispatch policy
 decides which CALL goes to which connection. The primitive is one:
 the sidecar process on the multi-connection bus.
 
-This eliminates: a separate worker binary, a separate connection
-type, a separate supervisor, a separate testing infrastructure.
-One primitive serves request handling, background jobs, and
-scheduled tasks.
-
 ## Resource comparison
-
-### Tiger_web N+1 sidecars vs industry N+1 servers
 
 | | Tiger_web (4 sidecars) | Industry (4 Node servers) |
 |---|---|---|
@@ -205,42 +311,17 @@ scheduled tasks.
 | Throughput | ~100K req/s | ~20K req/s |
 | Tools | 1 binary + 4 node | 7 services |
 | Failover | <1ms (already connected) | 5-30s (health check + drain) |
-| State sharing | None (SQLite local) | Redis + PostgreSQL |
 | Deploy | `--sidecar-count=4` | Kubernetes manifest |
 | Handler changes | None | None |
-| Infra changes | None | PG replicas, Redis cluster, LB config |
-
-### Why it works
-
-Handler functions are pure — no shared mutable state, no globals,
-no sockets, no file handles. The framework owns all IO. Duplicating
-a function executor (sidecar) is cheap. Duplicating an application
-server (Node + Express + PG pool + Redis + middleware) is expensive.
-
-The scaling primitive is the process, not the server. Add a process,
-get more compute. The industry scales by adding servers, which means
-adding infrastructure. Tiger_web scales by adding compute only.
 
 ## Dependencies
 
 | Dependency | Required for |
 |---|---|
-| Supervisor (supervisor.zig) | All stages ✓ DONE |
+| Supervisor | All stages ✓ DONE |
 | Recovery sim tests | Stage 1 ✓ DONE |
-| Multi-connection bus | Stage 2+ |
-| CLI --sidecar-count | Stage 2+ |
-| Concurrent pipeline (network-storage.md) | Stage 3 |
-
-## Files affected
-
-| File | Stage | Change |
-|---|---|---|
-| supervisor.zig | 1 ✓ | Spawn, reap, restart, kill stuck |
-| main.zig | 1 ✓ | Supervisor wiring, `--` CLI |
-| framework/server.zig | 1 ✓ | terminate_sidecar (no kill) |
-| protocol.zig | 1 ✓ | READY without pid |
-| sim_sidecar.zig | 1 ✓ | 10 recovery sim tests |
-| framework/message_bus.zig | 2 | Multi-connection: connections array, active index, pool sizing |
-| framework/server.zig | 2 | on_close with index, failover logic |
-| supervisor.zig | 2 | N children |
-| framework/server.zig | 3 | Multiple pipeline slots, background dispatch |
+| Callback connection index | Stage 2 (foundation) |
+| Multi-connection bus | Stage 2 |
+| Server per-connection state | Stage 2 |
+| SidecarClient pairing | Stage 2 |
+| Concurrent pipeline | Stage 3 |
