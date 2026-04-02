@@ -191,6 +191,7 @@ pub fn build(b: *std.Build) void {
         "framework/message_pool.zig",
         "wal_test.zig",
         "annotation_scanner.zig",
+        "supervisor.zig",
     };
     const unit_test_step = b.step("unit-test", "Run unit tests");
     for (modules) |mod| {
