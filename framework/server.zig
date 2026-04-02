@@ -584,7 +584,8 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
         /// - Before handshake: expects READY frame. Validates version.
         ///   Sets sidecar_connected = true.
         /// - After handshake: routes to sidecar client (CALL/RESULT).
-        pub fn sidecar_on_frame(ctx: *anyopaque, frame: []const u8) void {
+        pub fn sidecar_on_frame(ctx: *anyopaque, connection_index: u8, frame: []const u8) void {
+            _ = connection_index; // Stage 1: single connection (always 0)
             if (!App.sidecar_enabled) unreachable;
             const server: *Server = @ptrCast(@alignCast(ctx));
 
@@ -629,7 +630,8 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
         }
 
         /// Called when the sidecar bus connection closes.
-        pub fn sidecar_on_close(ctx: *anyopaque, reason: Handlers.BusType.Connection.CloseReason) void {
+        pub fn sidecar_on_close(ctx: *anyopaque, connection_index: u8, reason: Handlers.BusType.Connection.CloseReason) void {
+            _ = connection_index; // Stage 1: single connection (always 0)
             if (!App.sidecar_enabled) unreachable;
             const server: *Server = @ptrCast(@alignCast(ctx));
             server.sidecar_connected = false;

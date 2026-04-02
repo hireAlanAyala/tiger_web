@@ -339,7 +339,7 @@ const FuzzContext = struct {
         self.expected_tail += 1;
     }
 
-    fn on_frame(ctx_ptr: *anyopaque, frame: []const u8) void {
+    fn on_frame(ctx_ptr: *anyopaque, _: u8, frame: []const u8) void {
         const self: *FuzzContext = @ptrCast(@alignCast(ctx_ptr));
         const checksum = frame_checksum(frame);
 

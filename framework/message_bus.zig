@@ -158,14 +158,22 @@ pub fn ConnectionType(comptime IO: type, comptime options: Options) type {
         // this callback only. Consumer must copy data it needs to
         // retain (copy_state pattern). May call send_frame/send_message
         // re-entrantly (QUERY sub-protocol). May call terminate().
-        on_frame_fn: *const fn (context: *anyopaque, frame: []const u8) void,
+        // connection_index: which connection in the bus sent this frame.
+        // Stage 1: always 0 (single connection). Stage 2+: slot index.
+        on_frame_fn: *const fn (context: *anyopaque, connection_index: u8, frame: []const u8) void,
         // on_close_fn: Called when the connection closes (terminate_close).
         // Consumer should reset any in-flight state (e.g. call_state
         // to .failed). Called once, after all IO is drained.
         // CloseReason tells the consumer WHY — for logging, metrics,
         // or close decisions (sidecar: crc_error → terminate).
+        // connection_index: which connection closed.
         // May be null if consumer doesn't need close notification.
-        on_close_fn: ?*const fn (context: *anyopaque, reason: CloseReason) void,
+        on_close_fn: ?*const fn (context: *anyopaque, connection_index: u8, reason: CloseReason) void,
+        /// Which slot this connection occupies in the bus's connections
+        /// array. Passed to on_frame_fn and on_close_fn so the consumer
+        /// knows which connection sent the frame or closed.
+        /// Stage 1: always 0. Stage 2+: set by MessageBusType.
+        connection_index: u8,
         close_reason: CloseReason = .shutdown,
         context: *anyopaque,
 
@@ -182,8 +190,8 @@ pub fn ConnectionType(comptime IO: type, comptime options: Options) type {
             pool: *Pool,
             fd: IO.fd_t,
             context: *anyopaque,
-            on_frame_fn: *const fn (*anyopaque, []const u8) void,
-            on_close_fn: ?*const fn (*anyopaque, CloseReason) void,
+            on_frame_fn: *const fn (*anyopaque, u8, []const u8) void,
+            on_close_fn: ?*const fn (*anyopaque, u8, CloseReason) void,
         ) void {
             assert(self.state == .closed);
             assert(self.recv_message == null);
@@ -396,7 +404,7 @@ pub fn ConnectionType(comptime IO: type, comptime options: Options) type {
 
                 self.process_pos += frame_header_size + len;
 
-                self.on_frame_fn(self.context, frame);
+                self.on_frame_fn(self.context, self.connection_index, frame);
 
                 maybe(self.state == .terminating);
                 if (self.state != .connected) return;
@@ -547,7 +555,7 @@ pub fn ConnectionType(comptime IO: type, comptime options: Options) type {
 
             // Notify consumer that the connection closed, with reason.
             if (self.on_close_fn) |on_close| {
-                on_close(self.context, self.close_reason);
+                on_close(self.context, self.connection_index, self.close_reason);
             }
         }
 
@@ -634,8 +642,8 @@ pub fn MessageBusType(comptime IO: type, comptime options: Options) type {
         accept_pending: bool,
 
         // Consumer callbacks — stored here, passed to connection on init.
-        on_frame_fn: *const fn (*anyopaque, []const u8) void,
-        on_close_fn: ?*const fn (*anyopaque, Connection.CloseReason) void,
+        on_frame_fn: *const fn (*anyopaque, u8, []const u8) void,
+        on_close_fn: ?*const fn (*anyopaque, u8, Connection.CloseReason) void,
         context: *anyopaque,
 
         /// Pool sizing: recv buffer (1) + send queue (send_queue_max) + burst (1).
@@ -651,8 +659,8 @@ pub fn MessageBusType(comptime IO: type, comptime options: Options) type {
             allocator: std.mem.Allocator,
             io: *IO,
             context: *anyopaque,
-            on_frame_fn: *const fn (*anyopaque, []const u8) void,
-            on_close_fn: ?*const fn (*anyopaque, Connection.CloseReason) void,
+            on_frame_fn: *const fn (*anyopaque, u8, []const u8) void,
+            on_close_fn: ?*const fn (*anyopaque, u8, Connection.CloseReason) void,
         ) !void {
             self.io = io;
             self.pool = try Pool.init(allocator, messages_max);
@@ -674,6 +682,7 @@ pub fn MessageBusType(comptime IO: type, comptime options: Options) type {
                 .send_submitted = false,
                 .on_frame_fn = on_frame_fn,
                 .on_close_fn = on_close_fn,
+                .connection_index = 0, // Stage 1: single connection
                 .context = context,
             };
             self.listen_fd = -1;
@@ -692,8 +701,8 @@ pub fn MessageBusType(comptime IO: type, comptime options: Options) type {
             io: *IO,
             path: []const u8,
             context: *anyopaque,
-            on_frame_fn: *const fn (*anyopaque, []const u8) void,
-            on_close_fn: ?*const fn (*anyopaque, Connection.CloseReason) void,
+            on_frame_fn: *const fn (*anyopaque, u8, []const u8) void,
+            on_close_fn: ?*const fn (*anyopaque, u8, Connection.CloseReason) void,
         ) !void {
             try self.init_pool(allocator, io, context, on_frame_fn, on_close_fn);
             self.start_listener(path);
@@ -927,7 +936,7 @@ const TestContext = struct {
         };
     }
 
-    fn on_frame(ctx_ptr: *anyopaque, frame: []const u8) void {
+    fn on_frame(ctx_ptr: *anyopaque, _: u8, frame: []const u8) void {
         const self: *TestContext = @ptrCast(@alignCast(ctx_ptr));
         assert(self.frame_count < 16);
         const i = self.frame_count;
@@ -937,7 +946,7 @@ const TestContext = struct {
     }
 };
 
-fn test_init_conn(conn: *TestConnection, io: *TestIO, pool: *TestConnection.Pool, fd: TestIO.fd_t, ctx: *anyopaque, on_frame_fn: *const fn (*anyopaque, []const u8) void) void {
+fn test_init_conn(conn: *TestConnection, io: *TestIO, pool: *TestConnection.Pool, fd: TestIO.fd_t, ctx: *anyopaque, on_frame_fn: *const fn (*anyopaque, u8, []const u8) void) void {
     conn.state = .closed;
     conn.recv_message = null;
     conn.init(io, pool, fd, ctx, on_frame_fn, null);
@@ -1071,7 +1080,7 @@ test "Connection: backpressure suspend and resume" {
         frame_count: u32,
         conn_ptr: *TestConnection,
 
-        fn on_frame(ctx_ptr: *anyopaque, frame: []const u8) void {
+        fn on_frame(ctx_ptr: *anyopaque, _: u8, frame: []const u8) void {
             const self: *@This() = @ptrCast(@alignCast(ctx_ptr));
             const i = self.frame_count;
             @memcpy(self.frame_bufs[i][0..frame.len], frame);
@@ -1196,7 +1205,8 @@ test "Connection: re-entrancy — send_frame from on_frame" {
         conn_ptr: *TestConnection,
         pool_ptr: *TestConnection.Pool,
 
-        fn on_frame(ctx_ptr: *anyopaque, _: []const u8) void {
+        fn on_frame(ctx_ptr: *anyopaque, _: u8, _frame: []const u8) void {
+            _ = _frame;
             const self: *@This() = @ptrCast(@alignCast(ctx_ptr));
             // Re-entrant: send a frame from inside on_frame.
             if (self.conn_ptr.state == .connected and
@@ -1261,7 +1271,8 @@ test "Connection: re-entrancy — terminate from on_frame" {
         terminated: bool = false,
         conn_ptr: *TestConnection,
 
-        fn on_frame(ctx_ptr: *anyopaque, _: []const u8) void {
+        fn on_frame(ctx_ptr: *anyopaque, _: u8, _frame: []const u8) void {
+            _ = _frame;
             const self: *@This() = @ptrCast(@alignCast(ctx_ptr));
             if (self.conn_ptr.state == .connected) {
                 self.conn_ptr.terminate(.no_shutdown, .shutdown);

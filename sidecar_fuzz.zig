@@ -445,7 +445,7 @@ const SidecarFuzzCtx = struct {
     client: *SidecarClient,
     bus: *Bus,
 
-    fn on_bus_frame(ctx_ptr: *anyopaque, frame: []const u8) void {
+    fn on_bus_frame(ctx_ptr: *anyopaque, _: u8, frame: []const u8) void {
         const self: *SidecarFuzzCtx = @ptrCast(@alignCast(ctx_ptr));
         self.client.on_frame(
             self.bus,
