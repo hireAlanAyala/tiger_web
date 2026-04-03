@@ -146,9 +146,14 @@ Do NOT evolve the current tracer. The current timing sites are
 wrong — `.execute` span crosses three stages, CallTiming is a
 separate system, timing was designed for serial pipeline.
 
+This is the first phase because all other phases depend on it:
+benchmarks need the tracer for overhead measurement, budget
+assertions need the tick span for duration tracking, CI metrics
+need trace output for regression visualization.
+
 **Step 1: Design events from boundaries.**
 
-6 boundary events. Each traces where work LEAVES our code.
+6 events. 5 boundary crossings + 1 synchronization wait.
 
 ```zig
 const Event = union(enum) {
@@ -156,15 +161,26 @@ const Event = union(enum) {
     tick,
 
     // Pipeline stage — one span per stage per slot
-    pipeline_stage: struct { stage: CommitStage, slot: u8, op: Operation },
+    pipeline_stage: struct {
+        stage: CommitStage,
+        slot: u8,
+        op: ?Operation,  // null at .route (operation unknown until routed)
+    },
 
     // Sidecar CALL→RESULT — one span per round-trip
-    sidecar_call: struct { function: []const u8, slot: u8, request_id: u32 },
+    sidecar_call: struct {
+        function: enum { route, prefetch, handle, render },  // comptime-known, not string
+        slot: u8,
+        request_id: u32,
+    },
 
     // Storage operation — one span per query or write
+    // Fires from SidecarClient.on_frame around query_fn (per-QUERY)
+    // and from server.zig around native handler storage calls
     storage_op: struct { slot: u8 },
 
-    // Handle lock wait — time spent waiting for another slot's write
+    // Synchronization wait — time spent waiting for another slot's write
+    // NOT a boundary crossing — a contention event that affects latency
     handle_lock_wait: struct { slot: u8 },
 
     // WAL append — disk write after commit
@@ -178,35 +194,59 @@ const Event = union(enum) {
 - Timing aggregation (min/max/sum/count)
 - Gauges and counters
 - StatsD emission (log mode first, UDP later)
+- `cancel_slot(slot_idx)` — cancel all open spans for a slot
+  (TB uses per-event cancel; we need per-slot because concurrent
+  slots mean per-event cancel would kill other slots' spans)
+- Time source: injected `Time` vtable, not `std.time.Instant`
+  (simulation determinism)
 - Use TB reference files (`framework/trace/*_tb.zig`)
 
-**Step 3: Wire events in server.zig.**
+**Step 3: Wire tracer ownership.**
+- Create tracer in `main.zig`, pass to server
+- Server stores `*Tracer`
+- SidecarClient stores `*Tracer` (like TB's Grid stores `*Tracer`)
+  — for per-QUERY storage_op spans inside on_frame.
+  Set during `wire_sidecar`, same pattern as sidecar_client and
+  sidecar_bus pointers. No signature changes to on_frame.
+- SM loses tracer field entirely (tracer is not a framework service,
+  it's infrastructure owned by the server)
+
+**Step 4: Wire events at boundary sites.**
 - `trace.start(.tick)` / `defer trace.stop(.tick)` in tick()
-- `trace.start(.{.pipeline_stage = ...})` at each stage entry
-- `trace.start(.{.sidecar_call = ...})` in call_submit
-- `trace.start(.{.storage_op = ...})` around storage calls
+- `trace.start(.{.pipeline_stage = ...})` at each stage entry in commit_dispatch
+- `trace.start(.{.sidecar_call = ...})` in SidecarClient.call_submit
+- `trace.stop(.{.sidecar_call = ...})` in SidecarClient.on_frame (.complete)
+- `trace.start(.{.storage_op = ...})` in SidecarClient.on_frame before query_fn
+- `trace.stop(.{.storage_op = ...})` in SidecarClient.on_frame after query_fn
+- `trace.start(.{.storage_op = ...})` in server.zig around native handler_execute
 - `trace.start(.{.handle_lock_wait = ...})` when slot enters .handle_wait
+- `trace.stop(.{.handle_lock_wait = ...})` in wake_handle_waiters when slot resumes
 - `trace.start(.{.wal_append = ...})` around wal.append_writes
 
-**Step 4: Delete old timing infrastructure.**
-- Delete `framework/tracer.zig` entirely (wrong time source, wrong events)
-- Delete `CallTiming` struct from `sidecar.zig` (wrong primitive — nesting replaces it)
-- Delete `log_call_timing()` calls from `sidecar_handlers.zig`
-- Delete `sm.tracer` field from SM — tracer owned by server, passed by pointer
-- Delete `Tracer` construction from `state_machine.zig`
-- Delete `pipeline_slots_max` param from `StateMachineType` (was only for tracer slots)
+**Step 5: Wire cancellation on recovery.**
+Three paths cancel open spans for a slot:
+- `sidecar_on_close`: `trace.cancel_slot(connection_index)`
+- `timeout_idle`: `trace.cancel_slot(slot_idx)`
+- `pipeline_reset`: `trace.cancel_slot(slot_idx)`
+Replaces the current per-event-type switch (route → {}, prefetch →
+cancel, render → cancel). One call, explicit, can't miss an event.
+
+**Step 6: Delete old timing infrastructure.**
+- Delete `framework/tracer.zig` entirely
+- Delete `CallTiming` struct + `log_call_timing()` from sidecar.zig
+- Delete `log_call_timing()` calls from sidecar_handlers.zig
+- Delete `sm.tracer` field and `Tracer` construction from state_machine.zig
+- Delete `pipeline_slots_max` param from `StateMachineType`
 - Delete `framework/trace/*_tb.zig` reference files
-- Update all call sites (server.zig, state_machine.zig, app.zig, main.zig, sim files)
+- Update SM type in app.zig, main.zig, sim files (no slots_max param)
 
-**Simulation violations fixed by this step:**
-- `framework/tracer.zig` used `std.time.Instant` (OS clock) — new tracer uses injected `Time` vtable
-- `sidecar.zig` `CallTiming` used `std.time.Instant` — deleted entirely
-
-**Step 5: Verify.**
+**Step 7: Verify.**
 - `--trace=trace.json` → open in ui.perfetto.dev
 - See concurrent pipeline timeline with overlapping slot spans
-- See sidecar CALL gaps (V8 execution time visible)
+- See sidecar_call spans with nested storage_op spans (V8 = gap)
 - See handle_lock_wait spans between slots
+- Cancel paths produce valid JSON (no unclosed spans)
+- SimIO tests: trace output is deterministic (same seed = same trace)
 - All tests pass (unit, sim, sim-sidecar, fuzz smoke)
 
 ### Phase 2: Missing benchmarks
@@ -224,11 +264,15 @@ Each: smoke mode in `zig build unit-test`, real mode in `zig build bench`.
 
 ### Phase 3: Budget assertions
 
-Runtime assertions on hot path resource usage.
+Runtime assertions on hot path resource usage. Assert bounded
+COUNTS, not bounded DURATIONS — crashing under load is worse
+than being slow under load.
 
-- [ ] Tick duration budget assertion
-- [ ] process_inbox scan bound
-- [ ] wake_handle_waiters bound
+- [ ] process_inbox: connections scanned ≤ max_connections
+- [ ] wake_handle_waiters: waiters processed ≤ pipeline_slots_max
+- [ ] Tick duration: measure via aggregate_only tick span, alert
+      in CI metrics. Do NOT runtime-assert — ticks should take
+      longer under load, not crash.
 
 ### Phase 4: Continuous metrics (CI)
 
@@ -238,7 +282,9 @@ Benchmark on every merge, store results, detect drift.
 - [ ] JSON format: `{timestamp, commit, metrics: [{name, unit, value}]}`
 - [ ] Git-backed storage (separate repo or branch)
 - [ ] Baseline comparison: week-over-week mean
-- [ ] Alert on >10% regression
+- [ ] Outlier detection: week-over-week mean comparison per metric
+      (TB pattern — not a fixed 10% threshold, noisy metrics like
+      p99 need wider bands than stable metrics like executable size)
 - [ ] Visualization: line chart per metric over time
 
 ## Verification
