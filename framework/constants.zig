@@ -24,6 +24,12 @@ const build_options = @import("build_options");
 pub const sidecar_enabled: bool = build_options.sidecar_enabled;
 pub const sidecar_count: u8 = build_options.sidecar_count;
 
+comptime {
+    assert(sidecar_count >= 1);
+    assert(sidecar_count <= 32); // bounded — pipeline_slots_max derives from this
+    if (!sidecar_enabled) assert(sidecar_count == 1);
+}
+
 // ---------------------------------------------------------------------------
 // Pipeline — concurrent dispatch slots.
 // ---------------------------------------------------------------------------
