@@ -130,39 +130,68 @@ One system, not two. CallTiming fields become event args.
 
 ## Implementation phases
 
-### Phase 1: Trace output (Chrome Tracing JSON)
+### Phase 1: Trace infrastructure (start from scratch)
 
-Port TB's trace.zig output format. Our tracer already captures
-timing — this phase adds the JSON serialization.
+Do NOT evolve the current tracer. The current timing sites are
+wrong — `.execute` span crosses three stages, CallTiming is a
+separate system, timing was designed for serial pipeline.
 
-- [ ] Add `--trace=<file.json>` CLI flag
-- [ ] Write Chrome Tracing JSON on start/stop (Perfetto compatible)
-- [ ] Add `aggregate_only` support (tick event: timing yes, JSON no)
-- [ ] Define 6 boundary events as typed enum with args
-- [ ] Replace current span enums (prefetch, execute) with boundary events
-- [ ] Merge CallTiming into sidecar_call event
-- [ ] Verify: open trace.json in ui.perfetto.dev, see pipeline timeline
+**Step 1: Design events from boundaries.**
 
-### Phase 1b: Remove old timing infrastructure
+6 boundary events. Each traces where work LEAVES our code.
 
-The new tracer replaces three separate timing systems. Remove them
-to avoid confusion — one system, not three.
+```zig
+const Event = union(enum) {
+    // aggregate_only — fires every tick, too frequent for spans
+    tick,
 
-| Remove | Where | Replaced by |
-|---|---|---|
-| Old `tracer.zig` span enums (prefetch, execute) | `framework/tracer.zig` | Boundary events (pipeline_stage, sidecar_call) |
-| CallTiming struct | `sidecar.zig` | sidecar_call event |
-| `log_call_timing()` calls | `sidecar_handlers.zig` | sidecar_call trace span |
-| `sm.tracer.start/stop(.prefetch/.execute)` | `framework/server.zig` | `trace.start(.{.pipeline_stage = ...})` |
-| `sm.tracer.trace_log()` | `framework/server.zig` | Chrome Tracing JSON (automatic) |
-| `sm.tracer.count_status()` | `framework/server.zig` | `trace.count(.requests_ok)` |
-| `sm.tracer.gauge()` | `framework/server.zig` | `trace.gauge(.connections_active, N)` |
-| `sm.tracer.emit()` | `framework/server.zig` | `trace.emit_metrics()` |
-| Per-slot `started[span][slot_idx]` arrays | `framework/tracer.zig` | Per-event `events_started[stack]` (TB pattern) |
-| `_tb.zig` reference files | `framework/trace/` | Replaced by real implementation |
+    // Pipeline stage — one span per stage per slot
+    pipeline_stage: struct { stage: CommitStage, slot: u8, op: Operation },
 
-After cleanup: one tracer, one output format, one set of events.
-No legacy timing code.
+    // Sidecar CALL→RESULT — one span per round-trip
+    sidecar_call: struct { function: []const u8, slot: u8, request_id: u32 },
+
+    // Storage operation — one span per query or write
+    storage_op: struct { slot: u8 },
+
+    // Handle lock wait — time spent waiting for another slot's write
+    handle_lock_wait: struct { slot: u8 },
+
+    // WAL append — disk write after commit
+    wal_append: struct { op: Operation },
+};
+```
+
+**Step 2: Port TB's tracer engine.**
+- Chrome Tracing JSON output (`--trace=file.json`)
+- aggregate_only support
+- Timing aggregation (min/max/sum/count)
+- Gauges and counters
+- StatsD emission (log mode first, UDP later)
+- Use TB reference files (`framework/trace/*_tb.zig`)
+
+**Step 3: Wire events in server.zig.**
+- `trace.start(.tick)` / `defer trace.stop(.tick)` in tick()
+- `trace.start(.{.pipeline_stage = ...})` at each stage entry
+- `trace.start(.{.sidecar_call = ...})` in call_submit
+- `trace.start(.{.storage_op = ...})` around storage calls
+- `trace.start(.{.handle_lock_wait = ...})` when slot enters .handle_wait
+- `trace.start(.{.wal_append = ...})` around wal.append_writes
+
+**Step 4: Delete old timing infrastructure.**
+- Delete `framework/tracer.zig` entirely
+- Delete `CallTiming` from `sidecar.zig`
+- Delete `log_call_timing()` from `sidecar_handlers.zig`
+- Delete `sm.tracer` field from SM — tracer moves to server
+- Delete `framework/trace/*_tb.zig` reference files
+- Update all call sites (server.zig, state_machine.zig, etc.)
+
+**Step 5: Verify.**
+- `--trace=trace.json` → open in ui.perfetto.dev
+- See concurrent pipeline timeline with overlapping slot spans
+- See sidecar CALL gaps (V8 execution time visible)
+- See handle_lock_wait spans between slots
+- All tests pass (unit, sim, sim-sidecar, fuzz smoke)
 
 ### Phase 2: Missing benchmarks
 
