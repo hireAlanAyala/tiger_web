@@ -725,3 +725,58 @@ number of cores needed to saturate the database.
 → Phase 2 (shm). Batching before shm because it gives a larger
 throughput gain (~2-4×) than shm (~1.4×) and works on the existing
 unix socket transport. shm is incremental on top.
+
+### Measured timing (2026-04-03)
+
+Real sidecar instrumentation (unix socket, V8 warm after 5 requests):
+
+| CALL | Total | V8 compute | QUERY round-trips | Queries |
+|---|---|---|---|---|
+| route | 298µs | 298µs | 0µs | 0 |
+| prefetch | 344µs | 263µs | 81µs | 1 |
+| handle | 62µs | 62µs | 0µs | 0 |
+| render | 115µs | 115µs | 0µs | 0 |
+| **Total** | **819µs** | **738µs** | **81µs** | **1** |
+
+**Finding:** V8 handler execution is 90% of the cost. QUERY
+round-trips are 10%. Transport overhead is <10µs per round-trip
+(invisible). The bottleneck is V8, not the protocol or queries.
+
+**Comparison with Express (same handler logic + SQLite):**
+
+| Work | Express | Our sidecar (now) | After plan |
+|---|---|---|---|
+| HTTP parse | ~15µs (Node) | ~1µs (Zig) | ~1µs |
+| Body parse | ~10µs (middleware) | 0µs (Zig) | 0µs |
+| Handler JS | ~200µs | ~200µs | ~200µs |
+| SQLite query | ~80µs (better-sqlite3) | ~88µs (QUERY RT) | ~10µs (batched) |
+| Template render | ~100µs | ~100µs | ~100µs |
+| Session/cookie | ~20µs (middleware) | ~1µs (Zig HMAC) | ~1µs |
+| HTTP encode | ~10µs (Node) | ~1µs (Zig) | ~1µs |
+| Protocol overhead | 0µs | ~350µs (4 RT) | ~10µs (batched) |
+| **Total** | **~440µs** | **~819µs** | **~328µs** |
+| **vs Express** | **1x** | **0.5x** | **1.3x faster** |
+
+After RT reduction + batching, 1 sidecar is faster than Express
+because Zig handles the expensive non-JS work (HTTP, SQL, session).
+The 10µs protocol cost is paid for 5x over by work that moved
+from V8 to Zig.
+
+### Future: QUERY batching
+
+Measured QUERY round-trip: ~88µs per query (11% of request cost).
+Not the bottleneck today — V8 handler execution dominates. But with
+RT reduction + request batching (which shrink handler overhead),
+QUERY round-trips become a larger fraction.
+
+Currently each `db.query()` is a synchronous round-trip: sidecar
+sends QUERY frame → server executes SQL → sends QUERY_RESULT.
+With N queries per handler, that's N round-trips.
+
+QUERY batching: sidecar sends all QUERYs upfront, server executes
+all and returns all QUERY_RESULTs in one batch. 1 round-trip for
+N queries instead of N.
+
+Not needed now — the 88µs is small compared to 738µs of V8 compute.
+Revisit after Phase 1 + Phase 4 when protocol overhead shrinks and
+QUERY round-trips become a larger share of the remaining cost.
