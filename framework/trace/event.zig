@@ -1,5 +1,6 @@
 const std = @import("std");
 const assert = std.debug.assert;
+const constants = @import("constants");
 
 /// Operation is stored as raw u8 — the tracer doesn't depend on
 /// domain types. The server converts Operation enum to u8 at the
@@ -188,11 +189,7 @@ pub const EventTracing = union(enum) {
 
     // -- Comptime stack layout --
 
-    pub const slots_max = max: {
-        // Import would be circular; use a reasonable upper bound.
-        // The actual slots_max is validated at ServerType comptime.
-        break :max 32;
-    };
+    pub const slots_max = constants.pipeline_slots_max;
 
     pub const stack_limits = std.enums.EnumArray(Event.Tag, u32).init(.{
         .tick = 1,
@@ -343,13 +340,21 @@ test "slot_count covers all timing variants" {
     try std.testing.expectEqual(expected, EventTiming.slot_count);
 }
 
-test "stack positions are unique per slot" {
+test "stack positions are unique per event type" {
     const s0 = EventTracing.stack(&.{ .pipeline_stage = .{ .slot = 0 } });
-    const s1 = EventTracing.stack(&.{ .pipeline_stage = .{ .slot = 1 } });
     const c0 = EventTracing.stack(&.{ .sidecar_call = .{ .slot = 0 } });
-    try std.testing.expect(s0 != s1);
+    const q0 = EventTracing.stack(&.{ .storage_op = .{ .slot = 0 } });
+    const tick = EventTracing.stack(&.{ .tick = {} });
+    // Each event type occupies a different stack range.
     try std.testing.expect(s0 != c0);
-    try std.testing.expect(s1 != c0);
+    try std.testing.expect(c0 != q0);
+    try std.testing.expect(s0 != tick);
+    // Within a type, slot 0 gets the base position.
+    if (EventTracing.slots_max > 1) {
+        const s1 = EventTracing.stack(&.{ .pipeline_stage = .{ .slot = 1 } });
+        try std.testing.expect(s0 != s1);
+        try std.testing.expect(s1 != c0);
+    }
 }
 
 test "timing slots aggregate by work type, not instance" {
