@@ -9,6 +9,7 @@ const StateMachine = App.StateMachineWith(App.Storage);
 const ServerType = @import("framework/server.zig").ServerType;
 const TimeReal = @import("framework/time.zig").TimeReal;
 const Trace = @import("trace.zig");
+const TraceWriter = @import("trace_writer.zig").TraceWriter;
 const auth = @import("framework/auth.zig");
 
 const Server = ServerType(App, IO, App.Storage);
@@ -70,19 +71,34 @@ pub fn main() !void {
     defer wal.deinit();
 
     var time_real = TimeReal{};
-    const trace_file: ?std.fs.File = if (cli.trace) |path|
-        std.fs.cwd().createFile(path, .{}) catch |err| {
-            log.err("failed to open trace file '{s}': {}", .{ path, err });
+
+    const trace_max_bytes = parse_trace_max(cli);
+    const trace_path = generate_trace_path(cli);
+    var trace_file: ?std.fs.File = if (cli.trace)
+        std.fs.cwd().createFile(&trace_path, .{}) catch |err| {
+            log.err("failed to create trace file: {}", .{err});
             std.process.exit(1);
         }
     else
         null;
-    defer if (trace_file) |f| f.close();
+    defer if (trace_file) |*f| f.close();
+
+    var trace_writer: ?TraceWriter = if (trace_file) |f|
+        TraceWriter.init(f, trace_max_bytes)
+    else
+        null;
 
     var tracer = try Trace.Tracer.init(allocator, time_real.time(), .{
-        .writer = if (trace_file) |f| f.writer().any() else null,
+        .writer = if (trace_writer) |*tw| tw.any() else null,
         .log_trace = cli.log_trace,
     });
+
+    if (cli.trace) {
+        log.info("tracing to {s} (max {s})", .{
+            @as([]const u8, &trace_path),
+            cli.@"trace-max".?,
+        });
+    }
     var server = try Server.init(allocator, &io, &sm, &tracer, listen_fd, time_real.time(), &wal);
 
     try wire_sidecar(&server, cli, allocator);
@@ -95,6 +111,65 @@ pub fn main() !void {
 }
 
 // --- Init helpers (each under 70 lines) ---
+
+/// Parse --trace-max value (e.g. "50mb", "100kb", "1gb") to bytes.
+/// Required when --trace is set. Exits on missing or invalid value.
+fn parse_trace_max(cli: CliArgs) u64 {
+    if (!cli.trace) return 0;
+    const raw = cli.@"trace-max" orelse {
+        log.err("--trace-max is required when using --trace (e.g. --trace-max=50mb)", .{});
+        std.process.exit(1);
+    };
+
+    var i: usize = 0;
+    while (i < raw.len and raw[i] >= '0' and raw[i] <= '9') : (i += 1) {}
+    if (i == 0) {
+        log.err("--trace-max: invalid value '{s}' (e.g. 50mb, 100kb, 1gb)", .{raw});
+        std.process.exit(1);
+    }
+    const number = std.fmt.parseInt(u64, raw[0..i], 10) catch {
+        log.err("--trace-max: invalid number '{s}'", .{raw[0..i]});
+        std.process.exit(1);
+    };
+    const suffix = raw[i..];
+    const multiplier: u64 = if (std.ascii.eqlIgnoreCase(suffix, "kb"))
+        1024
+    else if (std.ascii.eqlIgnoreCase(suffix, "mb"))
+        1024 * 1024
+    else if (std.ascii.eqlIgnoreCase(suffix, "gb"))
+        1024 * 1024 * 1024
+    else if (suffix.len == 0)
+        1 // bare number = bytes
+    else {
+        log.err("--trace-max: unknown unit '{s}' (use kb, mb, or gb)", .{suffix});
+        std.process.exit(1);
+    };
+    return number * multiplier;
+}
+
+/// Generate a trace filename from the current timestamp.
+/// Format: trace-YYYY-MM-DD-HHMMSS.json (30 chars + sentinel)
+const trace_path_len = "trace-YYYY-MM-DD-HHMMSS.json".len;
+
+fn generate_trace_path(cli: CliArgs) [trace_path_len:0]u8 {
+    var buf: [trace_path_len:0]u8 = undefined;
+    if (!cli.trace) return buf;
+    const ts: u64 = @intCast(std.time.timestamp());
+    const epoch = std.time.epoch.EpochSeconds{ .secs = ts };
+    const day = epoch.getEpochDay().calculateYearDay();
+    const month_day = day.calculateMonthDay();
+    const day_secs = epoch.getDaySeconds();
+    _ = std.fmt.bufPrint(&buf, "trace-{d:0>4}-{d:0>2}-{d:0>2}-{d:0>2}{d:0>2}{d:0>2}.json", .{
+        day.year,
+        month_day.month.numeric(),
+        month_day.day_index + 1,
+        day_secs.getHoursIntoDay(),
+        day_secs.getMinutesIntoHour(),
+        day_secs.getSecondsIntoMinute(),
+    }) catch unreachable;
+    buf[trace_path_len] = 0;
+    return buf;
+}
 
 /// Collect sidecar command argv from extended args after `--`.
 /// Static buffer — the returned slice must outlive main() because
@@ -209,7 +284,8 @@ const CliArgs = struct {
     port: u16 = 3000,
     log_debug: bool = false,
     log_trace: bool = false,
-    trace: ?[]const u8 = null,
+    trace: bool = false,
+    @"trace-max": ?[]const u8 = null,
     sidecar: ?[]const u8 = null,
     db: [:0]const u8 = "tiger_web.db",
     /// Extended args after `--` are the sidecar command argv.
