@@ -36,25 +36,37 @@ const Methods = ["get", "put", "post", "delete"] as const;
 import { modules, routeTable } from "../generated/handlers.generated.ts";
 import type { HandlerModule, RouteTableEntry } from "../generated/handlers.generated.ts";
 
-// --- Frame IO ---
+// --- Pre-allocated buffers (zero allocation in hot paths) ---
 
 const _decoder = new TextDecoder();
 const _encoder = new TextEncoder();
 
-// Frame format: [payload_len: u32 BE][crc32: u32 LE][payload]
-// CRC covers len_bytes(4) ++ payload_bytes (incremental).
 const FRAME_HEADER_SIZE = 8;
 
+// Reusable frame header — avoids Buffer.alloc per sendFrame.
+const _frameHeader = Buffer.alloc(FRAME_HEADER_SIZE);
+
+// Reusable query frame buffer — avoids 256KB allocation per db.query().
+const _queryBuf = new Uint8Array(frame_max);
+const _queryDv = new DataView(_queryBuf.buffer);
+
+// Reusable result buffer for small results (route, prefetch, handle).
+const _resultBuf = new Uint8Array(4096);
+const _resultDv = new DataView(_resultBuf.buffer);
+
+// --- Frame IO ---
+
+// Frame format: [payload_len: u32 BE][crc32: u32 LE][payload]
+// CRC covers len_bytes(4) ++ payload_bytes (incremental).
+
 function sendFrame(conn: net.Socket, payload: Uint8Array): void {
-  const header = Buffer.alloc(FRAME_HEADER_SIZE);
-  header.writeUInt32BE(payload.length, 0);
-  // CRC-32 covers len(4) ++ payload — incremental computation.
-  const crcLen = crc32(header.subarray(0, 4));
+  _frameHeader.writeUInt32BE(payload.length, 0);
+  const crcLen = crc32(_frameHeader.subarray(0, 4));
   const crcFull = payload.length > 0
     ? crc32(Buffer.from(payload), crcLen)
     : crcLen;
-  header.writeUInt32LE(crcFull, 4);
-  conn.write(header);
+  _frameHeader.writeUInt32LE(crcFull, 4);
+  conn.write(_frameHeader);
   if (payload.length > 0) conn.write(Buffer.from(payload));
 }
 
@@ -63,13 +75,15 @@ function buildResult(
   flag: number,
   data: Uint8Array,
 ): Uint8Array {
-  const buf = new Uint8Array(1 + 4 + 1 + data.length);
-  const dv = new DataView(buf.buffer);
+  const len = 1 + 4 + 1 + data.length;
+  // Use pre-allocated buffer for small results, allocate for large.
+  const buf = len <= _resultBuf.length ? _resultBuf : new Uint8Array(len);
+  const dv = len <= _resultBuf.length ? _resultDv : new DataView(buf.buffer);
   buf[0] = CallTag.result;
   dv.setUint32(1, requestId, false);
   buf[5] = flag;
   buf.set(data, 6);
-  return buf;
+  return buf.subarray(0, len);
 }
 
 function buildQuery(
@@ -80,29 +94,26 @@ function buildQuery(
   params: unknown[],
 ): Uint8Array {
   const sqlBytes = _encoder.encode(sql);
-  // Use frame_max as upper bound — the protocol enforces this limit.
-  // Avoids fragile per-param estimation that can silently truncate.
-  const buf = new Uint8Array(frame_max);
-  const dv = new DataView(buf.buffer);
+  // Reuse pre-allocated buffer — no 256KB allocation per query.
   let pos = 0;
 
-  buf[pos] = CallTag.query;
+  _queryBuf[pos] = CallTag.query;
   pos += 1;
-  dv.setUint32(pos, requestId, false);
+  _queryDv.setUint32(pos, requestId, false);
   pos += 4;
-  dv.setUint16(pos, queryId, false);
+  _queryDv.setUint16(pos, queryId, false);
   pos += 2;
-  dv.setUint16(pos, sqlBytes.length, false);
+  _queryDv.setUint16(pos, sqlBytes.length, false);
   pos += 2;
-  buf.set(sqlBytes, pos);
+  _queryBuf.set(sqlBytes, pos);
   pos += sqlBytes.length;
-  buf[pos] = mode;
+  _queryBuf[pos] = mode;
   pos += 1;
-  buf[pos] = params.length;
+  _queryBuf[pos] = params.length;
   pos += 1;
-  pos += writeParams(dv, pos, params);
+  pos += writeParams(_queryDv, pos, params);
 
-  return buf.subarray(0, pos);
+  return _queryBuf.subarray(0, pos);
 }
 
 // --- Per-request state (sidecar holds between CALLs) ---
@@ -115,7 +126,8 @@ interface RequestState {
   prefetched: Record<string, any>;
 }
 
-let requestState: RequestState = {
+// Reuse object — reset fields instead of allocating new.
+const requestState: RequestState = {
   operation: "",
   id: "",
   body: {},
@@ -124,7 +136,11 @@ let requestState: RequestState = {
 };
 
 function resetRequestState(): void {
-  requestState = { operation: "", id: "", body: {}, params: {}, prefetched: {} };
+  requestState.operation = "";
+  requestState.id = "";
+  requestState.body = {};
+  requestState.params = {};
+  requestState.prefetched = {};
 }
 
 // --- Socket path ---
@@ -138,7 +154,9 @@ if (!socketPath) {
 // --- Connect to server ---
 // Server listens on the unix socket. Sidecar connects to it.
 
-let pending = Buffer.alloc(0);
+// Ring buffer for pending data — avoids Buffer.concat per data event.
+let pendingBuf = Buffer.alloc(frame_max + FRAME_HEADER_SIZE);
+let pendingLen = 0;
 
 const conn = net.createConnection(socketPath, () => {
   console.log("[call_runtime] connected to", socketPath);
@@ -153,7 +171,15 @@ const conn = net.createConnection(socketPath, () => {
 });
 
 conn.on("data", (chunk: Buffer) => {
-  pending = Buffer.concat([pending, chunk]);
+  // Copy into ring buffer — no Buffer.concat allocation.
+  if (pendingLen + chunk.length > pendingBuf.length) {
+    // Grow buffer (rare — only for very large frames).
+    const newBuf = Buffer.alloc(Math.max(pendingBuf.length * 2, pendingLen + chunk.length));
+    pendingBuf.copy(newBuf, 0, 0, pendingLen);
+    pendingBuf = newBuf;
+  }
+  chunk.copy(pendingBuf, pendingLen);
+  pendingLen += chunk.length;
   processFrames();
 });
 
@@ -183,21 +209,21 @@ const pendingQueries = new Map<number, (data: any) => void>();
 let nextQueryId = 0;
 
 function processFrames(): void {
-  while (pending.length >= FRAME_HEADER_SIZE) {
-    const frameLen = pending.readUInt32BE(0);
+  while (pendingLen >= FRAME_HEADER_SIZE) {
+    const frameLen = pendingBuf.readUInt32BE(0);
     if (frameLen > frame_max) {
       console.error("[call_runtime] frame too large:", frameLen);
       conn.destroy();
       return;
     }
     const totalLen = FRAME_HEADER_SIZE + frameLen;
-    if (pending.length < totalLen) break;
+    if (pendingLen < totalLen) break;
 
     // Validate CRC-32 before parsing. CRC covers len(4) ++ payload.
-    const storedCrc = pending.readUInt32LE(4);
-    const crcLen = crc32(pending.subarray(0, 4));
+    const storedCrc = pendingBuf.readUInt32LE(4);
+    const crcLen = crc32(pendingBuf.subarray(0, 4));
     const computedCrc = frameLen > 0
-      ? crc32(pending.subarray(FRAME_HEADER_SIZE, totalLen), crcLen)
+      ? crc32(pendingBuf.subarray(FRAME_HEADER_SIZE, totalLen), crcLen)
       : crcLen;
     if ((computedCrc >>> 0) !== (storedCrc >>> 0)) {
       console.error("[call_runtime] CRC mismatch — frame corrupted");
@@ -205,14 +231,13 @@ function processFrames(): void {
       return;
     }
 
-    // Copy frame data — must not alias pending buffer. When async
-    // handlers suspend (await db.query), more data arrives and
-    // Buffer.concat replaces the buffer. The old view would be stale.
-    const frame = new Uint8Array(pending.buffer.slice(
-      pending.byteOffset + FRAME_HEADER_SIZE,
-      pending.byteOffset + totalLen,
-    ));
-    pending = pending.subarray(totalLen);
+    // Copy frame data — must not alias pending buffer.
+    const frame = new Uint8Array(frameLen);
+    pendingBuf.copy(Buffer.from(frame.buffer), 0, FRAME_HEADER_SIZE, totalLen);
+
+    // Compact pending buffer.
+    pendingBuf.copy(pendingBuf, 0, totalLen, pendingLen);
+    pendingLen -= totalLen;
 
     const tag = frame[0];
 
@@ -311,10 +336,6 @@ async function handleCall(frame: Uint8Array): Promise<void> {
 
 import { matchRoute } from "../generated/routing.ts";
 
-function parseQueryParam(queryString: string, name: string): string | null {
-  const params = new URLSearchParams(queryString);
-  return params.get(name);
-}
 import { OperationValues } from "../generated/types.generated.ts";
 
 function dispatchRoute(requestId: number, args: Uint8Array): void {
@@ -334,9 +355,10 @@ function dispatchRoute(requestId: number, args: Uint8Array): void {
   const methods = ["get", "put", "post", "delete"];
   const methodStr = methods[method] || "get";
 
-  // Route matching — same as old dispatch.
+  // Parse query string once, not per param.
   const queryIdx = path.indexOf("?");
   const queryString = queryIdx >= 0 ? path.slice(queryIdx + 1) : "";
+  const queryParams = queryString ? new URLSearchParams(queryString) : null;
 
   let result: any = null;
   let matchedOp = "";
@@ -346,10 +368,12 @@ function dispatchRoute(requestId: number, args: Uint8Array): void {
     const params = matchRoute(path, entry.pattern);
     if (!params) continue;
 
-    // Merge query params.
-    for (const qname of entry.query_params) {
-      const qval = parseQueryParam(queryString, qname);
-      if (qval !== null) params[qname] = qval;
+    // Merge query params — use pre-parsed URLSearchParams.
+    if (queryParams) {
+      for (const qname of entry.query_params) {
+        const qval = queryParams.get(qname);
+        if (qval !== null) params[qname] = qval;
+      }
     }
 
     const routeFn = modules[entry.operation]?.route;
@@ -370,31 +394,54 @@ function dispatchRoute(requestId: number, args: Uint8Array): void {
     return;
   }
 
-  // Store per-request state from route.
+  // Store per-request state from route — mutate in place, no allocation.
   requestState.operation = matchedOp;
   requestState.id = (result.id || "").replace(/-/g, ""); // strip UUID hyphens
-  requestState.body = typeof body === "string" && body.length > 0 ? JSON.parse(body) : {};
+  // Parse body only if non-empty. Reuse parsed object.
+  requestState.body = body.length > 0 ? JSON.parse(body) : {};
   requestState.params = result.params || {};
 
   // Build result: [operation: u8][id: 16 bytes LE]
-  // No found byte — found/not-found signaled via RESULT flag.
-  // ID written little-endian to match Zig's readInt(u128, .little).
+  // Use pre-allocated result buffer.
   const opValue = (OperationValues as any)[matchedOp];
-  const resultBuf = new Uint8Array(1 + 16);
-  resultBuf[0] = opValue;
+  _resultBuf[0] = CallTag.result;
+  _resultDv.setUint32(1, requestId, false);
+  _resultBuf[5] = ResultFlag.success;
+  _resultBuf[6] = opValue;
   // ID as u128 LE — parse hex string to 16 bytes, reversed.
   const idHex = (result.id || "0".repeat(32)).replace(/-/g, "").padStart(32, "0");
   for (let i = 0; i < 16; i++) {
-    resultBuf[1 + i] = parseInt(idHex.substr((15 - i) * 2, 2), 16);
+    _resultBuf[7 + i] = parseInt(idHex.substr((15 - i) * 2, 2), 16);
   }
 
-  sendFrame(conn, buildResult(requestId, ResultFlag.success, resultBuf));
+  sendFrame(conn, _resultBuf.subarray(0, 7 + 16));
 }
 
 // --- Prefetch CALL ---
 // Args: [operation: u8][id: u128 BE]
 // QUERY sub-protocol for db.query()
 // Result: empty (sidecar holds state)
+
+// Reusable db object — closures capture requestId per call.
+let _currentRequestId = 0;
+
+const _prefetchDb = {
+  query: (sql: string, ...params: unknown[]) => {
+    return queryServerAsync(_currentRequestId, sql, QueryMode.query, params);
+  },
+  queryAll: (sql: string, ...params: unknown[]) => {
+    return queryServerAsync(_currentRequestId, sql, QueryMode.queryAll, params);
+  },
+};
+
+const _renderDb = {
+  query: (sql: string, ...params: unknown[]) => {
+    return queryServerAsync(_currentRequestId, sql, QueryMode.query, params);
+  },
+  queryAll: (sql: string, ...params: unknown[]) => {
+    return queryServerAsync(_currentRequestId, sql, QueryMode.queryAll, params);
+  },
+};
 
 async function dispatchPrefetch(requestId: number, args: Uint8Array): Promise<void> {
   const mod = modules[requestState.operation];
@@ -409,19 +456,8 @@ async function dispatchPrefetch(requestId: number, args: Uint8Array): Promise<vo
     body: requestState.body,
   };
 
-  // db.query() sends QUERY frame, returns Promise that resolves when
-  // QUERY_RESULT arrives. The handler awaits it — Node's event loop
-  // processes socket data while the handler is suspended.
-  const db = {
-    query: (sql: string, ...params: unknown[]) => {
-      return queryServerAsync(requestId, sql, QueryMode.query, params);
-    },
-    queryAll: (sql: string, ...params: unknown[]) => {
-      return queryServerAsync(requestId, sql, QueryMode.queryAll, params);
-    },
-  };
-
-  const prefetched = await mod.prefetch(msg, db);
+  _currentRequestId = requestId;
+  const prefetched = await mod.prefetch(msg, _prefetchDb);
   requestState.prefetched = prefetched || {};
 
   sendFrame(conn, buildResult(requestId, ResultFlag.success, new Uint8Array(0)));
@@ -438,28 +474,33 @@ const SessionAction = {
   clear: 2,
 } as const;
 
+// Reusable writes array — clear and reuse instead of allocating.
+const _writes: Array<{ sql: string; params: unknown[] }> = [];
+
+const _handleDb = {
+  execute: (sql: string, ...params: unknown[]) => {
+    _writes.push({ sql, params });
+  },
+};
+
 function dispatchHandle(requestId: number, _args: Uint8Array): void {
   const mod = modules[requestState.operation];
   if (!mod?.handle) {
     // No handle function — return "ok" with no writes, no session action.
     const statusBytes = _encoder.encode("ok");
-    const resultBuf = new Uint8Array(2 + statusBytes.length + 1 + 1);
-    const resultDv = new DataView(resultBuf.buffer);
-    resultDv.setUint16(0, statusBytes.length, false);
-    resultBuf.set(statusBytes, 2);
-    resultBuf[2 + statusBytes.length] = SessionAction.none;
-    resultBuf[2 + statusBytes.length + 1] = 0; // write_count
-    sendFrame(conn, buildResult(requestId, ResultFlag.success, resultBuf));
+    _resultBuf[0] = CallTag.result;
+    _resultDv.setUint32(1, requestId, false);
+    _resultBuf[5] = ResultFlag.success;
+    _resultDv.setUint16(6, statusBytes.length, false);
+    _resultBuf.set(statusBytes, 8);
+    _resultBuf[8 + statusBytes.length] = SessionAction.none;
+    _resultBuf[8 + statusBytes.length + 1] = 0; // write_count
+    sendFrame(conn, _resultBuf.subarray(0, 8 + statusBytes.length + 2));
     return;
   }
 
-  // Build ctx.
-  const writes: Array<{ sql: string; params: unknown[] }> = [];
-  const db = {
-    execute: (sql: string, ...params: unknown[]) => {
-      writes.push({ sql, params });
-    },
-  };
+  // Clear reusable writes array.
+  _writes.length = 0;
 
   const ctx = {
     operation: requestState.operation,
@@ -470,7 +511,7 @@ function dispatchHandle(requestId: number, _args: Uint8Array): void {
   };
 
   // Handle returns status string, or { status, sessionAction } object.
-  const handleResult = mod.handle(ctx, db);
+  const handleResult = mod.handle(ctx, _handleDb);
   let status: string;
   let sessionAction: number = SessionAction.none;
   if (typeof handleResult === "string") {
@@ -493,11 +534,10 @@ function dispatchHandle(requestId: number, _args: Uint8Array): void {
   const statusBytes = _encoder.encode(status);
   // Calculate total write size.
   let writeSize = 0;
-  for (const w of writes) {
+  for (const w of _writes) {
     const sqlBytes = _encoder.encode(w.sql);
     // [sql_len: u16 BE][sql][param_count: u8][params...]
     writeSize += 2 + sqlBytes.length + 1;
-    // Estimate param size.
     for (const p of w.params) {
       if (p === null || p === undefined) writeSize += 1;
       else if (typeof p === "number") writeSize += 9;
@@ -509,9 +549,14 @@ function dispatchHandle(requestId: number, _args: Uint8Array): void {
     }
   }
 
-  const resultBuf = new Uint8Array(2 + statusBytes.length + 1 + 1 + writeSize);
-  const resultDv = new DataView(resultBuf.buffer);
-  let pos = 0;
+  const totalSize = 6 + 2 + statusBytes.length + 1 + 1 + writeSize;
+  const resultBuf = totalSize <= _resultBuf.length ? _resultBuf : new Uint8Array(totalSize);
+  const resultDv = totalSize <= _resultBuf.length ? _resultDv : new DataView(resultBuf.buffer);
+
+  resultBuf[0] = CallTag.result;
+  resultDv.setUint32(1, requestId, false);
+  resultBuf[5] = ResultFlag.success;
+  let pos = 6;
 
   resultDv.setUint16(pos, statusBytes.length, false);
   pos += 2;
@@ -519,10 +564,10 @@ function dispatchHandle(requestId: number, _args: Uint8Array): void {
   pos += statusBytes.length;
   resultBuf[pos] = sessionAction;
   pos += 1;
-  resultBuf[pos] = writes.length;
+  resultBuf[pos] = _writes.length;
   pos += 1;
 
-  for (const w of writes) {
+  for (const w of _writes) {
     const sqlBytes = _encoder.encode(w.sql);
     resultDv.setUint16(pos, sqlBytes.length, false);
     pos += 2;
@@ -533,7 +578,7 @@ function dispatchHandle(requestId: number, _args: Uint8Array): void {
     pos += writeParams(resultDv, pos, w.params);
   }
 
-  sendFrame(conn, buildResult(requestId, ResultFlag.success, resultBuf.subarray(0, pos)));
+  sendFrame(conn, resultBuf.subarray(0, pos));
 }
 
 // --- Render CALL ---
@@ -554,14 +599,7 @@ async function dispatchRender(requestId: number, args: Uint8Array): Promise<void
     return;
   }
 
-  const db = {
-    query: (sql: string, ...params: unknown[]) => {
-      return queryServerAsync(requestId, sql, QueryMode.query, params);
-    },
-    queryAll: (sql: string, ...params: unknown[]) => {
-      return queryServerAsync(requestId, sql, QueryMode.queryAll, params);
-    },
-  };
+  _currentRequestId = requestId;
 
   const ctx = {
     operation: requestState.operation,
@@ -573,7 +611,7 @@ async function dispatchRender(requestId: number, args: Uint8Array): Promise<void
     is_sse: false,
   };
 
-  const html = (await mod.render(ctx, db)) || "";
+  const html = (await mod.render(ctx, _renderDb)) || "";
   const htmlBytes = _encoder.encode(html);
 
   sendFrame(conn, buildResult(requestId, ResultFlag.success, htmlBytes));
@@ -586,10 +624,6 @@ async function dispatchRender(requestId: number, args: Uint8Array): Promise<void
 // Send QUERY frame, return Promise. The Promise resolves when
 // QUERY_RESULT arrives on the socket. The event loop processes
 // socket data while the handler is suspended.
-//
-// Serial pipeline: at most one pending QUERY at a time. The handler
-// awaits db.query() sequentially. Parallel queries via Promise.all()
-// would require multiple pending resolvers — not supported yet.
 
 async function queryServerAsync(
   requestId: number,
@@ -597,12 +631,11 @@ async function queryServerAsync(
   mode: number,
   params: unknown[],
 ): Promise<any> {
-  // Assign a unique query_id for this QUERY. Enables Promise.all() —
-  // multiple queries in flight, each matched to its QUERY_RESULT.
+  // Assign a unique query_id for this QUERY.
   const queryId = nextQueryId++;
   if (nextQueryId > 0xFFFF) nextQueryId = 0; // wrap u16
 
-  // Send QUERY frame with query_id.
+  // Send QUERY frame with query_id — uses pre-allocated buffer.
   const queryFrame = buildQuery(requestId, queryId, sql, mode, params);
   sendFrame(conn, queryFrame);
 
