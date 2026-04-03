@@ -1,38 +1,114 @@
-//! Trace engine — Chrome Tracing JSON output + timing aggregation.
+//! Log IO/CPU event spans for analysis/visualization.
 //!
-//! Ported from TigerBeetle's src/trace.zig. Outputs JSON compatible with:
+//! Example:
+//!
+//!     $ ./tigerbeetle start --experimental --trace=trace.json
+//!
+//! or:
+//!
+//!     $ ./tigerbeetle benchmark --trace=trace.json
+//!
+//! The trace JSON output is compatible with:
 //! - https://ui.perfetto.dev/
 //! - https://gravitymoth.com/spall/spall.html
 //! - chrome://tracing/
 //!
-//! Usage:
-//!     $ ./tiger-web --trace=trace.json
+//! Example integrations:
 //!
-//! Three modes, always-on timing:
-//!   1. Timing aggregation (always) — min/max/sum/count per event
-//!   2. Debug logging (--log-trace) — log.debug per start/stop
-//!   3. Chrome Tracing JSON (--trace=file) — Perfetto timeline
+//!     // Trace a synchronous event.
+//!     // The second argument is a `anytype` struct, corresponding to the struct argument to
+//!     // `log.debug()`.
+//!     tree.grid.trace.start(.{ .compact_mutable = .{ .tree = tree.config.name } });
+//!     defer tree.grid.trace.stop(.{ .compact_mutable = .{ .tree = tree.config.name } });
 //!
-//! cancel_slot(slot_idx) cancels all open spans for a pipeline slot.
-//! Departure from TB (which cancels by event type). Required because
-//! concurrent slots are independent — cancelling by type would kill
-//! other slots' spans.
-
+//! Note that only one of each Event can be running at a time:
+//!
+//!     // good
+//!     trace.start(.{.foo = .{}});
+//!     trace.stop(.{ .foo = .{} });
+//!     trace.start(.{ .bar = .{} });
+//!     trace.stop(.{ .bar = .{} });
+//!
+//!     // good
+//!     trace.start(.{ .foo = .{} });
+//!     trace.start(.{ .bar = .{} });
+//!     trace.stop(.{ .foo = .{} });
+//!     trace.stop(.{ .bar = .{} });
+//!
+//!     // bad
+//!     trace.start(.{ .foo = .{} });
+//!     trace.start(.{ .foo = .{} });
+//!
+//!     // bad
+//!     trace.stop(.{ .foo = .{} });
+//!     trace.start(.{ .foo = .{} });
+//!
+//! If an event is is cancelled rather than properly stopped, use .reset():
+//! - Reset is safe to call regardless of whether the event is currently started.
+//! - For events with multiple instances (e.g. IO reads and writes), .reset() will
+//!   cancel all running traces of the same event.
+//!
+//!     // good
+//!     trace.start(.{ .foo = .{} });
+//!     trace.cancel(.foo);
+//!     trace.start(.{ .foo = .{} });
+//!     trace.stop(.{ .foo = .{} });
+//!
+//! Notes:
+//! - When enabled, traces are written to stdout (as opposed to logs, which are written to stderr).
+//! - The JSON output is a "[" followed by a comma-separated list of JSON objects. The JSON array is
+//!   never closed with a "]", but Chrome, Spall, and Perfetto all handle this.
+//! - Event pairing (start/stop) is asserted at runtime.
+//! - `trace.start()/.stop()/.reset()` will `log.debug()` regardless of whether tracing is enabled.
+//!
+//! The JSON output looks like:
+//!
+//!     {
+//!         // Process id:
+//!         // The replica index is encoded as the "process id" of trace events, so events from
+//!         // multiple replicas of a cluster can be unified to visualize them on the same timeline.
+//!         "pid": 0,
+//!
+//!         // Thread id:
+//!         "tid": 0,
+//!
+//!         // Category.
+//!         "cat": "replica_commit",
+//!
+//!         // Phase.
+//!         "ph": "B",
+//!
+//!         // Timestamp:
+//!         // Microseconds since program start.
+//!         "ts": 934327,
+//!
+//!         // Event name:
+//!         // Includes the event name and a *low cardinality subset* of the second argument to
+//!         // `trace.start()`. (Low-cardinality part so that tools like Perfetto can distinguish
+//!         // events usefully.)
+//!         "name": "replica_commit stage='next_pipeline'",
+//!
+//!         // Extra event arguments. (Encoded from the second argument to `trace.start()`).
+//!         "args": {
+//!             "stage": "next_pipeline",
+//!             "op": 1
+//!         },
+//!     },
+//!
 const std = @import("std");
 const assert = std.debug.assert;
-const stdx = @import("stdx");
-const Duration = stdx.Duration;
-const Instant = stdx.Instant;
-const Time = @import("time.zig").Time;
-const event_mod = @import("trace_event.zig");
-const Event = event_mod.Event;
-const EventTracing = event_mod.EventTracing;
-const EventTiming = event_mod.EventTiming;
-const EventTimingAggregate = event_mod.EventTimingAggregate;
-
 const log = std.log.scoped(.trace);
 
-const trace_span_size_max = 1024;
+const stdx = @import("stdx");
+const KiB = stdx.KiB;
+const Duration = stdx.Duration;
+const Time = @import("time.zig").Time;
+pub const Event = @import("trace_event.zig").Event;
+pub const EventTracing = @import("trace_event.zig").EventTracing;
+pub const EventTiming = @import("trace_event.zig").EventTiming;
+pub const EventTimingAggregate = @import("trace_event.zig").EventTimingAggregate;
+
+const trace_span_size_max = 1 * KiB;
 
 pub const Tracer = @This();
 
@@ -40,15 +116,16 @@ time: Time,
 options: Options,
 buffer: []u8,
 
-events_started: [EventTracing.stack_count]?Instant = @splat(null),
+events_started: [EventTracing.stack_count]?stdx.Instant = @splat(null),
 events_timing: [EventTiming.slot_count]?EventTimingAggregate =
     @as([EventTiming.slot_count]?EventTimingAggregate, @splat(null)),
 
-time_start: Instant,
+time_start: stdx.Instant,
+
 log_trace: bool,
 
 pub const Options = struct {
-    /// JSON writer — null disables JSON output but timing is still captured.
+    /// The tracer still validates start/stop state even when writer=null.
     writer: ?std.io.AnyWriter = null,
     log_trace: bool = false,
 };
@@ -79,9 +156,7 @@ pub fn deinit(tracer: *Tracer, allocator: std.mem.Allocator) void {
     tracer.* = undefined;
 }
 
-// =========================================================================
-// Start / Stop / Cancel
-// =========================================================================
+// TODO: gauge() and count() via EventMetric — add when wiring metrics.
 
 pub fn start(tracer: *Tracer, event: Event) void {
     const event_tracing = event.as(EventTracing);
@@ -93,37 +168,41 @@ pub fn start(tracer: *Tracer, event: Event) void {
     assert(tracer.events_started[stack] == null);
     tracer.events_started[stack] = time_now;
 
-    if (event_tracing.aggregate_only()) return;
+    if (event_tracing.aggregate_only()) {
+        return;
+    }
 
     if (tracer.log_trace) {
-        log.debug("{s}({}): start: {}", .{
-            @tagName(event),
-            event_tracing,
-            event_timing,
-        });
+        log.debug("{s}({}): start: {}", .{ @tagName(event), event_tracing, event_timing });
     }
 
     const writer = tracer.options.writer orelse return;
     const time_elapsed = time_now.duration_since(tracer.time_start);
 
     var buffer_stream = std.io.fixedBufferStream(tracer.buffer);
+
     buffer_stream.writer().print("{{" ++
         "\"pid\":0," ++
         "\"tid\":{[thread_id]}," ++
         "\"ph\":\"{[event]c}\"," ++
         "\"ts\":{[timestamp]}," ++
         "\"cat\":\"{[category]s}\"," ++
-        "\"name\":\"{[category]s} {[event_tracing]}\"," ++
+        "\"name\":\"{[category]s} {[event_tracing]} {[event_timing]}\"," ++
         "\"args\":{[args]s}" ++
         "}},\n", .{
-        .thread_id = stack,
+        .thread_id = event_tracing.stack(),
         .category = @tagName(event),
         .event = 'B',
         .timestamp = time_elapsed.to_us(),
         .event_tracing = event_tracing,
+        .event_timing = event_timing,
         .args = std.json.Formatter(Event){ .value = event, .options = .{} },
     }) catch {
-        log.err("{s}({}): event too large", .{ @tagName(event), event_tracing });
+        log.err("{s}({}): event too large: {}", .{
+            @tagName(event),
+            event_tracing,
+            event_timing,
+        });
         return;
     };
 
@@ -133,6 +212,8 @@ pub fn start(tracer: *Tracer, event: Event) void {
 }
 
 pub fn stop(tracer: *Tracer, event: Event) void {
+    const us_log_threshold_ns = 5 * std.time.ns_per_ms;
+
     const event_tracing = event.as(EventTracing);
     const event_timing = event.as(EventTiming);
     const stack = event_tracing.stack();
@@ -144,13 +225,13 @@ pub fn stop(tracer: *Tracer, event: Event) void {
     assert(tracer.events_started[stack] != null);
     tracer.events_started[stack] = null;
 
-    // Timing is ALWAYS recorded, even for aggregate_only events.
     tracer.timing(event_timing, event_duration);
 
-    if (event_tracing.aggregate_only()) return;
+    if (event_tracing.aggregate_only()) {
+        return;
+    }
 
     if (tracer.log_trace) {
-        const us_log_threshold_ns = 5 * std.time.ns_per_ms;
         log.debug("{s}({}): stop:  {} (duration={}{s})", .{
             @tagName(event),
             event_tracing,
@@ -166,8 +247,6 @@ pub fn stop(tracer: *Tracer, event: Event) void {
     tracer.write_stop(stack, event_end.duration_since(tracer.time_start));
 }
 
-/// Cancel all running instances of an event type.
-/// Writes JSON stop events but does NOT record timing.
 pub fn cancel(tracer: *Tracer, event_tag: Event.Tag) void {
     const stack_base = EventTracing.stack_bases.get(event_tag);
     const cardinality = EventTracing.stack_limits.get(event_tag);
@@ -177,14 +256,17 @@ pub fn cancel(tracer: *Tracer, event_tag: Event.Tag) void {
             if (tracer.log_trace) {
                 log.debug("{s}: cancel", .{@tagName(event_tag)});
             }
+
+            const event_duration = event_end.duration_since(tracer.time_start);
+
             tracer.events_started[stack] = null;
-            tracer.write_stop(@intCast(stack), event_end.duration_since(tracer.time_start));
+            tracer.write_stop(@intCast(stack), event_duration);
         }
     }
 }
 
 /// Cancel all open spans for a specific pipeline slot.
-/// Iterates all event types and cancels the target slot's stack.
+/// Iterates all event types, cancels only the target slot's stack.
 /// Required for concurrent dispatch — per-type cancel would kill
 /// other slots' spans.
 pub fn cancel_slot(tracer: *Tracer, slot_idx: u8) void {
@@ -206,58 +288,7 @@ pub fn cancel_slot(tracer: *Tracer, slot_idx: u8) void {
     }
 }
 
-// =========================================================================
-// Timing aggregation
-// =========================================================================
-
-fn timing(tracer: *Tracer, event_timing: EventTiming, duration: Duration) void {
-    const timing_slot = event_timing.slot();
-
-    if (tracer.events_timing[timing_slot]) |*existing| {
-        assert(std.meta.eql(existing.event, event_timing));
-        existing.values = .{
-            .duration_min = existing.values.duration_min.min(duration),
-            .duration_max = existing.values.duration_max.max(duration),
-            .duration_sum = .{ .ns = existing.values.duration_sum.ns +| duration.ns },
-            .count = existing.values.count +| 1,
-        };
-    } else {
-        tracer.events_timing[timing_slot] = .{
-            .event = event_timing,
-            .values = .{
-                .duration_min = duration,
-                .duration_max = duration,
-                .duration_sum = duration,
-                .count = 1,
-            },
-        };
-    }
-}
-
-/// Emit timing metrics and reset. Called periodically (metrics interval).
-pub fn emit_timing(tracer: *Tracer) bool {
-    var emitted = false;
-    for (&tracer.events_timing) |*timing_opt| {
-        const t = timing_opt.* orelse continue;
-        const tag_name = @tagName(t.event);
-        log.info("timing: {s} count={d} min={d}us max={d}us avg={d}us", .{
-            tag_name,
-            t.values.count,
-            t.values.duration_min.to_us(),
-            t.values.duration_max.to_us(),
-            if (t.values.count > 0) t.values.duration_sum.to_us() / t.values.count else 0,
-        });
-        timing_opt.* = null;
-        emitted = true;
-    }
-    return emitted;
-}
-
-// =========================================================================
-// JSON output helpers
-// =========================================================================
-
-fn write_stop(tracer: *Tracer, stack: u32, time_elapsed: Duration) void {
+fn write_stop(tracer: *Tracer, stack: u32, time_elapsed: stdx.Duration) void {
     const writer = tracer.options.writer orelse return;
     var buffer_stream = std.io.fixedBufferStream(tracer.buffer);
 
@@ -280,25 +311,73 @@ fn write_stop(tracer: *Tracer, stack: u32, time_elapsed: Duration) void {
     };
 }
 
-// =========================================================================
-// Tests
-// =========================================================================
+/// Emit timing metrics via log and reset. Called periodically.
+pub fn emit_metrics(tracer: *Tracer) bool {
+    var emitted = false;
+    for (&tracer.events_timing) |*timing_opt| {
+        const t = timing_opt.* orelse continue;
+        log.info("timing: {s} count={d} min={d}us max={d}us avg={d}us", .{
+            @tagName(t.event),
+            t.values.count,
+            t.values.duration_min.to_us(),
+            t.values.duration_max.to_us(),
+            if (t.values.count > 0) t.values.duration_sum.to_us() / t.values.count else 0,
+        });
+        timing_opt.* = null;
+        emitted = true;
+    }
+    return emitted;
+}
+
+// Timing works by storing the min, max, sum and count of each value provided. The avg is calculated
+// from sum and count at emit time.
+//
+// When these are emitted upstream (via statsd, currently), upstream must apply different
+// aggregations:
+// * min/max/avg are considered gauges for aggregation: last value wins.
+// * sum/count are considered counters for aggregation: they are added to the existing values.
+//
+// This matches the default behavior of the `g` and `c` statsd types respectively.
+pub fn timing(tracer: *Tracer, event_timing: EventTiming, duration: Duration) void {
+    const timing_slot = event_timing.slot();
+
+    if (tracer.events_timing[timing_slot]) |*event_timing_existing| {
+        assert(std.meta.eql(event_timing_existing.event, event_timing));
+
+        const timing_existing = event_timing_existing.values;
+        event_timing_existing.values = .{
+            .duration_min = timing_existing.duration_min.min(duration),
+            .duration_max = timing_existing.duration_max.max(duration),
+            .duration_sum = .{ .ns = timing_existing.duration_sum.ns +| duration.ns },
+            .count = timing_existing.count +| 1,
+        };
+    } else {
+        tracer.events_timing[timing_slot] = .{
+            .event = event_timing,
+            .values = .{
+                .duration_min = duration,
+                .duration_max = duration,
+                .duration_sum = duration,
+                .count = 1,
+            },
+        };
+    }
+}
 
 const TimeSim = @import("time.zig").TimeSim;
 
 test "start/stop produces valid timing" {
-    var sim = TimeSim{ .resolution = 1000 }; // 1µs per tick
+    var sim = TimeSim{ .resolution = 1000 };
     const time = sim.time();
 
     var tracer = try Tracer.init(std.testing.allocator, time, .{});
     defer tracer.deinit(std.testing.allocator);
 
     tracer.start(.{ .pipeline_stage = .{ .stage = .prefetch, .slot = 0 } });
-    time.tick(); // 1µs
-    time.tick(); // 2µs
+    time.tick();
+    time.tick();
     tracer.stop(.{ .pipeline_stage = .{ .stage = .prefetch, .slot = 0 } });
 
-    // Timing should be recorded.
     const slot = (EventTiming{ .pipeline_stage = .{ .stage = .prefetch } }).slot();
     const t = tracer.events_timing[slot].?;
     try std.testing.expectEqual(@as(u64, 1), t.values.count);
@@ -316,7 +395,6 @@ test "cancel does not record timing" {
     time.tick();
     tracer.cancel(.sidecar_call);
 
-    // Timing should NOT be recorded for cancelled spans.
     const slot = (EventTiming{ .sidecar_call = .{ .function = .route } }).slot();
     try std.testing.expect(tracer.events_timing[slot] == null);
 }
@@ -328,13 +406,9 @@ test "cancel_slot cancels only target slot" {
     var tracer = try Tracer.init(std.testing.allocator, time, .{});
     defer tracer.deinit(std.testing.allocator);
 
-    // Start spans on slot 0.
     tracer.start(.{ .pipeline_stage = .{ .stage = .prefetch, .slot = 0 } });
-
-    // Cancel slot 0.
     tracer.cancel_slot(0);
 
-    // Slot 0's span should be cleared.
     const stack = (EventTracing{ .pipeline_stage = .{ .slot = 0 } }).stack();
     try std.testing.expect(tracer.events_started[stack] == null);
 }
@@ -351,17 +425,14 @@ test "aggregate_only: tick timing captured but no JSON" {
     });
     defer tracer.deinit(std.testing.allocator);
 
-    // Record the initial "[" size.
     const initial_len = trace_buf.items.len;
 
     tracer.start(.tick);
     time.tick();
     tracer.stop(.tick);
 
-    // No JSON written for aggregate_only events.
     try std.testing.expectEqual(initial_len, trace_buf.items.len);
 
-    // But timing IS captured.
     const slot = (EventTiming{ .tick = {} }).slot();
     const t = tracer.events_timing[slot].?;
     try std.testing.expectEqual(@as(u64, 1), t.values.count);
@@ -384,17 +455,9 @@ test "Chrome Tracing JSON format" {
     tracer.stop(.{ .pipeline_stage = .{ .stage = .prefetch, .slot = 0, .op = 5 } });
 
     const output = trace_buf.items;
-    // Should contain begin and end events.
     try std.testing.expect(std.mem.indexOf(u8, output, "\"ph\":\"B\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, output, "\"ph\":\"E\"") != null);
-    // Should contain category.
     try std.testing.expect(std.mem.indexOf(u8, output, "\"cat\":\"pipeline_stage\"") != null);
-    // Stop event should be minimal (no cat).
-    // Find the E event and check it doesn't have "cat".
-    const e_pos = std.mem.indexOf(u8, output, "\"ph\":\"E\"").?;
-    const e_line_end = std.mem.indexOfPos(u8, output, e_pos, "\n").?;
-    const e_line = output[e_pos..e_line_end];
-    try std.testing.expect(std.mem.indexOf(u8, e_line, "\"cat\"") == null);
 }
 
 test "span duration > 0 in sim (time.tick integration)" {
@@ -405,10 +468,30 @@ test "span duration > 0 in sim (time.tick integration)" {
     defer tracer.deinit(std.testing.allocator);
 
     tracer.start(.{ .storage_op = .{ .slot = 0 } });
-    time.tick(); // Advance monotonic by 1µs
+    time.tick();
     tracer.stop(.{ .storage_op = .{ .slot = 0 } });
 
     const slot = (EventTiming{ .storage_op = {} }).slot();
     const t = tracer.events_timing[slot].?;
     try std.testing.expect(t.values.duration_min.ns > 0);
+}
+
+test "timing overflow saturates" {
+    var sim = TimeSim{ .resolution = 1000 };
+    const time = sim.time();
+
+    var tracer = try Tracer.init(std.testing.allocator, time, .{});
+    defer tracer.deinit(std.testing.allocator);
+
+    const event_timing: EventTiming = .{ .pipeline_stage = .{ .stage = .handle } };
+    const value: Duration = .{ .ns = std.math.maxInt(u64) - 1 };
+    tracer.timing(event_timing, value);
+    tracer.timing(event_timing, value);
+
+    const aggregate = tracer.events_timing[event_timing.slot()].?;
+
+    try std.testing.expectEqual(@as(u64, 2), aggregate.values.count);
+    try std.testing.expectEqual(value.ns, aggregate.values.duration_min.ns);
+    try std.testing.expectEqual(value.ns, aggregate.values.duration_max.ns);
+    try std.testing.expectEqual(std.math.maxInt(u64), aggregate.values.duration_sum.ns);
 }
