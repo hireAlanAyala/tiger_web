@@ -975,11 +975,16 @@ test "concurrent: throughput scales with slot count" {
     // we expect at least 30% improvement (conservative — actual
     // gain depends on SimIO delivery timing).
     //
-    // Log the results for manual inspection.
-    // Assert dual is strictly fewer ticks per request.
-    // If this fails, the pipeline isn't overlapping stages.
+    // Assert: concurrent pipeline should complete requests in fewer
+    // ticks per request than serial. If equal or worse, the pipeline
+    // isn't overlapping IO stages.
     const single_tpr = single_ticks / request_count;
     const dual_tpr = dual_ticks / request_count;
 
-    try std.testing.expect(dual_tpr < single_tpr);
+    if (dual_tpr >= single_tpr) {
+        std.debug.panic(
+            "concurrent pipeline not faster: single={d} tpr ({d} ticks/{d} reqs), dual={d} tpr ({d} ticks/{d} reqs)",
+            .{ single_tpr, single_ticks, request_count, dual_tpr, dual_ticks, request_count },
+        );
+    }
 }
