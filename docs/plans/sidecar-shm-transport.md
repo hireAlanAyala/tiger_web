@@ -252,35 +252,36 @@ Measured per-request cost is ~819µs (not ~77µs as originally
 estimated). The original estimates underweighted V8 handler
 execution time by ~10×. Revised projections use measured data.
 
-**Committed plan (Phase 3 + Phase 1):**
+**Committed plan (Phase 3 + Phase 1 + Phase 1b):**
 
-| | Current (measured) | After Phase 3 (typed) | After Phase 1 (2 RT) |
-|---|---|---|---|
-| V8 handler execution | 738µs | ~734µs (-4µs typed) | ~440µs (-298µs route CALL) |
-| QUERY round-trips | 81µs | 81µs | 81µs |
-| Protocol overhead | ~350µs (4 RT) | ~350µs | ~50µs (2 RT) |
-| **Total** | **~819µs** | **~815µs** | **~571µs** |
-| **req/s (1 sidecar)** | **~1,200** | **~1,200** | **~1,750** |
-| **vs Express** | **0.5×** | **0.5×** | **~1×** |
+| | Current | Phase 3 (typed) | Phase 1 (route→Zig) | Phase 1b (prefetch→Zig) |
+|---|---|---|---|---|
+| V8 handler | 738µs | ~734µs | ~440µs | ~175µs |
+| QUERY round-trips | 81µs | 81µs | 81µs | 0µs |
+| Protocol overhead | ~350µs | ~350µs | ~50µs | ~50µs |
+| **Total** | **819µs** | **815µs** | **571µs** | **~225µs** |
+| **req/s (1 sidecar)** | **1,200** | **1,200** | **1,750** | **~4,400** |
+| **vs Express** | **0.5×** | **0.5×** | **~1×** | **~2× faster** |
 
 With concurrent pipeline (N sidecars), multiply by N:
 
 | | 1 sidecar | 2 sidecars | 4 sidecars |
 |---|---|---|---|
-| Current | ~1,200 | ~2,400 | ~4,800 |
-| After Phase 1 | ~1,750 | ~3,500 | ~7,000 |
+| Current | 1,200 | 2,400 | 4,800 |
+| After Phase 1 | 1,750 | 3,500 | 7,000 |
+| After Phase 1b | 4,400 | 8,800 | 17,600 |
 
 **Future optimizations (measure-driven, deploy if data shows need):**
 
 | Optimization | Saves | When to deploy |
 |---|---|---|
-| Request batching | ~40µs/req under load | Protocol overhead >10% of cost |
-| QUERY batching | ~60-350µs/req | QUERY RTs >20% of cost (complex handlers) |
+| Request batching | ~40µs/req under load | Protocol overhead >10% after Phase 1b |
+| QUERY batching | ~60-350µs/req | Complex handlers with 5+ render queries |
 | Shared memory | ~20µs/req | Transport >10% of cost (unlikely) |
 
-The concurrent pipeline (✅ DONE) is the multiplier. Phase 1 (RT
-reduction) brings 1 sidecar to Express parity. Additional sidecars
-scale beyond what a single Node.js process can deliver.
+The concurrent pipeline (✅ DONE) is the multiplier. Phase 1+1b
+brings 1 sidecar to 2× Express. The sidecar only runs user code —
+all framework work is in Zig.
 
 Options that could close the remaining gap and their TB violations:
 
@@ -628,13 +629,19 @@ at 2x throughput with 2 slots.
 
 **Recommended implementation order (revised after measurement):**
 1. Phase 3: Typed schemas — correctness fix (safety > performance)
-2. Phase 1: RT reduction — biggest single win (298µs saved, 36% faster)
-3. Measure. Then decide: request batching or QUERY batching based
-   on where the time goes for real handler workloads.
+2. Phase 1: RT reduction — move routing to server (298µs saved)
+3. Phase 1b: Server-side prefetch — move prefetch SQL to server (~200µs saved)
+4. Measure. The sidecar should only run user code (handle + render).
+   Decide next step based on where the remaining time goes.
 
 Shm (Phase 2) deferred — measured transport overhead is <10µs per
 round-trip (~2% of request cost). Months of complexity for <2% gain.
 Unix socket is the right primitive when transport isn't the bottleneck.
+
+**Design principle:** if the framework can do it, the sidecar
+shouldn't. The sidecar exists for user code (business logic,
+templates). Everything else — HTTP, routing, SQL, auth, sessions —
+runs at native speed in Zig.
 
 ## What we're NOT doing
 
@@ -713,6 +720,96 @@ This changes the optimization priority: RT reduction saves 298µs
 After RT reduction alone, 1 sidecar reaches Express parity. Zig
 handles HTTP, SQL, and session faster than Node — those savings
 offset the remaining 2-RT protocol cost.
+
+### Phase 1b: Server-side prefetch — thin sidecar
+
+Move prefetch SQL execution from sidecar to server. The annotation
+scanner already declares each handler's prefetch SQL at build time.
+The server already executes SQL for native Zig handlers. The sidecar
+doesn't need to orchestrate `db.query()` calls — the server can
+execute the declared SQL, serialize the results, and send only the
+**prefetched data** to the sidecar.
+
+After Phase 1 (route) + Phase 1b (prefetch), the sidecar receives:
+- Pre-routed operation + params (from Phase 1)
+- Pre-fetched data (from Phase 1b)
+- And only runs: handle (business logic) + render (templates)
+
+**Why:** Measured V8 time is 738µs. ~500µs is framework code the
+server already knows how to do. Moving route (Phase 1) saves 298µs.
+Moving prefetch saves another ~200µs. The sidecar becomes a thin
+shell that only runs user-written code.
+
+**Protocol change:**
+
+Current 4 RT:
+```
+RT1: CALL route    → sidecar routes         → RESULT operation+id
+RT2: CALL prefetch → sidecar queries via QUERY sub-protocol → RESULT
+RT3: CALL handle   → sidecar business logic  → RESULT status+writes
+RT4: CALL render   → sidecar template        → RESULT html
+```
+
+After Phase 1 + 1b (2 RT, thin sidecar):
+```
+Server: routes from manifest, executes prefetch SQL from annotations
+RT1: CALL handle [operation, id, body, prefetched_data] → sidecar → RESULT status+writes
+RT2: CALL render [operation, status, prefetched_data]   → sidecar → RESULT html
+```
+
+The QUERY sub-protocol is eliminated for prefetch — the server
+sends the already-fetched data in the CALL frame. No round-trips
+within a CALL. The sidecar never calls `db.query()` for prefetch.
+
+**Projected impact:**
+
+| | Now | Phase 1 (route) | Phase 1+1b (route+prefetch) |
+|---|---|---|---|
+| V8 time | 738µs | ~440µs | ~175µs |
+| Protocol overhead | ~350µs | ~50µs | ~50µs |
+| QUERY round-trips | 81µs | 81µs | 0µs |
+| **Total** | **819µs** | **571µs** | **~225µs** |
+| **Req/s (1 sidecar)** | **1,200** | **1,750** | **~4,400** |
+| **vs Express** | **0.5×** | **~1×** | **~2× faster** |
+
+**What the sidecar handler author sees:**
+
+```typescript
+// Before (current): handler orchestrates queries
+export async function prefetch(msg, db) {
+  const product = await db.query("SELECT * FROM products WHERE id = ?", msg.id);
+  return { product };
+}
+
+// After Phase 1b: handler receives pre-fetched data
+// prefetch is declared in annotations, executed by server
+// [prefetch] SELECT * FROM products WHERE id = ?
+export function handle(ctx, db) {
+  if (!ctx.prefetched.product) return "not_found";
+  return "ok";
+}
+```
+
+The `prefetch` function disappears from handler code. The SQL is
+in the annotation (already the pattern). The server executes it
+and passes the results. Simpler handler code, faster execution.
+
+**Implementation:**
+- [ ] Server reads prefetch SQL from manifest at startup
+- [ ] Server executes prefetch SQL with route-extracted params
+- [ ] Serialize prefetched rows into CALL frame (binary row format)
+- [ ] Sidecar deserializes prefetched data from CALL frame
+- [ ] Update `HandleContext` type to include typed prefetch data
+- [ ] Drop CALL "prefetch" from protocol
+- [ ] Drop QUERY sub-protocol for prefetch (still needed for render)
+- [ ] Measure: expect ~4,400 req/s per sidecar
+
+**Note:** Handlers with dynamic prefetch (SQL depends on runtime
+values, not just route params) still need the QUERY sub-protocol.
+The annotation scanner can detect this: if all prefetch SQL is
+static (uses only `msg.id`, `msg.body.*`), server-side prefetch
+applies. If prefetch SQL is dynamic, fall back to sidecar prefetch
+via QUERY. Per-handler decision at build time.
 
 ## Future optimizations (measure-driven)
 
