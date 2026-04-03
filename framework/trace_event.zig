@@ -92,6 +92,9 @@ pub const Event = union(enum) {
     // WAL append — disk write after commit
     wal_append,
 
+    // Metrics emission — self-traces the emit call
+    metrics_emit,
+
     pub const Tag = std.meta.Tag(Event);
 
     /// Flatten the union for JSON — remove the extra indirection layer.
@@ -160,6 +163,7 @@ pub const EventTracing = union(enum) {
     storage_op: struct { slot: u8 },
     handle_lock_wait: struct { slot: u8 },
     wal_append,
+    metrics_emit,
 
     pub fn aggregate_only(event: *const EventTracing) bool {
         return switch (event.*) {
@@ -217,6 +221,7 @@ pub const EventTracing = union(enum) {
         .storage_op = slots_max,
         .handle_lock_wait = slots_max,
         .wal_append = 1,
+        .metrics_emit = 1,
     });
 
     pub const stack_count = count: {
@@ -256,6 +261,7 @@ pub const EventTiming = union(enum) {
     storage_op,
     handle_lock_wait,
     wal_append,
+    metrics_emit,
 
     pub fn slot(event: *const EventTiming) u32 {
         switch (event.*) {
@@ -297,6 +303,7 @@ pub const EventTiming = union(enum) {
         .storage_op = 1,
         .handle_lock_wait = 1,
         .wal_append = 1,
+        .metrics_emit = 1,
     });
 
     pub const slot_count = count: {
@@ -324,14 +331,12 @@ pub const EventTiming = union(enum) {
 
 pub const EventTimingAggregate = struct {
     event: EventTiming,
-    values: Values,
-
-    pub const Values = struct {
+    values: struct {
         duration_min: @import("stdx").Duration,
         duration_max: @import("stdx").Duration,
         duration_sum: @import("stdx").Duration,
         count: u64,
-    };
+    },
 };
 
 // ---------------------------------------------------------------------------
@@ -345,7 +350,8 @@ test "stack_count covers all events" {
         EventTracing.slots_max + // sidecar_call
         EventTracing.slots_max + // storage_op
         EventTracing.slots_max + // handle_lock_wait
-        1; // wal_append
+        1 + // wal_append
+        1; // metrics_emit
     try std.testing.expectEqual(expected, EventTracing.stack_count);
 }
 
@@ -355,7 +361,8 @@ test "slot_count covers all timing variants" {
         enum_count(CallFunction) + // sidecar_call (4 functions)
         1 + // storage_op
         1 + // handle_lock_wait
-        1; // wal_append
+        1 + // wal_append
+        1; // metrics_emit
     try std.testing.expectEqual(expected, EventTiming.slot_count);
 }
 

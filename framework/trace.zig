@@ -312,8 +312,11 @@ fn write_stop(tracer: *Tracer, stack: u32, time_elapsed: stdx.Duration) void {
 }
 
 /// Emit timing metrics via log and reset. Called periodically.
-pub fn emit_metrics(tracer: *Tracer) bool {
-    var emitted = false;
+/// Self-traces the emission call (TB pattern).
+pub fn emit_metrics(tracer: *Tracer) void {
+    tracer.start(.metrics_emit);
+    defer tracer.stop(.metrics_emit);
+
     for (&tracer.events_timing) |*timing_opt| {
         const t = timing_opt.* orelse continue;
         log.info("timing: {s} count={d} min={d}us max={d}us avg={d}us", .{
@@ -323,10 +326,9 @@ pub fn emit_metrics(tracer: *Tracer) bool {
             t.values.duration_max.to_us(),
             if (t.values.count > 0) t.values.duration_sum.to_us() / t.values.count else 0,
         });
-        timing_opt.* = null;
-        emitted = true;
     }
-    return emitted;
+
+    @memset(&tracer.events_timing, null);
 }
 
 // Timing works by storing the min, max, sum and count of each value provided. The avg is calculated
