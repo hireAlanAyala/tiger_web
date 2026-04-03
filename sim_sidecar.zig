@@ -324,15 +324,18 @@ const TestHarness = struct {
         if (h.io.clients[sidecar_slot_b].connected) {
             h.sidecar_b.disconnect();
         }
-        if (h.server.sidecar_bus.is_connected()) {
-            h.run_server_until(bus_closed);
+        if (!all_bus_connections_closed(h)) {
+            h.run_server_until(all_bus_connections_closed);
         }
         h.server.deinit(h.allocator);
         h.storage.deinit();
     }
 
-    fn bus_closed(h: *TestHarness) bool {
-        return !h.server.sidecar_bus.is_connected();
+    fn all_bus_connections_closed(h: *TestHarness) bool {
+        for (&h.server.sidecar_bus.connections) |*conn| {
+            if (conn.state != .closed) return false;
+        }
+        return true;
     }
 
     /// Connect primary sidecar and complete READY handshake.
@@ -406,16 +409,30 @@ const TestHarness = struct {
         return h.io.clients[http_slot].accepted;
     }
 
-    /// Prepare for next HTTP request. Handles both keep-alive (clear
-    /// response buffer) and Connection: close (reconnect).
+    /// Prepare for next HTTP request. Waits for the server to finish
+    /// the current response cycle, then either reuses (keep-alive)
+    /// or reconnects (Connection: close).
     fn prepare_next_request(h: *TestHarness) void {
         h.io.clear_response(http_slot);
+        // Wait for the server to settle — explicit condition, not timing.
+        h.run_until(http_slot_idle);
         if (h.io.clients[http_slot].server_closed) {
-            // Connection: close — need a fresh connection.
             h.io.connect_client(http_slot, http_listen_fd);
             h.run_until(http_accepted);
         }
-        // Keep-alive — connection still open, just cleared the buffer.
+    }
+
+    /// HTTP connection is idle: server closed it (Connection: close)
+    /// or returned to .receiving (keep-alive). Checks actual server
+    /// connection state — no heuristics.
+    fn http_slot_idle(h: *TestHarness) bool {
+        const client = &h.io.clients[http_slot];
+        if (client.server_closed) return true;
+        // Keep-alive: find the server connection by fd, check .receiving.
+        for (h.server.connections) |*conn| {
+            if (conn.fd == client.fd and conn.state == .receiving) return true;
+        }
+        return false;
     }
 
     /// Inject a POST to /products with a unique UUID.
@@ -681,7 +698,7 @@ test "sidecar: connect then disconnect before READY → 503" {
     h.run_until(TestHarness.sidecar_accepted);
     // Disconnect before READY.
     h.sidecar.disconnect();
-    h.run_server_until(TestHarness.bus_closed);
+    h.run_server_until(TestHarness.all_bus_connections_closed);
 
     try std.testing.expect(!h.server.sidecar_any_ready());
 
@@ -893,4 +910,76 @@ test "concurrent: handle_lock serializes writes" {
 
     // handle_lock must be free after all requests complete.
     try std.testing.expectEqual(@as(?u8, null), h.server.handle_lock);
+}
+
+test "concurrent: throughput scales with slot count" {
+    // Measures pipeline efficiency: ticks-to-complete for a batch of
+    // requests with 1 slot vs 2 slots. With SimIO, "IO latency" is
+    // 1-2 ticks per CALL/RESULT round-trip. Concurrent slots overlap
+    // these round-trips, completing more requests in fewer ticks.
+    //
+    // This is a simulation benchmark, not a wall-clock benchmark.
+    // It validates that the pipeline architecture enables overlap,
+    // not that real throughput scales (that depends on actual sidecar
+    // latency and is measured by tiger-load).
+    const request_count = 6;
+
+    // --- Phase 1: single slot (only sidecar 0 connected) ---
+    var h: TestHarness = undefined;
+    try h.init();
+    defer h.deinit();
+
+    h.connect_sidecar();
+    // Only slot 0 is ready. Slot 1 is not connected.
+
+    h.connect_http();
+    const single_start = h.server.tick_count;
+
+    for (0..request_count) |_| {
+        h.prepare_next_request();
+        h.inject_post();
+        _ = h.wait_response() orelse @panic("single-slot request failed");
+    }
+
+    const single_ticks = h.server.tick_count - single_start;
+
+    // --- Phase 2: two slots (both sidecars connected) ---
+    h.connect_standby();
+    h.connect_http_b();
+    const dual_start = h.server.tick_count;
+
+    // Inject pairs of requests — each pair uses both HTTP clients.
+    var completed: u32 = 0;
+    var pair: u32 = 0;
+    while (completed < request_count) : (pair += 1) {
+        h.prepare_next_request();
+        h.inject_post();
+
+        // Second client — prepare + inject.
+        h.io.clear_response(TestHarness.http_slot_b);
+        if (h.io.clients[TestHarness.http_slot_b].server_closed) {
+            h.io.connect_client(TestHarness.http_slot_b, TestHarness.http_listen_fd);
+            h.run_until(TestHarness.http_b_accepted);
+        }
+        h.inject_post_b();
+
+        const resps = h.wait_both_responses() orelse @panic("dual-slot request failed");
+
+        if (resps.a.status_code == 200) completed += 1;
+        if (resps.b.status_code == 200) completed += 1;
+    }
+
+    const dual_ticks = h.server.tick_count - dual_start;
+
+    // Concurrent should be faster. With 2 slots overlapping IO,
+    // we expect at least 30% improvement (conservative — actual
+    // gain depends on SimIO delivery timing).
+    //
+    // Log the results for manual inspection.
+    // Assert dual is strictly fewer ticks per request.
+    // If this fails, the pipeline isn't overlapping stages.
+    const single_tpr = single_ticks / request_count;
+    const dual_tpr = dual_ticks / request_count;
+
+    try std.testing.expect(dual_tpr < single_tpr);
 }

@@ -395,6 +395,12 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
             for (server.connections) |*conn| {
                 if (conn.state != .ready) continue;
 
+                // Skip connections already assigned to a pipeline slot.
+                // A connection stays .ready during async dispatch (no
+                // response sent yet). Without this check, process_inbox
+                // would dispatch the same connection to multiple slots.
+                if (server.connection_dispatched(conn)) continue;
+
                 // Sidecar not connected → 503 immediately, no pipeline needed.
                 // Handled here (server level), not in the pipeline — the 503
                 // is a framework concern, not a per-request concern.
@@ -451,6 +457,16 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
                     server.commit_dispatch(slot);
                 }
             }
+        }
+
+        /// Whether a connection is already assigned to a pipeline slot.
+        /// Prevents dispatching the same connection to multiple slots
+        /// (the connection stays .ready during async dispatch).
+        fn connection_dispatched(server: *const Server, conn: *const Connection) bool {
+            for (&server.pipeline_slots) |*slot| {
+                if (slot.stage != .idle and slot.connection == conn) return true;
+            }
+            return false;
         }
 
         /// Whether any pipeline slot is currently active (non-idle).
@@ -865,6 +881,13 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
                 server.pipeline_reset(slot);
                 return;
             };
+            // Connection may have timed out or closed while the pipeline
+            // was waiting for the sidecar render. Only send the fallback
+            // if the connection is still ready to receive a response.
+            if (conn.state != .ready) {
+                server.pipeline_reset(slot);
+                return;
+            }
             const msg = slot.msg.?;
             const pipeline_resp = slot.pipeline_resp.?;
 
