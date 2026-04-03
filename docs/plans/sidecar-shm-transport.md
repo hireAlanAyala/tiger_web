@@ -246,39 +246,41 @@ The original rejection called it "an abstraction over futex for
 epoll bridging we don't need." With the async pipeline, epoll
 bridging IS what we need.
 
-## Projected performance
+## Projected performance (revised with measured data)
 
-Per-request cost breakdown (single sidecar process):
+Measured per-request cost is ~819µs (not ~77µs as originally
+estimated). The original estimates underweighted V8 handler
+execution time by ~10×. Revised projections use measured data.
 
-| Component | Current | Phase 1 | Phase 2 | Phase 3 | Phase 4 |
-|---|---|---|---|---|---|
-| Zig-side (SQLite + framing) | 19μs | 19μs | 19μs | 19μs | 19μs |
-| Transport | 58μs (3 RT socket) | 38μs (2 RT socket) | 10μs (2 RT eventfd) | 10μs | ~1μs (amortized) |
-| V8 compute | ~15μs | ~15μs | ~15μs | ~11μs | ~11μs |
-| **Total** | **77μs** | **57μs** | **42μs** | **38μs** | **~31μs** |
-| **req/s (1 proc)** | **13K** | **17K** | **24K** | **~26K** | **~32K** |
-| **% of native** | **25%** | **32%** | **45%** | **~49%** | **~60%** |
+**Committed plan (Phase 3 + Phase 1):**
 
-With concurrent pipeline (N sidecar processes), multiply by N until
-SQLite ceiling (~100K writes/s):
+| | Current (measured) | After Phase 3 (typed) | After Phase 1 (2 RT) |
+|---|---|---|---|
+| V8 handler execution | 738µs | ~734µs (-4µs typed) | ~440µs (-298µs route CALL) |
+| QUERY round-trips | 81µs | 81µs | 81µs |
+| Protocol overhead | ~350µs (4 RT) | ~350µs | ~50µs (2 RT) |
+| **Total** | **~819µs** | **~815µs** | **~571µs** |
+| **req/s (1 sidecar)** | **~1,200** | **~1,200** | **~1,750** |
+| **vs Express** | **0.5×** | **0.5×** | **~1×** |
 
-| Optimization | 1 sidecar | 2 sidecars | 4 sidecars | Ceiling |
-|---|---|---|---|---|
-| Current (4 RT) | 13K | 26K | 52K | ~100K (8 procs) |
-| Phase 1 (2 RT) | 17K | 34K | 68K | ~100K (6 procs) |
-| Phase 2 (shm) | 24K | 48K | 96K | ~100K (5 procs) |
-| Phase 3 (typed) | 26K | 52K | 104K | ~100K (4 procs) |
-| Phase 4 (batch) | 32K | 64K | 128K | ~100K (3 procs) |
+With concurrent pipeline (N sidecars), multiply by N:
 
-The concurrent pipeline (Stage 3, ✅ DONE) is the multiplier.
-Each optimization phase reduces how many processes are needed to
-hit the SQLite ceiling. With all phases: 3 V8 processes saturate
-the database. Without any optimization: 8 processes.
+| | 1 sidecar | 2 sidecars | 4 sidecars |
+|---|---|---|---|
+| Current | ~1,200 | ~2,400 | ~4,800 |
+| After Phase 1 | ~1,750 | ~3,500 | ~7,000 |
 
-~60% of native per-process is the TB-aligned ceiling for Node.js
-with batching. The remaining 40% gap is V8 computation — irreducible
-without violating TB principles. If a user needs more, write the
-hot handlers in Zig (100%) or Rust (~90%).
+**Future optimizations (measure-driven, deploy if data shows need):**
+
+| Optimization | Saves | When to deploy |
+|---|---|---|
+| Request batching | ~40µs/req under load | Protocol overhead >10% of cost |
+| QUERY batching | ~60-350µs/req | QUERY RTs >20% of cost (complex handlers) |
+| Shared memory | ~20µs/req | Transport >10% of cost (unlikely) |
+
+The concurrent pipeline (✅ DONE) is the multiplier. Phase 1 (RT
+reduction) brings 1 sidecar to Express parity. Additional sidecars
+scale beyond what a single Node.js process can deliver.
 
 Options that could close the remaining gap and their TB violations:
 
@@ -624,11 +626,15 @@ framework services (auth, transactions). Handlers are per-slot on
 the server. All connections active — no standby concept. Sim-tested
 at 2x throughput with 2 slots.
 
-**Recommended implementation order:**
-1. Phase 1: RT reduction (protocol simplification, same transport)
-2. Phase 4: Batching (biggest throughput gain, works on unix socket)
-3. Phase 2: Shared memory (transport swap, incremental gain)
-4. Phase 3: Typed schemas (type safety + performance, independent)
+**Recommended implementation order (revised after measurement):**
+1. Phase 3: Typed schemas — correctness fix (safety > performance)
+2. Phase 1: RT reduction — biggest single win (298µs saved, 36% faster)
+3. Measure. Then decide: request batching or QUERY batching based
+   on where the time goes for real handler workloads.
+
+Shm (Phase 2) deferred — measured transport overhead is <10µs per
+round-trip (~2% of request cost). Months of complexity for <2% gain.
+Unix socket is the right primitive when transport isn't the bottleneck.
 
 ## What we're NOT doing
 
@@ -666,25 +672,65 @@ at 2x throughput with 2 slots.
   | TypeScript (V8) | ~25K | ~50K | ~100K |
   | Rust/Go | ~34K | ~68K | ~136K |
 
-## Phase 4: Request batching (NEW)
+## Measured timing (2026-04-03)
+
+Real sidecar instrumentation (unix socket, V8 warm after 5 requests).
+After eliminating per-request allocations in the TS runtime (2.8x
+speedup from pre-allocated buffers, reused db/ctx objects).
+
+| CALL | Total | V8 compute | QUERY round-trips | Queries |
+|---|---|---|---|---|
+| route | 298µs | 298µs | 0µs | 0 |
+| prefetch | 344µs | 263µs | 81µs | 1 |
+| handle | 62µs | 62µs | 0µs | 0 |
+| render | 115µs | 115µs | 0µs | 0 |
+| **Total** | **819µs** | **738µs** | **81µs** | **1** |
+
+**Cost breakdown:**
+- V8 handler execution: 738µs (90%)
+- QUERY round-trips: 81µs (10%)
+- Transport overhead: <10µs per RT (<2%)
+
+**The bottleneck is V8 handler execution, not transport or queries.**
+This changes the optimization priority: RT reduction saves 298µs
+(one fewer V8 invocation), not ~35µs (one fewer socket round-trip).
+
+**Comparison with Express (same handler logic + SQLite):**
+
+| Work | Express | Our sidecar (now) | After RT reduction |
+|---|---|---|---|
+| HTTP parse | ~15µs (Node) | ~1µs (Zig) | ~1µs |
+| Body parse | ~10µs (middleware) | 0µs (Zig) | 0µs |
+| Handler JS | ~200µs | ~200µs | ~200µs |
+| SQLite query | ~80µs (better-sqlite3) | ~88µs (QUERY RT) | ~88µs |
+| Template render | ~100µs | ~100µs | ~100µs |
+| Session/cookie | ~20µs (middleware) | ~1µs (Zig HMAC) | ~1µs |
+| HTTP encode | ~10µs (Node) | ~1µs (Zig) | ~1µs |
+| Protocol overhead | 0µs | ~350µs (4 RT) | ~50µs (2 RT) |
+| **Total** | **~440µs** | **~819µs** | **~441µs** |
+| **vs Express** | **1x** | **0.5x** | **~1x (parity)** |
+
+After RT reduction alone, 1 sidecar reaches Express parity. Zig
+handles HTTP, SQL, and session faster than Node — those savings
+offset the remaining 2-RT protocol cost.
+
+## Future optimizations (measure-driven)
+
+Deploy after Phase 1 + Phase 3 and re-measure. Each optimization
+targets a different bottleneck. The instrumentation (`--log-trace`)
+shows exactly where time goes — implement whichever the data says
+is the next bottleneck.
+
+### Request batching
 
 Batch N ready connections into one CALL, get N results in one RESULT.
-The server already collects all ready connections per tick — batching
-is sending them together instead of individually. Free at batch=1
+Amortizes protocol overhead across N requests. Free at batch=1
 (low load), multiplicative at batch=N (high load).
 
-**Why:** The per-request round-trip overhead (~35µs with unix socket,
-~10µs with shm) is amortized across N requests. With batch=50,
-the transport overhead per request drops to ~0.5-1µs. Combined with
-RT reduction, a single V8 sidecar reaches ~30-40K req/s.
-
-**How it composes with existing work:**
-- PipelineSlot holds a batch (array of requests), not a single request
-- Handle_lock serializes batch transactions (fewer lock acquisitions)
-- Round-robin distributes batches across sidecars
-- Connection-indexed routing unchanged (batch response → slot)
-- Handler API unchanged — framework calls handler once per request
-  inside the sidecar, batching is invisible to the handler author
+**When to implement:** after RT reduction, if protocol overhead
+(~50µs at 2 RT) is still a significant fraction of request cost
+under high load. If V8 handler execution dominates (as measured),
+batching saves less than expected.
 
 **Design:**
 ```
@@ -699,84 +745,42 @@ sidecar:
     route → prefetch → handle → render
   pack results: [response_count: u16][response1][response2]...
   send one RESULT frame
-
-server receives RESULT:
-  unpack N responses
-  set_response on each connection
 ```
 
 No waiting to fill the batch. Send what's ready NOW, every tick.
-Batch size = 1 under low load (same latency as unbatched).
-Batch size = N under high load (N× fewer round-trips).
 
-| Optimization | RTs per request | V8 req/s (1 process) |
-|---|---|---|
-| Current (4 RT × 1 req) | 4.0 | ~7K |
-| Phase 1: RT reduction (2 RT × 1 req) | 2.0 | ~17K |
-| Phase 2: shm (2 RT × 1 req) | 2.0 | ~24K |
-| Phase 4: batching (2 RT × 50 req) | 0.04 | ~30-40K |
-| Phase 4 + concurrent (2 sidecars) | 0.04 | ~60-80K |
+**Composes with existing work:** PipelineSlot holds a batch,
+handle_lock serializes batch transactions, round-robin distributes
+batches across sidecars. Handler API unchanged — framework calls
+handler per request inside the sidecar.
 
-**SQLite ceiling:** ~100K writes/s. Reached at ~3-4 V8 sidecar
-processes with batching, or ~14 without. Batching reduces the
-number of cores needed to saturate the database.
+### QUERY batching
 
-**Implementation order:** Phase 1 (RT reduction) → Phase 4 (batching)
-→ Phase 2 (shm). Batching before shm because it gives a larger
-throughput gain (~2-4×) than shm (~1.4×) and works on the existing
-unix socket transport. shm is incremental on top.
+Batch N queries within a single handler into one exchange instead
+of N round-trips.
 
-### Measured timing (2026-04-03)
+**When to implement:** after RT reduction + request batching, if
+QUERY round-trips are >20% of remaining request cost. Measured
+today: 10% for simple handlers (1 query), up to 37% for complex
+handlers (5 queries).
 
-Real sidecar instrumentation (unix socket, V8 warm after 5 requests):
+**Design:** sidecar sends all QUERYs upfront, server executes all
+and returns all QUERY_RESULTs in one batch. Complementary to
+request batching — they operate at different levels (request-level
+vs query-level).
 
-| CALL | Total | V8 compute | QUERY round-trips | Queries |
-|---|---|---|---|---|
-| route | 298µs | 298µs | 0µs | 0 |
-| prefetch | 344µs | 263µs | 81µs | 1 |
-| handle | 62µs | 62µs | 0µs | 0 |
-| render | 115µs | 115µs | 0µs | 0 |
-| **Total** | **819µs** | **738µs** | **81µs** | **1** |
+### Shared memory transport
 
-**Finding:** V8 handler execution is 90% of the cost. QUERY
-round-trips are 10%. Transport overhead is <10µs per round-trip
-(invisible). The bottleneck is V8, not the protocol or queries.
+Replace unix socket with mmap + eventfd. Eliminates kernel buffer
+copies and socket syscalls.
 
-**Comparison with Express (same handler logic + SQLite):**
+**When to implement:** if measured transport overhead exceeds 10%
+of request cost. Currently <2%. The unix socket is the right
+primitive when transport isn't the bottleneck. Months of
+implementation (mmap, eventfd, native addon, crash recovery,
+memory ordering, CRC validation, fuzz coverage) for <2% gain
+is not justified.
 
-| Work | Express | Our sidecar (now) | After plan |
-|---|---|---|---|
-| HTTP parse | ~15µs (Node) | ~1µs (Zig) | ~1µs |
-| Body parse | ~10µs (middleware) | 0µs (Zig) | 0µs |
-| Handler JS | ~200µs | ~200µs | ~200µs |
-| SQLite query | ~80µs (better-sqlite3) | ~88µs (QUERY RT) | ~10µs (batched) |
-| Template render | ~100µs | ~100µs | ~100µs |
-| Session/cookie | ~20µs (middleware) | ~1µs (Zig HMAC) | ~1µs |
-| HTTP encode | ~10µs (Node) | ~1µs (Zig) | ~1µs |
-| Protocol overhead | 0µs | ~350µs (4 RT) | ~10µs (batched) |
-| **Total** | **~440µs** | **~819µs** | **~328µs** |
-| **vs Express** | **1x** | **0.5x** | **1.3x faster** |
-
-After RT reduction + batching, 1 sidecar is faster than Express
-because Zig handles the expensive non-JS work (HTTP, SQL, session).
-The 10µs protocol cost is paid for 5x over by work that moved
-from V8 to Zig.
-
-### Future: QUERY batching
-
-Measured QUERY round-trip: ~88µs per query (11% of request cost).
-Not the bottleneck today — V8 handler execution dominates. But with
-RT reduction + request batching (which shrink handler overhead),
-QUERY round-trips become a larger fraction.
-
-Currently each `db.query()` is a synchronous round-trip: sidecar
-sends QUERY frame → server executes SQL → sends QUERY_RESULT.
-With N queries per handler, that's N round-trips.
-
-QUERY batching: sidecar sends all QUERYs upfront, server executes
-all and returns all QUERY_RESULTs in one batch. 1 round-trip for
-N queries instead of N.
-
-Not needed now — the 88µs is small compared to 738µs of V8 compute.
-Revisit after Phase 1 + Phase 4 when protocol overhead shrinks and
-QUERY round-trips become a larger share of the remaining cost.
+The full shm design (layout, memory ordering, crash recovery,
+safety model) is documented above in case transport becomes the
+bottleneck for a specific workload or sidecar language.
