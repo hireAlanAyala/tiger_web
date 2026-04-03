@@ -1,6 +1,6 @@
 const std = @import("std");
 const assert = std.debug.assert;
-const constants = @import("constants");
+const constants = @import("constants.zig");
 
 /// Operation is stored as raw u8 — the tracer doesn't depend on
 /// domain types. The server converts Operation enum to u8 at the

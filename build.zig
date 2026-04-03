@@ -19,12 +19,6 @@ pub fn build(b: *std.Build) void {
     build_options.addOption(bool, "sidecar_enabled", sidecar_enabled);
     build_options.addOption(u8, "sidecar_count", sidecar_count);
 
-    // --- Constants module (TB pattern: single source of truth) ---
-    const constants_module = b.addModule("constants", .{
-        .root_source_file = b.path("framework/constants.zig"),
-    });
-    constants_module.addOptions("build_options", build_options);
-
     // --- Main executable ---
     const exe = b.addExecutable(.{
         .name = "tiger-web",
@@ -288,12 +282,12 @@ pub fn build(b: *std.Build) void {
     // Trace event tests.
     {
         const trace_test = b.addTest(.{
-            .root_source_file = b.path("framework/trace/event.zig"),
+            .root_source_file = b.path("framework/trace_event.zig"),
             .target = target,
             .optimize = optimize,
         });
         trace_test.root_module.addImport("stdx", stdx_module);
-        trace_test.root_module.addImport("constants", constants_module);
+        trace_test.root_module.addOptions("build_options", build_options);
         trace_test.linkLibC();
         const run_trace_test = b.addRunArtifact(trace_test);
         unit_test_step.dependOn(&run_trace_test.step);
