@@ -91,18 +91,21 @@ pub fn main() !void {
 // --- Init helpers (each under 70 lines) ---
 
 /// Collect sidecar command argv from extended args after `--`.
+/// Static buffer — the returned slice must outlive main() because
+/// the supervisor respawns processes using this argv.
+var sidecar_argv_buf: [16][]const u8 = undefined;
+
 fn collect_sidecar_argv(args: *std.process.ArgIterator) ?[]const []const u8 {
-    var buf: [16][]const u8 = undefined;
     var argc: usize = 0;
     while (args.next()) |arg| {
-        if (argc >= buf.len) {
-            log.err("too many sidecar command arguments (max {d})", .{buf.len});
+        if (argc >= sidecar_argv_buf.len) {
+            log.err("too many sidecar command arguments (max {d})", .{sidecar_argv_buf.len});
             std.process.exit(1);
         }
-        buf[argc] = arg;
+        sidecar_argv_buf[argc] = arg;
         argc += 1;
     }
-    return if (argc > 0) buf[0..argc] else null;
+    return if (argc > 0) sidecar_argv_buf[0..argc] else null;
 }
 
 /// Validate CLI config and return the secret key.
@@ -145,11 +148,18 @@ fn wire_sidecar(server: *Server, cli: CliArgs) !void {
 
 /// Init supervisor if sidecar argv was provided.
 /// Optional — no `--` args means external supervision mode.
+///
+/// Uses a GPA for child process argv duplication (TB pattern:
+/// GPA for one-time init, page_allocator for hot-path-free
+/// fixed buffers). page_allocator wastes 4KB per small string
+/// like "node" or "dispatch.js", exhausting address space.
+var supervisor_gpa: std.heap.GeneralPurposeAllocator(.{}) = .{};
+
 fn init_supervisor(sidecar_argv: ?[]const []const u8) !?Supervisor {
     if (!App.sidecar_enabled) return null;
     const argv = sidecar_argv orelse return null;
     const count = App.sidecar_count;
-    var sup = try Supervisor.init(std.heap.page_allocator, argv, count);
+    var sup = try Supervisor.init(supervisor_gpa.allocator(), argv, count);
     try sup.spawn_all();
     return sup;
 }
