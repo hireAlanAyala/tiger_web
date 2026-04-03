@@ -194,8 +194,9 @@ const Event = union(enum) {
 - Timing aggregation (min/max/sum/count) using Duration type
 - Gauges and counters
 - StatsD emission (log mode first, UDP later)
-- Port TB's Duration type (`ns: u64` with `.ms()`, `.to_us()`,
-  `.min()`, `.max()`, `.clamp()`). Cleaner than raw u64.
+- Use TB's Duration type (already ported in `framework/stdx/time_units.zig`,
+  exported as `stdx.Duration`). `ns: u64` with `.ms()`, `.to_us()`,
+  `.min()`, `.max()`, `.clamp()`. Replaces raw u64 nanoseconds.
 - `cancel_slot(slot_idx)` — iterates all event types, cancels
   only the target slot's stack position for each. Uses TB's
   stack_bases/stack_limits system internally. 6 iterations.
