@@ -279,10 +279,10 @@ pub fn build(b: *std.Build) void {
         unit_test_step.dependOn(&run_fw_test.step);
     }
 
-    // Trace event tests.
-    {
+    // Trace engine + event tests.
+    for ([_][]const u8{ "framework/trace_event.zig", "framework/tracer_engine.zig" }) |trace_file| {
         const trace_test = b.addTest(.{
-            .root_source_file = b.path("framework/trace_event.zig"),
+            .root_source_file = b.path(trace_file),
             .target = target,
             .optimize = optimize,
         });
