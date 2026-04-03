@@ -14,66 +14,40 @@
    Remove session_action from HandleResult. Session changes via
    db.execute on a sessions table. Only logout uses session_action.
 
-4. **Phase 4: SimSidecar** — NEXT
-   Simulation primitive for sim tests with full sidecar pipeline.
-   Exercises Server + SM + MessageBus + SidecarHandlers together.
-   Recovery scenarios: disconnect → 503 → reconnect → 200.
-   SimSidecar speaks CALL/RESULT frames via FuzzIO, controls
-   when RESULTs arrive (PRNG-driven delays, failures).
-   Same pattern as TB's SimStorage. Currently covered by:
-   - Protocol fuzzer (sidecar_fuzz.zig — state machine level)
-   - Transport fuzzer (message_bus_fuzz.zig — connection level)
-   - Manual e2e (npm run dev + curl)
-   - Integration test (examples/ecommerce-ts/test.ts — 67/75 pass)
+4. **SimSidecar sim tests** — DONE
+   11 sim tests + 4 concurrent dispatch tests in sim_sidecar.zig.
+   Throughput benchmark: 2x scaling with 2 slots (32→16 ticks/req).
 
-5. **Non-blocking sidecar frame IO** — DONE (message bus replaced it)
-   The old blocking `read_frame`/`write_frame` was replaced by
-   MessageBusType(IO) with async recv/send in Phase 1. Dead code
-   still in protocol.zig (read_frame/write_frame/recv_exact/send_exact)
-   — blocked from deletion by old sidecar_fuzz.zig test. Can now be
-   deleted since sidecar_fuzz.zig was rewritten.
+5. **Non-blocking sidecar frame IO** — DONE (message bus)
 
-6. **N+1 sidecar process manager** — DEFERRED
-   Server spawns N sidecar processes. Each connects, handshakes,
-   gets its own bus. Two modes:
+6. **Concurrent pipeline (Stage 3)** — DONE
+   PipelineSlot, per-slot handlers, handle_lock, round-robin dispatch.
+   SM pure services (no handlers, no per-request state). Per-slot tracer.
+   All connections active (no standby concept). Tested + benchmarked.
 
-   **Hot standby (simple, no concurrent pipeline):**
-   Dispatch to sidecar A. If A dies, instantly switch to B
-   (already connected). Zero downtime on crash. Same throughput
-   (serial pipeline), double availability. `--sidecar-count=2`.
+7. **Sidecar transport optimization** — `docs/plans/sidecar-shm-transport.md`
+   Committed: Phase 3 (typed schemas), Phase 1 (RT reduction),
+   Phase 1b (server-side prefetch — thin sidecar).
+   Future (measure-driven): request batching, QUERY batching, shm.
 
-   **Round-robin (requires concurrent pipeline):**
-   N in-flight pipelines, dispatch to whichever sidecar is free.
-   Throughput scales linearly: 1 sidecar = 25K, 2 = 50K, 4 = 100K.
-   Requires multiple `commit_stage` slots (network-storage.md).
+8. **Batch SQLite transactions per tick** — DEFERRED
+   begin_batch before first .handle in a tick, commit_batch after
+   last. All writes in one tick share one SQLite transaction.
+   Reduces fsyncs from N to 1 under concurrent dispatch.
+   Currently each .handle does its own begin/commit_batch.
 
-   Hot standby first. Round-robin after concurrent pipeline.
-   Handler code unchanged — pure functions, no shared state.
-
-   Pieces that already exist:
-   - MessageBus with tick_accept
-   - READY handshake per connection (PID + version)
-   - Binary state (connected/disconnected)
-   - Pure function handlers
-
-   Pieces needed:
-   - `std.process.Child` to spawn/respawn sidecars (~30 lines)
-   - Array of bus connections instead of single embedded bus
-   - `next_sidecar_index` for round-robin dispatch
-   - Concurrent pipeline for round-robin mode (separate plan)
-
-7. **Adapter lifecycle flags** — DEFERRED
+9. **Adapter lifecycle flags** — DEFERRED
    READY handshake flags byte for runtime-specific kill semantics
    (process group kill for npx/poetry). See decision doc:
    `docs/internal/decision-sidecar-lifecycle.md`.
    Defer until second adapter (Python/Go) is added.
 
-7. **E2e test handler failures** — 8 handler logic bugs
+10. **E2e test handler failures** — 8 handler logic bugs
    update/search/dashboard rendering failures in sidecar mode.
    Not transport issues — handler TS code needs fixes.
    See: `examples/ecommerce-ts/test.ts` (67/75 pass).
 
-8. **Delete dead protocol code** — cleanup
+11. **Delete dead protocol code** — cleanup
    `protocol.read_frame`, `write_frame`, `recv_exact`, `send_exact`
    are dead code (replaced by message bus). `io.readable()` has no
    callers. Can delete now that sidecar_fuzz.zig is rewritten.
@@ -200,6 +174,7 @@ Right primitive: the developer states what happened, the framework handles the p
 - ensure all errors absorbed by the framework like, db, network, worker, etc. are logged correctly for debugging.
 - change prefetch from epoll to io_uring to 15x if a user uses a network db as the db interface postgres would go from 2k to 50k req/s
 - assert the args passed to the sidecar functions are not directly mutated like ctx.something = ""
+- if storage is a network db, commit will probably need to be async, right now it blocks
 
 # clean up
 - ensure we use cli/program defaults very carefully. i like no defaults or few defaults over heavy defaults
