@@ -149,8 +149,6 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
         time: Time,
 
         listen_fd: IO.fd_t,
-        accept_completion: IO.Completion,
-        accept_connection: ?*Connection,
 
         connections: []Connection,
         connections_used: u32,
@@ -251,8 +249,6 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
                 .tracer = tracer,
                 .time = time,
                 .listen_fd = listen_fd,
-                .accept_completion = .{},
-                .accept_connection = null,
                 .connections = connections,
                 .connections_used = 0,
                 .wal = wal,
@@ -341,49 +337,23 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
 
         // --- Accept ---
 
+        /// Accept one pending connection per tick. Direct non-blocking
+        /// accept — same primitive as the sidecar bus. No epoll
+        /// registration, no ONESHOT race, deterministic per-tick.
         fn maybe_accept(server: *Server) void {
-            if (server.accept_connection != null) return;
-
             // All slots may be busy under load.
             if (server.connections_used == server.connections.len) return;
 
-            server.accept_connection = for (server.connections) |*conn| {
-                if (conn.state == .free) {
-                    conn.set_accepting();
-                    break conn;
-                }
+            const accepted_fd = server.io.try_accept(server.listen_fd) orelse return;
+
+            const conn = for (server.connections) |*conn| {
+                if (conn.state == .free) break conn;
             } else unreachable;
 
-            server.io.accept(
-                server.listen_fd,
-                &server.accept_completion,
-                @ptrCast(server),
-                accept_callback,
-            );
-        }
-
-        fn accept_callback(ctx: *anyopaque, result: i32) void {
-            const server: *Server = @ptrCast(@alignCast(ctx));
-
-            assert(server.accept_connection != null);
-            const conn = server.accept_connection.?;
-            server.accept_connection = null;
-
-            assert(conn.fd == 0);
-            assert(conn.state == .accepting);
-            defer assert(conn.state == .receiving or conn.state == .free);
-
-            // Accept may fail due to resource exhaustion or client abort.
-            stdx.maybe(result < 0);
-            if (result < 0) {
-                log.mark.warn("accept failed: result={d}", .{result});
-                conn.on_accept_error();
-                return;
-            }
-
-            conn.on_accept(server.io, result, server.tick_count);
+            conn.set_accepting();
+            conn.on_accept(server.io, accepted_fd, server.tick_count);
             server.connections_used += 1;
-            log.debug("accepted connection fd={d}", .{result});
+            log.debug("accepted connection fd={d}", .{accepted_fd});
         }
 
         // --- Inbox: process ready requests ---
@@ -1050,11 +1020,9 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
             // connections_used counts active connections (not accepting).
             assert(server.connections_used == active_count);
 
-            // At most one connection can be in accepting state.
-            assert(accepting_count <= 1);
-            if (server.accept_connection != null) {
-                assert(accepting_count == 1);
-            }
+            // No connection should be in accepting state — accept is
+            // synchronous now (try_accept), no async pending state.
+            assert(accepting_count == 0);
 
             // Pipeline cross-invariants — slot.stage and its associated
             // fields must be consistent. Pair assertion with commit_dispatch

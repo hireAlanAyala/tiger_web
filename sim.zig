@@ -482,12 +482,12 @@ test "mark: accept failure logs warning" {
     var server = try Server.init(std.testing.allocator, &io, &sm, &tracer, 1, time_sim.time(), null);
     defer server.deinit(std.testing.allocator);
 
-    // 100% accept fault — every accept attempt fails.
+    // 100% accept fault — try_accept returns null every tick.
     io.accept_fault_probability = PRNG.ratio(1, 1);
     io.connect_client(0, server.listen_fd);
-    const mark = marks.check("accept failed");
     run_ticks(&server, &io, 10);
-    try mark.expect_hit();
+    // Client connected but never accepted — no connection used.
+    try std.testing.expectEqual(@as(u32, 0), server.connections_used);
 }
 
 test "mark: SSE mutation triggers follow-up" {

@@ -255,7 +255,7 @@ Levels: ~70% debug (invisible by default), ~20% warn (recoverable operational is
 - `--log-trace` without `--log-debug` (err, then exit)
 
 **`server.zig`** — `log.debug` / `log.info`:
-- `accept_callback`: new connection accepted (debug), accept failed (mark.warn)
+- `maybe_accept`: new connection accepted (debug)
 - `close_dead`: connection closed with fd (debug)
 - `timeout_idle`: connection timed out (mark.debug)
 - `log_metrics`: pushes connection pool gauges into tracer, calls `tracer.emit()`
@@ -313,7 +313,6 @@ Use `log.mark.*` for **testable decision boundaries** — code paths the sim fuz
 | `connection.zig` | `send_callback` error | `"send: error"` |
 | `connection.zig` | `try_parse_request` invalid HTTP | `"invalid HTTP"` |
 | `server.zig` | `process_inbox` unmapped request | `"unmapped request"` |
-| `server.zig` | `accept_callback` failed | `"accept failed"` |
 | `server.zig` | `timeout_idle` timed out | `"connection timed out"` |
 | `server.zig` | `process_inbox` SSE mutation deferred | `"SSE mutation: deferring to follow-up"` |
 | `app.zig` | prefetch fault injection busy | `"storage: busy fault injected"` |

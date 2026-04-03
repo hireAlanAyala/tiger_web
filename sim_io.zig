@@ -400,6 +400,22 @@ pub const SimIO = struct {
 
     // --- IO interface (called by server/connection code) ---
 
+    /// Synchronous non-blocking accept — matches IO.try_accept.
+    /// Returns the fd of the first connected-but-not-accepted client
+    /// targeting this listen_fd, or null if none pending.
+    pub fn try_accept(self: *SimIO, listen_fd: fd_t) ?fd_t {
+        if (self.fault(.accept)) return null;
+        for (&self.clients) |*client| {
+            if (client.connected and !client.accepted and
+                client.target_listen_fd == listen_fd)
+            {
+                client.accepted = true;
+                return client.fd;
+            }
+        }
+        return null;
+    }
+
     pub fn accept(self: *SimIO, listen_fd: fd_t, completion: *Completion, context: *anyopaque, callback: *const fn (*anyopaque, i32) void) void {
         assert(completion.operation == .none);
         completion.* = .{
