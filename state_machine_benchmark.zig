@@ -25,6 +25,24 @@ const StateMachine = App.SM;
 const fuzz = @import("fuzz.zig");
 const PRNG = @import("stdx").PRNG;
 
+/// Budget assertions — catch catastrophic regressions (O(n²) queries,
+/// accidental allocations in the hot path). Set at ~10x expected value
+/// so they pass on slow CI runners but catch real algorithmic regressions.
+///
+/// These are NOT continuous benchmarks. TB doesn't run benchmarks in CI
+/// either — they use manual benchmarking on known hardware for gradual
+/// drift detection. Budget assertions only catch order-of-magnitude
+/// regressions. A 20% slowdown won't trigger these; a 10x slowdown will.
+///
+/// To recalibrate: run `./zig/zig build bench`, note the actual durations,
+/// set budgets to ~10x those values.
+const budget = struct {
+    /// Per-operation budget in nanoseconds (smoke mode only).
+    const get_product_ns: u64 = 500_000; // 500us — point read
+    const list_products_ns: u64 = 2_000_000; // 2ms — table scan
+    const update_product_ns: u64 = 1_000_000; // 1ms — read + write
+};
+
 const bench_test_key: *const [auth.key_length]u8 = "tiger-web-test-key-0123456789ab!";
 
 /// Test pipeline helper — runs the full prefetch + commit pipeline for native handlers.
@@ -93,7 +111,9 @@ test "benchmark: state machine" {
             dur.* = bench.stop();
             dur.* /= ops;
         }
-        bench.report("get_product:    {}/op", .{std.fmt.fmtDuration(bench.estimate(&durations))});
+        const est = bench.estimate(&durations);
+        bench.report("get_product:    {}/op", .{std.fmt.fmtDuration(est)});
+        bench.assert_budget(est, budget.get_product_ns, "get_product");
     }
 
     // --- list_products ---
@@ -110,7 +130,9 @@ test "benchmark: state machine" {
             dur.* = bench.stop();
             dur.* /= ops;
         }
-        bench.report("list_products:  {}/op", .{std.fmt.fmtDuration(bench.estimate(&durations))});
+        const est = bench.estimate(&durations);
+        bench.report("list_products:  {}/op", .{std.fmt.fmtDuration(est)});
+        bench.assert_budget(est, budget.list_products_ns, "list_products");
     }
 
     // --- update_product ---
@@ -132,7 +154,9 @@ test "benchmark: state machine" {
             dur.* = bench.stop();
             dur.* /= ops;
         }
-        bench.report("update_product: {}/op", .{std.fmt.fmtDuration(bench.estimate(&durations))});
+        const est = bench.estimate(&durations);
+        bench.report("update_product: {}/op", .{std.fmt.fmtDuration(est)});
+        bench.assert_budget(est, budget.update_product_ns, "update_product");
     }
 
     bench.report("checksum: {}", .{checksum});

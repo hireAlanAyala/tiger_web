@@ -98,6 +98,23 @@ pub fn estimate(_: *const Bench, durations: []u64) u64 {
     return durations[2];
 }
 
+/// Assert that a measured duration is within budget. Smoke mode only —
+/// benchmark mode prints results without asserting.
+/// Catches catastrophic regressions (O(n²), accidental allocations).
+pub fn assert_budget(_: *const Bench, measured_ns: u64, budget_ns: u64, comptime name: []const u8) void {
+    switch (mode) {
+        .smoke => {
+            if (measured_ns > budget_ns) {
+                std.debug.panic(
+                    "budget exceeded: {s}: {d}ns > {d}ns budget",
+                    .{ name, measured_ns, budget_ns },
+                );
+            }
+        },
+        .benchmark => {},
+    }
+}
+
 /// Only prints in benchmark mode. Silent in smoke.
 pub fn report(_: *const Bench, comptime fmt: []const u8, args: anytype) void {
     switch (mode) {
