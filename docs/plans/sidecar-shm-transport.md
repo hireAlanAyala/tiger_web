@@ -1,15 +1,21 @@
-# Sidecar: shared memory transport
+# Sidecar transport and protocol optimization
 
-Close the sidecar performance gap from 25% of native to ~49%.
+Make the sidecar as fast as Express with 1 process, faster with 2+.
 
-## Problem
+## Current state (measured 2026-04-03)
 
-The sidecar is 3.9x slower than native Zig (13K vs 53K req/s). The
-cost is 3 Unix socket round trips per request, not the TypeScript
-runtime. Per-request socket overhead is ~58μs (77μs total minus 19μs
-native work), split across 6 syscalls (3× send + 3× recv).
+Per-request: ~819µs = ~1,200 req/s per sidecar process.
+Express comparison: 0.5× (Express ~440µs for same handler logic).
 
-Measured data (i7-14700K, 128 connections, 100K requests):
+The bottleneck is V8 handler execution (90%), not transport (<2%).
+500µs of the 738µs V8 time is framework work (routing, SQL
+orchestration) that the Zig server can do from annotation data.
+Moving this to Zig makes the sidecar a thin shell (handle + render
+only) and brings 1 sidecar to 2× Express.
+
+Concurrent pipeline (✅ DONE) scales linearly with sidecar count.
+
+Load test baseline (i7-14700K, 128 connections, 100K requests):
 - Native Zig: 53,048 req/s, p50=2ms, p99=2ms
 - Sidecar (TypeScript, Unix socket): 13,642 req/s, p50=7ms, p99=22ms
 
