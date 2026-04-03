@@ -288,8 +288,9 @@ const TestHarness = struct {
     const http_listen_fd: SimIO.fd_t = 1;
     const sidecar_listen_fd: SimIO.fd_t = 2;
     const sidecar_slot: usize = 0;
-    const sidecar_slot_b: usize = 2; // standby slot (avoid http_slot=1)
+    const sidecar_slot_b: usize = 2; // second sidecar connection
     const http_slot: usize = 1;
+    const http_slot_b: usize = 3; // second HTTP client (concurrent tests)
     /// Max ticks for run_until/run_server_until before panic.
     /// 500 ticks = 5s at 10ms/tick. Tight enough to catch slow
     /// convergence, generous enough for partial delivery + timeout.
@@ -472,6 +473,72 @@ const TestHarness = struct {
             if (h.io.read_close_response(http_slot)) |resp| return resp;
         }
         return null;
+    }
+
+    // --- Concurrent dispatch helpers ---
+
+    /// Connect second HTTP client.
+    fn connect_http_b(h: *TestHarness) void {
+        h.io.connect_client(http_slot_b, http_listen_fd);
+        h.run_until(http_b_accepted);
+    }
+
+    fn http_b_accepted(h: *TestHarness) bool {
+        return h.io.clients[http_slot_b].accepted;
+    }
+
+    /// Inject POST on second HTTP client.
+    fn inject_post_b(h: *TestHarness) void {
+        h.post_count += 1;
+        var id_buf: [32]u8 = "bbccddee22334455bbccddee22334400".*;
+        const hex = "0123456789abcdef";
+        id_buf[30] = hex[h.post_count / 16];
+        id_buf[31] = hex[h.post_count % 16];
+
+        var body_buf: [128]u8 = undefined;
+        const body = std.fmt.bufPrint(&body_buf, "{{\"id\":\"{s}\",\"name\":\"Gadget\",\"price_cents\":200}}", .{id_buf}) catch unreachable;
+        h.io.inject_post(http_slot_b, "/products", body);
+    }
+
+    /// Wait for response on second HTTP client.
+    fn wait_response_b(h: *TestHarness) ?SimIO.HttpResponse {
+        for (0..max_wait_ticks) |_| {
+            h.tick_all();
+            if (h.io.read_response(http_slot_b)) |resp| return resp;
+            if (h.io.read_close_response(http_slot_b)) |resp| return resp;
+        }
+        return null;
+    }
+
+    /// Wait until BOTH HTTP clients have responses.
+    fn wait_both_responses(h: *TestHarness) ?struct { a: SimIO.HttpResponse, b: SimIO.HttpResponse } {
+        var resp_a: ?SimIO.HttpResponse = null;
+        var resp_b: ?SimIO.HttpResponse = null;
+        for (0..max_wait_ticks) |_| {
+            h.tick_all();
+            if (resp_a == null) {
+                resp_a = h.io.read_response(http_slot) orelse h.io.read_close_response(http_slot);
+            }
+            if (resp_b == null) {
+                resp_b = h.io.read_response(http_slot_b) orelse h.io.read_close_response(http_slot_b);
+            }
+            if (resp_a != null and resp_b != null) return .{ .a = resp_a.?, .b = resp_b.? };
+        }
+        return null;
+    }
+
+    /// Count active (non-idle) pipeline slots.
+    fn active_slot_count(h: *TestHarness) u32 {
+        var count: u32 = 0;
+        for (&h.server.pipeline_slots) |*slot| {
+            if (slot.stage != .idle) count += 1;
+        }
+        return count;
+    }
+
+    /// Both sidecar handlers have processed at least one CALL each.
+    fn both_sidecars_called(h: *TestHarness) bool {
+        return h.sidecar.calls_processed >= 1 and h.sidecar_b.calls_processed >= 1;
     }
 };
 
@@ -744,4 +811,86 @@ test "sidecar: hot standby — kill active, standby takes over" {
     h.inject_post();
     const resp2 = h.wait_response() orelse return error.TestUnexpectedResult;
     try std.testing.expectEqual(@as(u16, 200), resp2.status_code);
+}
+
+// =====================================================================
+// Concurrent dispatch tests
+// =====================================================================
+
+test "concurrent: two requests to two slots, both succeed" {
+    // Two HTTP clients, two sidecars. Each request routes to a different
+    // slot. Both complete independently. Exercises round-robin dispatch.
+    var h: TestHarness = undefined;
+    try h.init();
+    defer h.deinit();
+
+    h.connect_sidecar();
+    h.connect_standby();
+
+    // Two HTTP connections, two requests.
+    h.connect_http();
+    h.connect_http_b();
+    h.inject_post();
+    h.inject_post_b();
+
+    // Both should complete — dispatched to slot 0 and slot 1.
+    const resps = h.wait_both_responses() orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(u16, 200), resps.a.status_code);
+    try std.testing.expectEqual(@as(u16, 200), resps.b.status_code);
+}
+
+test "concurrent: slot recovery during concurrent dispatch" {
+    // Two requests in-flight. Kill one sidecar. Its request gets
+    // recovered (pipeline reset). The other completes normally.
+    var h: TestHarness = undefined;
+    try h.init();
+    defer h.deinit();
+
+    h.connect_sidecar();
+    h.connect_standby();
+
+    h.connect_http();
+    h.connect_http_b();
+    h.inject_post();
+    h.inject_post_b();
+
+    // Wait until both sidecars have received at least one CALL.
+    h.run_until(TestHarness.both_sidecars_called);
+
+    // Kill sidecar on slot 0. Its request is recovered.
+    h.sidecar.disconnect();
+
+    // Wait for both responses. Slot 1's request completes normally (200).
+    // Slot 0's request was reset — HTTP connection retries next tick,
+    // routes to slot 1 (the only ready slot) and completes.
+    const resps = h.wait_both_responses() orelse return error.TestUnexpectedResult;
+
+    // At least one must be 200 (the undisturbed slot).
+    const any_200 = resps.a.status_code == 200 or resps.b.status_code == 200;
+    try std.testing.expect(any_200);
+}
+
+test "concurrent: handle_lock serializes writes" {
+    // Verify that at most one slot is in .handle at any point.
+    // Enforced by handle_lock + invariants (which run every tick via
+    // defer). If two slots enter .handle simultaneously, the invariant
+    // crashes the test. Reaching the end without crash = serialization works.
+    var h: TestHarness = undefined;
+    try h.init();
+    defer h.deinit();
+
+    h.connect_sidecar();
+    h.connect_standby();
+
+    h.connect_http();
+    h.connect_http_b();
+    h.inject_post();
+    h.inject_post_b();
+
+    const resps = h.wait_both_responses() orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(u16, 200), resps.a.status_code);
+    try std.testing.expectEqual(@as(u16, 200), resps.b.status_code);
+
+    // handle_lock must be free after all requests complete.
+    try std.testing.expectEqual(@as(?u8, null), h.server.handle_lock);
 }
