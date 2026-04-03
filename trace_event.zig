@@ -1,10 +1,13 @@
 const std = @import("std");
 const assert = std.debug.assert;
-const constants = @import("constants.zig");
+const constants = @import("framework/constants.zig");
+const message = @import("message.zig");
 
-/// Operation is stored as raw u8 — the tracer doesn't depend on
-/// domain types. The server converts Operation enum to u8 at the
-/// trace call site. Display converts back via @tagName at output.
+/// Domain types — imported directly, same as TB's trace/event.zig
+/// imports from tigerbeetle.zig, vsr.zig, and state_machine.zig.
+/// The event definitions describe the system, which includes domain types.
+pub const Operation = message.Operation;
+pub const Status = message.Status;
 
 /// Maps an exhaustive enum value from an enum type that might potentially start with a non-zero
 /// value or be sparse to a continuous index that fits within enum_count().
@@ -326,6 +329,111 @@ pub const EventTiming = union(enum) {
 };
 
 // ---------------------------------------------------------------------------
+// EventMetric — gauges and counters.
+//
+// Same slot/base/count infrastructure as EventTiming.
+// gauge(): last-set wins. count(): cumulative.
+// Matches TB's trace/event.zig EventMetric.
+// ---------------------------------------------------------------------------
+
+pub const EventMetric = union(enum) {
+    const Tag = std.meta.Tag(EventMetric);
+
+    // Framework gauges — connection pool health.
+    connections_active,
+    connections_receiving,
+    connections_ready,
+    connections_sending,
+
+    // Per-operation counters — one slot per Operation variant.
+    // Exact cardinality from the domain enum, same as TB's
+    // table_count_visible using enum_count(TreeEnum).
+    requests_by_operation: struct { operation: Operation },
+
+    // Per-status counters — one slot per Status variant.
+    requests_by_status: struct { status: Status },
+
+    pub const slot_limits = std.enums.EnumArray(Tag, u32).init(.{
+        .connections_active = 1,
+        .connections_receiving = 1,
+        .connections_ready = 1,
+        .connections_sending = 1,
+        .requests_by_operation = enum_count(Operation),
+        .requests_by_status = enum_count(Status),
+    });
+
+    pub const slot_bases = array: {
+        var array = std.enums.EnumArray(Tag, u32).initDefault(0, .{});
+        var next: u32 = 0;
+        for (std.enums.values(Tag)) |event_type| {
+            array.set(event_type, next);
+            next += slot_limits.get(event_type);
+        }
+        break :array array;
+    };
+
+    pub const slot_count = count: {
+        var total: u32 = 0;
+        for (std.enums.values(Tag)) |event_type| {
+            total += slot_limits.get(event_type);
+        }
+        break :count total;
+    };
+
+    pub fn slot(event: *const EventMetric) u32 {
+        switch (event.*) {
+            inline .requests_by_operation => |data| {
+                const offset = index_from_enum(data.operation);
+                assert(offset < slot_limits.get(.requests_by_operation));
+                return slot_bases.get(.requests_by_operation) + offset;
+            },
+            inline .requests_by_status => |data| {
+                const offset = index_from_enum(data.status);
+                assert(offset < slot_limits.get(.requests_by_status));
+                return slot_bases.get(.requests_by_status) + offset;
+            },
+            else => {
+                return slot_bases.get(event.*);
+            },
+        }
+    }
+};
+
+/// Format event data fields as "key=value" pairs. Enums use @tagName.
+/// Copied from TB's trace/event.zig format_data.
+pub fn format_data(
+    data: anytype,
+    writer: anytype,
+) !void {
+    const Data = @TypeOf(data);
+    if (Data == void) return;
+
+    const fields = std.meta.fields(Data);
+    inline for (fields, 0..) |data_field, i| {
+        assert(data_field.type == bool or
+            @typeInfo(data_field.type) == .int or
+            @typeInfo(data_field.type) == .@"enum" or
+            @typeInfo(data_field.type) == .@"union");
+
+        const data_field_value = @field(data, data_field.name);
+        try writer.writeAll(data_field.name);
+        try writer.writeByte('=');
+
+        if (@typeInfo(data_field.type) == .@"enum" or
+            @typeInfo(data_field.type) == .@"union")
+        {
+            try writer.print("{s}", .{@tagName(data_field_value)});
+        } else {
+            try writer.print("{}", .{data_field_value});
+        }
+
+        if (i != fields.len - 1) {
+            try writer.writeByte(' ');
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // EventTimingAggregate — accumulated timing values between emissions.
 // ---------------------------------------------------------------------------
 
@@ -337,6 +445,18 @@ pub const EventTimingAggregate = struct {
         duration_sum: @import("stdx").Duration,
         count: u64,
     },
+};
+
+// ---------------------------------------------------------------------------
+// EventMetricAggregate — gauge/counter value between emissions.
+// Matches TB's trace/event.zig EventMetricAggregate.
+// ---------------------------------------------------------------------------
+
+pub const EventMetricAggregate = struct {
+    pub const ValueType = i65;
+
+    event: EventMetric,
+    value: ValueType,
 };
 
 // ---------------------------------------------------------------------------

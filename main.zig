@@ -5,9 +5,10 @@ const IO = @import("framework/io.zig").IO;
 const App = @import("app.zig");
 // Resolve Handlers (needs IO for sidecar), then construct SM.
 // SM is handler-agnostic — pure framework services.
-const StateMachine = App.StateMachineWith(App.Storage, App.sidecar_count);
+const StateMachine = App.StateMachineWith(App.Storage);
 const ServerType = @import("framework/server.zig").ServerType;
 const TimeReal = @import("framework/time.zig").TimeReal;
+const Trace = @import("trace.zig");
 const auth = @import("framework/auth.zig");
 
 const Server = ServerType(App, IO, App.Storage);
@@ -52,7 +53,6 @@ pub fn main() !void {
 
     var sm = StateMachine.init(
         &storage,
-        cli.log_trace,
         @truncate(std.crypto.random.int(u128)),
         secret_key,
     );
@@ -64,7 +64,10 @@ pub fn main() !void {
     defer wal.deinit();
 
     var time_real = TimeReal{};
-    var server = try Server.init(std.heap.page_allocator, &io, &sm, listen_fd, time_real.time(), &wal);
+    var tracer = try Trace.Tracer.init(std.heap.page_allocator, time_real.time(), .{
+        .log_trace = cli.log_trace,
+    });
+    var server = try Server.init(std.heap.page_allocator, &io, &sm, &tracer, listen_fd, time_real.time(), &wal);
 
     try wire_sidecar(&server, cli);
     var supervisor = try init_supervisor(sidecar_argv);

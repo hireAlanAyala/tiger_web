@@ -28,7 +28,8 @@ pub const std_options: std.Options = .{
 
 const Server = ServerType(App, SimIO, Storage);
 const Handlers = App.HandlersFor(Storage, SimIO);
-const StateMachine = App.StateMachineWith(Storage, Handlers.BusType.connections_max);
+const StateMachine = App.StateMachineWith(Storage);
+const Trace = @import("trace.zig");
 
 const test_key: *const [auth.key_length]u8 = "tiger-web-test-key-0123456789ab!";
 
@@ -279,6 +280,7 @@ const TestHarness = struct {
     io: SimIO,
     storage: Storage,
     sm: StateMachine,
+    tracer: Trace.Tracer,
     server: Server,
     sidecar: SimSidecar,
     sidecar_b: SimSidecar, // standby (hot standby tests)
@@ -306,8 +308,9 @@ const TestHarness = struct {
         h.storage = try Storage.init(":memory:");
 
         var time_sim = TimeSim{};
-        h.sm = StateMachine.init(&h.storage, false, 0, test_key);
-        h.server = try Server.init(h.allocator, &h.io, &h.sm, http_listen_fd, time_sim.time(), null);
+        h.sm = StateMachine.init(&h.storage, 0, test_key);
+        h.tracer = try Trace.Tracer.init(h.allocator, time_sim.time(), .{});
+        h.server = try Server.init(h.allocator, &h.io, &h.sm, &h.tracer, http_listen_fd, time_sim.time(), null);
         try h.server.wire_sidecar(h.allocator, null);
         h.server.sidecar_bus.listen_fd = sidecar_listen_fd;
 
@@ -328,6 +331,7 @@ const TestHarness = struct {
             h.run_server_until(all_bus_connections_closed);
         }
         h.server.deinit(h.allocator);
+        h.tracer.deinit(h.allocator);
         h.storage.deinit();
     }
 

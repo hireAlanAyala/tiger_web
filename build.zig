@@ -258,7 +258,6 @@ pub fn build(b: *std.Build) void {
 
     // Framework unit tests.
     const fw_test_modules = [_][]const u8{
-        "framework/tracer.zig",
         "framework/http.zig",
         "framework/marks.zig",
         "framework/time.zig",
@@ -280,7 +279,7 @@ pub fn build(b: *std.Build) void {
     }
 
     // Trace engine + event tests.
-    for ([_][]const u8{ "framework/trace_event.zig", "framework/trace.zig" }) |trace_file| {
+    for ([_][]const u8{ "trace_event.zig", "trace.zig" }) |trace_file| {
         const trace_test = b.addTest(.{
             .root_source_file = b.path(trace_file),
             .target = target,

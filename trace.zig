@@ -102,11 +102,13 @@ const log = std.log.scoped(.trace);
 const stdx = @import("stdx");
 const KiB = stdx.KiB;
 const Duration = stdx.Duration;
-const Time = @import("time.zig").Time;
+const Time = @import("framework/time.zig").Time;
 pub const Event = @import("trace_event.zig").Event;
+pub const EventMetric = @import("trace_event.zig").EventMetric;
 pub const EventTracing = @import("trace_event.zig").EventTracing;
 pub const EventTiming = @import("trace_event.zig").EventTiming;
 pub const EventTimingAggregate = @import("trace_event.zig").EventTimingAggregate;
+pub const EventMetricAggregate = @import("trace_event.zig").EventMetricAggregate;
 
 const trace_span_size_max = 1 * KiB;
 
@@ -117,6 +119,8 @@ options: Options,
 buffer: []u8,
 
 events_started: [EventTracing.stack_count]?stdx.Instant = @splat(null),
+events_metric: [EventMetric.slot_count]?EventMetricAggregate =
+    @as([EventMetric.slot_count]?EventMetricAggregate, @splat(null)),
 events_timing: [EventTiming.slot_count]?EventTimingAggregate =
     @as([EventTiming.slot_count]?EventTimingAggregate, @splat(null)),
 
@@ -156,7 +160,30 @@ pub fn deinit(tracer: *Tracer, allocator: std.mem.Allocator) void {
     tracer.* = undefined;
 }
 
-// TODO: gauge() and count() via EventMetric — add when wiring metrics.
+/// Gauges work on a last-set wins. Multiple calls to .gauge() followed by an emit will
+/// result in only the last value being submitted.
+// Takes an i65 to keep calling code simple: lots of places want to call this with a u64, and
+// requiring an @intCast and checks at every call site is cumbersome.
+pub fn gauge(tracer: *Tracer, event: EventMetric, value: i65) void {
+    const timing_slot = event.slot();
+    tracer.events_metric[timing_slot] = .{
+        .event = event,
+        .value = value,
+    };
+}
+
+/// Counters are cumulative values that only increase.
+pub fn count(tracer: *Tracer, event: EventMetric, value: u64) void {
+    const timing_slot = event.slot();
+    if (tracer.events_metric[timing_slot]) |*metric| {
+        metric.value +|= value;
+    } else {
+        tracer.events_metric[timing_slot] = .{
+            .event = event,
+            .value = value,
+        };
+    }
+}
 
 pub fn start(tracer: *Tracer, event: Event) void {
     const event_tracing = event.as(EventTracing);
@@ -311,11 +338,33 @@ fn write_stop(tracer: *Tracer, stack: u32, time_elapsed: stdx.Duration) void {
     };
 }
 
-/// Emit timing metrics via log and reset. Called periodically.
+/// Emit timing and metric values via log and reset. Called periodically.
 /// Self-traces the emission call (TB pattern).
 pub fn emit_metrics(tracer: *Tracer) void {
     tracer.start(.metrics_emit);
     defer tracer.stop(.metrics_emit);
+
+    for (&tracer.events_metric) |*metric_opt| {
+        const m = metric_opt.* orelse continue;
+        switch (m.event) {
+            inline else => |data| {
+                if (@TypeOf(data) == void) {
+                    log.info("metric: {s} value={d}", .{ @tagName(m.event), m.value });
+                } else {
+                    // Use format_data to emit domain enum names (TB pattern).
+                    // Output: "metric: requests_by_operation operation=create_product value=5"
+                    var name_buf: [128]u8 = undefined;
+                    var name_stream = std.io.fixedBufferStream(&name_buf);
+                    @import("trace_event.zig").format_data(data, name_stream.writer()) catch {};
+                    log.info("metric: {s} {s} value={d}", .{
+                        @tagName(m.event),
+                        name_stream.getWritten(),
+                        m.value,
+                    });
+                }
+            },
+        }
+    }
 
     for (&tracer.events_timing) |*timing_opt| {
         const t = timing_opt.* orelse continue;
@@ -328,6 +377,7 @@ pub fn emit_metrics(tracer: *Tracer) void {
         });
     }
 
+    @memset(&tracer.events_metric, null);
     @memset(&tracer.events_timing, null);
 }
 
@@ -366,7 +416,7 @@ pub fn timing(tracer: *Tracer, event_timing: EventTiming, duration: Duration) vo
     }
 }
 
-const TimeSim = @import("time.zig").TimeSim;
+const TimeSim = @import("framework/time.zig").TimeSim;
 
 test "start/stop produces valid timing" {
     var sim = TimeSim{ .resolution = 1000 };
@@ -496,4 +546,47 @@ test "timing overflow saturates" {
     try std.testing.expectEqual(value.ns, aggregate.values.duration_min.ns);
     try std.testing.expectEqual(value.ns, aggregate.values.duration_max.ns);
     try std.testing.expectEqual(std.math.maxInt(u64), aggregate.values.duration_sum.ns);
+}
+
+test "gauge sets last value, count accumulates" {
+    var sim = TimeSim{ .resolution = 1000 };
+    const time = sim.time();
+
+    var tracer = try Tracer.init(std.testing.allocator, time, .{});
+    defer tracer.deinit(std.testing.allocator);
+
+    // Gauge: last-set wins.
+    tracer.gauge(.connections_active, 5);
+    tracer.gauge(.connections_active, 10);
+    const gauge_slot = (EventMetric{ .connections_active = {} }).slot();
+    try std.testing.expectEqual(@as(EventMetricAggregate.ValueType, 10), tracer.events_metric[gauge_slot].?.value);
+
+    // Count: cumulative. Per-operation counter uses domain type directly.
+    tracer.count(.{ .requests_by_operation = .{ .operation = .create_product } }, 3);
+    tracer.count(.{ .requests_by_operation = .{ .operation = .create_product } }, 7);
+    const count_slot = (EventMetric{ .requests_by_operation = .{ .operation = .create_product } }).slot();
+    try std.testing.expectEqual(@as(EventMetricAggregate.ValueType, 10), tracer.events_metric[count_slot].?.value);
+
+    // Different operation → different slot.
+    tracer.count(.{ .requests_by_operation = .{ .operation = .list_products } }, 1);
+    const other_slot = (EventMetric{ .requests_by_operation = .{ .operation = .list_products } }).slot();
+    try std.testing.expect(count_slot != other_slot);
+    try std.testing.expectEqual(@as(EventMetricAggregate.ValueType, 1), tracer.events_metric[other_slot].?.value);
+}
+
+test "emit_metrics resets gauges and counters" {
+    var sim = TimeSim{ .resolution = 1000 };
+    const time = sim.time();
+
+    var tracer = try Tracer.init(std.testing.allocator, time, .{});
+    defer tracer.deinit(std.testing.allocator);
+
+    tracer.gauge(.connections_active, 5);
+    tracer.count(.{ .requests_by_operation = .{ .operation = .create_product } }, 1);
+    tracer.emit_metrics();
+
+    const gauge_slot = (EventMetric{ .connections_active = {} }).slot();
+    const count_slot = (EventMetric{ .requests_by_operation = .{ .operation = .create_product } }).slot();
+    try std.testing.expect(tracer.events_metric[gauge_slot] == null);
+    try std.testing.expect(tracer.events_metric[count_slot] == null);
 }

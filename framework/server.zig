@@ -7,6 +7,7 @@ const Time = @import("time.zig").Time;
 const marks = @import("marks.zig");
 const log = marks.wrap_log(std.log.scoped(.server));
 const WalType = @import("wal.zig").WalType;
+const Trace = @import("../trace.zig");
 
 /// The server orchestrator, parameterized on the App, IO, and Storage types.
 /// In production, IO is the real epoll-based implementation and Storage is SqliteStorage.
@@ -53,10 +54,9 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
     const SidecarBus = if (App.sidecar_enabled) Handlers.BusType else void;
     const SidecarClient = if (App.sidecar_enabled) Handlers.ClientType else void;
 
-    // Pipeline slot count — derived from bus connections. Used for
-    // SM construction (tracer per-slot spans) and Server arrays.
+    // Pipeline slot count — derived from bus connections.
     const slots_max: u8 = if (App.sidecar_enabled) SidecarBus.connections_max else 1;
-    const StateMachine = App.StateMachineWith(Storage, slots_max);
+    const StateMachine = App.StateMachineWith(Storage);
 
     comptime {
         // Validate StateMachine interface — framework services.
@@ -64,7 +64,6 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
         assert(@hasDecl(StateMachine, "begin_batch"));
         assert(@hasDecl(StateMachine, "commit_batch"));
         assert(@hasDecl(StateMachine, "resolve_credential"));
-        assert(@hasField(StateMachine, "tracer"));
         assert(@hasField(StateMachine, "secret_key"));
         assert(@hasField(StateMachine, "now"));
     }
@@ -146,6 +145,7 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
 
         io: *IO,
         state_machine: *StateMachine,
+        tracer: *Trace.Tracer,
         time: Time,
 
         listen_fd: IO.fd_t,
@@ -233,6 +233,7 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
             allocator: std.mem.Allocator,
             io: *IO,
             state_machine: *StateMachine,
+            tracer: *Trace.Tracer,
             listen_fd: IO.fd_t,
             time: Time,
             wal: ?*Wal,
@@ -247,6 +248,7 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
             return Server{
                 .io = io,
                 .state_machine = state_machine,
+                .tracer = tracer,
                 .time = time,
                 .listen_fd = listen_fd,
                 .accept_completion = .{},
@@ -549,7 +551,7 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
 
                         slot.msg = msg;
                         slot.stage = .prefetch;
-                        sm.tracer.start(.prefetch, idx);
+                        server.tracer.start(.{ .pipeline_stage = .{ .stage = .prefetch, .slot = idx } });
                         continue;
                     },
 
@@ -564,8 +566,8 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
                         // Handler prefetch — may return null (busy or pending).
                         slot.cache = handler.handler_prefetch(sm.storage, &msg);
                         if (slot.cache != null) {
-                            sm.tracer.stop(.prefetch, idx, msg.operation);
-                            sm.tracer.start(.execute, idx);
+                            server.tracer.stop(.{ .pipeline_stage = .{ .stage = .prefetch, .slot = idx, .op = @intFromEnum(msg.operation) } });
+                            server.tracer.start(.{ .pipeline_stage = .{ .stage = .handle, .slot = idx } });
                             slot.stage = .handle;
                             continue;
                         }
@@ -573,7 +575,7 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
                         if (handler.is_handler_pending()) return; // async IO in-flight
 
                         // Busy — retry next tick.
-                        sm.tracer.cancel(.prefetch, idx);
+                        server.tracer.cancel_slot(idx);
                         server.pipeline_reset(slot);
                         return;
                     },
@@ -644,7 +646,8 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
                             .is_new_visitor = identity.is_new != 0,
                         };
 
-                        sm.tracer.count_status(handle_result.status);
+                        server.tracer.count(.{ .requests_by_operation = .{ .operation = msg.operation } }, 1);
+                        server.tracer.count(.{ .requests_by_status = .{ .status = handle_result.status } }, 1);
 
                         // Release write lock.
                         assert(server.handle_lock.? == idx);
@@ -722,8 +725,7 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
             );
 
             const trace_idx = server.slot_index(slot);
-            sm.tracer.stop(.execute, trace_idx, msg.operation);
-            sm.tracer.trace_log(msg.operation, commit_result.status, conn.fd, trace_idx);
+            server.tracer.stop(.{ .pipeline_stage = .{ .stage = .render, .slot = trace_idx, .op = @intFromEnum(msg.operation) } });
 
             conn.set_response(commit_result.response.offset, commit_result.response.len);
             conn.keep_alive = commit_result.response.keep_alive;
@@ -831,13 +833,7 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
             }
 
             if (slot.stage != .idle) {
-                const sm = server.state_machine;
-                switch (slot.stage) {
-                    .route => {},
-                    .prefetch => sm.tracer.cancel(.prefetch, connection_index),
-                    .render => unreachable,
-                    .handle, .handle_wait, .idle => {},
-                }
+                server.tracer.cancel_slot(connection_index);
                 server.pipeline_reset(slot);
             } else {
                 server.handlers[connection_index].reset_handler_state();
@@ -926,12 +922,12 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
                     .accepting, .closing, .free => {},
                 }
             }
-            server.state_machine.tracer.gauge(.connections_active, connections_active);
-            server.state_machine.tracer.gauge(.connections_receiving, connections_receiving);
-            server.state_machine.tracer.gauge(.connections_ready, connections_ready);
-            server.state_machine.tracer.gauge(.connections_sending, connections_sending);
+            server.tracer.gauge(.connections_active, connections_active);
+            server.tracer.gauge(.connections_receiving, connections_receiving);
+            server.tracer.gauge(.connections_ready, connections_ready);
+            server.tracer.gauge(.connections_sending, connections_sending);
 
-            _ = server.state_machine.tracer.emit();
+            server.tracer.emit_metrics();
         }
 
         // --- Outbox: send pending responses ---
@@ -996,14 +992,7 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
                     // closing connection — use-after-close.
                     for (&server.pipeline_slots, 0..) |*slot, si| {
                         if (slot.connection == conn and slot.stage != .idle) {
-                            const sm = server.state_machine;
-                            const slot_i: u8 = @intCast(si);
-                            switch (slot.stage) {
-                                .route => {}, // no tracer span active during route
-                                .prefetch => sm.tracer.cancel(.prefetch, slot_i),
-                                .render => sm.tracer.cancel(.execute, slot_i),
-                                .handle, .handle_wait, .idle => {},
-                            }
+                            server.tracer.cancel_slot(@intCast(si));
                             server.pipeline_reset(slot);
                             break; // one connection per slot
                         }
