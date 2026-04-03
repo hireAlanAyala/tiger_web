@@ -143,6 +143,27 @@ timing — this phase adds the JSON serialization.
 - [ ] Merge CallTiming into sidecar_call event
 - [ ] Verify: open trace.json in ui.perfetto.dev, see pipeline timeline
 
+### Phase 1b: Remove old timing infrastructure
+
+The new tracer replaces three separate timing systems. Remove them
+to avoid confusion — one system, not three.
+
+| Remove | Where | Replaced by |
+|---|---|---|
+| Old `tracer.zig` span enums (prefetch, execute) | `framework/tracer.zig` | Boundary events (pipeline_stage, sidecar_call) |
+| CallTiming struct | `sidecar.zig` | sidecar_call event |
+| `log_call_timing()` calls | `sidecar_handlers.zig` | sidecar_call trace span |
+| `sm.tracer.start/stop(.prefetch/.execute)` | `framework/server.zig` | `trace.start(.{.pipeline_stage = ...})` |
+| `sm.tracer.trace_log()` | `framework/server.zig` | Chrome Tracing JSON (automatic) |
+| `sm.tracer.count_status()` | `framework/server.zig` | `trace.count(.requests_ok)` |
+| `sm.tracer.gauge()` | `framework/server.zig` | `trace.gauge(.connections_active, N)` |
+| `sm.tracer.emit()` | `framework/server.zig` | `trace.emit_metrics()` |
+| Per-slot `started[span][slot_idx]` arrays | `framework/tracer.zig` | Per-event `events_started[stack]` (TB pattern) |
+| `_tb.zig` reference files | `framework/trace/` | Replaced by real implementation |
+
+After cleanup: one tracer, one output format, one set of events.
+No legacy timing code.
+
 ### Phase 2: Missing benchmarks
 
 Add dual-mode benchmarks for framework components without coverage.
