@@ -313,6 +313,7 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
         /// 6. Close dead connections
         pub fn tick(server: *Server) void {
             server.tick_count +%= 1;
+            server.time.tick(); // Advance simulated time (no-op for TimeReal)
             defer server.invariants();
             // Ordering constraint: sidecar bus tick_accept runs BEFORE
             // process_inbox. process_inbox calls commit_dispatch (sets
