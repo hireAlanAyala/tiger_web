@@ -390,7 +390,8 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
             // A pending pipeline uses the time from when the request arrived,
             // not when it resumes. Same as TB: time is per-prepare, not per-tick.
             if (!server.any_slot_active()) {
-                server.state_machine.set_time(server.time.realtime());
+                // realtime() returns nanoseconds; SM uses seconds.
+                server.state_machine.set_time(@divTrunc(server.time.realtime(), std.time.ns_per_s));
             }
 
             // Transaction boundary moved to commit_dispatch (.handle stage).
