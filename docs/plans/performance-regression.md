@@ -125,8 +125,18 @@ another system. The span duration reveals the other system's cost.
 - **No HTTP recv/send span.** Client network speed is not our boundary.
 - **No per-SQL-statement span.** Too granular. Pipeline stage span already reveals total storage cost.
 
-**Existing CallTiming (sidecar.zig) merges into sidecar_call event.**
-One system, not two. CallTiming fields become event args.
+**CallTiming (sidecar.zig) is deleted — wrong primitive.**
+It reimplements what trace event nesting gives for free.
+sidecar_call is the outer span. storage_op fires when a QUERY
+arrives during the CALL. The gap IS the V8 compute time —
+visible in Perfetto without measuring it. No separate system.
+
+| CallTiming field | Trace equivalent (free from nesting) |
+|---|---|
+| `call_ns()` | sidecar_call span duration |
+| `query_total_ns` | sum of storage_op spans inside sidecar_call |
+| `query_count` | count of storage_op spans inside sidecar_call |
+| `sidecar_ns` | visible gap between storage_op and sidecar_call edges |
 
 ## Implementation phases
 
@@ -179,12 +189,18 @@ const Event = union(enum) {
 - `trace.start(.{.wal_append = ...})` around wal.append_writes
 
 **Step 4: Delete old timing infrastructure.**
-- Delete `framework/tracer.zig` entirely
-- Delete `CallTiming` from `sidecar.zig`
-- Delete `log_call_timing()` from `sidecar_handlers.zig`
-- Delete `sm.tracer` field from SM — tracer moves to server
+- Delete `framework/tracer.zig` entirely (wrong time source, wrong events)
+- Delete `CallTiming` struct from `sidecar.zig` (wrong primitive — nesting replaces it)
+- Delete `log_call_timing()` calls from `sidecar_handlers.zig`
+- Delete `sm.tracer` field from SM — tracer owned by server, passed by pointer
+- Delete `Tracer` construction from `state_machine.zig`
+- Delete `pipeline_slots_max` param from `StateMachineType` (was only for tracer slots)
 - Delete `framework/trace/*_tb.zig` reference files
-- Update all call sites (server.zig, state_machine.zig, etc.)
+- Update all call sites (server.zig, state_machine.zig, app.zig, main.zig, sim files)
+
+**Simulation violations fixed by this step:**
+- `framework/tracer.zig` used `std.time.Instant` (OS clock) — new tracer uses injected `Time` vtable
+- `sidecar.zig` `CallTiming` used `std.time.Instant` — deleted entirely
 
 **Step 5: Verify.**
 - `--trace=trace.json` → open in ui.perfetto.dev
