@@ -214,12 +214,25 @@ fn cmd_trace(cli: TraceArgs) void {
         std.time.sleep(100 * std.time.ns_per_ms);
     }
 
-    // Send stop_trace command.
-    _ = std.posix.send(fd, "stop_trace\n", 0) catch {};
+    // Send stop_trace command. Set a receive timeout so we don't
+    // hang if the server is slow or the connection is broken.
+    stdout.print("\nstopping trace...\n", .{}) catch {};
+    _ = std.posix.send(fd, "stop_trace\n", 0) catch {
+        stdout.print("failed to send stop command\n", .{}) catch {};
+        std.posix.close(fd);
+        return;
+    };
+
+    // Set 2-second receive timeout for the response.
+    const timeout = std.posix.timeval{ .sec = 2, .usec = 0 };
+    std.posix.setsockopt(fd, std.posix.SOL.SOCKET, std.posix.SO.RCVTIMEO, std.mem.asBytes(&timeout)) catch {};
+
     const stop_n = std.posix.recv(fd, &resp_buf, 0) catch 0;
     if (stop_n > 0) {
         const stop_resp = std.mem.trimRight(u8, resp_buf[0..stop_n], "\n");
         stdout.print("{s}\n", .{stop_resp}) catch {};
+    } else {
+        stdout.print("trace stopped (no response from server)\n", .{}) catch {};
     }
 
     std.posix.close(fd);
@@ -437,10 +450,12 @@ const AdminSocket = struct {
             self.client_fd = fd;
         }
 
-        // Try to read a command.
+        // Try to read a command. Non-blocking — EAGAIN means
+        // no data yet (client still connected, waiting).
         var buf: [32]u8 = undefined;
-        const n = std.posix.recv(self.client_fd, &buf, 0) catch {
-            // Client disconnected or error.
+        const n = std.posix.recv(self.client_fd, &buf, 0) catch |err| {
+            if (err == error.WouldBlock) return null; // no data yet, keep connection
+            // Real error — close.
             std.posix.close(self.client_fd);
             self.client_fd = -1;
             return null;
