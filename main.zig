@@ -88,7 +88,7 @@ fn cmd_start(cli: StartArgs, args: *std.process.ArgIterator) void {
     var time_real = TimeReal{};
 
     const trace_max_bytes = parse_trace_max(cli);
-    const trace_path = generate_trace_path(cli);
+    const trace_path = if (cli.trace) generate_trace_path() else @as([trace_path_len:0]u8, undefined);
     var trace_file: ?std.fs.File = if (cli.trace)
         std.fs.cwd().createFile(&trace_path, .{}) catch |err| {
             log.err("failed to create trace file: {}", .{err});
@@ -132,10 +132,13 @@ fn cmd_start(cli: StartArgs, args: *std.process.ArgIterator) void {
         std.process.exit(1);
     };
 
+    var admin = AdminSocket.init(actual_port);
+    defer admin.deinit();
+
     log_startup(cli, actual_port);
     emit_readiness_signal(cli.port, actual_port);
 
-    run_loop(&server, &io, &supervisor, &trace_writer, &tracer);
+    run_loop(&server, &io, &supervisor, &trace_writer, &tracer, &admin);
 }
 
 fn cmd_trace(cli: TraceArgs) void {
@@ -170,14 +173,56 @@ fn cmd_trace(cli: TraceArgs) void {
         std.process.exit(1);
     };
 
-    // Parse max size for the trace.
-    const max_bytes = parse_size(cli.max);
-    _ = max_bytes;
+    _ = parse_size(cli.max); // validate early
 
-    // TODO: Send start command, wait for Ctrl-C, send stop command.
-    // Requires admin socket listener on the server side (Step 4).
-    stdout.print("admin socket connected — trace toggle not yet implemented\n", .{}) catch {};
-    stdout.print("use --trace --trace-max on server start for now\n", .{}) catch {};
+    // Send start_trace command.
+    _ = std.posix.send(fd, "start_trace\n", 0) catch {
+        stdout.print("failed to send command\n", .{}) catch {};
+        std.process.exit(1);
+    };
+
+    // Read response.
+    var resp_buf: [128]u8 = undefined;
+    const resp_n = std.posix.recv(fd, &resp_buf, 0) catch {
+        stdout.print("failed to read response\n", .{}) catch {};
+        std.process.exit(1);
+    };
+    const resp = std.mem.trimRight(u8, resp_buf[0..resp_n], "\n");
+    stdout.print("{s}\n", .{resp}) catch {};
+
+    if (!std.mem.startsWith(u8, resp, "started")) {
+        std.process.exit(1);
+    }
+
+    stdout.print("tracing... press Ctrl-C to stop\n", .{}) catch {};
+
+    // Wait for Ctrl-C (SIGINT).
+    const handler = struct {
+        var stop: bool = false;
+        fn handle(_: c_int) callconv(.C) void {
+            stop = true;
+        }
+    };
+    const act = std.posix.Sigaction{
+        .handler = .{ .handler = handler.handle },
+        .mask = std.posix.empty_sigset,
+        .flags = 0,
+    };
+    std.posix.sigaction(std.posix.SIG.INT, &act, null);
+
+    while (!handler.stop) {
+        std.time.sleep(100 * std.time.ns_per_ms);
+    }
+
+    // Send stop_trace command.
+    _ = std.posix.send(fd, "stop_trace\n", 0) catch {};
+    const stop_n = std.posix.recv(fd, &resp_buf, 0) catch 0;
+    if (stop_n > 0) {
+        const stop_resp = std.mem.trimRight(u8, resp_buf[0..stop_n], "\n");
+        stdout.print("{s}\n", .{stop_resp}) catch {};
+    }
+
+    std.posix.close(fd);
 }
 
 // --- Init helpers (each under 70 lines) ---
@@ -224,9 +269,8 @@ fn parse_trace_max(cli: StartArgs) u64 {
 /// Format: trace-YYYY-MM-DD-HHMMSS.json (30 chars + sentinel)
 const trace_path_len = "trace-YYYY-MM-DD-HHMMSS.json".len;
 
-fn generate_trace_path(cli: StartArgs) [trace_path_len:0]u8 {
+fn generate_trace_path() [trace_path_len:0]u8 {
     var buf: [trace_path_len:0]u8 = undefined;
-    if (!cli.trace) return buf;
     const ts: u64 = @intCast(std.time.timestamp());
     const epoch = std.time.epoch.EpochSeconds{ .secs = ts };
     const day = epoch.getEpochDay().calculateYearDay();
@@ -329,7 +373,105 @@ fn emit_readiness_signal(requested_port: u16, actual_port: u16) void {
     }
 }
 
+// --- Admin socket — local-only trace control ---
+
+const AdminSocket = struct {
+    listen_fd: IO.fd_t,
+    client_fd: IO.fd_t,
+    path_buf: [64]u8,
+    path_len: usize,
+
+    fn init(port: u16) AdminSocket {
+        var self: AdminSocket = .{
+            .listen_fd = -1,
+            .client_fd = -1,
+            .path_buf = undefined,
+            .path_len = 0,
+        };
+        const path = std.fmt.bufPrint(&self.path_buf, "/tmp/tiger_web_admin_{d}.sock", .{port}) catch unreachable;
+        self.path_len = path.len;
+
+        // Remove stale socket file.
+        std.posix.unlink(self.path_buf[0..self.path_len :0]) catch {};
+
+        var addr: std.posix.sockaddr.un = .{ .family = std.posix.AF.UNIX, .path = undefined };
+        @memset(&addr.path, 0);
+        @memcpy(addr.path[0..self.path_len], path);
+
+        const fd = std.posix.socket(std.posix.AF.UNIX, std.posix.SOCK.STREAM | std.posix.SOCK.NONBLOCK, 0) catch |err| {
+            log.warn("admin socket failed: {}", .{err});
+            return self;
+        };
+        std.posix.bind(fd, @ptrCast(&addr), @sizeOf(std.posix.sockaddr.un)) catch |err| {
+            log.warn("admin socket bind failed: {}", .{err});
+            std.posix.close(fd);
+            return self;
+        };
+        std.posix.listen(fd, 1) catch |err| {
+            log.warn("admin socket listen failed: {}", .{err});
+            std.posix.close(fd);
+            return self;
+        };
+        self.listen_fd = fd;
+        log.info("admin socket: {s}", .{path});
+        return self;
+    }
+
+    fn deinit(self: *AdminSocket) void {
+        if (self.client_fd >= 0) std.posix.close(self.client_fd);
+        if (self.listen_fd >= 0) {
+            std.posix.close(self.listen_fd);
+            std.posix.unlink(self.path_buf[0..self.path_len :0]) catch {};
+        }
+    }
+
+    const AdminCommand = enum { start_trace, stop_trace, unknown };
+
+    /// Poll for admin commands. Non-blocking — returns null if nothing pending.
+    fn poll(self: *AdminSocket) ?AdminCommand {
+        if (self.listen_fd < 0) return null;
+
+        // Accept new client if none connected.
+        if (self.client_fd < 0) {
+            const fd = std.posix.accept(self.listen_fd, null, null, std.posix.SOCK.NONBLOCK) catch return null;
+            self.client_fd = fd;
+        }
+
+        // Try to read a command.
+        var buf: [32]u8 = undefined;
+        const n = std.posix.recv(self.client_fd, &buf, 0) catch {
+            // Client disconnected or error.
+            std.posix.close(self.client_fd);
+            self.client_fd = -1;
+            return null;
+        };
+        if (n == 0) {
+            // Client closed.
+            std.posix.close(self.client_fd);
+            self.client_fd = -1;
+            return null;
+        }
+
+        const cmd = std.mem.trimRight(u8, buf[0..n], "\n");
+        if (std.mem.eql(u8, cmd, "start_trace")) return .start_trace;
+        if (std.mem.eql(u8, cmd, "stop_trace")) return .stop_trace;
+        return .unknown;
+    }
+
+    fn respond(self: *AdminSocket, msg: []const u8) void {
+        if (self.client_fd < 0) return;
+        _ = std.posix.send(self.client_fd, msg, 0) catch {};
+    }
+};
+
 // --- Main event loop ---
+
+/// Runtime trace state — for admin socket trace toggle.
+/// Separate from startup trace (--trace flag). Both use the
+/// same TraceWriter and Tracer, but runtime trace creates its
+/// own file and writer on start_trace, closes on stop_trace.
+var runtime_trace_file: ?std.fs.File = null;
+var runtime_trace_writer: ?TraceWriter = null;
 
 fn run_loop(
     server: *Server,
@@ -337,6 +479,7 @@ fn run_loop(
     supervisor: *?Supervisor,
     trace_writer: *?TraceWriter,
     tracer: *Trace.Tracer,
+    admin: *AdminSocket,
 ) void {
     var was_sidecar_connected: bool = false;
     var trace_limit_logged: bool = false;
@@ -345,18 +488,71 @@ fn run_loop(
 
         // Stop tracing when size limit reached. Log once, then
         // null the writer so the tracer stops emitting JSON.
-        if (trace_writer.*) |*tw| {
+        // Applies to both startup trace and runtime trace.
+        const active_writer = if (runtime_trace_writer != null) &runtime_trace_writer else trace_writer;
+        if (active_writer.*) |*tw| {
             if (tw.limit_reached() and !trace_limit_logged) {
                 log.info("trace file limit reached ({d} bytes), tracing stopped", .{tw.bytes_written});
                 tracer.options.writer = null;
                 trace_limit_logged = true;
+                admin.respond("stopped: limit reached\n");
+                // Close runtime trace file.
+                if (runtime_trace_file) |*f| {
+                    f.close();
+                    runtime_trace_file = null;
+                    runtime_trace_writer = null;
+                }
             }
         }
 
+        // Admin socket — trace toggle.
+        if (admin.poll()) |cmd| switch (cmd) {
+            .start_trace => {
+                if (tracer.options.writer != null) {
+                    admin.respond("error: tracing already active\n");
+                } else {
+                    // Create runtime trace file + writer.
+                    // Max bytes sent by client in a follow-up (TODO).
+                    // For now, use 50MB default.
+                    const default_max: u64 = 50 * 1024 * 1024;
+                    const path = generate_trace_path();
+                    runtime_trace_file = std.fs.cwd().createFile(&path, .{}) catch |err| {
+                        var resp_buf: [64]u8 = undefined;
+                        const resp = std.fmt.bufPrint(&resp_buf, "error: {}\n", .{err}) catch "error\n";
+                        admin.respond(resp);
+                        break;
+                    };
+                    runtime_trace_writer = TraceWriter.init(runtime_trace_file.?, default_max);
+                    const writer = runtime_trace_writer.?.any();
+                    writer.writeAll("[\n") catch {};
+                    tracer.options.writer = writer;
+                    trace_limit_logged = false;
+                    log.info("runtime tracing started: {s}", .{@as([]const u8, &path)});
+                    var resp_buf: [80]u8 = undefined;
+                    const resp = std.fmt.bufPrint(&resp_buf, "started: {s}\n", .{@as([]const u8, &path)}) catch "started\n";
+                    admin.respond(resp);
+                }
+            },
+            .stop_trace => {
+                if (runtime_trace_writer) |*tw| {
+                    log.info("runtime tracing stopped ({d} bytes)", .{tw.bytes_written});
+                    tracer.options.writer = null;
+                    var resp_buf: [80]u8 = undefined;
+                    const resp = std.fmt.bufPrint(&resp_buf, "stopped: {d} bytes\n", .{tw.bytes_written}) catch "stopped\n";
+                    admin.respond(resp);
+                    runtime_trace_writer = null;
+                    if (runtime_trace_file) |*f| {
+                        f.close();
+                        runtime_trace_file = null;
+                    }
+                } else {
+                    admin.respond("error: tracing not active\n");
+                }
+            },
+            .unknown => admin.respond("error: unknown command\n"),
+        };
+
         // Composition root wiring: server ↔ supervisor.
-        // No cross-references — main.zig reads public state from both.
-        // The supervisor watches processes via waitpid — no "restart"
-        // signal needed. The sidecar detects the closed socket and exits.
         if (supervisor.*) |*sup| {
             const connected = server.sidecar_any_ready();
             if (!was_sidecar_connected and connected) {
