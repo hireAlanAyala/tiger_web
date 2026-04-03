@@ -39,7 +39,13 @@ pub const std_options: std.Options = .{
     .logFn = log_runtime,
 };
 
+/// One GPA for all init-time allocations. TB pattern: GPA at startup,
+/// no allocations after init. page_allocator wastes 4KB per small alloc.
+var gpa: std.heap.GeneralPurposeAllocator(.{}) = .{};
+
 pub fn main() !void {
+    const allocator = gpa.allocator();
+
     var args = std.process.args();
     const cli = stdx.flags(&args, CliArgs);
     const sidecar_argv = collect_sidecar_argv(&args);
@@ -73,14 +79,14 @@ pub fn main() !void {
         null;
     defer if (trace_file) |f| f.close();
 
-    var tracer = try Trace.Tracer.init(std.heap.page_allocator, time_real.time(), .{
+    var tracer = try Trace.Tracer.init(allocator, time_real.time(), .{
         .writer = if (trace_file) |f| f.writer().any() else null,
         .log_trace = cli.log_trace,
     });
-    var server = try Server.init(std.heap.page_allocator, &io, &sm, &tracer, listen_fd, time_real.time(), &wal);
+    var server = try Server.init(allocator, &io, &sm, &tracer, listen_fd, time_real.time(), &wal);
 
-    try wire_sidecar(&server, cli);
-    var supervisor = try init_supervisor(sidecar_argv);
+    try wire_sidecar(&server, cli, allocator);
+    var supervisor = try init_supervisor(sidecar_argv, allocator);
 
     log_startup(cli, actual_port);
     emit_readiness_signal(cli.port, actual_port);
@@ -138,28 +144,21 @@ fn resolve_port(listen_fd: IO.fd_t, requested: u16) u16 {
 }
 
 /// Wire sidecar bus after server is at its final address.
-fn wire_sidecar(server: *Server, cli: CliArgs) !void {
+fn wire_sidecar(server: *Server, cli: CliArgs, allocator: std.mem.Allocator) !void {
     const sidecar_path: ?[]const u8 = if (App.sidecar_enabled)
         (cli.sidecar orelse "/tmp/tiger_web_sidecar.sock")
     else
         null;
-    try server.wire_sidecar(std.heap.page_allocator, sidecar_path);
+    try server.wire_sidecar(allocator, sidecar_path);
 }
 
 /// Init supervisor if sidecar argv was provided.
 /// Optional — no `--` args means external supervision mode.
-///
-/// Uses a GPA for child process argv duplication (TB pattern:
-/// GPA for one-time init, page_allocator for hot-path-free
-/// fixed buffers). page_allocator wastes 4KB per small string
-/// like "node" or "dispatch.js", exhausting address space.
-var supervisor_gpa: std.heap.GeneralPurposeAllocator(.{}) = .{};
-
-fn init_supervisor(sidecar_argv: ?[]const []const u8) !?Supervisor {
+fn init_supervisor(sidecar_argv: ?[]const []const u8, allocator: std.mem.Allocator) !?Supervisor {
     if (!App.sidecar_enabled) return null;
     const argv = sidecar_argv orelse return null;
     const count = App.sidecar_count;
-    var sup = try Supervisor.init(supervisor_gpa.allocator(), argv, count);
+    var sup = try Supervisor.init(allocator, argv, count);
     try sup.spawn_all();
     return sup;
 }
