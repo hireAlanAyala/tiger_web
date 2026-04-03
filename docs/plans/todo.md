@@ -55,7 +55,20 @@
    Not transport issues — handler TS code needs fixes.
    See: `examples/ecommerce-ts/test.ts` (67/75 pass).
 
-11. **Delete dead protocol code** — cleanup
+11. **Supervisor integration test** — real spawn/waitpid/restart cycle
+   The supervisor state machine (backoff, restart) is unit tested, but
+   the real spawn → waitpid → restart path is never exercised. This
+   gap hid two bugs:
+   - `collect_sidecar_argv` returned a slice into a stack-local buffer
+     (use-after-return — the supervisor read garbage argv on respawn)
+   - `page_allocator` used for `Child.spawn` dupeZ wasted 4KB per
+     small string, causing OOM on the second sidecar process
+   Neither bug was caught by sim tests because sim mocks the spawn.
+   Fix: integration test that spawns a real trivial binary (e.g.
+   `sleep 0.1`), verifies the supervisor detects exit via waitpid,
+   and respawns with correct argv. Not a sim test — real processes.
+
+12. **Delete dead protocol code** — cleanup
    `protocol.read_frame`, `write_frame`, `recv_exact`, `send_exact`
    are dead code (replaced by message bus). `io.readable()` has no
    callers. Can delete now that sidecar_fuzz.zig is rewritten.
