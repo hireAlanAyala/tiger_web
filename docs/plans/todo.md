@@ -100,7 +100,15 @@
    requires restart. Remove the path argument, add `--trace-max`,
    add admin socket + `trace` subcommand.
 
-13. **Delete dead protocol code** — cleanup
+13. **Extract admin socket from main.zig** — cleanup
+   main.zig is ~350 lines of composition root. The admin socket
+   (AdminSocket struct, poll, respond), runtime trace state
+   (module-level vars), and trace toggle logic in run_loop should
+   move to their own file if we add more admin commands. For now
+   it's one command (trace toggle) so it's fine inline. Trigger:
+   second admin command added.
+
+14. **Delete dead protocol code** — cleanup
    `protocol.read_frame`, `write_frame`, `recv_exact`, `send_exact`
    are dead code (replaced by message bus). `io.readable()` has no
    callers. Can delete now that sidecar_fuzz.zig is rewritten.
