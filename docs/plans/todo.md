@@ -68,7 +68,39 @@
    `sleep 0.1`), verifies the supervisor detects exit via waitpid,
    and respawns with correct argv. Not a sim test — real processes.
 
-12. **Delete dead protocol code** — cleanup
+12. **Runtime trace toggle** — safe production tracing
+
+   Two entry points, both bounded:
+
+   ```
+   # Init tracing — captures startup spans
+   tiger-web start --port=3000 --trace --trace-max=50mb
+
+   # Runtime tracing — attaches to running server
+   tiger-web trace :3000 --max=50mb
+   # → "tracing started on server :3000 (max 50 MB)"
+   # Ctrl-C or size limit reached
+   # → "trace stopped: trace-2026-04-03-163012.json (50 MB, 30s)"
+   ```
+
+   **Design:**
+   - `--trace-max` required with `--trace` (startup error if missing).
+     TB says no unbounded limits. Unfamiliar users will forget to stop.
+   - `--max` required with `tiger-web trace` (same rule).
+   - File auto-named `trace-{timestamp}.json` in current directory.
+     No user-specified names — one fewer decision, no overwrites.
+   - Three stop conditions: Ctrl-C, size limit, server shutdown.
+     All close the file cleanly (valid Chrome Tracing JSON).
+   - `tiger-web trace` connects via admin Unix socket derived from
+     port: `/tmp/tiger_web_admin_{port}.sock`. Local-only, no network
+     surface, filesystem permissions enforce access.
+   - CLI prints file path and size on stop.
+
+   **Current state:** `--trace=path` exists but is unbounded and
+   requires restart. Remove the path argument, add `--trace-max`,
+   add admin socket + `trace` subcommand.
+
+13. **Delete dead protocol code** — cleanup
    `protocol.read_frame`, `write_frame`, `recv_exact`, `send_exact`
    are dead code (replaced by message bus). `io.readable()` has no
    callers. Can delete now that sidecar_fuzz.zig is rewritten.
@@ -200,6 +232,14 @@ This replaces the always-200 model for API responses while keeping the handler i
 unchanged. Same handler serves HTML and JSON — the framework picks the encoding.
 
 Right primitive: the developer states what happened, the framework handles the protocol.
+
+# current
+review recent changes
+generate new multicart trace.json
+finish tracing plan
+finish sidecar plan
+look in th eproject for illegal posix and other syscalls that are not simulation friendly
+
 
 # Backlog
 
