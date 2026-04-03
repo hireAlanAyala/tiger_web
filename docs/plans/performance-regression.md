@@ -300,6 +300,17 @@ cancel, render → cancel). One call, explicit, can't miss an event.
   (TB pattern — `snap()` + simulated time = deterministic output)
 - All tests pass (unit, sim, sim-sidecar, fuzz smoke)
 
+**Integration tests (don't ship primitives without consumers):**
+- Assert span durations > 0 in sim tests (catches unwired time.tick)
+- Assert start/stop pairing: every started span has a matching stop
+  or cancel (runtime assert in stop(), test for cancel paths)
+- Assert concurrent slots produce different tids in trace JSON
+- Assert nested spans (storage_op inside sidecar_call) have
+  child.ts >= parent.ts and child.ts + child.dur <= parent.ts + parent.dur
+- Run with 2 concurrent slots: verify both appear in trace output
+- Each test creates the tracer AND the consumer in the same test —
+  never test the primitive in isolation without verifying the wiring
+
 ### Phase 2: Missing benchmarks
 
 Add dual-mode benchmarks for framework components without coverage.
