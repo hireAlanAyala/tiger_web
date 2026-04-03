@@ -107,7 +107,7 @@ pub fn main() !void {
     log_startup(cli, actual_port);
     emit_readiness_signal(cli.port, actual_port);
 
-    run_loop(&server, &io, &supervisor);
+    run_loop(&server, &io, &supervisor, &trace_writer, &tracer);
 }
 
 // --- Init helpers (each under 70 lines) ---
@@ -258,10 +258,27 @@ fn emit_readiness_signal(requested_port: u16, actual_port: u16) void {
 
 // --- Main event loop ---
 
-fn run_loop(server: *Server, io: *IO, supervisor: *?Supervisor) void {
+fn run_loop(
+    server: *Server,
+    io: *IO,
+    supervisor: *?Supervisor,
+    trace_writer: *?TraceWriter,
+    tracer: *Trace.Tracer,
+) void {
     var was_sidecar_connected: bool = false;
+    var trace_limit_logged: bool = false;
     while (true) {
         server.tick();
+
+        // Stop tracing when size limit reached. Log once, then
+        // null the writer so the tracer stops emitting JSON.
+        if (trace_writer.*) |*tw| {
+            if (tw.limit_reached() and !trace_limit_logged) {
+                log.info("trace file limit reached ({d} bytes), tracing stopped", .{tw.bytes_written});
+                tracer.options.writer = null;
+                trace_limit_logged = true;
+            }
+        }
 
         // Composition root wiring: server ↔ supervisor.
         // No cross-references — main.zig reads public state from both.
