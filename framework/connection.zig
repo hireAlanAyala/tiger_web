@@ -17,8 +17,6 @@ pub fn ConnectionType(comptime IO: type) type {
         pub const State = enum {
             /// Slot is not in use.
             free,
-            /// Waiting for the accept to complete (fd not yet assigned).
-            accepting,
             /// Accumulating request bytes.
             receiving,
             /// A complete request is in the inbox, waiting for the server tick.
@@ -82,16 +80,9 @@ pub fn ConnectionType(comptime IO: type) type {
             };
         }
 
-        /// Transition to accepting state. The server calls this when it
-        /// acquires a slot and submits an accept.
-        pub fn set_accepting(conn: *Connection) void {
-            assert(conn.state == .free);
-            conn.state = .accepting;
-        }
-
-        /// Called by the accept callback. Assigns the fd and starts receiving.
+        /// Accept a connection. Assigns the fd and starts receiving.
         pub fn on_accept(conn: *Connection, io: *IO, fd: IO.fd_t, current_tick: u32) void {
-            assert(conn.state == .accepting);
+            assert(conn.state == .free);
             assert(fd > 0);
             defer conn.invariants();
             log.debug("connection assigned fd={d}", .{fd});
@@ -100,12 +91,6 @@ pub fn ConnectionType(comptime IO: type) type {
             conn.recv_pos = 0;
             conn.last_activity_tick = current_tick;
             conn.submit_recv(io);
-        }
-
-        /// Called when the accept fails.
-        pub fn on_accept_error(conn: *Connection) void {
-            assert(conn.state == .accepting);
-            conn.state = .free;
         }
 
         fn submit_recv(conn: *Connection, io: *IO) void {
@@ -128,9 +113,6 @@ pub fn ConnectionType(comptime IO: type) type {
                     assert(conn.recv_completion.operation == .none);
                     assert(conn.send_completion.operation == .none);
                     assert(!conn.is_datastar_request);
-                },
-                .accepting => {
-                    assert(conn.fd == 0);
                 },
                 .receiving => {
                     assert(conn.fd > 0);

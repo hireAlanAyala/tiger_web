@@ -275,7 +275,7 @@ test "timeout — partial request triggers close" {
     // After timeout, the receiving connection should be freed.
     var any_active = false;
     for (server.connections) |*conn| {
-        if (conn.state != .free and conn.state != .accepting) {
+        if (conn.state != .free) {
             any_active = true;
             break;
         }

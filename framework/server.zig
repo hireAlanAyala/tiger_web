@@ -350,7 +350,6 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
                 if (conn.state == .free) break conn;
             } else unreachable;
 
-            conn.set_accepting();
             conn.on_accept(server.io, accepted_fd, server.tick_count);
             server.connections_used += 1;
             log.debug("accepted connection fd={d}", .{accepted_fd});
@@ -889,7 +888,7 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
                     .receiving => connections_receiving += 1,
                     .ready => connections_ready += 1,
                     .sending => connections_sending += 1,
-                    .accepting, .closing, .free => {},
+                    .closing, .free => {},
                 }
             }
             server.tracer.gauge(.connections_active, connections_active);
@@ -954,7 +953,7 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
 
         fn timeout_idle(server: *Server) void {
             for (server.connections) |*conn| {
-                if (conn.state == .free or conn.state == .accepting or conn.state == .closing) continue;
+                if (conn.state == .free or conn.state == .closing) continue;
                 if (conn.check_timeout(server.tick_count, request_timeout_ticks)) {
                     log.mark.debug("connection timed out fd={d}", .{conn.fd});
                     // If this connection has a pending pipeline, cancel it
@@ -1004,25 +1003,17 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
         /// Connection-level invariants are checked by Connection.invariants().
         /// Handler-level invariants checked per-slot.
         fn invariants(server: *Server) void {
-            var accepting_count: u32 = 0;
             var active_count: u32 = 0;
 
             for (server.connections) |*conn| {
                 conn.invariants();
-
-                if (conn.state == .accepting) {
-                    accepting_count += 1;
-                } else if (conn.state != .free) {
+                if (conn.state != .free) {
                     active_count += 1;
                 }
             }
 
-            // connections_used counts active connections (not accepting).
+            // connections_used counts active connections.
             assert(server.connections_used == active_count);
-
-            // No connection should be in accepting state — accept is
-            // synchronous now (try_accept), no async pending state.
-            assert(accepting_count == 0);
 
             // Pipeline cross-invariants — slot.stage and its associated
             // fields must be consistent. Pair assertion with commit_dispatch
