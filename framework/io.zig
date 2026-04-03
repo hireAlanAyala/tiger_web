@@ -21,7 +21,6 @@ pub const IO = struct {
 
         const Op = enum {
             none,
-            accept,
             recv,
             send,
             readable, // Notify when fd is readable, don't consume data.
@@ -119,26 +118,20 @@ pub const IO = struct {
     }
 
     /// Synchronous non-blocking accept. Returns the accepted fd, or
-    /// null if no connection is pending (EAGAIN). The right primitive
-    /// for listen sockets — epoll can't multiplex multiple accepts on
-    /// one fd (ONESHOT race). Direct syscall, drain until null.
+    /// null if no connection is pending (EAGAIN).
+    ///
+    /// Direct syscall, not epoll. The right primitive for listen sockets:
+    /// - Epoll can't multiplex accepts on one fd (ONESHOT race)
+    /// - No perf difference — same syscall either way, once per tick
+    /// - Deterministic — always runs at the same point in the tick
+    /// - Simpler — no completion, no callback, no pending state
+    ///
+    /// Do not reintroduce async accept. There is no throughput benefit
+    /// (accept is not the bottleneck — recv/send on established
+    /// connections is) and it adds complexity with no gain.
     pub fn try_accept(_: *IO, listen_fd: fd_t) ?fd_t {
         const fd = posix.accept(listen_fd, null, null, posix.SOCK.NONBLOCK | posix.SOCK.CLOEXEC) catch return null;
         return fd;
-    }
-
-    /// Submit an async accept. The callback fires when a connection is ready.
-    /// NOTE: Only used by the HTTP server (one listen fd, one accept at a time).
-    /// The sidecar bus uses try_accept() instead.
-    pub fn accept(self: *IO, listen_fd: fd_t, completion: *Completion, context: *anyopaque, callback: *const fn (*anyopaque, i32) void) void {
-        assert(completion.operation == .none);
-        completion.* = .{
-            .fd = listen_fd,
-            .operation = .accept,
-            .context = context,
-            .callback = callback,
-        };
-        self.register(completion);
     }
 
     /// Submit an async recv. The callback fires when data is available.
@@ -211,7 +204,7 @@ pub const IO = struct {
 
     fn register(self: *IO, completion: *Completion) void {
         const events: u32 = switch (completion.operation) {
-            .accept, .recv, .readable => linux.EPOLL.IN,
+            .recv, .readable => linux.EPOLL.IN,
             .send => linux.EPOLL.OUT,
             .none => unreachable,
         };
@@ -233,15 +226,6 @@ pub const IO = struct {
         completion.operation = .none;
 
         switch (op) {
-            .accept => {
-                const result = posix.accept(completion.fd, null, null, posix.SOCK.NONBLOCK | posix.SOCK.CLOEXEC);
-                if (result) |fd| {
-                    set_tcp_options(fd);
-                    completion.callback(completion.context, fd);
-                } else |_| {
-                    completion.callback(completion.context, -1);
-                }
-            },
             .recv => {
                 const buf = completion.buffer.?;
                 const result = posix.recv(completion.fd, buf, 0);
