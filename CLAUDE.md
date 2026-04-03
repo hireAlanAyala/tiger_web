@@ -125,20 +125,23 @@ Native commit handles storage, auth, WAL. Sidecar provides HTML.
 
 ### Framework (`framework/`) — domain-free, parameterized on App
 
+No framework file imports from the app root except via comptime generics (e.g. `ServerType(App, IO, Storage)`) or `../trace.zig` (trace references domain types — same as TB's `trace/event.zig` importing from `tigerbeetle.zig`).
+
 | File | Role |
 |---|---|
 | `framework/server.zig` | `ServerType(App, IO, Storage)` — tick loop, connection pool, accepts, prefetch→execute orchestration |
 | `framework/connection.zig` | `ConnectionType(IO, FollowupState)` — per-connection state machine (accepting → receiving → ready → sending) |
 | `framework/http.zig` | HTTP/1.0+1.1 request parser (pure parser, no response encoding — see decisions/always-200.md) |
-| `framework/io.zig` | epoll IO layer (real syscalls) |
+| `framework/io.zig` | epoll IO layer (real syscalls), `try_accept` for synchronous non-blocking accept |
 | `framework/wal.zig` | `WalType(Message, root_fn)` — append-only replay log, writes Message entries after commit(), no fsync |
-| `framework/tracer.zig` | `TracerType(Operation, Counter)` — gauges, counters, span timings, trace logging |
+| `framework/message_bus.zig` | `MessageBusType(IO, options)` — sidecar Unix socket transport, connection pool, direct `accept()` per tick |
 | `framework/auth.zig` | Cookie signing/verification (HMAC-SHA256), session management |
 | `framework/marks.zig` | Coverage marks — links log sites to test assertions |
 | `framework/stdx.zig` | Ported from TB's stdx — `no_padding`, `equal_bytes`, `maybe`, `format_u32`, `parse_uuid` |
 | `framework/checksum.zig` | Aegis128L checksum — zero-key MAC, matches TB's vsr/checksum.zig |
 | `framework/prng.zig` | Xoshiro256++ PRNG with Ratio, Combination, Reservoir — matches TigerBeetle's stdx.PRNG |
 | `framework/time.zig` | Wall-clock time (real + simulated) |
+| `framework/constants.zig` | Cross-module constants — pipeline_slots_max, max_connections, frame limits, timeouts |
 | `framework/flags.zig` | CLI argument parser — struct-driven `--key=value` parsing, ported from TigerBeetle's stdx/flags.zig |
 | `framework/bench.zig` | Micro benchmarking harness — smoke/benchmark dual mode, matches TB's testing/bench.zig |
 
@@ -147,7 +150,9 @@ Native commit handles storage, auth, WAL. Sidecar provides HTML.
 | File | Role |
 |---|---|
 | `app.zig` | App binding — wires domain modules to the framework's comptime interface |
-| `main.zig` | Entry point, runtime log level filtering, CLI parsing |
+| `main.zig` | Entry point, GPA for init, runtime log level filtering, CLI parsing |
+| `trace.zig` | Trace engine — start/stop/cancel spans, gauge/count metrics, Chrome Tracing JSON output. Copied from TB's `src/trace.zig` with surgical edits |
+| `trace_event.zig` | Trace event definitions — 7 boundary events, EventTracing (concurrent stacks), EventTiming (aggregate), EventMetric (per-operation/per-status). Imports domain types (Operation, Status) directly, same as TB's `trace/event.zig` |
 | `message.zig` | Types: Product, ProductCollection, flat Operation enum with EventType, Message (extern struct, WAL-writable), MessageResponse |
 | `codec.zig` | Route parsing, JSON request → typed struct translation, UUID parsing |
 | `render.zig` | HTML + SSE response renderer — always 200, body-first with Content-Length backfill (keep-alive), SSE from offset 0 (Connection: close), Set-Cookie for new visitors |
