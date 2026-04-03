@@ -126,9 +126,15 @@ pub const IO = struct {
     /// - Deterministic — always runs at the same point in the tick
     /// - Simpler — no completion, no callback, no pending state
     ///
+    /// TB divergence: TB uses io_uring which batches accept + recv + send
+    /// into one kernel crossing. That matters at millions of IOPS. Our
+    /// bottleneck is SQLite (milliseconds per write), not syscall overhead
+    /// (microseconds per crossing). The batching gain is irrelevant until
+    /// storage stops being the bottleneck — which it always will be with
+    /// SQLite. Direct accept is the right primitive at our scale.
+    ///
     /// Do not reintroduce async accept. There is no throughput benefit
-    /// (accept is not the bottleneck — recv/send on established
-    /// connections is) and it adds complexity with no gain.
+    /// and it adds complexity with no gain.
     pub fn try_accept(_: *IO, listen_fd: fd_t) ?fd_t {
         const fd = posix.accept(listen_fd, null, null, posix.SOCK.NONBLOCK | posix.SOCK.CLOEXEC) catch return null;
         return fd;
