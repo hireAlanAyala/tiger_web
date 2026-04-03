@@ -25,6 +25,14 @@
    SM pure services (no handlers, no per-request state). Per-slot tracer.
    All connections active (no standby concept). Tested + benchmarked.
 
+12. **Tracer port (TB pattern)** — DONE
+   Copied TB's trace.zig + surgical edits. Time vtable (TimeSim/TimeReal),
+   7 boundary events, EventTracing (concurrent stacks), EventTiming
+   (aggregate by work type), EventMetric (gauge/count). Chrome Tracing
+   JSON output. Server owns tracer (not SM). cancel_slot for concurrent
+   pipeline. constants.zig as single source of truth. Old tracer deleted.
+   4 boundary events defined but not yet instrumented (matches TB pattern).
+
 7. **Sidecar transport optimization** — `docs/plans/sidecar-shm-transport.md`
    Committed: Phase 3 (typed schemas), Phase 1 (RT reduction),
    Phase 1b (server-side prefetch — thin sidecar).
@@ -73,6 +81,38 @@ Fix: walk byte-by-byte, skip `\"` when looking for closing quote.
 
 Sent `"price_cents":999` but response shows `price_cents:9`.
 Possible Datastar serializer nesting or Content-Length truncation.
+
+## Observability translator — document the split, not build the tool
+
+The framework already emits all the data a user needs. Three primitives,
+three time horizons, three output formats:
+
+| Primitive | Source | Horizon | Format | Answers |
+|-----------|--------|---------|--------|---------|
+| Metric logs | `tracer.emit_metrics()` → stderr | Live / last N min | Structured text, periodic (~100s) | Rate, errors, health |
+| Trace JSON | `--trace=trace.json` | Debugging session | Chrome Tracing JSON (Perfetto) | Per-request stage breakdown |
+| WAL | `wal.append_writes()` → `.wal` file | All time | Binary, replay via `replay.zig` | Audit, recovery, replay |
+
+**What each metric covers:**
+- `requests_by_operation` (count): which operations are hot
+- `requests_by_status` (count): what's failing and why
+- `pipeline_stage` timing (min/max/avg/count): per-stage latency (route/prefetch/handle/render)
+- `connections_*` gauges: server health
+
+**The gap:** timing is per-stage, not per-operation. "Prefetch averages
+200us" but not "create_product prefetch vs list_products prefetch."
+Per-operation × per-stage timing would need 5 × N slots (multiplicative).
+Instead: periodic metrics answer "what's slow" (which stage), trace.json
+answers "where exactly" (which operation × which stage). Two tools,
+two granularities.
+
+**What the user does:** pipe stderr metric lines to their monitoring
+(Prometheus, DataDog, Grafana). Each emit window = one data point.
+count ÷ window = rate. Compare windows = trends. When something looks
+off, enable `--trace`, open Perfetto, find the specific operation.
+
+**Framework's job:** emit correct, structured, bounded data. Not build
+a dashboard. Document the output format so translators are trivial.
 
 ---
 
