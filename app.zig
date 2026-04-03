@@ -208,11 +208,10 @@ pub fn HandlersType(comptime StorageParam: type) type {
 // Tests use SM (native-only alias) — they don't need sidecar.
 // =====================================================================
 
-/// Construct SM — framework services (auth, transactions, tracer).
-/// SM doesn't see handlers — those are per-slot on the server.
-/// slots_max: number of concurrent pipeline slots (for per-slot tracer spans).
-pub fn StateMachineWith(comptime StorageParam: type, comptime slots_max: u8) type {
-    return state_machine.StateMachineType(StorageParam, slots_max);
+/// Construct SM — framework services (auth, transactions).
+/// SM doesn't see handlers or tracer — those are on the server.
+pub fn StateMachineWith(comptime StorageParam: type) type {
+    return state_machine.StateMachineType(StorageParam);
 }
 
 /// Build option: true = sidecar handlers, false = native handlers.
@@ -285,8 +284,7 @@ pub const Storage = @import("storage.zig").SqliteStorage;
 
 /// Pre-computed SM type for native-only consumers (tests, fuzz,
 /// benchmarks). SM is handler-agnostic — pure framework services.
-/// slots_max=1 — native handlers are synchronous, single slot.
-pub const SM = state_machine.StateMachineType(Storage, 1);
+pub const SM = state_machine.StateMachineType(Storage);
 
 pub const Wal = @import("framework/wal.zig").WalType(Operation);
 

@@ -148,7 +148,6 @@ pub fn SidecarHandlersType(comptime StorageParam: type, comptime Bus: type) type
                 },
                 .receiving => return null,
                 .complete => {
-                    c.log_call_timing("route");
                     defer c.reset_call_state();
                     if (c.result_flag != .success) return null;
                     return parse_route_result(c.result_data);
@@ -188,7 +187,6 @@ pub fn SidecarHandlersType(comptime StorageParam: type, comptime Bus: type) type
                 .receiving => return null,
                 .complete => {
                     if (self.request.prefetch_phase == .prefetch_pending) {
-                        c.log_call_timing("prefetch");
                         c.reset_call_state();
                         if (!self.submit_operation_call("handle", msg)) {
                             self.request.prefetch_phase = .idle;
@@ -198,7 +196,6 @@ pub fn SidecarHandlersType(comptime StorageParam: type, comptime Bus: type) type
                         return null;
                     }
                     if (self.request.prefetch_phase == .handle_pending) {
-                        c.log_call_timing("handle");
                         self.parse_handle_result();
                         c.reset_call_state();
                         self.request.prefetch_phase = .idle;
@@ -266,7 +263,6 @@ pub fn SidecarHandlersType(comptime StorageParam: type, comptime Bus: type) type
                 },
                 .receiving => return null,
                 .complete => {
-                    c.log_call_timing("render");
                     defer c.reset_call_state();
                     if (c.result_flag != .success) {
                         return render_error(render_buf);

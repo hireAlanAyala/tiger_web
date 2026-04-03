@@ -3,7 +3,7 @@ const assert = std.debug.assert;
 const stdx = @import("stdx");
 const message = @import("message.zig");
 const auth = @import("framework/auth.zig");
-const TracerType = @import("framework/tracer.zig").TracerType;
+// Tracer removed from SM — owned by server. See framework/trace.zig.
 const marks = @import("framework/marks.zig");
 const log = marks.wrap_log(std.log.scoped(.state_machine));
 const PRNG = @import("stdx").PRNG;
@@ -158,17 +158,14 @@ pub fn input_valid(msg: message.Message) bool {
 ///     swapping bug (one handler instance shared across slots).
 ///   - Adding per-request fields here would break concurrent dispatch
 ///     (prefetch on slot 0 clobbers slot 1's cache).
-pub fn StateMachineType(comptime Storage: type, comptime pipeline_slots_max: u8) type {
+pub fn StateMachineType(comptime Storage: type) type {
     // Storage must define its own read/write split.
     @import("framework/read_only_storage.zig").assertReadView(Storage);
-
-    const Tracer = TracerType(message.Operation, message.Status, pipeline_slots_max);
 
     return struct {
         const StateMachine = @This();
 
         storage: *Storage,
-        tracer: Tracer,
         prng: PRNG,
         secret_key: *const [auth.key_length]u8,
 
@@ -176,10 +173,9 @@ pub fn StateMachineType(comptime Storage: type, comptime pipeline_slots_max: u8)
         /// each process_inbox call. Used for order timeout_at.
         now: i64,
 
-        pub fn init(storage: *Storage, log_trace: bool, prng_seed: u64, secret_key: *const [auth.key_length]u8) StateMachine {
+        pub fn init(storage: *Storage, prng_seed: u64, secret_key: *const [auth.key_length]u8) StateMachine {
             return .{
                 .storage = storage,
-                .tracer = Tracer.init(log_trace),
                 .prng = PRNG.from_seed(prng_seed),
                 .secret_key = secret_key,
                 .now = 0,

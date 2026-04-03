@@ -94,7 +94,7 @@ pub fn main(_: std.mem.Allocator, args: FuzzArgs) !void {
         events_max,
     });
 
-    var sm = StateMachine.init(&storage, false, seed, fuzz_test_key);
+    var sm = StateMachine.init(&storage, seed, fuzz_test_key);
     sm.now = 1_700_000_000;
 
     // ID tracker: lightweight pool for generating messages that reference

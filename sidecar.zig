@@ -43,9 +43,6 @@ pub fn SidecarClientType(comptime Bus: type) type {
         // CALL/RESULT state machine.
         call_state: CallState = .idle,
         call_query_count: u32 = 0,
-        /// Per-CALL timing — measures round-trip and QUERY sub-trips.
-        /// Enabled by --log-trace. Zero overhead when disabled (no Instant.now calls).
-        call_timing: CallTiming = .{},
         /// The request_id sent in the most recent CALL. Validated
         /// against the request_id in every RESULT and QUERY frame.
         /// Detects stale or mismatched responses.
@@ -87,28 +84,9 @@ pub fn SidecarClientType(comptime Bus: type) type {
             failed, // Protocol error or disconnect
         };
 
-        const Instant = std.time.Instant;
-
-        /// Per-CALL timing — captures submit→complete duration and
-        /// per-QUERY sub-trip durations. Reset on each call_submit.
-        pub const CallTiming = struct {
-            call_submit_time: ?Instant = null,
-            call_complete_time: ?Instant = null,
-            query_total_ns: u64 = 0,
-            query_count: u32 = 0,
-            /// Tracks when the most recent QUERY_RESULT send started.
-            query_start_time: ?Instant = null,
-
-            pub fn call_ns(self: *const CallTiming) u64 {
-                const start = self.call_submit_time orelse return 0;
-                const end = self.call_complete_time orelse return 0;
-                return end.since(start);
-            }
-
-            fn reset(self: *CallTiming) void {
-                self.* = .{};
-            }
-        };
+        // CallTiming removed — replaced by trace.zig boundary events.
+        // sidecar_call span + nested storage_op spans provide the
+        // same data via Chrome Tracing timeline.
 
         /// Query dispatch function type.
         pub const QueryFn = *const fn (
@@ -156,8 +134,6 @@ pub fn SidecarClientType(comptime Bus: type) type {
             self.call_state = .receiving;
             self.call_query_count = 0;
             self.expected_request_id = request_id;
-            self.call_timing.reset();
-            self.call_timing.call_submit_time = Instant.now() catch null;
             return true;
         }
 
@@ -213,7 +189,6 @@ pub fn SidecarClientType(comptime Bus: type) type {
                     // copy into owned state_buf before the slice is invalidated.
                     self.result_data = self.copy_state(result.data);
                     self.call_state = .complete;
-                    self.call_timing.call_complete_time = Instant.now() catch null;
                 },
                 .query => {
                     if (query_fn == null) {
@@ -230,7 +205,6 @@ pub fn SidecarClientType(comptime Bus: type) type {
                         return;
                     }
                     self.call_query_count += 1;
-                    self.call_timing.query_start_time = Instant.now() catch null;
 
                     const query = protocol.parse_query_payload(parsed.payload) orelse {
                         log.warn("call: invalid QUERY payload", .{});
@@ -269,14 +243,6 @@ pub fn SidecarClientType(comptime Bus: type) type {
                     const qr_total: u32 = @intCast(7 + row_set.len);
                     bus.send_message_to(connection_index, msg, qr_total);
 
-                    // Record QUERY duration.
-                    if (self.call_timing.query_start_time) |qs| {
-                        const elapsed = (Instant.now() catch qs).since(qs);
-                        self.call_timing.query_total_ns += elapsed;
-                        self.call_timing.query_count += 1;
-                        self.call_timing.query_start_time = null;
-                    }
-
                     // Stay in .receiving — more frames expected.
                 },
                 else => unreachable,
@@ -290,22 +256,6 @@ pub fn SidecarClientType(comptime Bus: type) type {
                 self.call_state = .failed;
             }
             self.reset_request_state();
-        }
-
-        /// Log per-CALL timing breakdown. Called by handlers after
-        /// each CALL completes. Guarded by log_trace at the call site.
-        pub fn log_call_timing(self: *const Self, function_name: []const u8) void {
-            const t = &self.call_timing;
-            const call_ns = t.call_ns();
-            const query_ns = t.query_total_ns;
-            const sidecar_ns = if (call_ns > query_ns) call_ns - query_ns else 0;
-            log.debug("sidecar timing: {s} total={d}us sidecar={d}us queries={d}us (count={d})", .{
-                function_name,
-                call_ns / std.time.ns_per_us,
-                sidecar_ns / std.time.ns_per_us,
-                query_ns / std.time.ns_per_us,
-                t.query_count,
-            });
         }
 
         pub fn reset_call_state(self: *Self) void {
