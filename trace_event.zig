@@ -208,7 +208,7 @@ pub const EventTracing = union(enum) {
         switch (event.*) {
             inline else => |data| {
                 if (@TypeOf(data) == void) return;
-                try writer.print("{}", .{data});
+                try format_data(data, writer);
             },
         }
     }
@@ -294,7 +294,7 @@ pub const EventTiming = union(enum) {
         switch (event.*) {
             inline else => |data| {
                 if (@TypeOf(data) == void) return;
-                try writer.print("{}", .{data});
+                try format_data(data, writer);
             },
         }
     }

@@ -64,7 +64,17 @@ pub fn main() !void {
     defer wal.deinit();
 
     var time_real = TimeReal{};
+    const trace_file: ?std.fs.File = if (cli.trace) |path|
+        std.fs.cwd().createFile(path, .{}) catch |err| {
+            log.err("failed to open trace file '{s}': {}", .{ path, err });
+            std.process.exit(1);
+        }
+    else
+        null;
+    defer if (trace_file) |f| f.close();
+
     var tracer = try Trace.Tracer.init(std.heap.page_allocator, time_real.time(), .{
+        .writer = if (trace_file) |f| f.writer().any() else null,
         .log_trace = cli.log_trace,
     });
     var server = try Server.init(std.heap.page_allocator, &io, &sm, &tracer, listen_fd, time_real.time(), &wal);
@@ -190,6 +200,7 @@ const CliArgs = struct {
     port: u16 = 3000,
     log_debug: bool = false,
     log_trace: bool = false,
+    trace: ?[]const u8 = null,
     sidecar: ?[]const u8 = null,
     db: [:0]const u8 = "tiger_web.db",
     /// Extended args after `--` are the sidecar command argv.
