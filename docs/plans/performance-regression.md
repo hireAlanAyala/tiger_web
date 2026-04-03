@@ -206,7 +206,10 @@ const Event = union(enum) {
 };
 ```
 
-**Step 2: Port TB's tracer engine.**
+**Step 2: Port TB's tracer engine (including EventMetric).**
+- Define EventMetric union for gauges/counters (connections_active,
+  requests_ok, etc.) — TB pattern, added alongside EventTiming.
+  Deferred from Step 1 to avoid primitive-without-consumer.
 - Chrome Tracing JSON output (`--trace=file.json`)
 - aggregate_only support
 - Timing aggregation (min/max/sum/count) using Duration type

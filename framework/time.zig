@@ -139,6 +139,34 @@ pub const TimeSim = struct {
     }
 };
 
+/// Equivalent to `std.time.Timer`,
+/// but using the `Time` interface as the source of time.
+pub const Timer = struct {
+    time: Time,
+    started: Instant,
+
+    pub fn init(time: Time) Timer {
+        return .{
+            .time = time,
+            .started = time.monotonic(),
+        };
+    }
+
+    /// Reads the timer value since start or the last reset.
+    pub fn read(self: *Timer) stdx.Duration {
+        const current = self.time.monotonic();
+        assert(current.ns >= self.started.ns);
+        return current.duration_since(self.started);
+    }
+
+    /// Resets the timer.
+    pub fn reset(self: *Timer) void {
+        const current = self.time.monotonic();
+        assert(current.ns >= self.started.ns);
+        self.started = current;
+    }
+};
+
 // =====================================================================
 // Tests
 // =====================================================================
@@ -196,4 +224,26 @@ test "TimeSim custom resolution" {
     try std.testing.expectEqual(@as(u64, 1), t.monotonic().ns);
     t.tick();
     try std.testing.expectEqual(@as(u64, 2), t.monotonic().ns);
+}
+
+test "Timer read/reset cycle" {
+    var sim = TimeSim{ .resolution = 1 };
+    const t = sim.time();
+
+    var timer = Timer.init(t);
+    for (0..3) |_| {
+        const t0 = timer.read();
+        try std.testing.expectEqual(@as(u64, 0), t0.ns);
+        t.tick();
+
+        const t1 = timer.read();
+        try std.testing.expectEqual(@as(u64, 1), t1.ns);
+        t.tick();
+
+        const t2 = timer.read();
+        try std.testing.expectEqual(@as(u64, 2), t2.ns);
+        t.tick();
+
+        timer.reset();
+    }
 }

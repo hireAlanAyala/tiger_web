@@ -6,6 +6,25 @@ const constants = @import("constants.zig");
 /// domain types. The server converts Operation enum to u8 at the
 /// trace call site. Display converts back via @tagName at output.
 
+/// Maps an exhaustive enum value from an enum type that might potentially start with a non-zero
+/// value or be sparse to a continuous index that fits within enum_count().
+fn index_from_enum(enum_tag: anytype) u8 {
+    const type_info = @typeInfo(@TypeOf(enum_tag));
+    assert(type_info == .@"enum" or type_info == .@"union");
+
+    const Enum = if (type_info == .@"enum")
+        type_info.@"enum"
+    else
+        @typeInfo(type_info.@"union".tag_type.?).@"enum";
+    assert(Enum.is_exhaustive);
+
+    inline for (Enum.fields, 0..) |enum_field, i| {
+        if (enum_field.value == @intFromEnum(enum_tag)) {
+            return i;
+        }
+    } else unreachable;
+}
+
 /// Returns the count of an exhaustive enum.
 fn enum_count(EnumOrUnion: type) u8 {
     const type_info = @typeInfo(EnumOrUnion);
@@ -241,10 +260,10 @@ pub const EventTiming = union(enum) {
     pub fn slot(event: *const EventTiming) u32 {
         switch (event.*) {
             .pipeline_stage => |data| {
-                return slot_bases.get(.pipeline_stage) + @as(u32, @intFromEnum(data.stage));
+                return slot_bases.get(.pipeline_stage) + @as(u32, index_from_enum(data.stage));
             },
             .sidecar_call => |data| {
-                return slot_bases.get(.sidecar_call) + @as(u32, @intFromEnum(data.function));
+                return slot_bases.get(.sidecar_call) + @as(u32, index_from_enum(data.function));
             },
             inline else => |data, tag| {
                 const event_tag: Event.Tag = @enumFromInt(@intFromEnum(tag));
