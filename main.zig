@@ -127,18 +127,25 @@ fn cmd_start(cli: StartArgs, args: *std.process.ArgIterator) void {
         log.err("sidecar init failed: {}", .{err});
         std.process.exit(1);
     };
-    var supervisor = init_supervisor(sidecar_argv, allocator) catch |err| {
+    const supervisor = init_supervisor(sidecar_argv, allocator) catch |err| {
         log.err("supervisor init failed: {}", .{err});
         std.process.exit(1);
     };
 
-    var admin = AdminSocket.init(actual_port);
-    defer admin.deinit();
+    var state = RunState{
+        .server = &server,
+        .io = &io,
+        .supervisor = supervisor,
+        .tracer = &tracer,
+        .admin = AdminSocket.init(actual_port),
+        .startup_trace_writer = if (trace_writer) |*tw| tw else null,
+    };
+    defer state.admin.deinit();
 
     log_startup(cli, actual_port);
     emit_readiness_signal(cli.port, actual_port);
 
-    run_loop(&server, &io, &supervisor, &trace_writer, &tracer, &admin);
+    run_loop(&state);
 }
 
 fn cmd_trace(cli: TraceArgs) void {
@@ -491,99 +498,105 @@ const AdminSocket = struct {
 
 // --- Main event loop ---
 
-/// Runtime trace state — for admin socket trace toggle.
-/// Separate from startup trace (--trace flag). Both use the
-/// same TraceWriter and Tracer, but runtime trace creates its
-/// own file and writer on start_trace, closes on stop_trace.
-var runtime_trace_file: ?std.fs.File = null;
-var runtime_trace_writer: ?TraceWriter = null;
-
-fn run_loop(
+/// All mutable state for the event loop. No module-level vars.
+/// TB pattern: state on a struct, passed by pointer.
+const RunState = struct {
     server: *Server,
     io: *IO,
-    supervisor: *?Supervisor,
-    trace_writer: *?TraceWriter,
+    supervisor: ?Supervisor,
     tracer: *Trace.Tracer,
-    admin: *AdminSocket,
-) void {
-    var was_sidecar_connected: bool = false;
-    var trace_limit_logged: bool = false;
-    while (true) {
-        server.tick();
+    admin: AdminSocket,
 
-        // Stop tracing when size limit reached. Log once, then
-        // null the writer so the tracer stops emitting JSON.
-        // Applies to both startup trace and runtime trace.
-        const active_writer = if (runtime_trace_writer != null) &runtime_trace_writer else trace_writer;
-        if (active_writer.*) |*tw| {
-            if (tw.limit_reached() and !trace_limit_logged) {
+    // Startup trace (--trace flag). Owned by cmd_start's stack.
+    startup_trace_writer: ?*TraceWriter,
+
+    // Runtime trace (admin socket toggle). Owned by RunState.
+    runtime_trace_file: ?std.fs.File = null,
+    runtime_trace_writer: ?TraceWriter = null,
+
+    was_sidecar_connected: bool = false,
+    trace_limit_logged: bool = false,
+
+    fn active_writer(self: *RunState) ?*TraceWriter {
+        if (self.runtime_trace_writer != null) return &self.runtime_trace_writer.?;
+        if (self.startup_trace_writer) |tw| return tw;
+        return null;
+    }
+
+    fn close_runtime_trace(self: *RunState) void {
+        self.runtime_trace_writer = null;
+        if (self.runtime_trace_file) |*f| {
+            f.close();
+            self.runtime_trace_file = null;
+        }
+    }
+};
+
+fn run_loop(state: *RunState) void {
+    while (true) {
+        state.server.tick();
+
+        // Stop tracing when size limit reached.
+        if (state.active_writer()) |tw| {
+            if (tw.limit_reached() and !state.trace_limit_logged) {
                 log.info("trace file limit reached ({d} bytes), tracing stopped", .{tw.bytes_written});
-                tracer.options.writer = null;
-                trace_limit_logged = true;
-                admin.respond("stopped: limit reached\n");
-                // Close runtime trace file.
-                if (runtime_trace_file) |*f| {
-                    f.close();
-                    runtime_trace_file = null;
-                    runtime_trace_writer = null;
-                }
+                state.tracer.options.writer = null;
+                state.trace_limit_logged = true;
+                state.admin.respond("stopped: limit reached\n");
+                state.close_runtime_trace();
             }
         }
 
         // Admin socket — trace toggle.
-        if (admin.poll()) |cmd| switch (cmd) {
+        if (state.admin.poll()) |cmd| switch (cmd) {
             .start_trace => |max_bytes| {
-                if (tracer.options.writer != null) {
-                    admin.respond("error: tracing already active\n");
+                if (state.tracer.options.writer != null) {
+                    state.admin.respond("error: tracing already active\n");
                 } else {
                     const path = generate_trace_path();
-                    runtime_trace_file = std.fs.cwd().createFile(&path, .{}) catch |err| {
+                    state.runtime_trace_file = std.fs.cwd().createFile(&path, .{}) catch |err| {
                         var resp_buf: [64]u8 = undefined;
                         const resp = std.fmt.bufPrint(&resp_buf, "error: {}\n", .{err}) catch "error\n";
-                        admin.respond(resp);
+                        state.admin.respond(resp);
                         break;
                     };
-                    runtime_trace_writer = TraceWriter.init(runtime_trace_file.?, max_bytes);
-                    const writer = runtime_trace_writer.?.any();
+                    state.runtime_trace_writer = TraceWriter.init(state.runtime_trace_file.?, max_bytes);
+                    const writer = state.runtime_trace_writer.?.any();
                     writer.writeAll("[\n") catch {};
-                    tracer.options.writer = writer;
-                    trace_limit_logged = false;
+                    state.tracer.options.writer = writer;
+                    state.trace_limit_logged = false;
                     log.info("runtime tracing started: {s}", .{@as([]const u8, &path)});
                     var resp_buf: [80]u8 = undefined;
                     const resp = std.fmt.bufPrint(&resp_buf, "started: {s}\n", .{@as([]const u8, &path)}) catch "started\n";
-                    admin.respond(resp);
+                    state.admin.respond(resp);
                 }
             },
             .stop_trace => {
-                if (runtime_trace_writer) |*tw| {
+                if (state.runtime_trace_writer) |*tw| {
                     log.info("runtime tracing stopped ({d} bytes)", .{tw.bytes_written});
-                    tracer.options.writer = null;
+                    state.tracer.options.writer = null;
                     var resp_buf: [80]u8 = undefined;
                     const resp = std.fmt.bufPrint(&resp_buf, "stopped: {d} bytes\n", .{tw.bytes_written}) catch "stopped\n";
-                    admin.respond(resp);
-                    runtime_trace_writer = null;
-                    if (runtime_trace_file) |*f| {
-                        f.close();
-                        runtime_trace_file = null;
-                    }
+                    state.admin.respond(resp);
+                    state.close_runtime_trace();
                 } else {
-                    admin.respond("error: tracing not active\n");
+                    state.admin.respond("error: tracing not active\n");
                 }
             },
-            .unknown => admin.respond("error: unknown command\n"),
+            .unknown => state.admin.respond("error: unknown command\n"),
         };
 
         // Composition root wiring: server ↔ supervisor.
-        if (supervisor.*) |*sup| {
-            const connected = server.sidecar_any_ready();
-            if (!was_sidecar_connected and connected) {
+        if (state.supervisor) |*sup| {
+            const connected = state.server.sidecar_any_ready();
+            if (!state.was_sidecar_connected and connected) {
                 sup.notify_connected();
             }
-            was_sidecar_connected = connected;
-            sup.tick(server.tick_count);
+            state.was_sidecar_connected = connected;
+            sup.tick(state.server.tick_count);
         }
 
-        io.run_for_ns(tick_ns);
+        state.io.run_for_ns(tick_ns);
     }
 }
 
