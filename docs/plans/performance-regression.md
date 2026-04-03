@@ -191,25 +191,34 @@ const Event = union(enum) {
 **Step 2: Port TB's tracer engine.**
 - Chrome Tracing JSON output (`--trace=file.json`)
 - aggregate_only support
-- Timing aggregation (min/max/sum/count)
+- Timing aggregation (min/max/sum/count) using Duration type
 - Gauges and counters
 - StatsD emission (log mode first, UDP later)
-- `cancel_slot(slot_idx)` — cancel all open spans for a slot
-  (TB uses per-event cancel; we need per-slot because concurrent
-  slots mean per-event cancel would kill other slots' spans)
+- Port TB's Duration type (`ns: u64` with `.ms()`, `.to_us()`,
+  `.min()`, `.max()`, `.clamp()`). Cleaner than raw u64.
+- `cancel_slot(slot_idx)` — iterates all event types, cancels
+  only the target slot's stack position for each. Uses TB's
+  stack_bases/stack_limits system internally. 6 iterations.
+  Justified departure from TB (they cancel by event type, but
+  their operations don't have independent concurrent slots).
+- Cancel does NOT call `timing()` — cancelled spans don't
+  pollute timing aggregates. Only writes JSON stop event
+  (valid trace file, no dangling opens).
 - Time source: injected `Time` vtable, not `std.time.Instant`
   (simulation determinism)
 - Use TB reference files (`framework/trace/*_tb.zig`)
 
 **Step 3: Wire tracer ownership.**
 - Create tracer in `main.zig`, pass to server
-- Server stores `*Tracer`
+- Server stores `*Tracer` (like TB's Replica stores `*Tracer`)
 - SidecarClient stores `*Tracer` (like TB's Grid stores `*Tracer`)
   — for per-QUERY storage_op spans inside on_frame.
   Set during `wire_sidecar`, same pattern as sidecar_client and
   sidecar_bus pointers. No signature changes to on_frame.
-- SM loses tracer field entirely (tracer is not a framework service,
-  it's infrastructure owned by the server)
+- SM loses tracer field entirely (tracer is infrastructure, not
+  a framework service). `sm.tracer.count_status()` becomes
+  `server.tracer.count(...)` — called from server.zig .handle
+  stage where it already lives.
 
 **Step 4: Wire events at boundary sites.**
 - `trace.start(.tick)` / `defer trace.stop(.tick)` in tick()
@@ -222,6 +231,10 @@ const Event = union(enum) {
 - `trace.start(.{.handle_lock_wait = ...})` when slot enters .handle_wait
 - `trace.stop(.{.handle_lock_wait = ...})` in wake_handle_waiters when slot resumes
 - `trace.start(.{.wal_append = ...})` around wal.append_writes
+- `trace.emit_metrics()` in log_metrics (every metrics_interval_ticks
+  = 10,000 ticks ≈ 100s). Not per-tick — TB uses pulse timeout,
+  we use the existing metrics cadence. Gauges set before emit,
+  reset inside emit.
 
 **Step 5: Wire cancellation on recovery.**
 Three paths cancel open spans for a slot:
@@ -246,7 +259,10 @@ cancel, render → cancel). One call, explicit, can't miss an event.
 - See sidecar_call spans with nested storage_op spans (V8 = gap)
 - See handle_lock_wait spans between slots
 - Cancel paths produce valid JSON (no unclosed spans)
+- Cancelled spans do NOT appear in timing aggregates
 - SimIO tests: trace output is deterministic (same seed = same trace)
+- Snapshot test: write trace to buffer, compare against expected JSON
+  (TB pattern — `snap()` + simulated time = deterministic output)
 - All tests pass (unit, sim, sim-sidecar, fuzz smoke)
 
 ### Phase 2: Missing benchmarks
