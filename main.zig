@@ -45,17 +45,29 @@ pub const std_options: std.Options = .{
 var gpa: std.heap.GeneralPurposeAllocator(.{}) = .{};
 
 pub fn main() !void {
-    const allocator = gpa.allocator();
-
     var args = std.process.args();
-    const cli = stdx.flags(&args, CliArgs);
-    const sidecar_argv = collect_sidecar_argv(&args);
+    const cmd = stdx.flags(&args, Command);
+    switch (cmd) {
+        .start => |cli| cmd_start(cli, &args),
+        .trace => |cli| cmd_trace(cli),
+    }
+}
+
+fn cmd_start(cli: StartArgs, args: *std.process.ArgIterator) void {
+    const allocator = gpa.allocator();
+    const sidecar_argv = collect_sidecar_argv(args);
     const secret_key = validate_config(cli);
 
-    var io = try IO.init();
+    var io = IO.init() catch |err| {
+        log.err("IO init failed: {}", .{err});
+        std.process.exit(1);
+    };
     defer io.deinit();
 
-    var storage = try App.Storage.init(cli.db);
+    var storage = App.Storage.init(cli.db) catch |err| {
+        log.err("storage init failed: {}", .{err});
+        std.process.exit(1);
+    };
     defer storage.deinit();
 
     var sm = StateMachine.init(
@@ -64,7 +76,10 @@ pub fn main() !void {
         secret_key,
     );
 
-    const listen_fd = try io.open_listener(try std.net.Address.parseIp4("0.0.0.0", cli.port));
+    const listen_fd = io.open_listener(std.net.Address.parseIp4("0.0.0.0", cli.port) catch unreachable) catch |err| {
+        log.err("listen failed: {}", .{err});
+        std.process.exit(1);
+    };
     const actual_port = resolve_port(listen_fd, cli.port);
 
     var wal = App.Wal.init("tiger_web.wal");
@@ -88,10 +103,13 @@ pub fn main() !void {
     else
         null;
 
-    var tracer = try Trace.Tracer.init(allocator, time_real.time(), .{
+    var tracer = Trace.Tracer.init(allocator, time_real.time(), .{
         .writer = if (trace_writer) |*tw| tw.any() else null,
         .log_trace = cli.log_trace,
-    });
+    }) catch |err| {
+        log.err("tracer init failed: {}", .{err});
+        std.process.exit(1);
+    };
 
     if (cli.trace) {
         log.info("tracing to {s} (max {s})", .{
@@ -99,10 +117,20 @@ pub fn main() !void {
             cli.@"trace-max".?,
         });
     }
-    var server = try Server.init(allocator, &io, &sm, &tracer, listen_fd, time_real.time(), &wal);
 
-    try wire_sidecar(&server, cli, allocator);
-    var supervisor = try init_supervisor(sidecar_argv, allocator);
+    var server = Server.init(allocator, &io, &sm, &tracer, listen_fd, time_real.time(), &wal) catch |err| {
+        log.err("server init failed: {}", .{err});
+        std.process.exit(1);
+    };
+
+    wire_sidecar(&server, cli, allocator) catch |err| {
+        log.err("sidecar init failed: {}", .{err});
+        std.process.exit(1);
+    };
+    var supervisor = init_supervisor(sidecar_argv, allocator) catch |err| {
+        log.err("supervisor init failed: {}", .{err});
+        std.process.exit(1);
+    };
 
     log_startup(cli, actual_port);
     emit_readiness_signal(cli.port, actual_port);
@@ -110,25 +138,60 @@ pub fn main() !void {
     run_loop(&server, &io, &supervisor, &trace_writer, &tracer);
 }
 
-// --- Init helpers (each under 70 lines) ---
-
-/// Parse --trace-max value (e.g. "50mb", "100kb", "1gb") to bytes.
-/// Required when --trace is set. Exits on missing or invalid value.
-fn parse_trace_max(cli: CliArgs) u64 {
-    if (!cli.trace) return 0;
-    const raw = cli.@"trace-max" orelse {
-        log.err("--trace-max is required when using --trace (e.g. --trace-max=50mb)", .{});
+fn cmd_trace(cli: TraceArgs) void {
+    // Parse ":port" target.
+    if (cli.target.len < 2 or cli.target[0] != ':') {
+        log.err("invalid target '{s}' — expected :port (e.g. :3000)", .{cli.target});
+        std.process.exit(1);
+    }
+    const port = std.fmt.parseInt(u16, cli.target[1..], 10) catch {
+        log.err("invalid port in '{s}'", .{cli.target});
         std.process.exit(1);
     };
 
+    // Connect to admin socket.
+    var path_buf: [64]u8 = undefined;
+    const admin_path = std.fmt.bufPrint(&path_buf, "/tmp/tiger_web_admin_{d}.sock", .{port}) catch unreachable;
+
+    const stdout = std.io.getStdOut().writer();
+    stdout.print("connecting to server at :{d}...\n", .{port}) catch {};
+
+    // Connect to the admin socket.
+    const fd = std.posix.socket(std.posix.AF.UNIX, std.posix.SOCK.STREAM, 0) catch |err| {
+        stdout.print("failed to create socket: {}\n", .{err}) catch {};
+        std.process.exit(1);
+    };
+    var addr: std.posix.sockaddr.un = .{ .family = std.posix.AF.UNIX, .path = undefined };
+    @memset(&addr.path, 0);
+    @memcpy(addr.path[0..admin_path.len], admin_path);
+    std.posix.connect(fd, @ptrCast(&addr), @sizeOf(std.posix.sockaddr.un)) catch {
+        stdout.print("could not connect to {s}\n", .{admin_path}) catch {};
+        stdout.print("is the server running on port {d}?\n", .{port}) catch {};
+        std.process.exit(1);
+    };
+
+    // Parse max size for the trace.
+    const max_bytes = parse_size(cli.max);
+    _ = max_bytes;
+
+    // TODO: Send start command, wait for Ctrl-C, send stop command.
+    // Requires admin socket listener on the server side (Step 4).
+    stdout.print("admin socket connected — trace toggle not yet implemented\n", .{}) catch {};
+    stdout.print("use --trace --trace-max on server start for now\n", .{}) catch {};
+}
+
+// --- Init helpers (each under 70 lines) ---
+
+/// Parse a size string (e.g. "50mb", "100kb", "1gb") to bytes.
+fn parse_size(raw: []const u8) u64 {
     var i: usize = 0;
     while (i < raw.len and raw[i] >= '0' and raw[i] <= '9') : (i += 1) {}
     if (i == 0) {
-        log.err("--trace-max: invalid value '{s}' (e.g. 50mb, 100kb, 1gb)", .{raw});
+        log.err("invalid size '{s}' (e.g. 50mb, 100kb, 1gb)", .{raw});
         std.process.exit(1);
     }
     const number = std.fmt.parseInt(u64, raw[0..i], 10) catch {
-        log.err("--trace-max: invalid number '{s}'", .{raw[0..i]});
+        log.err("invalid number in size '{s}'", .{raw[0..i]});
         std.process.exit(1);
     };
     const suffix = raw[i..];
@@ -141,17 +204,27 @@ fn parse_trace_max(cli: CliArgs) u64 {
     else if (suffix.len == 0)
         1 // bare number = bytes
     else {
-        log.err("--trace-max: unknown unit '{s}' (use kb, mb, or gb)", .{suffix});
+        log.err("unknown unit '{s}' (use kb, mb, or gb)", .{suffix});
         std.process.exit(1);
     };
     return number * multiplier;
+}
+
+/// Parse --trace-max value. Required when --trace is set.
+fn parse_trace_max(cli: StartArgs) u64 {
+    if (!cli.trace) return 0;
+    const raw = cli.@"trace-max" orelse {
+        log.err("--trace-max is required when using --trace (e.g. --trace-max=50mb)", .{});
+        std.process.exit(1);
+    };
+    return parse_size(raw);
 }
 
 /// Generate a trace filename from the current timestamp.
 /// Format: trace-YYYY-MM-DD-HHMMSS.json (30 chars + sentinel)
 const trace_path_len = "trace-YYYY-MM-DD-HHMMSS.json".len;
 
-fn generate_trace_path(cli: CliArgs) [trace_path_len:0]u8 {
+fn generate_trace_path(cli: StartArgs) [trace_path_len:0]u8 {
     var buf: [trace_path_len:0]u8 = undefined;
     if (!cli.trace) return buf;
     const ts: u64 = @intCast(std.time.timestamp());
@@ -190,7 +263,7 @@ fn collect_sidecar_argv(args: *std.process.ArgIterator) ?[]const []const u8 {
 }
 
 /// Validate CLI config and return the secret key.
-fn validate_config(cli: CliArgs) *const [auth.key_length]u8 {
+fn validate_config(cli: StartArgs) *const [auth.key_length]u8 {
     if (cli.log_trace and !cli.log_debug) {
         log.err("--log-debug must be provided when using --log-trace", .{});
         std.process.exit(1);
@@ -219,7 +292,7 @@ fn resolve_port(listen_fd: IO.fd_t, requested: u16) u16 {
 }
 
 /// Wire sidecar bus after server is at its final address.
-fn wire_sidecar(server: *Server, cli: CliArgs, allocator: std.mem.Allocator) !void {
+fn wire_sidecar(server: *Server, cli: StartArgs, allocator: std.mem.Allocator) !void {
     const sidecar_path: ?[]const u8 = if (App.sidecar_enabled)
         (cli.sidecar orelse "/tmp/tiger_web_sidecar.sock")
     else
@@ -238,7 +311,7 @@ fn init_supervisor(sidecar_argv: ?[]const []const u8, allocator: std.mem.Allocat
     return sup;
 }
 
-fn log_startup(cli: CliArgs, actual_port: u16) void {
+fn log_startup(cli: StartArgs, actual_port: u16) void {
     log.info("storage=sqlite wal=tiger_web.wal tick_interval={d}ms connections={d}", .{
         tick_ns / std.time.ns_per_ms,
         Server.max_connections,
@@ -297,7 +370,23 @@ fn run_loop(
     }
 }
 
-const CliArgs = struct {
+const Command = union(enum) {
+    start: StartArgs,
+    trace: TraceArgs,
+
+    pub const help =
+        \\Usage:
+        \\  tiger-web start [options] [-- sidecar-command...]
+        \\  tiger-web trace --max=<size> :<port>
+        \\
+        \\Subcommands:
+        \\  start   Start the server
+        \\  trace   Attach to a running server and capture a trace
+        \\
+    ;
+};
+
+const StartArgs = struct {
     port: u16 = 3000,
     log_debug: bool = false,
     log_trace: bool = false,
@@ -306,10 +395,13 @@ const CliArgs = struct {
     sidecar: ?[]const u8 = null,
     db: [:0]const u8 = "tiger_web.db",
     /// Extended args after `--` are the sidecar command argv.
-    /// The full command is visible in `ps aux` — explicit, no
-    /// hidden config files. Standard Unix convention (docker,
-    /// kubectl, ssh all use `--` for sub-commands).
-    ///   tiger-web -- node dispatch.js
-    ///   tiger-web -- ./my-rust-sidecar
     @"--": void,
+};
+
+const TraceArgs = struct {
+    max: []const u8,
+    /// Positional args follow @"--" sentinel.
+    @"--": void,
+    /// Positional: ":port" (e.g. ":3000")
+    target: []const u8,
 };
