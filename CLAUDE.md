@@ -6,6 +6,8 @@ Ecommerce HTTP server built in Zig, following TigerBeetle conventions.
 
 When faced with decisions always take the most correct approach never the simplest approach. We are shooting for safety and reliability.
 
+**Porting from TigerBeetle:** When adopting a TB primitive (trace, time, bench, constants), `cp` the TB file and make surgical edits — don't rewrite from memory. Copying is more faithful. A from-scratch port accumulates subtle deviations (wrong field order, missing self-tracing, hardcoded values instead of constants, private vs pub). Each deviation is small, but they compound. Surgical edits on the real file produce an auditable diff where every change from TB's original is intentional and documented. Reference repo: `/home/walker/Documents/personal/tigerbeetle`
+
 ## Design Principles (from TigerBeetle)
 
 TB's design goals, in order: **Safety > Performance > Developer Experience.**
