@@ -280,7 +280,7 @@ pub fn build(b: *std.Build) void {
     }
 
     // Trace engine + event tests.
-    for ([_][]const u8{ "framework/trace_event.zig", "framework/tracer_engine.zig" }) |trace_file| {
+    for ([_][]const u8{ "framework/trace_event.zig", "framework/trace.zig" }) |trace_file| {
         const trace_test = b.addTest(.{
             .root_source_file = b.path(trace_file),
             .target = target,
