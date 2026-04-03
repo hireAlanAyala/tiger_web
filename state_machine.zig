@@ -4,7 +4,6 @@ const stdx = @import("stdx");
 const message = @import("message.zig");
 const auth = @import("framework/auth.zig");
 const TracerType = @import("framework/tracer.zig").TracerType;
-const Tracer = TracerType(message.Operation, message.Status);
 const marks = @import("framework/marks.zig");
 const log = marks.wrap_log(std.log.scoped(.state_machine));
 const PRNG = @import("stdx").PRNG;
@@ -20,28 +19,13 @@ const PRNG = @import("stdx").PRNG;
 /// Fault injection is at the prefetch dispatch level (app.zig), not storage.
 pub const StorageResult = enum { ok, not_found, err, busy, corruption };
 
-/// State machine parameterized on a Storage backend.
-/// Storage is SqliteStorage — production uses a file, tests use :memory:.
-///
-/// Request processing is split into two phases (TigerBeetle style):
-/// - `prefetch(msg)` reads from storage into cache slots. Read-only — never mutates
-///   storage. Returns false if storage is busy (retry next tick).
-/// - `execute(msg)` decides from cache slots, then writes mutations to storage.
-/// State machine parameterized on Storage and Handlers.
-///
-/// Storage is the database backend (SqliteStorage).
-/// Handlers is the App's dispatch interface — it provides:
-///   - Cache: tagged union of all handler Prefetch types
-///   - handler_prefetch(storage, msg) → ?Cache
-///   - handler_execute(cache, msg, fw, db) → HandleResult
-///
-/// The SM owns the pipeline (auth, transactions, tracer, invariants).
-/// Handlers own the business logic. The SM never imports App — Handlers
-/// is passed as a comptime parameter. Clean one-way dependency.
-
 /// Handler's decision — status + optional session action.
 /// Session action moves to writes in a future phase; until then,
 /// only logout.zig sets it. All other handlers return bare status.
+///
+/// Defined here (not in handlers) because it's the interface contract
+/// between framework and handlers. Both native and sidecar handlers
+/// return this type.
 pub const HandleResult = struct {
     status: message.Status = .ok,
     session_action: message.SessionAction = .none,
@@ -160,18 +144,23 @@ pub fn input_valid(msg: message.Message) bool {
     return true;
 }
 
-pub fn StateMachineType(comptime Storage: type, comptime Handlers: type) type {
+/// State machine — framework services for the request pipeline.
+///
+/// Owns auth (credential resolution), transactions (begin/commit batch),
+/// storage pointer, tracer, and PRNG. Does NOT own handlers or per-request
+/// state — those live per-slot on the server.
+///
+/// TB pattern: the SM owns domain state. Our domain operations live in
+/// handlers (native Zig or sidecar TypeScript), not the SM. The SM
+/// provides cross-cutting services that handlers don't own.
+pub fn StateMachineType(comptime Storage: type, comptime pipeline_slots_max: u8) type {
     // Storage must define its own read/write split.
     @import("framework/read_only_storage.zig").assertReadView(Storage);
 
+    const Tracer = TracerType(message.Operation, message.Status, pipeline_slots_max);
+
     return struct {
         const StateMachine = @This();
-
-        /// Handler dispatch — native or sidecar. Owned by the SM.
-        /// For native: zero-size struct (no fields, zero bytes).
-        /// For sidecar: holds client/bus pointers, phase state, etc.
-        /// All handler calls go through self.handlers.method().
-        handlers: Handlers,
 
         storage: *Storage,
         tracer: Tracer,
@@ -182,61 +171,14 @@ pub fn StateMachineType(comptime Storage: type, comptime Handlers: type) type {
         /// each process_inbox call. Used for order timeout_at.
         now: i64,
 
-        /// Prefetch cache — opaque to the SM. Populated by handlers.handler_prefetch()
-        /// in prefetch(), consumed by handlers.handler_execute() in commit().
-        /// The SM stores it between phases but never inspects it.
-        prefetch_cache: ?Handlers.Cache,
-
-        /// Auth identity resolved from the request cookie. Cross-cutting
-        /// concern owned by the SM, not the handlers.
-        prefetch_identity: ?message.PrefetchIdentity,
-
-        /// WAL recording: if set, commit() records SQL writes into this buffer.
-        /// The server sets this before process_inbox and reads wal_record_len
-        /// after commit to get the recorded data for wal.append_writes().
-        wal_record_buf: ?[]u8 = null,
-        wal_record_len: usize = 0,
-        wal_record_count: u8 = 0,
-
-        pub fn init(storage: *Storage, handlers: Handlers, log_trace: bool, prng_seed: u64, secret_key: *const [auth.key_length]u8) StateMachine {
+        pub fn init(storage: *Storage, log_trace: bool, prng_seed: u64, secret_key: *const [auth.key_length]u8) StateMachine {
             return .{
-                .handlers = handlers,
                 .storage = storage,
                 .tracer = Tracer.init(log_trace),
                 .prng = PRNG.from_seed(prng_seed),
                 .secret_key = secret_key,
                 .now = 0,
-                .prefetch_cache = null,
-                .prefetch_identity = null,
             };
-        }
-
-        /// Returns whether the message is valid input for the state machine.
-
-        /// Phase 1: prefetch — dispatch to handler via Handlers interface.
-        pub const PrefetchResult = enum {
-            complete, // Prefetch done — proceed to commit.
-            busy,     // Storage busy — retry next tick.
-            pending,  // Handler needs async IO — callback resumes.
-        };
-
-        /// Start prefetch. Returns .complete, .busy, or .pending.
-        /// Idempotent — safe to call on both start and resume.
-        pub fn prefetch(self: *StateMachine, msg: message.Message) PrefetchResult {
-            assert(self.prefetch_cache == null);
-
-            // Auth: resolve cookie credential → identity.
-            if (self.prefetch_identity == null) {
-                self.resolve_credential(msg);
-            }
-
-            self.prefetch_cache = self.handlers.handler_prefetch(self.storage, &msg);
-            if (self.prefetch_cache != null) return .complete;
-
-            // Handler returned null — either busy (retry) or pending
-            // (async IO in-flight, callback will resume).
-            if (self.handlers.is_handler_pending()) return .pending;
-            return .busy;
         }
 
         /// Set wall-clock time for this batch. Called by the server before
@@ -257,160 +199,30 @@ pub fn StateMachineType(comptime Storage: type, comptime Handlers: type) type {
             self.storage.commit();
         }
 
-        /// Phase 2: commit — dispatch to handler.handle() via Handlers interface.
-        /// Cross-cutting concerns (auth, tracer) handled here so
-        /// handlers don't have to. Must only be called after prefetch() returned true.
-        ///
-        /// Pipeline response — the framework envelope. Handler decision + auth.
-        /// No domain data — that flows through handler Prefetch → render.
-        pub const PipelineResponse = struct {
-            status: message.Status,
-            session_action: message.SessionAction,
-            user_id: u128,
-            is_authenticated: bool,
-            is_new_visitor: bool,
-        };
-
-        /// Commit output — pipeline response + cache for render.
-        /// The SM's job ends here. Cache ownership transfers to the caller
-        /// so render can access prefetched data post-commit.
-        pub const CommitOutput = struct {
-            pub const Identity = message.PrefetchIdentity;
-            response: PipelineResponse,
-            cache: Handlers.Cache,
-            identity: Identity,
-        };
-
-        /// Commit — ALWAYS synchronous. Never returns .pending. Never
-        /// will be async. This is a permanent architectural constraint.
-        ///
-        /// WHY: Execute has irreversible side effects (SQL writes).
-        /// begin_batch opens a transaction, execute runs writes,
-        /// commit_batch closes it. This must be one uninterruptible
-        /// sequence. If execute were async, the transaction would be
-        /// open across an async boundary — a crash or disconnect
-        /// during the wait leaves partial writes in an open
-        /// transaction. The state is ambiguous: committed or not?
-        ///
-        /// TB's commit_execute increments commit_min (the commit
-        /// marker). Once incremented, the operation is committed on
-        /// every replica. There is no undo. TB makes execute sync
-        /// so this marker is either fully advanced or not touched.
-        /// Same principle: side effects are irreversible, don't put
-        /// an async boundary in the middle of irreversible work.
-        ///
-        /// The correct split: load all data first (prefetch, async,
-        /// safe to retry/abort), then apply it all at once (execute,
-        /// sync, no interruption).
-        ///
-        /// For sidecar: the handle CALL happens during PREFETCH.
-        ///   prefetch: CALL route + prefetch + handle (async)
-        ///   execute:  parse handle RESULT, db.execute writes (sync)
-        ///   render:   CALL render (async)
-        pub fn commit(self: *StateMachine, msg: message.Message) CommitOutput {
-            const cache = self.prefetch_cache.?;
-            defer self.prefetch_cache = null;
-            defer self.prefetch_identity = null;
-
-            const FwCtx = Handlers.FwCtx;
-            const fw = FwCtx{
-                .identity = self.prefetch_identity orelse std.mem.zeroes(message.PrefetchIdentity),
-                .now = self.now,
-                .is_sse = false, // Set by server when render is wired.
-            };
-
-            // Handle writes directly to storage. The transaction is
-            // managed by begin_batch/commit_batch at the server level —
-            // all writes in a tick share one transaction.
-            var write_view = if (self.wal_record_buf) |buf|
-                Storage.WriteView.init_recording(self.storage, buf)
-            else
-                Storage.WriteView.init(self.storage);
-            const handle_result = self.handlers.handler_execute(
-                cache,
-                msg,
-                fw,
-                &write_view,
-            );
-            // Store recording output for the server's WAL append.
-            self.wal_record_len = write_view.record_pos;
-            self.wal_record_count = write_view.record_count;
-
-            const identity = self.prefetch_identity orelse std.mem.zeroes(message.PrefetchIdentity);
-            const is_auth = identity.is_authenticated != 0 or
-                handle_result.session_action == .set_authenticated;
-
-            const resp = PipelineResponse{
-                .status = handle_result.status,
-                .session_action = handle_result.session_action,
-                .user_id = identity.user_id,
-                .is_authenticated = is_auth,
-                .is_new_visitor = identity.is_new != 0,
-            };
-
-            self.tracer.count_status(resp.status);
-            return .{
-                .response = resp,
-                .cache = cache,
-                .identity = self.prefetch_identity orelse std.mem.zeroes(message.PrefetchIdentity),
-            };
-        }
-
-        // --- Per-pattern execute handlers ---
-        //
-        // Operations are grouped by shared control flow, NOT by verb name.
-        // If a future operation has different error handling (e.g., returns
-        // a default instead of 404), it gets its own handler — don't force
-        // it into an existing group just because it's a "get" or "delete."
-
-        /// Get-by-ID pattern: check not_found, return cached entity.
-        /// Shared by get_product, get_product_inventory, get_collection, get_order.
-        /// Products use soft delete — inactive products return 404.
-        pub fn resolve_credential(self: *StateMachine, msg: message.Message) void {
+        /// Resolve cookie credential → identity. Cross-cutting auth concern
+        /// owned by the SM, not the handlers. Returns the identity — caller
+        /// stores it per-slot.
+        pub fn resolve_credential(self: *StateMachine, msg: message.Message) message.PrefetchIdentity {
             if (msg.credential_slice()) |cv| {
                 if (auth.verify_cookie(cv, self.secret_key)) |verified| {
-                    self.prefetch_identity = .{
+                    return .{
                         .user_id = verified.user_id,
                         .kind = @enumFromInt(@intFromEnum(verified.kind)),
                         .is_authenticated = @intFromBool(verified.kind == .authenticated),
                         .is_new = 0,
                         .reserved = .{0} ** 13,
                     };
-                    return;
                 }
             }
             // No credential or invalid — mint a new anonymous identity.
             const user_id = mint_user_id(&self.prng);
-            self.prefetch_identity = .{
+            return .{
                 .user_id = user_id,
                 .kind = .anonymous,
                 .is_authenticated = 0,
                 .is_new = 1,
                 .reserved = .{0} ** 13,
             };
-        }
-
-        /// Copy resolved identity onto the response. The render layer uses
-        /// these structured fields to format Set-Cookie headers.
-        pub fn apply_auth_response(self: *StateMachine, resp: *message.MessageResponse) void {
-            const identity = self.prefetch_identity orelse return;
-            resp.user_id = identity.user_id;
-            resp.is_authenticated = identity.is_authenticated != 0;
-            resp.kind = switch (identity.kind) {
-                .anonymous => .anonymous,
-                .authenticated => .authenticated,
-            };
-            resp.is_new_visitor = identity.is_new != 0;
-
-            // Login success overrides: the login result's user_id becomes
-            // the session identity, not the anonymous visitor who submitted the form.
-            if (resp.session_action == .set_authenticated) {
-                const login_result = resp.result.login;
-                assert(login_result.user_id != 0);
-                resp.user_id = login_result.user_id;
-                resp.is_authenticated = true;
-                resp.kind = .authenticated;
-            }
         }
 
         fn mint_user_id(prng: *PRNG) u128 {
@@ -420,8 +232,5 @@ pub fn StateMachineType(comptime Storage: type, comptime Handlers: type) type {
                 if (id != 0) return id;
             }
         }
-
     };
 }
-
-

@@ -4,8 +4,8 @@
 //! Neither knows the other exists. main.zig (composition root) wires
 //! them by reading public state from both:
 //!
-//!   server.sidecar_is_connected() == false → supervisor.request_restart()
-//!   server.sidecar_is_connected() == true  → supervisor.notify_connected()
+//!   server.sidecar_any_ready() == false → supervisor.request_restart()
+//!   server.sidecar_any_ready() == true  → supervisor.notify_connected()
 //!
 //! TB pattern (Vortex LoggedProcess): std.process.Child for spawn,
 //! waitpid(WNOHANG) for non-blocking reap, no signal handlers.

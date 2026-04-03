@@ -27,6 +27,19 @@ const PRNG = @import("stdx").PRNG;
 
 const bench_test_key: *const [auth.key_length]u8 = "tiger-web-test-key-0123456789ab!";
 
+/// Test pipeline helper — runs the full prefetch + commit pipeline for native handlers.
+fn pipeline_execute(sm: *StateMachine, msg: message.Message) message.Status {
+    var handler: App.HandlersType(App.Storage) = .{};
+    const identity = sm.resolve_credential(msg);
+    const cache = handler.handler_prefetch(sm.storage, &msg) orelse unreachable;
+    sm.begin_batch();
+    var write_view = App.Storage.WriteView.init(sm.storage);
+    const fw = App.HandlersType(App.Storage).FwCtx{ .identity = identity, .now = sm.now, .is_sse = false };
+    const result = handler.handler_execute(cache, msg, fw, &write_view);
+    sm.commit_batch();
+    return result.status;
+}
+
 const repetitions = 32;
 
 test "benchmark: state machine" {
@@ -40,7 +53,7 @@ test "benchmark: state machine" {
 
     var storage = try App.Storage.init(":memory:");
     defer storage.deinit();
-    var sm = StateMachine.init(&storage, .{}, false, 0, bench_test_key);
+    var sm = StateMachine.init(&storage, false, 0, bench_test_key);
 
     // --- Seed phase (untimed) ---
 
@@ -53,9 +66,8 @@ test "benchmark: state machine" {
         const p = fuzz.gen_product(&prng);
         const msg = message.Message.init(.create_product, 0, 1, p);
         if (!state_machine.input_valid(msg)) continue;
-        assert(sm.prefetch(msg) == .complete);
-        const resp = sm.commit(msg).response;
-        if (resp.status == .ok) {
+        const status = pipeline_execute(&sm, msg);
+        if (status == .ok) {
             product_ids_buf[product_count] = p.id;
             product_count += 1;
         }
@@ -75,9 +87,8 @@ test "benchmark: state machine" {
             bench.start();
             for (0..ops) |i| {
                 const msg = message.Message.init(.get_product, product_ids[i % product_count], 1, {});
-                assert(sm.prefetch(msg) == .complete);
-                const resp = sm.commit(msg).response;
-                checksum +%= @intFromEnum(resp.status);
+                const status = pipeline_execute(&sm, msg);
+                checksum +%= @intFromEnum(status);
             }
             dur.* = bench.stop();
             dur.* /= ops;
@@ -93,9 +104,8 @@ test "benchmark: state machine" {
             bench.start();
             for (0..ops) |_| {
                 const msg = message.Message.init(.list_products, 0, 1, params);
-                assert(sm.prefetch(msg) == .complete);
-                const resp = sm.commit(msg).response;
-                checksum +%= @intFromEnum(resp.status);
+                const status = pipeline_execute(&sm, msg);
+                checksum +%= @intFromEnum(status);
             }
             dur.* = bench.stop();
             dur.* /= ops;
@@ -116,9 +126,8 @@ test "benchmark: state machine" {
             for (0..ops) |i| {
                 update_payload.id = product_ids[i % product_count];
                 const msg = message.Message.init(.update_product, update_payload.id, 1, update_payload);
-                assert(sm.prefetch(msg) == .complete);
-                const resp = sm.commit(msg).response;
-                checksum +%= @intFromEnum(resp.status);
+                const status = pipeline_execute(&sm, msg);
+                checksum +%= @intFromEnum(status);
             }
             dur.* = bench.stop();
             dur.* /= ops;

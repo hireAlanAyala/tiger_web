@@ -24,6 +24,22 @@ const fuzz_test_key: *const [auth.key_length]u8 = "tiger-web-test-key-0123456789
 
 const log = std.log.scoped(.fuzz);
 
+const Handlers = App.HandlersType(App.Storage);
+
+/// Pipeline helper — prefetch + commit for native handlers.
+/// Returns null if prefetch was busy (fault injection).
+fn pipeline_execute(sm: *StateMachine, msg: message.Message) ?message.Status {
+    var handler: Handlers = .{};
+    const identity = sm.resolve_credential(msg);
+    const cache = handler.handler_prefetch(sm.storage, &msg) orelse return null;
+    sm.begin_batch();
+    var write_view = App.Storage.WriteView.init(sm.storage);
+    const fw = Handlers.FwCtx{ .identity = identity, .now = sm.now, .is_sse = false };
+    const result = handler.handler_execute(cache, msg, fw, &write_view);
+    sm.commit_batch();
+    return result.status;
+}
+
 pub const id_pool_capacity = 64;
 
 /// Generate a random number, biased towards all bit 'edges' of T. That is,
@@ -78,7 +94,7 @@ pub fn main(_: std.mem.Allocator, args: FuzzArgs) !void {
         events_max,
     });
 
-    var sm = StateMachine.init(&storage, .{}, false, seed, fuzz_test_key);
+    var sm = StateMachine.init(&storage, false, seed, fuzz_test_key);
     sm.now = 1_700_000_000;
 
     // ID tracker: lightweight pool for generating messages that reference
@@ -141,42 +157,37 @@ pub fn main(_: std.mem.Allocator, args: FuzzArgs) !void {
         // Gate: skip invalid inputs — matches TB's input_valid pattern.
         if (!state_machine.input_valid(msg)) continue;
 
-        // Prefetch — may fail with busy, in which case we just skip.
-        if (sm.prefetch(msg) != .complete) continue;
-
-        const resp = sm.commit(msg).response;
+        // Prefetch + commit — may fail with busy (fault injection), skip.
+        const status = pipeline_execute(&sm, msg) orelse continue;
         coverage.record(operation);
-        features.record_message(msg, resp);
+        const resp_proxy = struct { status: message.Status }{ .status = status };
+        features.record_message(msg, resp_proxy);
 
         // Track created entity IDs and verify structural invariants.
-        tracker.on_commit(msg, resp);
+        tracker.on_commit(msg, resp_proxy);
 
         // Cross-operation probe: after a successful create, immediately
         // get the entity back and assert it exists. Catches write-then-read
         // bugs where the storage accepted the write but can't find it.
         // Only fires when no faults are injected (prefetch succeeds).
-        if (resp.status == .ok) {
+        if (status == .ok) {
             switch (msg.operation) {
                 .create_product => {
-                    // ID from the create message body, not the response.
                     const probe = message.Message.init(.get_product, msg.body_as(message.Product).id, 1, {});
-                    if (sm.prefetch(probe) == .complete) {
-                        const probe_resp = sm.commit(probe).response;
-                        assert(probe_resp.status == .ok or probe_resp.status == .storage_error);
+                    if (pipeline_execute(&sm, probe)) |probe_status| {
+                        assert(probe_status == .ok or probe_status == .storage_error);
                     }
                 },
                 .create_collection => {
                     const probe = message.Message.init(.get_collection, msg.body_as(message.ProductCollection).id, 1, {});
-                    if (sm.prefetch(probe) == .complete) {
-                        const probe_resp = sm.commit(probe).response;
-                        assert(probe_resp.status == .ok or probe_resp.status == .storage_error);
+                    if (pipeline_execute(&sm, probe)) |probe_status| {
+                        assert(probe_status == .ok or probe_status == .storage_error);
                     }
                 },
                 .create_order => {
                     const probe = message.Message.init(.get_order, msg.body_as(message.OrderRequest).id, 1, {});
-                    if (sm.prefetch(probe) == .complete) {
-                        const probe_resp = sm.commit(probe).response;
-                        assert(probe_resp.status == .ok or probe_resp.status == .storage_error);
+                    if (pipeline_execute(&sm, probe)) |probe_status| {
+                        assert(probe_status == .ok or probe_status == .storage_error);
                     }
                 },
                 else => {},

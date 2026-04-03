@@ -55,32 +55,32 @@ pub fn SidecarHandlersType(comptime StorageParam: type, comptime Bus: type) type
         };
 
         // =============================================================
-        // Struct fields — all sidecar handler state lives here.
-        // Inspectable by invariants(). Reset by reset_handler_state().
+        // Two lifetime groups, structurally separated:
+        //   infra   — set once during wire_sidecar, never reset
+        //   request — per-request state, reset via request = .{}
         // =============================================================
 
-        /// Optional until Server.init wires them to the embedded
-        /// Bus/Client. Null = not yet wired. Every handler method
-        /// unwraps with .? — panics on null instead of UB from
-        /// undefined. Server.init sets these before the first tick.
+        /// Infrastructure — set during wire_sidecar, lives for server lifetime.
+        /// Optional until wired. Every handler method unwraps with .? —
+        /// panics on null instead of UB from undefined.
         sidecar_client: ?*SidecarClient = null,
         sidecar_bus: ?*Bus = null,
+        /// Paired bus connection index — each handler sends to its own connection.
+        connection_index: u8 = 0,
 
-        prefetch_phase: PrefetchPhase = .idle,
+        /// Per-request state — reset on each pipeline_reset via request = .{}.
+        /// Adding a field to Request without a default produces a compile error
+        /// in reset_handler_state. Total by construction.
+        request: Request = .{},
 
-        /// Handle result — parsed from handle CALL RESULT.
-        /// Stored between prefetch completion and execute.
-        /// Status and session_action live here (handler decision).
-        /// Write data (handle_writes/handle_write_count) lives on the
-        /// SidecarClient because copy_state uses the client's internal
-        /// buffer — the writes slice points into client.state_buf.
-        handle_status: message.Status = .ok,
-        handle_session_action: message.SessionAction = .none,
-
-        /// Monotonic request ID — incremented per CALL for correlation.
-        /// The sidecar echoes this in RESULT. Even though serial today,
-        /// the ID lets both sides detect stale responses.
-        next_request_id: u32 = 1,
+        const Request = struct {
+            prefetch_phase: PrefetchPhase = .idle,
+            /// Handle result — parsed from handle CALL RESULT.
+            handle_status: message.Status = .ok,
+            handle_session_action: message.SessionAction = .none,
+            /// Monotonic request ID — incremented per CALL for correlation.
+            next_request_id: u32 = 1,
+        };
 
         // =============================================================
         // Handler interface — instance methods matching HandlersType.
@@ -92,19 +92,15 @@ pub fn SidecarHandlersType(comptime StorageParam: type, comptime Bus: type) type
             return c.call_state == .receiving;
         }
 
-        /// Reset handler state. Called by the server on pipeline_reset.
-        /// Atomic self-assignment — adding a field without a default
-        /// produces a compile error here, not a silent stale-state bug.
-        /// Pointer fields (sidecar_client, sidecar_bus) are preserved.
+        /// Reset per-request handler state. Infrastructure (client, bus,
+        /// connection_index) is untouched. request = .{} is total by
+        /// construction — can't miss a field when new ones are added.
         pub fn reset_handler_state(self: *Self) void {
             if (self.sidecar_client) |c| {
                 c.reset_call_state();
                 c.reset_request_state();
             }
-            self.* = .{
-                .sidecar_client = self.sidecar_client,
-                .sidecar_bus = self.sidecar_bus,
-            };
+            self.request = .{};
         }
 
         /// Route: CALL "route" with HTTP method/path/body.
@@ -114,7 +110,7 @@ pub fn SidecarHandlersType(comptime StorageParam: type, comptime Bus: type) type
         /// Args format: [method: u8][path_len: u16 BE][path][body_len: u16 BE][body]
         /// Result format: [operation: u8][id: 16 bytes LE][body: N bytes]
         pub fn handler_route(self: *Self, method_val: http.Method, raw_path: []const u8, body: []const u8) ?message.Message {
-            assert(self.prefetch_phase == .idle);
+            assert(self.request.prefetch_phase == .idle);
             const c = self.sidecar_client.?;
             const b = self.sidecar_bus.?;
 
@@ -139,10 +135,10 @@ pub fn SidecarHandlersType(comptime StorageParam: type, comptime Bus: type) type
                         pos += body.len;
                     }
 
-                    if (!c.call_submit(b, "route", args_buf[0..pos], self.next_request_id)) {
+                    if (!c.call_submit(b, self.connection_index, "route", args_buf[0..pos], self.request.next_request_id)) {
                         return null;
                     }
-                    self.next_request_id +%= 1;
+                    self.request.next_request_id +%= 1;
                     return null; // pending
                 },
                 .receiving => return null,
@@ -168,43 +164,43 @@ pub fn SidecarHandlersType(comptime StorageParam: type, comptime Bus: type) type
 
             switch (c.call_state) {
                 .idle => {
-                    if (self.prefetch_phase == .idle) {
+                    if (self.request.prefetch_phase == .idle) {
                         if (!self.submit_operation_call("prefetch", msg)) return null;
-                        self.prefetch_phase = .prefetch_pending;
+                        self.request.prefetch_phase = .prefetch_pending;
                         return null;
                     }
-                    if (self.prefetch_phase == .prefetch_pending) {
+                    if (self.request.prefetch_phase == .prefetch_pending) {
                         if (!self.submit_operation_call("handle", msg)) {
-                            self.prefetch_phase = .idle;
+                            self.request.prefetch_phase = .idle;
                             return null;
                         }
-                        self.prefetch_phase = .handle_pending;
+                        self.request.prefetch_phase = .handle_pending;
                         return null;
                     }
                     unreachable;
                 },
                 .receiving => return null,
                 .complete => {
-                    if (self.prefetch_phase == .prefetch_pending) {
+                    if (self.request.prefetch_phase == .prefetch_pending) {
                         c.reset_call_state();
                         if (!self.submit_operation_call("handle", msg)) {
-                            self.prefetch_phase = .idle;
+                            self.request.prefetch_phase = .idle;
                             return null;
                         }
-                        self.prefetch_phase = .handle_pending;
+                        self.request.prefetch_phase = .handle_pending;
                         return null;
                     }
-                    if (self.prefetch_phase == .handle_pending) {
+                    if (self.request.prefetch_phase == .handle_pending) {
                         self.parse_handle_result();
                         c.reset_call_state();
-                        self.prefetch_phase = .idle;
+                        self.request.prefetch_phase = .idle;
                         return {};
                     }
                     unreachable;
                 },
                 .failed => {
                     c.reset_call_state();
-                    self.prefetch_phase = .idle;
+                    self.request.prefetch_phase = .idle;
                     return null;
                 },
             }
@@ -217,7 +213,7 @@ pub fn SidecarHandlersType(comptime StorageParam: type, comptime Bus: type) type
             fw: FwCtx,
             db: anytype,
         ) state_machine.HandleResult {
-            assert(self.prefetch_phase == .idle);
+            assert(self.request.prefetch_phase == .idle);
             _ = cache;
             _ = msg;
             _ = fw;
@@ -228,8 +224,8 @@ pub fn SidecarHandlersType(comptime StorageParam: type, comptime Bus: type) type
             }
 
             return .{
-                .status = self.handle_status,
-                .session_action = self.handle_session_action,
+                .status = self.request.handle_status,
+                .session_action = self.request.handle_session_action,
             };
         }
 
@@ -254,10 +250,10 @@ pub fn SidecarHandlersType(comptime StorageParam: type, comptime Bus: type) type
                     args_buf[0] = @intFromEnum(operation);
                     args_buf[1] = @intFromEnum(status);
 
-                    if (!c.call_submit(b, "render", &args_buf, self.next_request_id)) {
+                    if (!c.call_submit(b, self.connection_index, "render", &args_buf, self.request.next_request_id)) {
                         return render_error(render_buf);
                     }
-                    self.next_request_id +%= 1;
+                    self.request.next_request_id +%= 1;
                     return null;
                 },
                 .receiving => return null,
@@ -290,12 +286,12 @@ pub fn SidecarHandlersType(comptime StorageParam: type, comptime Bus: type) type
 
         /// Process a frame received from the sidecar bus.
         /// Re-entrancy note: called from bus's try_drain_recv loop.
-        /// Send and recv state are independent. commit_dispatch_entered
+        /// Send and recv state are independent. slot.dispatch_entered
         /// guards against nested pipeline execution.
         pub fn process_sidecar_frame(self: *Self, frame: []const u8, storage: *StorageParam) void {
             const c = self.sidecar_client.?;
             const b = self.sidecar_bus.?;
-            c.on_frame(b, frame, query_dispatch_fn, @ptrCast(storage), SidecarClient.max_queries_per_call);
+            c.on_frame(b, self.connection_index, frame, query_dispatch_fn, @ptrCast(storage), SidecarClient.max_queries_per_call);
         }
 
         /// Called when the sidecar bus connection closes.
@@ -308,11 +304,11 @@ pub fn SidecarHandlersType(comptime StorageParam: type, comptime Bus: type) type
         pub fn invariants(self: *const Self) void {
             const c = self.sidecar_client orelse return; // not wired yet
             const cs = c.call_state;
-            switch (self.prefetch_phase) {
+            switch (self.request.prefetch_phase) {
                 .idle => {
                     if (cs == .idle) {
-                        assert(self.handle_status == .ok);
-                        assert(self.handle_session_action == .none);
+                        assert(self.request.handle_status == .ok);
+                        assert(self.request.handle_session_action == .none);
                     }
                 },
                 .prefetch_pending => {
@@ -334,10 +330,10 @@ pub fn SidecarHandlersType(comptime StorageParam: type, comptime Bus: type) type
             var args_buf: [17]u8 = undefined;
             args_buf[0] = @intFromEnum(msg.operation);
             std.mem.writeInt(u128, args_buf[1..17], msg.id, .little);
-            if (!c.call_submit(b, function_name, &args_buf, self.next_request_id)) {
+            if (!c.call_submit(b, self.connection_index, function_name, &args_buf, self.request.next_request_id)) {
                 return false;
             }
-            self.next_request_id +%= 1;
+            self.request.next_request_id +%= 1;
             return true;
         }
 
@@ -373,7 +369,7 @@ pub fn SidecarHandlersType(comptime StorageParam: type, comptime Bus: type) type
             // Status name can be 0 bytes (empty name → from_string fails → error).
             if (data.len < 4) {
                 log.warn("handle: RESULT too short ({d} bytes)", .{data.len});
-                self.handle_status = .storage_error;
+                self.request.handle_status = .storage_error;
                 return;
             }
 
@@ -385,25 +381,25 @@ pub fn SidecarHandlersType(comptime StorageParam: type, comptime Bus: type) type
             if (pos + status_name_len + 2 > data.len) {
                 // +2 for the mandatory session_action + write_count after status name.
                 log.warn("handle: RESULT truncated at status name", .{});
-                self.handle_status = .storage_error;
+                self.request.handle_status = .storage_error;
                 return;
             }
             const status_name = data[pos..][0..status_name_len];
             pos += status_name_len;
-            self.handle_status = message.Status.from_string(status_name) orelse {
+            self.request.handle_status = message.Status.from_string(status_name) orelse {
                 log.warn("handle: unknown status '{s}'", .{status_name});
-                self.handle_status = .storage_error;
+                self.request.handle_status = .storage_error;
                 return;
             };
 
             // Session action — reject unknown values. Field is mandatory.
-            self.handle_session_action = switch (data[pos]) {
+            self.request.handle_session_action = switch (data[pos]) {
                 0 => .none,
                 1 => .set_authenticated,
                 2 => .clear,
                 else => {
                     log.warn("handle: unknown session_action {d}", .{data[pos]});
-                    self.handle_status = .storage_error;
+                    self.request.handle_status = .storage_error;
                     return;
                 },
             };
@@ -414,7 +410,7 @@ pub fn SidecarHandlersType(comptime StorageParam: type, comptime Bus: type) type
             pos += 1;
             if (c.handle_write_count > 0 and pos >= data.len) {
                 log.warn("handle: write_count={d} but no write data", .{c.handle_write_count});
-                self.handle_status = .storage_error;
+                self.request.handle_status = .storage_error;
                 return;
             }
             // data is already in state_buf (copied by on_frame's

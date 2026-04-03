@@ -4,9 +4,8 @@ pub const build_options = @import("build_options");
 const IO = @import("framework/io.zig").IO;
 const App = @import("app.zig");
 // Resolve Handlers (needs IO for sidecar), then construct SM.
-// Same resolution as the server — SM never sees IO.
-const Handlers = App.HandlersFor(App.Storage, IO);
-const StateMachine = App.StateMachineWith(App.Storage, Handlers);
+// SM is handler-agnostic — pure framework services.
+const StateMachine = App.StateMachineWith(App.Storage, App.sidecar_count);
 const ServerType = @import("framework/server.zig").ServerType;
 const TimeReal = @import("framework/time.zig").TimeReal;
 const auth = @import("framework/auth.zig");
@@ -53,7 +52,6 @@ pub fn main() !void {
 
     var sm = StateMachine.init(
         &storage,
-        .{},
         cli.log_trace,
         @truncate(std.crypto.random.int(u128)),
         secret_key,
@@ -137,7 +135,7 @@ fn wire_sidecar(server: *Server, cli: CliArgs) !void {
 fn init_supervisor(sidecar_argv: ?[]const []const u8) !?Supervisor {
     if (!App.sidecar_enabled) return null;
     const argv = sidecar_argv orelse return null;
-    const count = Handlers.BusType.connections_max;
+    const count = App.sidecar_count;
     var sup = try Supervisor.init(std.heap.page_allocator, argv, count);
     try sup.spawn_all();
     return sup;
@@ -173,7 +171,7 @@ fn run_loop(server: *Server, io: *IO, supervisor: *?Supervisor) void {
         // The supervisor watches processes via waitpid — no "restart"
         // signal needed. The sidecar detects the closed socket and exits.
         if (supervisor.*) |*sup| {
-            const connected = server.sidecar_is_connected();
+            const connected = server.sidecar_any_ready();
             if (!was_sidecar_connected and connected) {
                 sup.notify_connected();
             }

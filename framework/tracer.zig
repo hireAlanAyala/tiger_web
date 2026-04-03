@@ -6,9 +6,9 @@
 //!
 //! Usage:
 //!
-//!     tracer.start(.prefetch);
+//!     tracer.start(.prefetch, slot_idx);
 //!     // ... do work ...
-//!     tracer.stop(.prefetch, .get_product);
+//!     tracer.stop(.prefetch, slot_idx, .get_product);
 //!
 //!     // Periodically:
 //!     tracer.emit();
@@ -18,7 +18,7 @@ const assert = std.debug.assert;
 const marks = @import("marks.zig");
 const log = marks.wrap_log(std.log.scoped(.tracer));
 
-pub fn TracerType(comptime Operation: type, comptime Status: type) type {
+pub fn TracerType(comptime Operation: type, comptime Status: type, comptime slots_max: u8) type {
     // Derive counter enum from Status — one counter per status variant,
     // named "requests_" ++ status tag name. Eliminates manual Counter enum.
     const Counter = comptime blk: {
@@ -82,9 +82,12 @@ pub fn TracerType(comptime Operation: type, comptime Status: type) type {
         const Instant = std.time.Instant;
 
         timings: [span_count][operation_slots]?OperationTiming,
-        started: [span_count]?Instant,
-        /// Last completed duration per span — for trace logging the current request.
-        last_duration_ns: [span_count]u64,
+        /// Per-slot span start times. started[span][slot_idx] tracks
+        /// when each slot's span began. Concurrent slots can have
+        /// overlapping spans of the same type.
+        started: [span_count][slots_max]?Instant,
+        /// Last completed duration per span per slot — for trace logging.
+        last_duration_ns: [span_count][slots_max]u64,
         gauges: [gauge_count]?u64,
         counters: [counter_count]u64,
         log_trace: bool,
@@ -94,38 +97,42 @@ pub fn TracerType(comptime Operation: type, comptime Status: type) type {
                 .timings = [_][operation_slots]?OperationTiming{
                     [_]?OperationTiming{null} ** operation_slots,
                 } ** span_count,
-                .started = [_]?Instant{null} ** span_count,
-                .last_duration_ns = [_]u64{0} ** span_count,
+                .started = [_][slots_max]?Instant{
+                    [_]?Instant{null} ** slots_max,
+                } ** span_count,
+                .last_duration_ns = [_][slots_max]u64{
+                    [_]u64{0} ** slots_max,
+                } ** span_count,
                 .gauges = [_]?u64{null} ** gauge_count,
                 .counters = [_]u64{0} ** counter_count,
                 .log_trace = log_trace,
             };
         }
 
-/// Mark the beginning of a span. Asserts the span is not already started.
-pub fn start(self: *Tracer, span: Span) void {
-    const slot = @intFromEnum(span);
-    assert(self.started[slot] == null);
-    self.started[slot] = Instant.now() catch unreachable;
+/// Mark the beginning of a span for a specific pipeline slot.
+pub fn start(self: *Tracer, span: Span, slot_idx: u8) void {
+    const s = @intFromEnum(span);
+    assert(self.started[s][slot_idx] == null);
+    self.started[s][slot_idx] = Instant.now() catch unreachable;
 }
 
 /// Cancel a started span without recording. Used when prefetch returns
 /// busy — the span never completed, so no timing is recorded.
-pub fn cancel(self: *Tracer, span: Span) void {
-    const slot = @intFromEnum(span);
-    assert(self.started[slot] != null);
-    self.started[slot] = null;
+pub fn cancel(self: *Tracer, span: Span, slot_idx: u8) void {
+    const s = @intFromEnum(span);
+    assert(self.started[s][slot_idx] != null);
+    self.started[s][slot_idx] = null;
 }
 
-/// Mark the end of a span. Records duration into the per-operation aggregate.
-/// Asserts the span was started.
-pub fn stop(self: *Tracer, span: Span, op: Operation) void {
-    const slot = @intFromEnum(span);
-    const start_time = self.started[slot].?;
-    self.started[slot] = null;
+/// Mark the end of a span. Records duration into the shared per-operation
+/// aggregate (all slots contribute to the same histogram).
+pub fn stop(self: *Tracer, span: Span, slot_idx: u8, op: Operation) void {
+    const s = @intFromEnum(span);
+    const start_time = self.started[s][slot_idx].?;
+    self.started[s][slot_idx] = null;
 
     const elapsed_ns = (Instant.now() catch unreachable).since(start_time);
-    self.last_duration_ns[slot] = elapsed_ns;
+    self.last_duration_ns[s][slot_idx] = elapsed_ns;
     self.record(span, op, elapsed_ns);
 }
 
@@ -175,12 +182,12 @@ fn record(self: *Tracer, span: Span, op: Operation, duration_ns: u64) void {
 }
 
 /// Emit per-request trace log. Called after both spans complete.
-/// Uses last_duration_ns from the most recent stop() calls.
-pub fn trace_log(self: *Tracer, op: Operation, status: anytype, fd: i32) void {
+/// Uses last_duration_ns from the most recent stop() calls for this slot.
+pub fn trace_log(self: *Tracer, op: Operation, status: anytype, fd: i32, slot_idx: u8) void {
     if (!self.log_trace) return;
 
-    const prefetch_ns = self.last_duration_ns[@intFromEnum(TestSpan.prefetch)];
-    const execute_ns = self.last_duration_ns[@intFromEnum(TestSpan.execute)];
+    const prefetch_ns = self.last_duration_ns[@intFromEnum(TestSpan.prefetch)][slot_idx];
+    const execute_ns = self.last_duration_ns[@intFromEnum(TestSpan.execute)][slot_idx];
     const total_ns = prefetch_ns +| execute_ns;
 
     log.debug("{s}: status={s} prefetch={d}{s} execute={d}{s} total={d}{s} fd={d}", .{
@@ -269,14 +276,14 @@ const TestStatus = enum(u8) {
     ok = 1,
 };
 
-const TestTracer = TracerType(TestOp, TestStatus);
+const TestTracer = TracerType(TestOp, TestStatus, 1);
 const TestSpan = TestTracer.Span;
 const TestGauge = TestTracer.Gauge;
 
 test "start/stop records timing" {
     var tracer = TestTracer.init(false);
-    tracer.start(.prefetch);
-    tracer.stop(.prefetch, .get_product);
+    tracer.start(.prefetch, 0);
+    tracer.stop(.prefetch, 0, .get_product);
 
     const slot = @intFromEnum(TestOp.get_product);
     const t = tracer.timings[@intFromEnum(TestSpan.prefetch)][slot].?;
@@ -287,10 +294,10 @@ test "start/stop records timing" {
 test "multiple stops accumulate" {
     var tracer = TestTracer.init(false);
 
-    tracer.start(.execute);
-    tracer.stop(.execute, .create_product);
-    tracer.start(.execute);
-    tracer.stop(.execute, .create_product);
+    tracer.start(.execute, 0);
+    tracer.stop(.execute, 0, .create_product);
+    tracer.start(.execute, 0);
+    tracer.stop(.execute, 0, .create_product);
 
     const slot = @intFromEnum(TestOp.create_product);
     const t = tracer.timings[@intFromEnum(TestSpan.execute)][slot].?;
@@ -300,8 +307,8 @@ test "multiple stops accumulate" {
 
 test "emit resets timings" {
     var tracer = TestTracer.init(false);
-    tracer.start(.prefetch);
-    tracer.stop(.prefetch, .get_product);
+    tracer.start(.prefetch, 0);
+    tracer.stop(.prefetch, 0, .get_product);
     try std.testing.expect(tracer.emit());
 
     const slot = @intFromEnum(TestOp.get_product);
@@ -345,10 +352,10 @@ test "counter reset after emit" {
 
 test "separate spans are independent" {
     var tracer = TestTracer.init(false);
-    tracer.start(.prefetch);
-    tracer.stop(.prefetch, .get_product);
-    tracer.start(.execute);
-    tracer.stop(.execute, .get_product);
+    tracer.start(.prefetch, 0);
+    tracer.stop(.prefetch, 0, .get_product);
+    tracer.start(.execute, 0);
+    tracer.stop(.execute, 0, .get_product);
 
     const op_slot = @intFromEnum(TestOp.get_product);
     try std.testing.expect(tracer.timings[@intFromEnum(TestSpan.prefetch)][op_slot] != null);

@@ -86,7 +86,7 @@ pub fn main(allocator: std.mem.Allocator, args: FuzzArgs) !void {
                 if (client.call_state != .idle) continue;
 
                 // Submit CALL.
-                if (!client.call_submit(&bus, "test", "args", request_id)) continue;
+                if (!client.call_submit(&bus, 0, "test", "args", request_id)) continue;
                 request_id +%= 1;
 
                 // Inject valid RESULT.
@@ -116,7 +116,7 @@ pub fn main(allocator: std.mem.Allocator, args: FuzzArgs) !void {
             .call_with_query => {
                 if (client.call_state != .idle) continue;
 
-                if (!client.call_submit(&bus, "prefetch", "args", request_id)) continue;
+                if (!client.call_submit(&bus, 0, "prefetch", "args", request_id)) continue;
                 request_id +%= 1;
 
                 // Inject QUERY frame from "sidecar."
@@ -152,7 +152,7 @@ pub fn main(allocator: std.mem.Allocator, args: FuzzArgs) !void {
             },
             .inject_corrupt_result => {
                 if (client.call_state != .idle) continue;
-                if (!client.call_submit(&bus, "test", "args", request_id)) continue;
+                if (!client.call_submit(&bus, 0, "test", "args", request_id)) continue;
                 request_id +%= 1;
 
                 // Inject corrupt RESULT — CRC will fail at transport layer
@@ -183,7 +183,7 @@ pub fn main(allocator: std.mem.Allocator, args: FuzzArgs) !void {
             },
             .inject_truncated_result => {
                 if (client.call_state != .idle) continue;
-                if (!client.call_submit(&bus, "test", "args", request_id)) continue;
+                if (!client.call_submit(&bus, 0, "test", "args", request_id)) continue;
                 request_id +%= 1;
 
                 // Inject a RESULT with only the tag byte — truncated.
@@ -204,7 +204,7 @@ pub fn main(allocator: std.mem.Allocator, args: FuzzArgs) !void {
             },
             .inject_wrong_tag => {
                 if (client.call_state != .idle) continue;
-                if (!client.call_submit(&bus, "test", "args", request_id)) continue;
+                if (!client.call_submit(&bus, 0, "test", "args", request_id)) continue;
                 request_id +%= 1;
 
                 // Inject a CALL frame (wrong direction — sidecar should send RESULT, not CALL).
@@ -233,7 +233,7 @@ pub fn main(allocator: std.mem.Allocator, args: FuzzArgs) !void {
             },
             .inject_wrong_request_id => {
                 if (client.call_state != .idle) continue;
-                if (!client.call_submit(&bus, "test", "args", request_id)) continue;
+                if (!client.call_submit(&bus, 0, "test", "args", request_id)) continue;
                 request_id +%= 1;
 
                 // Inject RESULT with wrong request_id.
@@ -279,7 +279,7 @@ pub fn main(allocator: std.mem.Allocator, args: FuzzArgs) !void {
                     if (!bus.is_connected()) break;
                     if (client.call_state != .idle) break;
 
-                    if (!client.call_submit(&bus, "multi", "args", request_id)) break;
+                    if (!client.call_submit(&bus, 0, "multi", "args", request_id)) break;
                     request_id +%= 1;
 
                     if (!inject_result_frame(&io, pair[1], request_id - 1, .success, "multi_ok")) break;
@@ -449,6 +449,7 @@ const SidecarFuzzCtx = struct {
         const self: *SidecarFuzzCtx = @ptrCast(@alignCast(ctx_ptr));
         self.client.on_frame(
             self.bus,
+            0, // connection_index — single connection in fuzz
             frame,
             dummy_query_fn,
             undefined, // query_ctx not used by dummy

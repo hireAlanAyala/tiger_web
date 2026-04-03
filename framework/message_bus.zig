@@ -894,6 +894,49 @@ pub fn MessageBusType(comptime IO: type, comptime options: Options) type {
             self.active = 0;
         }
 
+        // --- Connection-indexed methods (Stage 3: per-slot dispatch) ---
+
+        /// Send a frame to a specific connection by index.
+        pub fn send_frame_to(self: *Self, index: u8, data: []const u8) void {
+            assert(index < connections_max);
+            self.connections[index].send_frame(data);
+        }
+
+        /// Send a message to a specific connection by index.
+        pub fn send_message_to(self: *Self, index: u8, message: *Connection.Message, payload_len: u32) void {
+            assert(index < connections_max);
+            if (self.connections[index].state != .connected) {
+                self.pool.unref(message);
+                return;
+            }
+            self.connections[index].send_message(message, payload_len);
+        }
+
+        /// Whether a specific connection is established.
+        pub fn is_connection_ready(self: *const Self, index: u8) bool {
+            assert(index < connections_max);
+            return self.connections[index].state == .connected;
+        }
+
+        /// Whether a specific connection can accept a message.
+        pub fn can_send_to(self: *const Self, index: u8) bool {
+            assert(index < connections_max);
+            if (self.connections[index].state != .connected) return false;
+            return !self.connections[index].send_queue.full();
+        }
+
+        /// Suspend recv on a specific connection.
+        pub fn suspend_recv_to(self: *Self, index: u8) void {
+            assert(index < connections_max);
+            self.connections[index].suspend_recv();
+        }
+
+        /// Resume recv on a specific connection.
+        pub fn resume_recv_to(self: *Self, index: u8) void {
+            assert(index < connections_max);
+            self.connections[index].resume_recv();
+        }
+
         /// Frame header size — re-exported so consumers don't reach
         /// into Bus.Connection for a constant.
         pub const frame_header_size = Connection.frame_header_size;

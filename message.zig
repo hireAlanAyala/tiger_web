@@ -36,6 +36,16 @@ pub const Status = enum(u8) {
 /// Session action — set by handle (verify_login_code, logout).
 pub const SessionAction = enum { none, set_authenticated, clear };
 
+/// Pipeline response — the framework envelope. Handler decision + auth.
+/// No domain data — that flows through handler cache → render.
+pub const PipelineResponse = struct {
+    status: Status,
+    session_action: SessionAction,
+    user_id: u128,
+    is_authenticated: bool,
+    is_new_visitor: bool,
+};
+
 /// Flat operation enum — encodes entity type AND action in a single tag,
 /// following TigerBeetle's pattern. Adding a new entity type means adding
 /// new variants here; the compiler forces every switch site to handle them.

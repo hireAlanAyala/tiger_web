@@ -64,16 +64,39 @@ fn list_params_price(price_min: u32, price_max: u32) message.ListParams {
     return params;
 }
 
-fn test_execute(sm: *TestStateMachine, msg: message.Message) TestStateMachine.PipelineResponse {
+fn test_execute(sm: *TestStateMachine, msg: message.Message) message.PipelineResponse {
     if (sm.now == 0) sm.now = 1_700_000_000;
-    assert(sm.prefetch(msg) == .complete);
-    return sm.commit(msg).response;
+
+    var handler: App.HandlersType(App.Storage) = .{};
+    const identity = sm.resolve_credential(msg);
+    const cache = handler.handler_prefetch(sm.storage, &msg) orelse unreachable;
+
+    sm.begin_batch();
+    var write_view = App.Storage.WriteView.init(sm.storage);
+    const fw = App.HandlersType(App.Storage).FwCtx{
+        .identity = identity,
+        .now = sm.now,
+        .is_sse = false,
+    };
+    const handle_result = handler.handler_execute(cache, msg, fw, &write_view);
+    sm.commit_batch();
+
+    const is_auth = identity.is_authenticated != 0 or
+        handle_result.session_action == .set_authenticated;
+
+    return .{
+        .status = handle_result.status,
+        .session_action = handle_result.session_action,
+        .user_id = identity.user_id,
+        .is_authenticated = is_auth,
+        .is_new_visitor = identity.is_new != 0,
+    };
 }
 
 test "create and get" {
     var storage = try App.Storage.init(":memory:");
     defer storage.deinit();
-    var sm = TestStateMachine.init(&storage, .{}, false, 0, sm_test_key);
+    var sm = TestStateMachine.init(&storage, false, 0, sm_test_key);
 
     const test_id: u128 = 0xaabbccdd11223344aabbccdd11223344;
     const create_resp = test_execute(&sm, message.Message.init(.create_product, 0, 1, make_test_product(test_id, "Widget", 999)));
@@ -86,7 +109,7 @@ test "create and get" {
 test "get missing" {
     var storage = try App.Storage.init(":memory:");
     defer storage.deinit();
-    var sm = TestStateMachine.init(&storage, .{}, false, 0, sm_test_key);
+    var sm = TestStateMachine.init(&storage, false, 0, sm_test_key);
 
     const resp = test_execute(&sm, message.Message.init(.get_product, 0x00000000000000000000000000000063, 1, {}));
     try std.testing.expectEqual(resp.status, .not_found);
@@ -95,7 +118,7 @@ test "get missing" {
 test "update" {
     var storage = try App.Storage.init(":memory:");
     defer storage.deinit();
-    var sm = TestStateMachine.init(&storage, .{}, false, 0, sm_test_key);
+    var sm = TestStateMachine.init(&storage, false, 0, sm_test_key);
 
     const test_id: u128 = 0x11111111111111111111111111111111;
     _ = test_execute(&sm, message.Message.init(.create_product, 0, 1, make_test_product(test_id, "Old Name", 100)));
@@ -107,7 +130,7 @@ test "update" {
 test "delete" {
     var storage = try App.Storage.init(":memory:");
     defer storage.deinit();
-    var sm = TestStateMachine.init(&storage, .{}, false, 0, sm_test_key);
+    var sm = TestStateMachine.init(&storage, false, 0, sm_test_key);
 
     const test_id: u128 = 0x22222222222222222222222222222222;
     _ = test_execute(&sm, message.Message.init(.create_product, 0, 1, make_test_product(test_id, "Doomed", 100)));
@@ -122,7 +145,7 @@ test "delete" {
 test "delete missing" {
     var storage = try App.Storage.init(":memory:");
     defer storage.deinit();
-    var sm = TestStateMachine.init(&storage, .{}, false, 0, sm_test_key);
+    var sm = TestStateMachine.init(&storage, false, 0, sm_test_key);
 
     const resp = test_execute(&sm, message.Message.init(.delete_product, 0x00000000000000000000000000000063, 1, {}));
     try std.testing.expectEqual(resp.status, .not_found);
@@ -131,7 +154,7 @@ test "delete missing" {
 test "soft delete preserves product in storage" {
     var storage = try App.Storage.init(":memory:");
     defer storage.deinit();
-    var sm = TestStateMachine.init(&storage, .{}, false, 0, sm_test_key);
+    var sm = TestStateMachine.init(&storage, false, 0, sm_test_key);
 
     const test_id: u128 = 0x33333333333333333333333333333333;
     _ = test_execute(&sm, message.Message.init(.create_product, 0, 1, make_test_product(test_id, "SoftDel", 100)));
@@ -154,7 +177,7 @@ test "soft delete preserves product in storage" {
 test "list" {
     var storage = try App.Storage.init(":memory:");
     defer storage.deinit();
-    var sm = TestStateMachine.init(&storage, .{}, false, 0, sm_test_key);
+    var sm = TestStateMachine.init(&storage, false, 0, sm_test_key);
 
     _ = test_execute(&sm, message.Message.init(.create_product, 0, 1, make_test_product(0xaaaa0000000000000000000000000001, "A", 100)));
     _ = test_execute(&sm, message.Message.init(.create_product, 0, 1, make_test_product(0xaaaa0000000000000000000000000002, "B", 200)));
@@ -166,7 +189,7 @@ test "list" {
 test "list returns results sorted by ID regardless of insertion order" {
     var storage = try App.Storage.init(":memory:");
     defer storage.deinit();
-    var sm = TestStateMachine.init(&storage, .{}, false, 0, sm_test_key);
+    var sm = TestStateMachine.init(&storage, false, 0, sm_test_key);
 
     // Insert in descending ID order — the opposite of sorted.
     const id_high: u128 = 0xff;
@@ -185,7 +208,7 @@ test "list returns results sorted by ID regardless of insertion order" {
 test "list pagination returns the smallest IDs when more than list_max exist" {
     var storage = try App.Storage.init(":memory:");
     defer storage.deinit();
-    var sm = TestStateMachine.init(&storage, .{}, false, 0, sm_test_key);
+    var sm = TestStateMachine.init(&storage, false, 0, sm_test_key);
 
     // Create list_max + 10 products with IDs from 1..list_max+10,
     // inserted in reverse order to stress the sort.
@@ -207,7 +230,7 @@ test "list pagination returns the smallest IDs when more than list_max exist" {
 test "list with cursor skips earlier items" {
     var storage = try App.Storage.init(":memory:");
     defer storage.deinit();
-    var sm = TestStateMachine.init(&storage, .{}, false, 0, sm_test_key);
+    var sm = TestStateMachine.init(&storage, false, 0, sm_test_key);
 
     const id1: u128 = 0x00000000000000000000000000000001;
     const id2: u128 = 0x00000000000000000000000000000002;
@@ -231,7 +254,7 @@ test "list with cursor skips earlier items" {
 test "list filters by active status" {
     var storage = try App.Storage.init(":memory:");
     defer storage.deinit();
-    var sm = TestStateMachine.init(&storage, .{}, false, 0, sm_test_key);
+    var sm = TestStateMachine.init(&storage, false, 0, sm_test_key);
 
     var active = make_test_product(0x01, "Active", 100);
     active.flags.active = true;
@@ -254,7 +277,7 @@ test "list filters by active status" {
 test "list filters by price range" {
     var storage = try App.Storage.init(":memory:");
     defer storage.deinit();
-    var sm = TestStateMachine.init(&storage, .{}, false, 0, sm_test_key);
+    var sm = TestStateMachine.init(&storage, false, 0, sm_test_key);
 
     _ = test_execute(&sm, message.Message.init(.create_product, 0, 1, make_test_product(0x01, "Cheap", 500)));
     _ = test_execute(&sm, message.Message.init(.create_product, 0, 1, make_test_product(0x02, "Mid", 1500)));
@@ -273,7 +296,7 @@ test "list filters by price range" {
 test "list filters by name prefix" {
     var storage = try App.Storage.init(":memory:");
     defer storage.deinit();
-    var sm = TestStateMachine.init(&storage, .{}, false, 0, sm_test_key);
+    var sm = TestStateMachine.init(&storage, false, 0, sm_test_key);
 
     _ = test_execute(&sm, message.Message.init(.create_product, 0, 1, make_test_product(0x01, "Widget A", 100)));
     _ = test_execute(&sm, message.Message.init(.create_product, 0, 1, make_test_product(0x02, "Widget B", 200)));
@@ -290,7 +313,7 @@ test "list filters by name prefix" {
 test "client-provided IDs" {
     var storage = try App.Storage.init(":memory:");
     defer storage.deinit();
-    var sm = TestStateMachine.init(&storage, .{}, false, 0, sm_test_key);
+    var sm = TestStateMachine.init(&storage, false, 0, sm_test_key);
 
     const id1: u128 = 0xaabbccddaabbccddaabbccddaabbccd1;
     const id2: u128 = 0xaabbccddaabbccddaabbccddaabbccd2;
@@ -301,7 +324,7 @@ test "client-provided IDs" {
 test "transfer inventory — success" {
     var storage = try App.Storage.init(":memory:");
     defer storage.deinit();
-    var sm = TestStateMachine.init(&storage, .{}, false, 0, sm_test_key);
+    var sm = TestStateMachine.init(&storage, false, 0, sm_test_key);
 
     const id_a: u128 = 0xaaaa0000000000000000000000000001;
     const id_b: u128 = 0xaaaa0000000000000000000000000002;
@@ -326,7 +349,7 @@ test "transfer inventory — success" {
 test "transfer inventory — insufficient stock" {
     var storage = try App.Storage.init(":memory:");
     defer storage.deinit();
-    var sm = TestStateMachine.init(&storage, .{}, false, 0, sm_test_key);
+    var sm = TestStateMachine.init(&storage, false, 0, sm_test_key);
 
     const id_a: u128 = 0xbbbb0000000000000000000000000001;
     const id_b: u128 = 0xbbbb0000000000000000000000000002;
@@ -346,7 +369,7 @@ test "transfer inventory — insufficient stock" {
 test "transfer inventory — source not found" {
     var storage = try App.Storage.init(":memory:");
     defer storage.deinit();
-    var sm = TestStateMachine.init(&storage, .{}, false, 0, sm_test_key);
+    var sm = TestStateMachine.init(&storage, false, 0, sm_test_key);
 
     const id_b: u128 = 0xcccc0000000000000000000000000002;
     _ = test_execute(&sm, message.Message.init(.create_product, 0, 1, make_test_product(id_b, "Target", 0)));
@@ -358,7 +381,7 @@ test "transfer inventory — source not found" {
 test "transfer inventory — target not found" {
     var storage = try App.Storage.init(":memory:");
     defer storage.deinit();
-    var sm = TestStateMachine.init(&storage, .{}, false, 0, sm_test_key);
+    var sm = TestStateMachine.init(&storage, false, 0, sm_test_key);
 
     const id_a: u128 = 0xdddd0000000000000000000000000001;
     var prod_a = make_test_product(id_a, "Source", 0);
@@ -384,7 +407,7 @@ fn make_order_request(id: u128, items: []const struct { id: u128, qty: u32 }) me
 test "create order — success" {
     var storage = try App.Storage.init(":memory:");
     defer storage.deinit();
-    var sm = TestStateMachine.init(&storage, .{}, false, 0, sm_test_key);
+    var sm = TestStateMachine.init(&storage, false, 0, sm_test_key);
 
     const id_a: u128 = 0xaaaa0000000000000000000000000001;
     const id_b: u128 = 0xaaaa0000000000000000000000000002;
@@ -413,7 +436,7 @@ test "create order — success" {
 test "create order — insufficient inventory rolls back all" {
     var storage = try App.Storage.init(":memory:");
     defer storage.deinit();
-    var sm = TestStateMachine.init(&storage, .{}, false, 0, sm_test_key);
+    var sm = TestStateMachine.init(&storage, false, 0, sm_test_key);
 
     const id_a: u128 = 0xbbbb0000000000000000000000000001;
     const id_b: u128 = 0xbbbb0000000000000000000000000002;
@@ -441,7 +464,7 @@ test "create order — insufficient inventory rolls back all" {
 test "create order — product not found" {
     var storage = try App.Storage.init(":memory:");
     defer storage.deinit();
-    var sm = TestStateMachine.init(&storage, .{}, false, 0, sm_test_key);
+    var sm = TestStateMachine.init(&storage, false, 0, sm_test_key);
 
     const id_a: u128 = 0xcccc0000000000000000000000000001;
     var prod_a = make_test_product(id_a, "Exists", 100);
@@ -459,7 +482,7 @@ test "create order — product not found" {
 test "create order — persisted and retrievable" {
     var storage = try App.Storage.init(":memory:");
     defer storage.deinit();
-    var sm = TestStateMachine.init(&storage, .{}, false, 0, sm_test_key);
+    var sm = TestStateMachine.init(&storage, false, 0, sm_test_key);
 
     const id_a: u128 = 0xaaaa0000000000000000000000000001;
     var prod_a = make_test_product(id_a, "Widget", 1000);
@@ -484,7 +507,7 @@ test "create order — persisted and retrievable" {
 test "get order — not found" {
     var storage = try App.Storage.init(":memory:");
     defer storage.deinit();
-    var sm = TestStateMachine.init(&storage, .{}, false, 0, sm_test_key);
+    var sm = TestStateMachine.init(&storage, false, 0, sm_test_key);
 
     const resp = test_execute(&sm, message.Message.init(.get_order, 0x00000000000000000000000000000099, 1, {}));
     try std.testing.expectEqual(resp.status, .not_found);
@@ -493,7 +516,7 @@ test "get order — not found" {
 test "create sets version to 1" {
     var storage = try App.Storage.init(":memory:");
     defer storage.deinit();
-    var sm = TestStateMachine.init(&storage, .{}, false, 0, sm_test_key);
+    var sm = TestStateMachine.init(&storage, false, 0, sm_test_key);
 
     const test_id: u128 = 0xffff0000000000000000000000000001;
     const resp = test_execute(&sm, message.Message.init(.create_product, 0, 1, make_test_product(test_id, "Versioned", 100)));
@@ -503,7 +526,7 @@ test "create sets version to 1" {
 test "update increments version" {
     var storage = try App.Storage.init(":memory:");
     defer storage.deinit();
-    var sm = TestStateMachine.init(&storage, .{}, false, 0, sm_test_key);
+    var sm = TestStateMachine.init(&storage, false, 0, sm_test_key);
 
     const test_id: u128 = 0xffff0000000000000000000000000002;
     _ = test_execute(&sm, message.Message.init(.create_product, 0, 1, make_test_product(test_id, "V1", 100)));
@@ -518,7 +541,7 @@ test "update increments version" {
 test "update with wrong version returns conflict" {
     var storage = try App.Storage.init(":memory:");
     defer storage.deinit();
-    var sm = TestStateMachine.init(&storage, .{}, false, 0, sm_test_key);
+    var sm = TestStateMachine.init(&storage, false, 0, sm_test_key);
 
     const test_id: u128 = 0xffff0000000000000000000000000003;
     _ = test_execute(&sm, message.Message.init(.create_product, 0, 1, make_test_product(test_id, "Original", 100)));
@@ -536,7 +559,7 @@ test "update with wrong version returns conflict" {
 test "update with version 0 skips check" {
     var storage = try App.Storage.init(":memory:");
     defer storage.deinit();
-    var sm = TestStateMachine.init(&storage, .{}, false, 0, sm_test_key);
+    var sm = TestStateMachine.init(&storage, false, 0, sm_test_key);
 
     const test_id: u128 = 0xffff0000000000000000000000000004;
     _ = test_execute(&sm, message.Message.init(.create_product, 0, 1, make_test_product(test_id, "NoCheck", 100)));
@@ -551,7 +574,7 @@ test "update with version 0 skips check" {
 test "duplicate ID rejected" {
     var storage = try App.Storage.init(":memory:");
     defer storage.deinit();
-    var sm = TestStateMachine.init(&storage, .{}, false, 0, sm_test_key);
+    var sm = TestStateMachine.init(&storage, false, 0, sm_test_key);
 
     const test_id: u128 = 0x33333333333333333333333333333333;
     const r1 = test_execute(&sm, message.Message.init(.create_product, 0, 1, make_test_product(test_id, "A", 1)));
@@ -566,7 +589,7 @@ test "capacity exhaustion — panics (writes are infallible after prefetch)" {
     // This test verifies the contract holds up to capacity.
     var storage = try App.Storage.init(":memory:");
     defer storage.deinit();
-    var sm = TestStateMachine.init(&storage, .{}, false, 0, sm_test_key);
+    var sm = TestStateMachine.init(&storage, false, 0, sm_test_key);
 
     // Fill storage with enough entries to test capacity behavior.
     // SQLite has no fixed capacity — use a reasonable test count.
@@ -588,7 +611,7 @@ fn make_test_collection(id: u128, name: []const u8) message.ProductCollection {
 test "delete collection cascades memberships but not products" {
     var storage = try App.Storage.init(":memory:");
     defer storage.deinit();
-    var sm = TestStateMachine.init(&storage, .{}, false, 0, sm_test_key);
+    var sm = TestStateMachine.init(&storage, false, 0, sm_test_key);
 
     const product_id: u128 = 0xaaaa0000000000000000000000000001;
     const col_id: u128 = 0xcccc0000000000000000000000000001;
@@ -628,7 +651,7 @@ test "delete collection cascades memberships but not products" {
 test "seeded: transfer inventory conserves total" {
     var storage = try App.Storage.init(":memory:");
     defer storage.deinit();
-    var sm = TestStateMachine.init(&storage, .{}, false, 0, sm_test_key);
+    var sm = TestStateMachine.init(&storage, false, 0, sm_test_key);
     var prng = PRNG.from_seed_testing();
 
     const num_products = 8;
@@ -668,7 +691,7 @@ test "seeded: transfer inventory conserves total" {
 test "seeded: create order arithmetic" {
     var storage = try App.Storage.init(":memory:");
     defer storage.deinit();
-    var sm = TestStateMachine.init(&storage, .{}, false, 0, sm_test_key);
+    var sm = TestStateMachine.init(&storage, false, 0, sm_test_key);
     var prng = PRNG.from_seed_testing();
 
     // Create products with random prices and inventories.
@@ -714,7 +737,7 @@ test "seeded: create order arithmetic" {
 test "seeded: list filters match predicate" {
     var storage = try App.Storage.init(":memory:");
     defer storage.deinit();
-    var sm = TestStateMachine.init(&storage, .{}, false, 0, sm_test_key);
+    var sm = TestStateMachine.init(&storage, false, 0, sm_test_key);
     var prng = PRNG.from_seed_testing();
 
     const prefixes = [_][]const u8{ "Alpha", "Beta", "Gamma", "Delta" };
@@ -800,7 +823,7 @@ test "seeded: list filters match predicate" {
 test "seeded: update versioning monotonicity" {
     var storage = try App.Storage.init(":memory:");
     defer storage.deinit();
-    var sm = TestStateMachine.init(&storage, .{}, false, 0, sm_test_key);
+    var sm = TestStateMachine.init(&storage, false, 0, sm_test_key);
     var prng = PRNG.from_seed_testing();
 
     const test_id: u128 = 0xffff0000000000000000000000000099;

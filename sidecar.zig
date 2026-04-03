@@ -99,21 +99,18 @@ pub fn SidecarClientType(comptime Bus: type) type {
         /// Returns false if the bus connection is closed (sidecar
         /// disconnected) or the frame is too large. The caller
         /// treats false as busy/fail.
-        pub fn call_submit(self: *Self, bus: *Bus, function_name: []const u8, args: []const u8, request_id: u32) bool {
+        pub fn call_submit(self: *Self, bus: *Bus, connection_index: u8, function_name: []const u8, args: []const u8, request_id: u32) bool {
             assert(self.call_state == .idle);
 
-            // Don't submit if the sidecar isn't connected. Without
-            // this check, call_state becomes .receiving but no RESULT
-            // will ever arrive — the pipeline hangs until timeout.
-            // TB pattern: call bus methods, never reach into bus.connection.
-            if (!bus.is_connected()) {
-                log.warn("call: bus not connected for {s}", .{function_name});
+            // Don't submit if the sidecar connection isn't ready.
+            if (!bus.is_connection_ready(connection_index)) {
+                log.warn("call: connection {d} not ready for {s}", .{ connection_index, function_name });
                 return false;
             }
 
             // Don't submit if the send queue is full.
-            if (!bus.can_send()) {
-                log.warn("call: send queue full for {s}", .{function_name});
+            if (!bus.can_send_to(connection_index)) {
+                log.warn("call: send queue full on connection {d} for {s}", .{ connection_index, function_name });
                 return false;
             }
 
@@ -129,7 +126,7 @@ pub fn SidecarClientType(comptime Bus: type) type {
                 return false;
             };
 
-            bus.send_message(msg, @intCast(call_len));
+            bus.send_message_to(connection_index, msg, @intCast(call_len));
             self.call_state = .receiving;
             self.call_query_count = 0;
             self.expected_request_id = request_id;
@@ -142,6 +139,7 @@ pub fn SidecarClientType(comptime Bus: type) type {
         pub fn on_frame(
             self: *Self,
             bus: *Bus,
+            connection_index: u8,
             frame: []const u8,
             query_fn: ?QueryFn,
             query_ctx: ?*anyopaque,
@@ -212,7 +210,7 @@ pub fn SidecarClientType(comptime Bus: type) type {
 
                     // Check send queue before allocating — a rogue sidecar
                     // bursting QUERYs must not assert-crash the server.
-                    if (!bus.can_send()) {
+                    if (!bus.can_send_to(connection_index)) {
                         log.warn("call: send queue full, cannot queue QUERY_RESULT", .{});
                         self.call_state = .failed;
                         self.protocol_violation = true;
@@ -239,7 +237,7 @@ pub fn SidecarClientType(comptime Bus: type) type {
                     ) orelse "";
 
                     const qr_total: u32 = @intCast(7 + row_set.len);
-                    bus.send_message(msg, qr_total);
+                    bus.send_message_to(connection_index, msg, qr_total);
 
                     // Stay in .receiving — more frames expected.
                 },

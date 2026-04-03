@@ -28,7 +28,7 @@ pub const std_options: std.Options = .{
 
 const Server = ServerType(App, SimIO, Storage);
 const Handlers = App.HandlersFor(Storage, SimIO);
-const StateMachine = App.StateMachineWith(Storage, Handlers);
+const StateMachine = App.StateMachineWith(Storage, Handlers.BusType.connections_max);
 
 const test_key: *const [auth.key_length]u8 = "tiger-web-test-key-0123456789ab!";
 
@@ -305,7 +305,7 @@ const TestHarness = struct {
         h.storage = try Storage.init(":memory:");
 
         var time_sim = TimeSim{};
-        h.sm = StateMachine.init(&h.storage, .{}, false, 0, test_key);
+        h.sm = StateMachine.init(&h.storage, false, 0, test_key);
         h.server = try Server.init(h.allocator, &h.io, &h.sm, http_listen_fd, time_sim.time(), null);
         try h.server.wire_sidecar(h.allocator, null);
         h.server.sidecar_bus.listen_fd = sidecar_listen_fd;
@@ -365,21 +365,23 @@ const TestHarness = struct {
     }
 
     fn sidecar_connected(h: *TestHarness) bool {
-        return h.server.sidecar_is_connected();
+        return h.server.sidecar_any_ready();
     }
 
     fn sidecar_disconnected(h: *TestHarness) bool {
-        return !h.server.sidecar_is_connected();
+        return !h.server.sidecar_any_ready();
     }
 
-    fn active_switched_to_standby(h: *TestHarness) bool {
-        // Active switched from primary (slot 0) to standby (slot 1).
-        return h.server.sidecar_bus.active != null and
-            h.server.sidecar_bus.active.? == 1;
+    fn slot_1_ready(h: *TestHarness) bool {
+        return h.server.sidecar_connections_ready[1];
     }
 
     fn handler_pending(h: *TestHarness) bool {
-        return h.server.state_machine.handlers.is_handler_pending();
+        // Check any handler for pending state (first non-idle slot).
+        for (&h.server.handlers, &h.server.pipeline_slots) |*handler, *slot| {
+            if (slot.stage != .idle) return handler.is_handler_pending();
+        }
+        return false;
     }
 
     /// Route + prefetch + handle CALLs complete (3 calls).
@@ -509,7 +511,7 @@ test "sidecar: basic request-response" {
     defer h.deinit();
 
     h.connect_sidecar();
-    try std.testing.expect(h.server.sidecar_is_connected());
+    try std.testing.expect(h.server.sidecar_any_ready());
 
     h.connect_http();
     h.inject_post();
@@ -524,7 +526,7 @@ test "sidecar: down at startup → 503" {
     defer h.deinit();
 
     // Don't connect sidecar — server has no sidecar.
-    try std.testing.expect(!h.server.sidecar_is_connected());
+    try std.testing.expect(!h.server.sidecar_any_ready());
 
     h.connect_http();
     h.inject_post();
@@ -573,7 +575,7 @@ test "sidecar: reconnect after disconnect → 200" {
 
     // Reconnect sidecar.
     h.connect_sidecar();
-    try std.testing.expect(h.server.sidecar_is_connected());
+    try std.testing.expect(h.server.sidecar_any_ready());
 
     // New request succeeds.
     h.prepare_next_request();
@@ -614,7 +616,7 @@ test "sidecar: connect then disconnect before READY → 503" {
     h.sidecar.disconnect();
     h.run_server_until(TestHarness.bus_closed);
 
-    try std.testing.expect(!h.server.sidecar_is_connected());
+    try std.testing.expect(!h.server.sidecar_any_ready());
 
     h.connect_http();
     h.inject_post();
@@ -715,27 +717,29 @@ test "sidecar: hot standby — kill active, standby takes over" {
     try h.init();
     defer h.deinit();
 
-    // Connect primary (becomes active) and standby.
+    // Connect both sidecars — both slots become ready.
     h.connect_sidecar();
     h.connect_standby();
-    try std.testing.expect(h.server.sidecar_is_connected());
-    try std.testing.expectEqual(@as(?u8, 0), h.server.sidecar_bus.active);
+    try std.testing.expect(h.server.sidecar_any_ready());
+    try std.testing.expect(h.server.sidecar_connections_ready[0]);
+    try std.testing.expect(h.server.sidecar_connections_ready[1]);
 
-    // First request succeeds via primary.
+    // First request succeeds via slot 0.
     h.connect_http();
     h.inject_post();
     const resp1 = h.wait_response() orelse return error.TestUnexpectedResult;
     try std.testing.expectEqual(@as(u16, 200), resp1.status_code);
 
-    // Kill primary sidecar.
+    // Kill sidecar on slot 0. Slot 0 disabled, slot 1 still ready.
     h.sidecar.disconnect();
-    h.run_server_until(TestHarness.active_switched_to_standby);
+    h.run_server_until(TestHarness.slot_1_ready);
 
-    // Active should have switched to standby (connection slot 1).
-    try std.testing.expect(h.server.sidecar_is_connected());
-    try std.testing.expectEqual(@as(?u8, 1), h.server.sidecar_bus.active);
+    // Slot 0 disabled, slot 1 still ready.
+    try std.testing.expect(h.server.sidecar_any_ready());
+    try std.testing.expect(!h.server.sidecar_connections_ready[0]);
+    try std.testing.expect(h.server.sidecar_connections_ready[1]);
 
-    // Next request succeeds via standby — no 503.
+    // Next request succeeds via slot 1 — no 503.
     h.prepare_next_request();
     h.inject_post();
     const resp2 = h.wait_response() orelse return error.TestUnexpectedResult;

@@ -205,6 +205,14 @@ Right primitive: the developer states what happened, the framework handles the p
 - ensure we use cli/program defaults very carefully. i like no defaults or few defaults over heavy defaults
 - think about 10 years from now, what parts of the user space would have likely been violated? we should pull back a primitive for these.
 
+# plugins
+potential pulled at runtime? or compiled with the server's binary?
+should they not allocate after init?
+I think for sure zig only as the language
+Should they pin their zig version and then be packaged as a binary of handles? so we can communicate to it isolated through binary?
+render should be vanilla html and js only
+plugins should copy into your binary, so you can inspect nad debug them
+
 
 
 Theres a pattern of annotations needing settings

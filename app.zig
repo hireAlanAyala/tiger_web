@@ -202,17 +202,17 @@ pub fn HandlersType(comptime StorageParam: type) type {
 // message bus). Both implement the same Handlers interface.
 //
 // The server resolves HandlersFor(Storage, IO) and passes the concrete
-// Handlers type to StateMachineWith(Storage, Handlers). The SM never
+// Handlers type to HandlersFor(Storage, IO). The SM never
 // sees IO — it receives only the resolved Handlers type. This matches
 // TB's pattern: the Replica resolves types, the SM is pure business logic.
 // Tests use SM (native-only alias) — they don't need sidecar.
 // =====================================================================
 
-/// Construct SM from resolved Handlers type. The server calls this
-/// after resolving Handlers via HandlersFor(Storage, IO). The SM
-/// sees Handlers (its dispatch interface), never IO.
-pub fn StateMachineWith(comptime StorageParam: type, comptime HandlersParam: type) type {
-    return state_machine.StateMachineType(StorageParam, HandlersParam);
+/// Construct SM — framework services (auth, transactions, tracer).
+/// SM doesn't see handlers — those are per-slot on the server.
+/// slots_max: number of concurrent pipeline slots (for per-slot tracer spans).
+pub fn StateMachineWith(comptime StorageParam: type, comptime slots_max: u8) type {
+    return state_machine.StateMachineType(StorageParam, slots_max);
 }
 
 /// Build option: true = sidecar handlers, false = native handlers.
@@ -284,9 +284,9 @@ fn validateHandlersInterface(comptime H: type) void {
 pub const Storage = @import("storage.zig").SqliteStorage;
 
 /// Pre-computed SM type for native-only consumers (tests, fuzz,
-/// benchmarks). These never use sidecar — they test the SM directly.
-/// The server uses StateMachineType(Storage, IO) for full resolution.
-pub const SM = state_machine.StateMachineType(Storage, HandlersType(Storage));
+/// benchmarks). SM is handler-agnostic — pure framework services.
+/// slots_max=1 — native handlers are synchronous, single slot.
+pub const SM = state_machine.StateMachineType(Storage, 1);
 
 pub const Wal = @import("framework/wal.zig").WalType(Operation);
 
