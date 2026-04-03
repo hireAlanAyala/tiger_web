@@ -173,10 +173,12 @@ fn cmd_trace(cli: TraceArgs) void {
         std.process.exit(1);
     };
 
-    _ = parse_size(cli.max); // validate early
+    const max_bytes = parse_size(cli.max);
 
-    // Send start_trace command.
-    _ = std.posix.send(fd, "start_trace\n", 0) catch {
+    // Send start_trace command with max bytes.
+    var cmd_buf: [48]u8 = undefined;
+    const cmd = std.fmt.bufPrint(&cmd_buf, "start_trace {d}\n", .{max_bytes}) catch unreachable;
+    _ = std.posix.send(fd, cmd, 0) catch {
         stdout.print("failed to send command\n", .{}) catch {};
         std.process.exit(1);
     };
@@ -438,7 +440,11 @@ const AdminSocket = struct {
         }
     }
 
-    const AdminCommand = enum { start_trace, stop_trace, unknown };
+    const AdminCommand = union(enum) {
+        start_trace: u64, // max bytes
+        stop_trace,
+        unknown,
+    };
 
     /// Poll for admin commands. Non-blocking — returns null if nothing pending.
     fn poll(self: *AdminSocket) ?AdminCommand {
@@ -452,7 +458,7 @@ const AdminSocket = struct {
 
         // Try to read a command. Non-blocking — EAGAIN means
         // no data yet (client still connected, waiting).
-        var buf: [32]u8 = undefined;
+        var buf: [48]u8 = undefined;
         const n = std.posix.recv(self.client_fd, &buf, 0) catch |err| {
             if (err == error.WouldBlock) return null; // no data yet, keep connection
             // Real error — close.
@@ -468,7 +474,11 @@ const AdminSocket = struct {
         }
 
         const cmd = std.mem.trimRight(u8, buf[0..n], "\n");
-        if (std.mem.eql(u8, cmd, "start_trace")) return .start_trace;
+        if (std.mem.startsWith(u8, cmd, "start_trace ")) {
+            const size_str = cmd["start_trace ".len..];
+            const max_bytes = std.fmt.parseInt(u64, size_str, 10) catch return .unknown;
+            return .{ .start_trace = max_bytes };
+        }
         if (std.mem.eql(u8, cmd, "stop_trace")) return .stop_trace;
         return .unknown;
     }
@@ -522,14 +532,10 @@ fn run_loop(
 
         // Admin socket — trace toggle.
         if (admin.poll()) |cmd| switch (cmd) {
-            .start_trace => {
+            .start_trace => |max_bytes| {
                 if (tracer.options.writer != null) {
                     admin.respond("error: tracing already active\n");
                 } else {
-                    // Create runtime trace file + writer.
-                    // Max bytes sent by client in a follow-up (TODO).
-                    // For now, use 50MB default.
-                    const default_max: u64 = 50 * 1024 * 1024;
                     const path = generate_trace_path();
                     runtime_trace_file = std.fs.cwd().createFile(&path, .{}) catch |err| {
                         var resp_buf: [64]u8 = undefined;
@@ -537,7 +543,7 @@ fn run_loop(
                         admin.respond(resp);
                         break;
                     };
-                    runtime_trace_writer = TraceWriter.init(runtime_trace_file.?, default_max);
+                    runtime_trace_writer = TraceWriter.init(runtime_trace_file.?, max_bytes);
                     const writer = runtime_trace_writer.?.any();
                     writer.writeAll("[\n") catch {};
                     tracer.options.writer = writer;
