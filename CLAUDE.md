@@ -174,6 +174,7 @@ Follow TigerBeetle style. Reference repo: `/home/walker/Documents/personal/tiger
 
 - **Assertions over error handling** — use `assert` for invariants, not `if/else` error paths
 - **No allocations in hot paths** — all buffers are fixed-size, allocated at init
+- **GPA for init, page_allocator only for thread-safe contexts** — `page_allocator` wastes 4KB per small alloc (`dupeZ` on "node" = full page). Use `GeneralPurposeAllocator` for all init-time allocations (Server, Tracer, Supervisor, wire_sidecar). `page_allocator` is only correct when thread safety is required and alloc sizes are page-aligned. One GPA in `main.zig`, passed to everything that allocates at startup
 - **No `std.fmt` in hot paths** — use hand-rolled formatters (see `format_u32`, `crc32_hex`)
 - **IO callbacks only update state** — they never call into the application; the server tick drives transitions
 - **PRNG-driven fuzz tests** — use `splitmix64`, not `std.testing.fuzz`; deterministic seeds for reproducibility
