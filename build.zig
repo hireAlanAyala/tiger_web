@@ -111,7 +111,7 @@ pub fn build(b: *std.Build) void {
     // the CALL/RESULT protocol deterministically.
     const sidecar_sim_options = b.addOptions();
     sidecar_sim_options.addOption(bool, "sidecar_enabled", true);
-    sidecar_sim_options.addOption(u8, "sidecar_count", 2); // hot standby tests need 2
+    sidecar_sim_options.addOption(u8, "sidecar_count", 2);
 
     const sidecar_sim = b.addTest(.{
         .root_source_file = b.path("sim_sidecar.zig"),

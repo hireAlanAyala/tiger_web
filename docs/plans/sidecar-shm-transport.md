@@ -248,21 +248,37 @@ bridging IS what we need.
 
 ## Projected performance
 
-Per-request cost breakdown:
+Per-request cost breakdown (single sidecar process):
 
-| Component | Current | Phase 1 | Phase 2 | Phase 3 |
+| Component | Current | Phase 1 | Phase 2 | Phase 3 | Phase 4 |
+|---|---|---|---|---|---|
+| Zig-side (SQLite + framing) | 19μs | 19μs | 19μs | 19μs | 19μs |
+| Transport | 58μs (3 RT socket) | 38μs (2 RT socket) | 10μs (2 RT eventfd) | 10μs | ~1μs (amortized) |
+| V8 compute | ~15μs | ~15μs | ~15μs | ~11μs | ~11μs |
+| **Total** | **77μs** | **57μs** | **42μs** | **38μs** | **~31μs** |
+| **req/s (1 proc)** | **13K** | **17K** | **24K** | **~26K** | **~32K** |
+| **% of native** | **25%** | **32%** | **45%** | **~49%** | **~60%** |
+
+With concurrent pipeline (N sidecar processes), multiply by N until
+SQLite ceiling (~100K writes/s):
+
+| Optimization | 1 sidecar | 2 sidecars | 4 sidecars | Ceiling |
 |---|---|---|---|---|
-| Zig-side (SQLite + framing) | 19μs | 19μs | 19μs | 19μs |
-| Transport | 58μs (3 RT socket) | 38μs (2 RT socket) | 10μs (2 RT eventfd) | 10μs |
-| V8 compute | ~15μs | ~15μs | ~15μs | ~11μs |
-| **Total** | **77μs** | **57μs** | **42μs** | **38μs** |
-| **req/s** | **13K** | **17K** | **24K** | **~26K** |
-| **% of native** | **25%** | **32%** | **45%** | **~49%** |
+| Current (4 RT) | 13K | 26K | 52K | ~100K (8 procs) |
+| Phase 1 (2 RT) | 17K | 34K | 68K | ~100K (6 procs) |
+| Phase 2 (shm) | 24K | 48K | 96K | ~100K (5 procs) |
+| Phase 3 (typed) | 26K | 52K | 104K | ~100K (4 procs) |
+| Phase 4 (batch) | 32K | 64K | 128K | ~100K (3 procs) |
 
-~49% of native is the TB-aligned ceiling for Node.js. The remaining
-gap is V8 computation (handler logic, HTML string concatenation) —
-irreducible without violating TB principles. If a user needs more,
-write those handlers in Zig (100%) or Rust (~90%).
+The concurrent pipeline (Stage 3, ✅ DONE) is the multiplier.
+Each optimization phase reduces how many processes are needed to
+hit the SQLite ceiling. With all phases: 3 V8 processes saturate
+the database. Without any optimization: 8 processes.
+
+~60% of native per-process is the TB-aligned ceiling for Node.js
+with batching. The remaining 40% gap is V8 computation — irreducible
+without violating TB principles. If a user needs more, write the
+hot handlers in Zig (100%) or Rust (~90%).
 
 Options that could close the remaining gap and their TB violations:
 
@@ -596,30 +612,23 @@ support — it's already Linux-only. Cross-platform (macOS kqueue,
 Windows IOCP) is a separate future gate; sidecar signaling slots into
 that same platform layer (futex → os_unfair_lock → WaitOnAddress).
 
-## Relationship to message bus plan
+## Relationship to completed work
 
-This plan was written before the message bus work (`message-bus.md`).
-The message bus replaces raw `protocol.read_frame`/`write_frame` with
-`ConnectionType(IO)` + `MessageBusType(IO)` — parameterized on IO.
+**Message bus (✅ DONE):** `ConnectionType(IO)` + `MessageBusType(IO)`
+with async handlers, `.pending` + callback resume. The shared memory
+transport replaces the IO layer, not raw socket calls.
 
-The shared memory transport is cleaner with the bus in place:
-- Replace the IO layer, not raw socket calls. `ConnectionType` calls
-  `self.io.recv/send/send_now`. A shared memory IO implementation
-  provides the same interface — `recv` reads from mmap, `send` writes
-  to mmap, `send_now` writes + futex_wake. The Connection, MessageBus,
-  SidecarClient, and handlers don't change.
-- The MessagePool provides buffer ownership. Shared memory slots can
-  be pool messages directly — the mmap region IS the pool's buffer
-  backing. Zero-copy from shared memory to handler.
-- `SidecarHandlersType` (comptime handler selection from message-bus.md)
-  implements the handler interface using the sidecar protocol. The
-  transport (unix socket vs shared memory) is behind the IO parameter.
-  Swapping transport is a one-line IO type change, not a protocol change.
+**Concurrent pipeline (✅ DONE, Stage 3):** Per-slot handlers,
+round-robin dispatch, handle_lock, per-slot tracer. SM is pure
+framework services (auth, transactions). Handlers are per-slot on
+the server. All connections active — no standby concept. Sim-tested
+at 2x throughput with 2 slots.
 
-Dependency: message-bus.md Phase 1.5 (consolidated pipeline with
-async handlers) should complete before this plan starts. The async
-handler interface means the server pipeline doesn't change when the
-transport changes — only the IO layer and handler implementation.
+**Recommended implementation order:**
+1. Phase 1: RT reduction (protocol simplification, same transport)
+2. Phase 4: Batching (biggest throughput gain, works on unix socket)
+3. Phase 2: Shared memory (transport swap, incremental gain)
+4. Phase 3: Typed schemas (type safety + performance, independent)
 
 ## What we're NOT doing
 
@@ -646,12 +655,10 @@ transport changes — only the IO layer and handler implementation.
 - **Spin-then-futex** — two code paths for 3μs. Violates "zero technical debt."
 - **Pure futex (blocking)** — see "blocking futex" above.
 - **Embedded V8** — massive dependency (Bun is 300K+ lines), single-language.
-- **Multiple sidecar workers** — server is single-threaded, one
-  exchange at a time. However, this is a future scaling path when
-  the runtime is the bottleneck. The server dispatches CALLs to N
-  sidecar processes via N MessageBus connections. While sidecar A
-  computes, the next request goes to sidecar B. The sidecars run
-  in parallel on separate cores. The server round-robins.
+- **Multiple sidecar workers** — ✅ DONE (Stage 3 concurrent pipeline).
+  Server dispatches to N sidecar processes via N MessageBus connections.
+  Per-slot handlers, round-robin dispatch, handle_lock serializes writes.
+  Sim-tested: 2x throughput with 2 slots. Linear scaling to SQLite ceiling.
 
   | Runtime | 1 process | 2 processes | 4 processes |
   |---|---|---|---|
@@ -659,13 +666,62 @@ transport changes — only the IO layer and handler implementation.
   | TypeScript (V8) | ~25K | ~50K | ~100K |
   | Rust/Go | ~34K | ~68K | ~136K |
 
-  This uses the connection pool extension point from message-bus.md.
-  The handler interface is unchanged — the dispatcher picks which
-  bus. Requires the concurrent pipeline (multiple `commit_stage`
-  slots) from network-storage.md so the server can have multiple
-  requests in-flight. Without concurrent pipeline, the server
-  blocks on each sidecar response.
+## Phase 4: Request batching (NEW)
 
-  Not doing this now — single-process sidecar is sufficient.
-  Build when a user needs more throughput than one runtime process
-  can deliver.
+Batch N ready connections into one CALL, get N results in one RESULT.
+The server already collects all ready connections per tick — batching
+is sending them together instead of individually. Free at batch=1
+(low load), multiplicative at batch=N (high load).
+
+**Why:** The per-request round-trip overhead (~35µs with unix socket,
+~10µs with shm) is amortized across N requests. With batch=50,
+the transport overhead per request drops to ~0.5-1µs. Combined with
+RT reduction, a single V8 sidecar reaches ~30-40K req/s.
+
+**How it composes with existing work:**
+- PipelineSlot holds a batch (array of requests), not a single request
+- Handle_lock serializes batch transactions (fewer lock acquisitions)
+- Round-robin distributes batches across sidecars
+- Connection-indexed routing unchanged (batch response → slot)
+- Handler API unchanged — framework calls handler once per request
+  inside the sidecar, batching is invisible to the handler author
+
+**Design:**
+```
+process_inbox:
+  collect all .ready connections (up to batch_max)
+  pack into one CALL frame: [request_count: u16][request1][request2]...
+  assign batch to next free slot
+  dispatch
+
+sidecar:
+  for each request in batch:
+    route → prefetch → handle → render
+  pack results: [response_count: u16][response1][response2]...
+  send one RESULT frame
+
+server receives RESULT:
+  unpack N responses
+  set_response on each connection
+```
+
+No waiting to fill the batch. Send what's ready NOW, every tick.
+Batch size = 1 under low load (same latency as unbatched).
+Batch size = N under high load (N× fewer round-trips).
+
+| Optimization | RTs per request | V8 req/s (1 process) |
+|---|---|---|
+| Current (4 RT × 1 req) | 4.0 | ~7K |
+| Phase 1: RT reduction (2 RT × 1 req) | 2.0 | ~17K |
+| Phase 2: shm (2 RT × 1 req) | 2.0 | ~24K |
+| Phase 4: batching (2 RT × 50 req) | 0.04 | ~30-40K |
+| Phase 4 + concurrent (2 sidecars) | 0.04 | ~60-80K |
+
+**SQLite ceiling:** ~100K writes/s. Reached at ~3-4 V8 sidecar
+processes with batching, or ~14 without. Batching reduces the
+number of cores needed to saturate the database.
+
+**Implementation order:** Phase 1 (RT reduction) → Phase 4 (batching)
+→ Phase 2 (shm). Batching before shm because it gives a larger
+throughput gain (~2-4×) than shm (~1.4×) and works on the existing
+unix socket transport. shm is incremental on top.
