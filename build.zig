@@ -279,6 +279,19 @@ pub fn build(b: *std.Build) void {
         unit_test_step.dependOn(&run_fw_test.step);
     }
 
+    // Trace event tests.
+    {
+        const trace_test = b.addTest(.{
+            .root_source_file = b.path("framework/trace/event.zig"),
+            .target = target,
+            .optimize = optimize,
+        });
+        trace_test.root_module.addImport("stdx", stdx_module);
+        trace_test.linkLibC();
+        const run_trace_test = b.addRunArtifact(trace_test);
+        unit_test_step.dependOn(&run_trace_test.step);
+    }
+
     // Shell + scripts tests.
     const shell_test = b.addTest(.{
         .root_source_file = b.path("shell.zig"),
