@@ -118,7 +118,18 @@ pub const IO = struct {
         posix.setsockopt(fd, posix.IPPROTO.TCP, posix.TCP.USER_TIMEOUT, &std.mem.toBytes(@as(c_int, 90_000))) catch {};
     }
 
+    /// Synchronous non-blocking accept. Returns the accepted fd, or
+    /// null if no connection is pending (EAGAIN). The right primitive
+    /// for listen sockets — epoll can't multiplex multiple accepts on
+    /// one fd (ONESHOT race). Direct syscall, drain until null.
+    pub fn try_accept(_: *IO, listen_fd: fd_t) ?fd_t {
+        const fd = posix.accept(listen_fd, null, null, posix.SOCK.NONBLOCK | posix.SOCK.CLOEXEC) catch return null;
+        return fd;
+    }
+
     /// Submit an async accept. The callback fires when a connection is ready.
+    /// NOTE: Only used by the HTTP server (one listen fd, one accept at a time).
+    /// The sidecar bus uses try_accept() instead.
     pub fn accept(self: *IO, listen_fd: fd_t, completion: *Completion, context: *anyopaque, callback: *const fn (*anyopaque, i32) void) void {
         assert(completion.operation == .none);
         completion.* = .{

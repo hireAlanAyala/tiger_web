@@ -645,8 +645,6 @@ pub fn MessageBusType(comptime IO: type, comptime options: Options) type {
 
         // Listen/accept — fills all empty slots.
         listen_fd: IO.fd_t,
-        accept_completions: [connections_max]IO.Completion,
-        accept_pending: [connections_max]bool,
 
         /// Which connection to route send_message() to. Set by the
         /// server via set_active(). null = no active connection
@@ -707,8 +705,6 @@ pub fn MessageBusType(comptime IO: type, comptime options: Options) type {
                 };
             }
             self.listen_fd = -1;
-            for (&self.accept_completions) |*ac| ac.* = .{};
-            for (&self.accept_pending) |*p| p.* = false;
             self.active = null;
             self.on_frame_fn = on_frame_fn;
             self.on_close_fn = on_close_fn;
@@ -756,56 +752,17 @@ pub fn MessageBusType(comptime IO: type, comptime options: Options) type {
             log.info("listening on {s}", .{path});
         }
 
+        /// Accept pending connections — drain until EAGAIN.
+        /// Direct non-blocking accept, no epoll. The right primitive
+        /// for listen sockets: one fd, poll every tick, no ONESHOT race.
         pub fn tick_accept(self: *Self) void {
             if (self.listen_fd == -1) return;
-            for (&self.connections, &self.accept_pending, &self.accept_completions) |*conn, *pending, *completion| {
+            for (&self.connections, 0..) |*conn, i| {
                 if (conn.state != .closed) continue;
-                if (pending.*) continue;
-                pending.* = true;
-                self.io.accept(
-                    self.listen_fd,
-                    completion,
-                    @ptrCast(self),
-                    accept_callback,
-                );
+                const accepted_fd = self.io.try_accept(self.listen_fd) orelse return;
+                log.info("accepted fd={d} slot={d}", .{ accepted_fd, i });
+                conn.init(self.io, &self.pool, accepted_fd, self.context, self.on_frame_fn, self.on_close_fn);
             }
-        }
-
-        fn accept_callback(ctx: *anyopaque, result: i32) void {
-            const self: *Self = @ptrCast(@alignCast(ctx));
-
-            if (result < 0) {
-                // Clear ONE pending flag for a closed slot. We can't
-                // identify which completion errored (callback doesn't
-                // receive the completion pointer), but exactly one
-                // outstanding accept failed. Clear the first match so
-                // tick_accept can resubmit it.
-                for (&self.connections, &self.accept_pending) |*conn, *pending| {
-                    if (conn.state == .closed and pending.*) {
-                        pending.* = false;
-                        break;
-                    }
-                }
-                return;
-            }
-
-            const accepted_fd: IO.fd_t = result;
-
-            // Assign the fd to the first available slot. Accepts on a
-            // listen socket are fungible — any accept returns the next
-            // incoming fd. Slot assignment is arbitrary because sidecars
-            // are interchangeable (no identity).
-            for (&self.connections, &self.accept_pending, 0..) |*conn, *pending, i| {
-                if (conn.state == .closed and pending.*) {
-                    pending.* = false;
-                    log.info("accepted fd={d} slot={d}", .{ accepted_fd, i });
-                    conn.init(self.io, &self.pool, accepted_fd, self.context, self.on_frame_fn, self.on_close_fn);
-                    return;
-                }
-            }
-            // No slot available — shouldn't happen (tick_accept only
-            // submits accepts for closed+non-pending slots).
-            unreachable;
         }
 
         // --- Active connection routing ---
@@ -1007,6 +964,10 @@ const TestIO = struct {
     pub fn send_now(_: *TestIO, fd: fd_t, buffer: []const u8) ?usize {
         const result = posix.send(fd, buffer, posix.MSG.DONTWAIT | posix.MSG.NOSIGNAL);
         return result catch null;
+    }
+
+    pub fn try_accept(_: *TestIO, _: fd_t) ?fd_t {
+        return null; // sim wires connections manually
     }
 
     pub fn accept(_: *TestIO, _: fd_t, _: *Completion, _: *anyopaque, _: *const fn (*anyopaque, i32) void) void {}
