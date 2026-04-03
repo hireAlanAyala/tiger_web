@@ -140,6 +140,24 @@ visible in Perfetto without measuring it. No separate system.
 
 ## Implementation phases
 
+### Phase 0: Time vtable upgrade (prerequisite)
+
+The tracer calls `time.monotonic()` on every start/stop. Our
+`framework/time.zig` has only `realtime()`. TB's Time has three
+methods: `monotonic() → Instant`, `realtime() → i64`, `tick() → void`.
+
+TB's time.zig copied to `framework/time_tb.zig` (236 lines, verbatim).
+Replace our Time with TB's vtable pattern:
+
+- [ ] Replace `framework/time.zig` with TB's vtable (3 function pointers)
+- [ ] `TimeReal`: implement `monotonic()` via platform clock, `tick()` as no-op
+- [ ] `TimeSim`: implement `monotonic()` via `ticks * resolution`, `tick()` increments
+- [ ] Update all Time consumers (server, main, sim tests)
+- [ ] Verify: sim tests deterministic, production uses OS clocks
+- [ ] Delete `framework/time_tb.zig` reference file
+
+Small, independent change. Test separately before Phase 1.
+
 ### Phase 1: Trace infrastructure (start from scratch)
 
 Do NOT evolve the current tracer. The current timing sites are
@@ -208,6 +226,22 @@ const Event = union(enum) {
 - Time source: injected `Time` vtable, not `std.time.Instant`
   (simulation determinism)
 - Use TB reference files (`framework/trace/*_tb.zig`)
+
+**Implementation notes (from TB deep dive):**
+- `events_started` and `events_timing` are SEPARATE arrays with
+  DIFFERENT sizes. `events_started` has one slot per concurrent
+  instance (`stack_count`). `events_timing` has one slot per
+  unique timing signature (`slot_count`). Same event, different
+  indexing: `stack()` for concurrency, `timing_slot()` for aggregation.
+- EventTiming cardinality: aggregate by WORK TYPE, not INSTANCE.
+  pipeline_stage timing = 4 slots (route/prefetch/handle/render),
+  NOT 4 × pipeline_slots_max. The timeline shows per-instance
+  detail. Timing shows aggregate trends. Different granularity.
+- Stop events are minimal: only `{pid, tid, ph, ts}`. No args,
+  no cat, no name. Chrome Tracing spec — not optional.
+- `tid` = stack position. Concurrent slots get different tids →
+  Perfetto shows them as separate "threads" on the timeline.
+  The stack system IS the visualization model.
 
 **Step 3: Wire tracer ownership.**
 - Create tracer in `main.zig`, pass to server
