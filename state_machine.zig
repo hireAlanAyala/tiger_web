@@ -147,12 +147,17 @@ pub fn input_valid(msg: message.Message) bool {
 /// State machine — framework services for the request pipeline.
 ///
 /// Owns auth (credential resolution), transactions (begin/commit batch),
-/// storage pointer, tracer, and PRNG. Does NOT own handlers or per-request
-/// state — those live per-slot on the server.
+/// storage pointer, tracer, and PRNG.
 ///
-/// TB pattern: the SM owns domain state. Our domain operations live in
-/// handlers (native Zig or sidecar TypeScript), not the SM. The SM
-/// provides cross-cutting services that handlers don't own.
+/// Does NOT own handlers or per-request state. Those live per-slot on
+/// the server. This separation is load-bearing:
+///   - Handlers are per-slot so concurrent slots don't share state.
+///   - Per-request state (cache, identity) lives on PipelineSlot so
+///     slot.* = .{} resets everything.
+///   - Adding a handlers field here would re-introduce the pointer-
+///     swapping bug (one handler instance shared across slots).
+///   - Adding per-request fields here would break concurrent dispatch
+///     (prefetch on slot 0 clobbers slot 1's cache).
 pub fn StateMachineType(comptime Storage: type, comptime pipeline_slots_max: u8) type {
     // Storage must define its own read/write split.
     @import("framework/read_only_storage.zig").assertReadView(Storage);

@@ -58,6 +58,11 @@ pub fn SidecarHandlersType(comptime StorageParam: type, comptime Bus: type) type
         // Two lifetime groups, structurally separated:
         //   infra   — set once during wire_sidecar, never reset
         //   request — per-request state, reset via request = .{}
+        //
+        // New per-request fields go in Request. New infrastructure
+        // fields go at the top level. If a per-request field is added
+        // at the top level, reset_handler_state won't clear it —
+        // stale state leaks between requests silently.
         // =============================================================
 
         /// Infrastructure — set during wire_sidecar, lives for server lifetime.

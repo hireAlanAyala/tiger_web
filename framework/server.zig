@@ -176,8 +176,13 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
         /// Per-slot handlers — domain dispatch (native or sidecar).
         /// Each handler instance owns its per-request state and, for
         /// sidecar, its paired client pointer. Zero-size for native
-        /// handlers (comptime-eliminated). No pointer swapping —
-        /// each slot dispatches through its own handler.
+        /// handlers (comptime-eliminated).
+        ///
+        /// Handlers MUST be per-slot, not shared. A shared handler
+        /// requires pointer-swapping per dispatch (setting the client
+        /// pointer before each call). With concurrent slots, a missed
+        /// swap sends a CALL to the wrong sidecar. Per-slot handlers
+        /// are permanently wired — no swap, no bug.
         handlers: [pipeline_slots_max]Handlers = .{@as(Handlers, .{})} ** pipeline_slots_max,
 
         // Sidecar Bus and Client — embedded in the Server (TB pattern:
@@ -478,7 +483,9 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
         }
 
         /// Derive slot index from pointer. Slot index = position in
-        /// pipeline_slots array. Used to select the paired client.
+        /// pipeline_slots array = paired bus connection index.
+        /// No mapping table. Direct pairing by array position.
+        /// Do NOT add a routing table — the index IS the route.
         fn slot_index(server: *const Server, slot: *const PipelineSlot) u8 {
             const base = @intFromPtr(&server.pipeline_slots[0]);
             const addr = @intFromPtr(slot);
@@ -780,8 +787,11 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
                 return;
             }
 
-            // Route to connection's paired handler. All connections are
-            // active — each serves its own pipeline slot.
+            // All connections are active — each serves its own pipeline
+            // slot. No active/standby concept. Do NOT add a standby
+            // check here — it would prevent concurrent dispatch.
+            // Each connection is permanently paired with its slot
+            // (slot index = connection index). Routing is direct.
             const handler = &server.handlers[connection_index];
             handler.process_sidecar_frame(frame, server.state_machine.storage);
 
