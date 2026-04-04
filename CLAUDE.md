@@ -154,7 +154,7 @@ No framework file imports from the app root except via comptime generics (e.g. `
 | File | Role |
 |---|---|
 | `app.zig` | App binding — wires domain modules to the framework's comptime interface |
-| `main.zig` | Entry point, GPA for init, runtime log level filtering, CLI parsing |
+| `main.zig` | Entry point, GPA for init, CLI subcommands (start/trace), RunState event loop, admin socket, runtime log level filtering |
 | `trace.zig` | Trace engine — start/stop/cancel spans, gauge/count metrics, Chrome Tracing JSON output. Copied from TB's `src/trace.zig` with surgical edits |
 | `trace_event.zig` | Trace event definitions — 7 boundary events, EventTracing (concurrent stacks), EventTiming (aggregate), EventMetric (per-operation/per-status). Imports domain types (Operation, Status) directly, same as TB's `trace/event.zig` |
 | `message.zig` | Types: Product, ProductCollection, flat Operation enum with EventType, Message (extern struct, WAL-writable), MessageResponse |
