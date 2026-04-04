@@ -345,6 +345,7 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
             if (server.connections_used == server.connections.len) return;
 
             const accepted_fd = server.io.try_accept(server.listen_fd) orelse return;
+            IO.set_tcp_options(accepted_fd);
 
             const conn = for (server.connections) |*conn| {
                 if (conn.state == .free) break conn;
@@ -520,7 +521,7 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
 
                         slot.msg = msg;
                         slot.stage = .prefetch;
-                        server.tracer.start(.{ .pipeline_stage = .{ .stage = .prefetch, .slot = idx } });
+                        server.tracer.start(.{ .pipeline_stage = .{ .stage = .prefetch, .slot = idx, .op = @intFromEnum(msg.operation) } });
                         continue;
                     },
 
@@ -536,7 +537,7 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
                         slot.cache = handler.handler_prefetch(sm.storage, &msg);
                         if (slot.cache != null) {
                             server.tracer.stop(.{ .pipeline_stage = .{ .stage = .prefetch, .slot = idx, .op = @intFromEnum(msg.operation) } });
-                            server.tracer.start(.{ .pipeline_stage = .{ .stage = .handle, .slot = idx } });
+                            server.tracer.start(.{ .pipeline_stage = .{ .stage = .handle, .slot = idx, .op = @intFromEnum(msg.operation) } });
                             slot.stage = .handle;
                             continue;
                         }
@@ -615,6 +616,7 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
                             .is_new_visitor = identity.is_new != 0,
                         };
 
+                        server.tracer.stop(.{ .pipeline_stage = .{ .stage = .handle, .slot = idx, .op = @intFromEnum(msg.operation) } });
                         server.tracer.count(.{ .requests_by_operation = .{ .operation = msg.operation } }, 1);
                         server.tracer.count(.{ .requests_by_status = .{ .status = handle_result.status } }, 1);
 
@@ -623,6 +625,7 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
                         server.handle_lock = null;
 
                         slot.stage = .render;
+                        server.tracer.start(.{ .pipeline_stage = .{ .stage = .render, .slot = idx, .op = @intFromEnum(msg.operation) } });
                         continue;
                     },
 

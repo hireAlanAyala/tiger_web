@@ -966,6 +966,8 @@ const TestIO = struct {
         return result catch null;
     }
 
+    pub fn set_tcp_options(_: fd_t) void {} // no-op in test
+
     pub fn try_accept(_: *TestIO, _: fd_t) ?fd_t {
         return null; // sim wires connections manually
     }

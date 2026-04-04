@@ -94,9 +94,10 @@ pub const IO = struct {
         return fd;
     }
 
-    /// Apply TCP socket options on accepted connections. Follows TigerBeetle's
-    /// tcp_options() pattern from src/io/common.zig.
-    fn set_tcp_options(fd: fd_t) void {
+    /// Apply TCP socket options on accepted connections. Call after
+    /// try_accept for TCP listen sockets (HTTP). Not for Unix sockets
+    /// (sidecar). Follows TigerBeetle's tcp_options() from src/io/common.zig.
+    pub fn set_tcp_options(fd: fd_t) void {
         // Disable Nagle's algorithm — send small HTTP responses immediately.
         posix.setsockopt(fd, posix.IPPROTO.TCP, posix.TCP.NODELAY, &std.mem.toBytes(@as(c_int, 1))) catch {};
 

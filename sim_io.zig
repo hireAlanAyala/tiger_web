@@ -401,6 +401,8 @@ pub const SimIO = struct {
     /// Synchronous non-blocking accept — matches IO.try_accept.
     /// Returns the fd of the first connected-but-not-accepted client
     /// targeting this listen_fd, or null if none pending.
+    pub fn set_tcp_options(_: fd_t) void {} // no-op in sim
+
     pub fn try_accept(self: *SimIO, listen_fd: fd_t) ?fd_t {
         if (self.prng.chance(self.accept_fault_probability)) return null;
         for (&self.clients) |*client| {
