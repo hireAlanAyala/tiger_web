@@ -72,6 +72,9 @@ npm run dev                 # start sidecar + server on port 3000
 ./zig/zig build load -Doptimize=ReleaseSafe -- --connections=128 --requests=100000
 ./zig/zig build load -- --port=3000          # against existing server
 ./zig/zig build load -- --ops=create_product:80,list_products:20  # custom weights
+# When using `hey`: use 200K+ requests at high concurrency. Short runs
+# (<50K at c=128) show false collapse from keep-alive reconnection overhead.
+#   hey -n 200000 -c 128 http://localhost:3000/products
 
 # --- Profiling (requires `perf` — sudo pacman -S perf) ---
 ./zig/zig build -Doptimize=ReleaseSafe       # build with symbols
