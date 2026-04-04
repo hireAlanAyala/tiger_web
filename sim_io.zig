@@ -179,7 +179,7 @@ pub const SimIO = struct {
     }
 
     pub fn inject_post_datastar(self: *SimIO, client_index: usize, path: []const u8, body: []const u8) void {
-        self.inject_with_body(client_index, "POST ", path, body, "Datastar-Request: true\r\n");
+        self.inject_with_body(client_index, "POST ", path, body, "Datastar-Request: true\r\nConnection: close\r\n");
     }
 
     /// Inject an HTTP PUT request to a path with a body.
@@ -188,7 +188,7 @@ pub const SimIO = struct {
     }
 
     pub fn inject_put_datastar(self: *SimIO, client_index: usize, path: []const u8, body: []const u8) void {
-        self.inject_with_body(client_index, "PUT ", path, body, "Datastar-Request: true\r\n");
+        self.inject_with_body(client_index, "PUT ", path, body, "Datastar-Request: true\r\nConnection: close\r\n");
     }
 
     fn inject_with_body(self: *SimIO, client_index: usize, method: []const u8, path: []const u8, body: []const u8, extra_headers: []const u8) void {
@@ -229,7 +229,7 @@ pub const SimIO = struct {
     }
 
     pub fn inject_get_datastar(self: *SimIO, client_index: usize, path: []const u8) void {
-        self.inject_get_with_headers(client_index, path, "Datastar-Request: true\r\n");
+        self.inject_get_with_headers(client_index, path, "Datastar-Request: true\r\nConnection: close\r\n");
     }
 
     fn inject_get_with_headers(self: *SimIO, client_index: usize, path: []const u8, extra_headers: []const u8) void {
@@ -260,7 +260,7 @@ pub const SimIO = struct {
     }
 
     pub fn inject_delete_datastar(self: *SimIO, client_index: usize, path: []const u8) void {
-        self.inject_delete_with_headers(client_index, path, "Datastar-Request: true\r\n");
+        self.inject_delete_with_headers(client_index, path, "Datastar-Request: true\r\nConnection: close\r\n");
     }
 
     fn inject_delete_with_headers(self: *SimIO, client_index: usize, path: []const u8, extra_headers: []const u8) void {
