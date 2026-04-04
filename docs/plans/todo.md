@@ -78,10 +78,10 @@
    AdminSocket struct + trace toggle logic inline in main.zig.
    Fine for one command. Extract when a second admin command is added.
 
-14. **Delete dead protocol code** — cleanup
-   `protocol.read_frame`, `write_frame`, `recv_exact`, `send_exact`
-   are dead code (replaced by message bus). `io.readable()` has no
-   callers. Can delete now that sidecar_fuzz.zig is rewritten.
+14. **Delete dead protocol code** — DONE
+   Protocol frame functions already deleted in prior session.
+   `io.readable()`, async `accept()`, and SimIO/TestIO equivalents
+   deleted. Op enums cleaned up across IO, SimIO, TestIO.
 
 ---
 
