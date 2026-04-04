@@ -62,7 +62,7 @@ async function startServer(): Promise<void> {
   // Server starts first — listens on unix socket, waits for sidecar.
   server = spawn(
     `${PROJ}/zig-out/bin/tiger-web`,
-    [`--port=${PORT}`, `--sidecar=${SOCK}`, `--db=${DB}`],
+    ["start", `--port=${PORT}`, `--sidecar=${SOCK}`, `--db=${DB}`],
     { cwd: PROJ, stdio: "pipe" },
   );
 

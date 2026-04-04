@@ -13,6 +13,16 @@
 //! Protocol logic (CALL/RESULT, QUERY) lives in the consumer, not
 //! in the transport.
 //!
+//! Key decisions:
+//! - CRC-32 on every frame, even over Unix sockets. Unix sockets
+//!   don't corrupt data, but the CRC catches programming errors
+//!   (wrong frame boundaries, stale buffers). TB uses checksums on
+//!   all internal transport for the same reason.
+//! - 3-phase termination (terminate → terminate_join → terminate_close)
+//!   ensures no use-after-close: shutdown signals intent, callbacks
+//!   drain, then close. TB pattern from Connection.
+//! - Direct `try_accept()` per tick, not epoll. See io.zig for rationale.
+//!
 //! Buffer ownership follows TB's pattern: a pre-allocated MessagePool
 //! holds ref-counted messages. The send queue holds *Message pointers
 //! (zero-copy). The recv buffer is a *Message from the pool. Consumers
