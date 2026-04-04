@@ -89,6 +89,26 @@ given scaling already works.
 - **Route RT elimination** — route does body parsing, can't move to Zig
 - **Further optimization** — 2 sidecars already deliver 19× Express
 
+## Query result cache (next step)
+
+perf profile shows ~70% of CPU in libsqlite3. The framework ceiling
+without SQLite is ~200K req/s. A per-query cache at the storage
+boundary would skip SQLite on repeated reads:
+
+- Cache sits on ReadView — transparent to handlers
+- Key: `(sql_ptr, param_bytes)` — comptime SQL pointer + runtime params
+- Invalidation: any WriteView.execute() clears all entries
+  (table-level invalidation possible later via comptime SQL analysis)
+- Fixed-size bounded hash map, no allocation after init
+- Both native and sidecar paths benefit (ReadView.query for native,
+  ReadView.query_raw for sidecar)
+
+Design decision: per-query (at storage level) vs per-response (at
+server level). Per-query is the right primitive — it's reusable
+across operations, and the storage boundary is where the cost is.
+Per-response would skip the entire pipeline but requires handling
+per-request headers (cookies) which complicates caching.
+
 ## Key learning
 
 1. Always re-measure before optimizing. The old 819µs was stale.
