@@ -300,6 +300,7 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
         /// buffer, retried when resources free up.
         fn try_dispatch(server: *Server, conn: *Connection) void {
             assert(conn.state == .ready);
+            conn.last_activity_tick = server.tick_count;
 
             // Sidecar not connected → 503 immediately.
             if (App.sidecar_enabled and !server.sidecar_any_ready()) {

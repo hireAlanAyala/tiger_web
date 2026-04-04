@@ -453,6 +453,10 @@ pub const SimIO = struct {
     /// Non-blocking send — SimIO equivalent. Returns null on fault
     /// (both send_now_fault and send_fault), forcing fallback to async
     /// where send_fault is properly reported via callback.
+    /// Non-blocking send — send ALL available bytes (not partial).
+    /// TB's send_now sends as much as the kernel buffer allows.
+    /// Partial sends are only simulated in the async path to test
+    /// send_callback handling. The fast-path sends everything.
     pub fn send_now(self: *SimIO, fd: fd_t, buffer: []const u8) ?usize {
         assert(buffer.len > 0);
         if (self.prng.chance(self.send_now_fault_probability)) return null;
@@ -461,10 +465,9 @@ pub const SimIO = struct {
             if (client.fd == fd and client.connected) {
                 const max = @min(buffer.len, client.recv_buf.len - client.recv_len);
                 if (max == 0) return null;
-                const n = self.prng.range_inclusive(u32, 1, @intCast(max));
-                @memcpy(client.recv_buf[client.recv_len..][0..n], buffer[0..n]);
-                client.recv_len += n;
-                return n;
+                @memcpy(client.recv_buf[client.recv_len..][0..max], buffer[0..max]);
+                client.recv_len += @intCast(max);
+                return max;
             }
         }
         return null;

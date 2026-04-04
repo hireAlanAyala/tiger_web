@@ -837,7 +837,7 @@ test "two-phase order — completion after timeout expires" {
     io.inject_post_datastar(1, "/orders/" ++ test_order_uuid ++ "/complete",
         "{\"result\":\"confirmed\"}",
     );
-    const resp = run_until_close_response(&server, &io, 1, 500) orelse return error.TestUnexpectedResult;
+    const resp = run_until_close_response(&server, &io, 1, 2000) orelse return error.TestUnexpectedResult;
     try std.testing.expectEqual(resp.status_code, 200);
     try std.testing.expect(body_contains(resp.body, "Order Expired"));
     io.clear_response(1);

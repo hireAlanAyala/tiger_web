@@ -172,7 +172,6 @@ pub fn ConnectionType(comptime IO: type) type {
 
             conn.recv_pos += @intCast(result);
             assert(conn.recv_pos <= conn.recv_buf.len);
-            conn.last_activity_tick = conn.last_activity_tick; // preserve — server updates on dispatch
 
             conn.try_parse_request();
 
