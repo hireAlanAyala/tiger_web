@@ -1,5 +1,41 @@
 # Connection scalability — event-driven connection handling
 
+## REGRESSION: callback model is 4× slower for sidecar
+
+The callback-driven execution model causes a 4× sidecar throughput
+regression. Verified by checking out the pre-callback commit and
+running the same benchmark:
+
+```bash
+# Pre-callback (commit b8f3ed5, tick model):
+#   94K, 109K, 94K req/s (3 runs at c=128, 2 sidecars)
+
+git checkout b8f3ed5
+./zig/zig build -Dsidecar=true -Dsidecar-count=2 -Doptimize=ReleaseSafe
+zig-out/bin/tiger-web --port=0 --db=:memory: --sidecar=/tmp/tiger_web_sidecar.sock
+# Start 2 sidecars: npx tsx adapters/call_runtime.ts /tmp/tiger_web_sidecar.sock (×2)
+# Seed 10 products, warmup: hey -n 10000 -c 64
+# Measure: hey -n 50000 -c 128 (×3 runs)
+
+# Post-callback (main, callback model):
+#   23.5K, 23.6K, 24.3K req/s (same benchmark)
+```
+
+Native Zig (no sidecar) is NOT regressed: ~76K at c=64 both models.
+The regression is sidecar-specific. The callback model changes how
+the sidecar pipeline is dispatched — recv_callback → try_dispatch →
+commit_dispatch runs the sidecar CALL synchronously, then the
+RESULT arrives on the next run_for_ns. The tick model dispatched
+from process_inbox which could batch multiple connections per tick.
+
+**Next steps:**
+1. Profile the sidecar path on both models to find the specific cause
+2. The tick model's process_inbox dispatches ALL ready connections in
+   one sweep. The callback model dispatches one at a time from each
+   recv_callback. This may cause interleaving that reduces throughput.
+3. Consider hybrid: callback-driven for native HTTP, tick-driven
+   dispatch for sidecar pipeline stages
+
 ## Problem
 
 Throughput caps at ~60-80K req/s and collapses above 128 connections.
