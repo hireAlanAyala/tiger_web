@@ -120,14 +120,14 @@ pub const tick_ms: u32 = 10;
 /// for this many ticks, terminate the sidecar connection.
 pub const sidecar_response_timeout_ticks: u32 = 500; // 5 seconds at 10ms/tick
 
-/// HTTP connection idle timeout in ticks.
-pub const request_timeout_ticks: u32 = 3000; // 30 seconds at 10ms/tick
+// HTTP connection idle timeout: handled by kernel TCP_USER_TIMEOUT
+// (set in io.zig set_tcp_options: 90s). No application-level scanning.
+// TB pattern: kernel handles idle detection, not the tick loop.
 
 /// Log metrics emission interval in ticks.
 pub const metrics_interval_ticks: u32 = 10_000; // ~100 seconds at 10ms/tick
 
 comptime {
     assert(sidecar_response_timeout_ticks >= 1);
-    assert(request_timeout_ticks > sidecar_response_timeout_ticks);
     assert(metrics_interval_ticks >= 100);
 }

@@ -331,7 +331,6 @@ Use `log.mark.*` for **testable decision boundaries** — code paths the sim fuz
 | `connection.zig` | `send_callback` error | `"send: error"` |
 | `connection.zig` | `try_parse_request` invalid HTTP | `"invalid HTTP"` |
 | `server.zig` | `process_inbox` unmapped request | `"unmapped request"` |
-| `server.zig` | `timeout_idle` timed out | `"connection timed out"` |
 | `server.zig` | `process_inbox` SSE mutation deferred | `"SSE mutation: deferring to follow-up"` |
 | `app.zig` | prefetch fault injection busy | `"storage: busy fault injected"` |
 

@@ -62,11 +62,6 @@ pub fn ConnectionType(comptime IO: type) type {
         // Used to shift leftover bytes for keep-alive pipelining.
         request_consumed: u32,
 
-        // Tick-based timeout: tracks when the connection last had activity.
-        last_activity_tick: u32,
-        // Set by callbacks to signal the server to update last_activity_tick.
-        recv_activity: bool,
-        send_activity: bool,
 
         // Whether the client wants keep-alive (HTTP/1.1 default) or close (HTTP/1.0 default).
         keep_alive: bool,
@@ -97,16 +92,13 @@ pub fn ConnectionType(comptime IO: type) type {
                 .send_pos = 0,
                 .send_completion = .{},
                 .request_consumed = 0,
-                .last_activity_tick = 0,
-                .recv_activity = false,
-                .send_activity = false,
                 .keep_alive = true,
                 .is_datastar_request = false,
             };
         }
 
         /// Accept a connection. Assigns the fd and starts receiving immediately.
-        pub fn on_accept(conn: *Connection, fd: IO.fd_t, current_tick: u32) void {
+        pub fn on_accept(conn: *Connection, fd: IO.fd_t) void {
             assert(conn.state == .free);
             assert(fd > 0);
             defer conn.invariants();
@@ -114,7 +106,6 @@ pub fn ConnectionType(comptime IO: type) type {
             conn.fd = fd;
             conn.state = .receiving;
             conn.recv_pos = 0;
-            conn.last_activity_tick = current_tick;
             conn.submit_recv();
         }
 
@@ -211,10 +202,6 @@ pub fn ConnectionType(comptime IO: type) type {
             }
         }
 
-        /// Returns true if the connection has been idle for longer than timeout_ticks.
-        pub fn check_timeout(conn: *Connection, current_tick: u32, timeout_ticks: u32) bool {
-            return current_tick -% conn.last_activity_tick > timeout_ticks;
-        }
 
         /// Place an encoded HTTP response and send immediately.
         /// TB pattern: don't wait for tick to flush — send now.
@@ -339,8 +326,6 @@ pub fn ConnectionType(comptime IO: type) type {
             conn.recv_completion = .{};
             conn.send_completion = .{};
             conn.request_consumed = 0;
-            conn.recv_activity = false;
-            conn.send_activity = false;
             conn.keep_alive = true;
             conn.is_datastar_request = false;
             conn.active_next = null;

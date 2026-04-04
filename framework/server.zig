@@ -132,7 +132,6 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
         const metrics_interval_ticks = 10_000;
 
         /// 30 seconds at 10ms/tick.
-        pub const request_timeout_ticks = 3000;
 
         /// Sidecar response deadline: 5 seconds at 10ms/tick.
         /// If the pipeline has been pending (waiting for sidecar
@@ -300,7 +299,6 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
         /// buffer, retried when resources free up.
         fn try_dispatch(server: *Server, conn: *Connection) void {
             assert(conn.state == .ready);
-            conn.last_activity_tick = server.tick_count;
 
             // Sidecar not connected → 503 immediately.
             if (App.sidecar_enabled and !server.sidecar_any_ready()) {
@@ -448,7 +446,6 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
             server.wake_handle_waiters();
             if (App.sidecar_enabled) server.timeout_sidecar_response();
             server.log_metrics();
-            server.timeout_idle();
         }
 
         // --- Accept ---
@@ -465,7 +462,7 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
                     if (conn.state == .free) break conn;
                 } else unreachable;
 
-                conn.on_accept(accepted_fd, server.tick_count);
+                conn.on_accept(accepted_fd);
                 server.connections_used += 1;
                 log.debug("accepted connection fd={d}", .{accepted_fd});
             }
@@ -986,22 +983,6 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
             server.tracer.gauge(.connections_sending, connections_sending);
 
             server.tracer.emit_metrics();
-        }
-
-        // --- Timeout idle connections ---
-
-        fn timeout_idle(server: *Server) void {
-            // Still scans all connections — timeout is periodic work
-            // that can't be callback-driven (no IO event on idle).
-            // Acceptable cost: timeout check is a u32 comparison.
-            // Move to kernel TCP_USER_TIMEOUT when this shows up in perf.
-            for (server.connections) |*conn| {
-                if (conn.state == .free) continue;
-                if (conn.check_timeout(server.tick_count, request_timeout_ticks)) {
-                    log.mark.debug("connection timed out fd={d}", .{conn.fd});
-                    conn.do_close();
-                }
-            }
         }
 
         /// Write a short error response for requests that parsed as valid HTTP

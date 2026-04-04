@@ -258,7 +258,7 @@ test "timeout — partial request triggers close" {
     io.inject_bytes(0, "GET /products HTTP/1.1\r\n");
     run_ticks(&server, &io, 10);
 
-    // Connection should still be alive before timeout.
+    // Connection should still be alive before disconnect.
     var found_receiving = false;
     for (server.connections) |*conn| {
         if (conn.state == .receiving) {
@@ -268,15 +268,13 @@ test "timeout — partial request triggers close" {
     }
     assert(found_receiving);
 
-    // Disconnect the client so SimIO won't try to deliver more data,
-    // then tick past the timeout.
+    // Disconnect the client — recv callback gets 0 bytes → do_close.
+    // TB pattern: kernel detects disconnect, callback handles close.
+    // No application-level timeout scanning needed.
     io.disconnect_client(0);
+    run_ticks(&server, &io, 10);
 
-    for (0..Server.request_timeout_ticks + 10) |_| {
-        server.tick();
-    }
-
-    // After timeout, the receiving connection should be freed.
+    // Connection should be freed immediately (callback-driven close).
     var any_active = false;
     for (server.connections) |*conn| {
         if (conn.state != .free) {
@@ -345,7 +343,7 @@ test "mark: send fault triggers send error" {
     try mark.expect_hit();
 }
 
-test "mark: idle connection triggers timeout" {
+test "mark: disconnected client triggers recv close" {
     var seed_prng = PRNG.from_seed_testing();
     var io = SimIO.init(seed_prng.int(u64));
     var storage = try App.Storage.init(":memory:");
@@ -361,17 +359,15 @@ test "mark: idle connection triggers timeout" {
     io.connect_client(0, server.listen_fd);
     run_ticks(&server, &io, 10);
 
-    // Send a partial request so connection stays in receiving state.
     io.inject_bytes(0, "GET /products HTTP/1.1\r\n");
     run_ticks(&server, &io, 10);
 
-    // Disconnect so SimIO won't deliver more data, then tick past timeout.
+    // Disconnect — recv callback gets 0 bytes → do_close.
+    // TB pattern: no application-level timeout scanning.
+    // Kernel TCP_USER_TIMEOUT handles real idle connections.
+    const mark = marks.check("recv: peer closed");
     io.disconnect_client(0);
-
-    const mark = marks.check("connection timed out");
-    for (0..Server.request_timeout_ticks + 10) |_| {
-        server.tick();
-    }
+    run_ticks(&server, &io, 10);
     try mark.expect_hit();
 }
 
