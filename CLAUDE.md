@@ -82,6 +82,13 @@ kill %2; kill %1                             # stop perf, stop server
 perf report -i perf.data --stdio --no-children -g none -s dso,symbol --percent-limit=0.5
 ```
 
+**Benchmarking safety:** Always verify zero orphaned processes before
+AND after each benchmark run. `npx tsx` spawns process trees that
+survive `pkill`. Use: `ps aux | grep -E "tiger-web|call_runtime" | grep -v grep | wc -l`
+and kill by PID if non-zero. Orphaned processes inflate throughput
+measurements by up to 8×. The supervisor uses process groups
+(`pgid=0`) to kill entire trees on shutdown.
+
 ## Documentation Structure
 
 Three directories, two audiences:
