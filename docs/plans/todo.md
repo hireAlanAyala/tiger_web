@@ -74,7 +74,21 @@
    Bounded, auto-named, size limit enforced, RunState struct (no globals).
    Budget assertions in benchmark (smoke mode, ~10x actual values).
 
-13. **Extract admin socket from main.zig** — cleanup (trigger: second admin command)
+13. **Delete legacy storage methods** — cleanup, prerequisite for query cache
+   All native handlers use query()/query_all()/execute(). Legacy methods
+   (get/put/update/delete/list/search + per-entity variants) have zero
+   external callers — only storage.zig's own tests use them. Delete:
+   - 24 prepared statement fields + init + finalize (~170 lines)
+   - 20 legacy methods (~500 lines)
+   - 5 legacy helpers (bind_uuid, bind_ok, read_product, read_collection,
+     read_order_item) (~90 lines)
+   - 3 dead tests (roundtrip max u32, list filters, order insertion order)
+   - 10 ReadView delegation methods (~40 lines)
+   Total: ~800 lines deleted. Compiler-driven — remove fields, fix errors.
+   After: storage has 3 read methods (query, query_all, query_raw) and
+   1 write method (execute, execute_raw). Cache wraps these uniformly.
+
+14. **Extract admin socket from main.zig** — cleanup (trigger: second admin command)
    AdminSocket struct + trace toggle logic inline in main.zig.
    Fine for one command. Extract when a second admin command is added.
 
