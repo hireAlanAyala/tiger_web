@@ -18,7 +18,7 @@ case "$1" in
     # Server starts first (listens on unix socket), sidecar connects.
     # call_runtime.ts is the CALL/RESULT runtime (replaces dispatch.generated.ts).
     npx concurrently \
-      "cd $FRAMEWORK_ROOT && ./zig/zig build -Dsidecar=true run -- --port=0 --sidecar=$SOCK" \
+      "cd $FRAMEWORK_ROOT && ./zig/zig build -Dsidecar=true run -- start --port=0 --sidecar=$SOCK" \
       "sleep 2 && tsx $FRAMEWORK_ROOT/adapters/call_runtime.ts $SOCK"
     ;;
   *)

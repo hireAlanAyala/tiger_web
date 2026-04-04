@@ -121,7 +121,7 @@ fn spawn_server(allocator: std.mem.Allocator, db: [:0]const u8) !ServerProcess {
     const db_arg = std.fmt.bufPrint(&db_arg_buf, "--db={s}", .{db}) catch @panic("db path too long");
 
     var child = std.process.Child.init(
-        &.{ server_path, "--port=0", db_arg },
+        &.{ server_path, "start", "--port=0", db_arg },
         allocator,
     );
     child.stdin_behavior = .Pipe;

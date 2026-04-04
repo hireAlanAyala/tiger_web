@@ -45,7 +45,7 @@ pub fn main(shell: *Shell, gpa: std.mem.Allocator, cli_args: CLIArgs) !void {
             .stdout_behavior = .Pipe,
             .stderr_behavior = .Inherit,
         },
-        "zig-out/bin/tiger-web --port=0 --db=tiger_web_perf.db",
+        "zig-out/bin/tiger-web start --port=0 --db=tiger_web_perf.db",
         .{},
     );
 
