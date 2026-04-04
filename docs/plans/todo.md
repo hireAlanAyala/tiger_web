@@ -259,7 +259,7 @@ look in the project for illegal posix and other syscalls that are not simulation
 - is ci/cd tracking benchmarks/loadtest/perf?
 - annotation settings should start with @ so they're obvious special syntax
 - ensure all errors absorbed by the framework like, db, network, worker, etc. are logged correctly for debugging.
-- change prefetch from epoll to io_uring to 15x if a user uses a network db as the db interface postgres would go from 2k to 50k req/s
+- change prefetch from epoll to io_uring to 15x if a user uses a network db as the db interface postgres would go from 2k to 50k req/s (copy linux.zig from og tb, it has everything cleanly isolated)
 - assert the args passed to the sidecar functions are not directly mutated like ctx.something = ""
 - if storage is a network db, commit will probably need to be async, right now it blocks
 

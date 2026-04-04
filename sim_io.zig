@@ -58,9 +58,16 @@ pub const SimIO = struct {
     /// Swarm testing should randomize this per seed.
     send_now_fault_probability: PRNG.Ratio,
 
+    /// Logical tick counter for completion scheduling.
+    current_tick: u64,
+
     const PendingOp = struct {
         completion: *Completion,
         active: bool,
+        /// TB pattern: completions have a ready_at tick. Only processed
+        /// when current_tick >= ready_at. New submissions from callbacks
+        /// get ready_at = current_tick + 1, preventing infinite cascade.
+        ready_at: u64 = 0,
     };
 
     pub const SimClient = struct {
@@ -100,12 +107,13 @@ pub const SimIO = struct {
             .pending = undefined,
             .pending_count = 0,
             .clients = undefined,
-            .next_fd = 100, // Start at 100 to distinguish from listen fd.
+            .next_fd = 100,
             .prng = PRNG.from_seed(seed),
             .accept_fault_probability = PRNG.Ratio.zero(),
             .recv_fault_probability = PRNG.Ratio.zero(),
             .send_fault_probability = PRNG.Ratio.zero(),
             .send_now_fault_probability = PRNG.Ratio.zero(),
+            .current_tick = 0,
         };
         for (&sim.pending) |*p| {
             p.* = .{ .completion = undefined, .active = false };
@@ -485,19 +493,32 @@ pub const SimIO = struct {
         }
     }
 
+    /// TB pattern: advance tick, then process all completions where
+    /// ready_at <= current_tick. Callbacks may submit new IO with
+    /// ready_at = current_tick + 1 — those are NOT ready this tick.
+    /// Loop terminates naturally because nothing new is ready.
+    /// Same mechanism as TB's packet_simulator: packets have ready_at
+    /// timestamps, step() only delivers packets where ready_at <= now.
     pub fn run_for_ns(self: *SimIO, _: u64) void {
-        var to_process: [max_pending]*Completion = undefined;
-        var count: u32 = 0;
-        for (&self.pending) |*p| {
-            if (!p.active) continue;
-            to_process[count] = p.completion;
-            p.active = false;
-            count += 1;
-        }
-        self.pending_count -= count;
+        self.current_tick += 1;
 
-        for (to_process[0..count]) |completion| {
-            self.complete(completion);
+        while (true) {
+            var to_process: [max_pending]*Completion = undefined;
+            var count: u32 = 0;
+            for (&self.pending) |*p| {
+                if (!p.active) continue;
+                if (p.ready_at > self.current_tick) continue; // not ready yet
+                to_process[count] = p.completion;
+                p.active = false;
+                count += 1;
+            }
+            self.pending_count -= count;
+
+            if (count == 0) break;
+
+            for (to_process[0..count]) |completion| {
+                self.complete(completion);
+            }
         }
     }
 
@@ -507,7 +528,11 @@ pub const SimIO = struct {
         }
         for (&self.pending) |*p| {
             if (!p.active) {
-                p.* = .{ .completion = completion, .active = true };
+                p.* = .{
+                    .completion = completion,
+                    .active = true,
+                    .ready_at = self.current_tick + 1,
+                };
                 self.pending_count += 1;
                 return;
             }

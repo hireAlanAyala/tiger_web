@@ -153,6 +153,12 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
         connections: []Connection,
         connections_used: u32,
 
+        /// TB pattern: suspended connections queue. Connections with
+        /// a complete request that couldn't be dispatched (no free
+        /// pipeline slot). Drained when a slot frees up.
+        suspended_head: ?*Connection = null,
+        suspended_tail: ?*Connection = null,
+
         wal: ?*Wal,
         /// Assembly scratch — used by wal.append_writes to build the entry
         /// (header + writes) before writing to disk.
@@ -239,8 +245,18 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
             const connections = try allocator.alloc(Connection, max_connections);
             errdefer allocator.free(connections);
 
+            // Connections are initialized with zeroed state. They're
+            // wired with callbacks below after the server is at its
+            // final address. TB pattern: init connections after the
+            // containing struct is constructed.
+            // Connections are placeholder-initialized. wire_connections()
+            // must be called after the server is at its final address.
             for (connections) |*conn| {
-                conn.* = Connection.init_free();
+                conn.* = undefined;
+                conn.state = .free;
+                conn.fd = 0;
+                conn.recv_completion = .{};
+                conn.send_completion = .{};
             }
 
             return Server{
@@ -254,6 +270,110 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
                 .wal = wal,
                 .tick_count = 0,
             };
+        }
+
+        /// Wire connection callbacks after server is at its final address.
+        /// Must be called before the first tick. TB pattern: connections
+        /// hold a context pointer to the server for callback dispatch.
+        pub fn wire_connections(server: *Server) void {
+            for (server.connections) |*conn| {
+                conn.* = Connection.init(
+                    server.io,
+                    @ptrCast(server),
+                    on_connection_ready,
+                    on_connection_close,
+                );
+            }
+        }
+
+        /// Callback: connection has a complete HTTP request. Dispatch
+        /// to the pipeline immediately — don't wait for tick.
+        /// Callback: connection has a complete HTTP request.
+        /// TB pattern: dispatch immediately, or suspend if no slot.
+        fn on_connection_ready(ctx: *anyopaque, conn: *Connection) void {
+            const server: *Server = @ptrCast(@alignCast(ctx));
+            server.try_dispatch(conn);
+        }
+
+        /// Try to dispatch a ready connection. If no slot available,
+        /// push to suspended queue. TB pattern: message stays in recv
+        /// buffer, retried when resources free up.
+        fn try_dispatch(server: *Server, conn: *Connection) void {
+            assert(conn.state == .ready);
+
+            // Sidecar not connected → 503 immediately.
+            if (App.sidecar_enabled and !server.sidecar_any_ready()) {
+                const resp = sidecar_unavailable_response(conn);
+                conn.set_response(resp.offset, resp.len);
+                conn.keep_alive = false;
+                return;
+            }
+
+            // Already dispatched to a slot — don't double-dispatch.
+            if (server.connection_dispatched(conn)) return;
+
+            // Find a free pipeline slot.
+            const slot = server.find_free_slot() orelse {
+                // No slot — suspend. Resume when a slot frees up.
+                server.suspend_connection(conn);
+                return;
+            };
+
+            slot.stage = .route;
+            slot.pending_since = server.tick_count;
+            slot.connection = conn;
+            server.commit_dispatch(slot);
+        }
+
+        fn suspend_connection(server: *Server, conn: *Connection) void {
+            // Don't add duplicates.
+            if (conn.active_next != null or conn.active_prev != null) return;
+            if (server.suspended_head == conn) return;
+
+            conn.active_next = null;
+            conn.active_prev = server.suspended_tail;
+            if (server.suspended_tail) |tail| {
+                tail.active_next = conn;
+            } else {
+                server.suspended_head = conn;
+            }
+            server.suspended_tail = conn;
+        }
+
+        /// Drain suspended connections — called when a pipeline slot
+        /// frees up. TB pattern: resume_receive re-drains suspended
+        /// messages when journal/repair slots become available.
+        fn resume_suspended(server: *Server) void {
+            var conn = server.suspended_head;
+            server.suspended_head = null;
+            server.suspended_tail = null;
+
+            while (conn) |c| {
+                const next = c.active_next;
+                c.active_next = null;
+                c.active_prev = null;
+                conn = next;
+
+                if (c.state == .ready) {
+                    server.try_dispatch(c);
+                }
+            }
+        }
+
+        /// Callback: connection closed. Free resources and handle
+        /// pipeline cleanup.
+        fn on_connection_close(ctx: *anyopaque, conn: *Connection) void {
+            const server: *Server = @ptrCast(@alignCast(ctx));
+            server.connections_used -= 1;
+
+            // Cancel any pipeline slot using this connection.
+            for (&server.pipeline_slots, 0..) |*slot, si| {
+                if (slot.connection == conn and slot.stage != .idle) {
+                    server.tracer.cancel_slot(@intCast(si));
+                    server.pipeline_reset(slot);
+                    break;
+                }
+            }
         }
 
         /// Wire the sidecar Bus and Client into the server and SM.
@@ -324,15 +444,12 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
             // runs after tick returns). This ordering is safe.
             if (App.sidecar_enabled) server.sidecar_bus.tick_accept();
             server.maybe_accept();
-            server.process_inbox();
+            server.update_time();
+            server.resume_suspended();
             server.wake_handle_waiters();
             if (App.sidecar_enabled) server.timeout_sidecar_response();
             server.log_metrics();
-            server.flush_outbox();
-            server.continue_receives();
-            server.update_activity();
             server.timeout_idle();
-            server.close_dead();
         }
 
         // --- Accept ---
@@ -349,7 +466,7 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
                     if (conn.state == .free) break conn;
                 } else unreachable;
 
-                conn.on_accept(server.io, accepted_fd, server.tick_count);
+                conn.on_accept(accepted_fd, server.tick_count);
                 server.connections_used += 1;
                 log.debug("accepted connection fd={d}", .{accepted_fd});
             }
@@ -357,46 +474,10 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
 
         // --- Inbox: process ready requests ---
 
-        fn process_inbox(server: *Server) void {
-            // Set wall-clock time — only when no pipeline is in-flight.
-            // A pending pipeline uses the time from when the request arrived,
-            // not when it resumes. Same as TB: time is per-prepare, not per-tick.
+        /// Update wall-clock time when no pipeline is in-flight.
+        fn update_time(server: *Server) void {
             if (!server.any_slot_active()) {
-                // realtime() returns nanoseconds; SM uses seconds.
                 server.state_machine.set_time(@divTrunc(server.time.realtime(), std.time.ns_per_s));
-            }
-
-            // Transaction boundary moved to commit_dispatch (.handle stage).
-            // WAL recording enabled there too. process_inbox only does
-            // routing + pipeline start.
-
-            for (server.connections) |*conn| {
-                if (conn.state != .ready) continue;
-
-                // Skip connections already assigned to a pipeline slot.
-                // A connection stays .ready during async dispatch (no
-                // response sent yet). Without this check, process_inbox
-                // would dispatch the same connection to multiple slots.
-                if (server.connection_dispatched(conn)) continue;
-
-                // Sidecar not connected → 503 immediately, no pipeline needed.
-                // Handled here (server level), not in the pipeline — the 503
-                // is a framework concern, not a per-request concern.
-                if (App.sidecar_enabled and !server.sidecar_any_ready()) {
-                    const resp = sidecar_unavailable_response(conn);
-                    conn.set_response(resp.offset, resp.len);
-                    conn.keep_alive = false;
-                    continue;
-                }
-
-                // Find a free slot — round-robin across ready connections.
-                const slot = server.find_free_slot() orelse break;
-
-                // Start pipeline at .route — routing is the first stage.
-                slot.stage = .route;
-                slot.pending_since = server.tick_count;
-                slot.connection = conn;
-                server.commit_dispatch(slot);
             }
         }
 
@@ -543,9 +624,13 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
 
                         if (handler.is_handler_pending()) return; // async IO in-flight
 
-                        // Busy — retry next tick.
+                        // Busy — suspend for retry on next tick.
                         server.tracer.cancel_slot(idx);
+                        const busy_conn = slot.connection;
                         server.pipeline_reset(slot);
+                        if (busy_conn) |bc| {
+                            if (bc.state == .ready) server.suspend_connection(bc);
+                        }
                         return;
                     },
 
@@ -901,74 +986,18 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
             server.tracer.emit_metrics();
         }
 
-        // --- Outbox: send pending responses ---
-
-        fn flush_outbox(server: *Server) void {
-            for (server.connections) |*conn| {
-                if (conn.state != .sending) continue;
-                // Don't re-submit if a send is already in-flight.
-                if (conn.send_completion.operation != .none) continue;
-                if (conn.send_pos < conn.send_len) {
-                    conn.submit_send(server.io);
-                }
-            }
-        }
-
-        // --- Continue receiving on connections that need more bytes ---
-
-        fn continue_receives(server: *Server) void {
-            for (server.connections) |*conn| {
-                if (conn.state == .free) continue;
-                conn.continue_recv(server.io);
-            }
-        }
-
-        // --- Close dead connections ---
-
-        fn close_dead(server: *Server) void {
-            for (server.connections) |*conn| {
-                if (conn.state != .closing) continue;
-                assert(conn.fd > 0);
-
-                log.debug("closing connection fd={d}", .{conn.fd});
-                server.io.close(conn.fd);
-                conn.* = Connection.init_free();
-                server.connections_used -= 1;
-            }
-        }
-
-        // --- Activity tracking ---
-
-        /// Update last_activity_tick for connections that signaled activity via callbacks.
-        fn update_activity(server: *Server) void {
-            for (server.connections) |*conn| {
-                if (conn.state == .free) continue;
-                if (conn.recv_activity or conn.send_activity) {
-                    conn.last_activity_tick = server.tick_count;
-                    conn.recv_activity = false;
-                    conn.send_activity = false;
-                }
-            }
-        }
-
         // --- Timeout idle connections ---
 
         fn timeout_idle(server: *Server) void {
+            // Still scans all connections — timeout is periodic work
+            // that can't be callback-driven (no IO event on idle).
+            // Acceptable cost: timeout check is a u32 comparison.
+            // Move to kernel TCP_USER_TIMEOUT when this shows up in perf.
             for (server.connections) |*conn| {
-                if (conn.state == .free or conn.state == .closing) continue;
+                if (conn.state == .free) continue;
                 if (conn.check_timeout(server.tick_count, request_timeout_ticks)) {
                     log.mark.debug("connection timed out fd={d}", .{conn.fd});
-                    // If this connection has a pending pipeline, cancel it
-                    // before closing. Otherwise the pipeline resumes on a
-                    // closing connection — use-after-close.
-                    for (&server.pipeline_slots, 0..) |*slot, si| {
-                        if (slot.connection == conn and slot.stage != .idle) {
-                            server.tracer.cancel_slot(@intCast(si));
-                            server.pipeline_reset(slot);
-                            break; // one connection per slot
-                        }
-                    }
-                    conn.state = .closing;
+                    conn.do_close();
                 }
             }
         }

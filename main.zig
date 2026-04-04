@@ -122,6 +122,7 @@ fn cmd_start(cli: StartArgs, args: *std.process.ArgIterator) void {
         log.err("server init failed: {}", .{err});
         std.process.exit(1);
     };
+    server.wire_connections();
 
     wire_sidecar(&server, cli, allocator) catch |err| {
         log.err("sidecar init failed: {}", .{err});

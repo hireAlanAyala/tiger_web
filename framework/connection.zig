@@ -8,8 +8,10 @@ const log = marks.wrap_log(std.log.scoped(.connection));
 /// Per-connection state machine. Parameterized on IO type so the same
 /// connection logic works with real epoll IO or simulated IO.
 ///
-/// IO callbacks only update buffers and set state. They never call into
-/// the application state machine — that's the server tick's job.
+/// TB pattern: callbacks drive work. When a complete HTTP request is
+/// parsed, the connection calls on_ready_fn to dispatch immediately.
+/// When a connection closes, it calls on_close_fn to free resources.
+/// The server tick does NOT scan connections for work.
 pub fn ConnectionType(comptime IO: type) type {
     return struct {
         const Connection = @This();
@@ -29,6 +31,19 @@ pub fn ConnectionType(comptime IO: type) type {
 
         state: State,
         fd: IO.fd_t,
+        io: *IO,
+
+        /// Intrusive linked list for suspended connection queue.
+        active_next: ?*Connection = null,
+        active_prev: ?*Connection = null,
+
+        /// Server callback: dispatched when a complete HTTP request
+        /// is parsed. The server dispatches to the pipeline immediately.
+        on_ready_fn: *const fn (*anyopaque, *Connection) void,
+        /// Server callback: dispatched when a connection is closed
+        /// and resources can be freed (fd closed, slot released).
+        on_close_fn: *const fn (*anyopaque, *Connection) void,
+        context: *anyopaque,
 
         // Receive buffer: accumulate incoming HTTP bytes until a full request arrives.
         recv_buf: [http.recv_buf_max]u8,
@@ -59,10 +74,19 @@ pub fn ConnectionType(comptime IO: type) type {
         // The render layer uses this to decide full-page HTML vs SSE fragments.
         is_datastar_request: bool,
 
-        pub fn init_free() Connection {
+        pub fn init(
+            io: *IO,
+            context: *anyopaque,
+            on_ready_fn: *const fn (*anyopaque, *Connection) void,
+            on_close_fn: *const fn (*anyopaque, *Connection) void,
+        ) Connection {
             return .{
                 .state = .free,
                 .fd = 0,
+                .io = io,
+                .on_ready_fn = on_ready_fn,
+                .on_close_fn = on_close_fn,
+                .context = context,
                 .recv_buf = undefined,
                 .recv_pos = 0,
                 .recv_completion = .{},
@@ -80,8 +104,8 @@ pub fn ConnectionType(comptime IO: type) type {
             };
         }
 
-        /// Accept a connection. Assigns the fd and starts receiving.
-        pub fn on_accept(conn: *Connection, io: *IO, fd: IO.fd_t, current_tick: u32) void {
+        /// Accept a connection. Assigns the fd and starts receiving immediately.
+        pub fn on_accept(conn: *Connection, fd: IO.fd_t, current_tick: u32) void {
             assert(conn.state == .free);
             assert(fd > 0);
             defer conn.invariants();
@@ -90,19 +114,18 @@ pub fn ConnectionType(comptime IO: type) type {
             conn.state = .receiving;
             conn.recv_pos = 0;
             conn.last_activity_tick = current_tick;
-            conn.submit_recv(io);
+            conn.submit_recv();
         }
 
-        fn submit_recv(conn: *Connection, io: *IO) void {
+        fn submit_recv(conn: *Connection) void {
             assert(conn.state == .receiving);
             assert(conn.recv_pos <= conn.recv_buf.len);
             const buf = conn.recv_buf[conn.recv_pos..];
             if (buf.len == 0) {
-                // Buffer full but no valid request — close.
-                conn.state = .closing;
+                conn.do_close();
                 return;
             }
-            io.recv(conn.fd, buf, &conn.recv_completion, @ptrCast(conn), recv_callback);
+            conn.io.recv(conn.fd, buf, &conn.recv_completion, @ptrCast(conn), recv_callback);
         }
 
         /// Cross-check internal state consistency.
@@ -139,19 +162,29 @@ pub fn ConnectionType(comptime IO: type) type {
             const conn: *Connection = @ptrCast(@alignCast(ctx));
             assert(conn.state == .receiving);
             defer conn.invariants();
-            // Peer may close or error at any time.
+
             stdx.maybe(result <= 0);
             if (result <= 0) {
                 log.mark.debug("recv: peer closed or error fd={d} result={d}", .{ conn.fd, result });
-                conn.state = .closing;
+                conn.do_close();
                 return;
             }
 
             conn.recv_pos += @intCast(result);
             assert(conn.recv_pos <= conn.recv_buf.len);
-            conn.recv_activity = true;
+            conn.last_activity_tick = conn.last_activity_tick; // preserve — server updates on dispatch
 
             conn.try_parse_request();
+
+            // TB pattern: if request is ready, dispatch immediately.
+            // Don't wait for the tick — the callback drives work.
+            if (conn.state == .ready) {
+                conn.on_ready_fn(conn.context, conn);
+            } else if (conn.state == .receiving) {
+                // Need more bytes — re-submit recv immediately.
+                conn.submit_recv();
+            }
+            // .closing is handled by do_close already called above.
         }
 
         /// Try to parse an HTTP request from the current recv buffer.
@@ -170,12 +203,10 @@ pub fn ConnectionType(comptime IO: type) type {
                     conn.keep_alive = parsed.keep_alive;
                     conn.state = .ready;
                 },
-                .incomplete => {
-                    // Need more bytes — stay in receiving state.
-                },
+                .incomplete => {},
                 .invalid => {
                     log.mark.warn("invalid HTTP request fd={d}", .{conn.fd});
-                    conn.state = .closing;
+                    conn.do_close();
                 },
             }
         }
@@ -186,30 +217,25 @@ pub fn ConnectionType(comptime IO: type) type {
         }
 
         /// Called by the server tick to continue receiving if we need more bytes.
-        pub fn continue_recv(conn: *Connection, io: *IO) void {
-            if (conn.state != .receiving) return;
-            // Don't re-submit if a recv is already in-flight.
-            if (conn.recv_completion.operation != .none) return;
-            conn.submit_recv(io);
-        }
-
-        /// Called by the server tick to place an encoded HTTP response in the
-        /// send buffer. The server encodes the response; the connection is
-        /// pure byte mechanics.
+        /// Place an encoded HTTP response and send immediately.
+        /// TB pattern: don't wait for tick to flush — send now.
         pub fn set_response(conn: *Connection, offset: u32, len: u32) void {
             assert(conn.state == .ready);
-            defer conn.invariants();
             conn.send_start = offset;
             conn.send_len = len;
             conn.send_pos = 0;
             conn.state = .sending;
+            conn.submit_send();
         }
 
         /// Start sending the response. TB pattern: try synchronous
         /// send first (fast-path), only fall back to async epoll
         /// send if the socket would block. Avoids a kernel round-trip
         /// per response for small payloads that fit in the send buffer.
-        pub fn submit_send(conn: *Connection, io: *IO) void {
+        /// Send the response. Called by the server after rendering.
+        /// TB pattern: try synchronous send first (fast-path), only
+        /// fall back to async if the socket would block.
+        pub fn submit_send(conn: *Connection) void {
             assert(conn.state == .sending);
             assert(conn.send_pos < conn.send_len);
 
@@ -218,12 +244,10 @@ pub fn ConnectionType(comptime IO: type) type {
                 const abs_pos = conn.send_start + conn.send_pos;
                 const abs_end = conn.send_start + conn.send_len;
                 const buf = conn.send_buf[abs_pos..abs_end];
-                const sent = io.send_now(conn.fd, buf) orelse break;
+                const sent = conn.io.send_now(conn.fd, buf) orelse break;
                 conn.send_pos += @intCast(sent);
-                conn.send_activity = true;
             }
 
-            // Check if fast-path completed the send.
             if (conn.send_pos >= conn.send_len) {
                 conn.send_complete();
                 return;
@@ -233,14 +257,15 @@ pub fn ConnectionType(comptime IO: type) type {
             const abs_pos = conn.send_start + conn.send_pos;
             const abs_end = conn.send_start + conn.send_len;
             const buf = conn.send_buf[abs_pos..abs_end];
-            io.send(conn.fd, buf, &conn.send_completion, @ptrCast(conn), send_callback);
+            conn.io.send(conn.fd, buf, &conn.send_completion, @ptrCast(conn), send_callback);
         }
 
         /// Complete a fully-sent response — shared by fast-path and callback.
+        /// TB pattern: callback drives the next step immediately.
         fn send_complete(conn: *Connection) void {
             assert(conn.send_pos >= conn.send_len);
             if (!conn.keep_alive) {
-                conn.state = .closing;
+                conn.do_close();
                 return;
             }
             // Keep-alive: shift pipelined bytes, go back to receiving.
@@ -261,8 +286,17 @@ pub fn ConnectionType(comptime IO: type) type {
             conn.is_datastar_request = false;
             conn.state = .receiving;
 
+            // Check for pipelined request before submitting recv.
             if (conn.recv_pos > 0) {
                 conn.try_parse_request();
+                if (conn.state == .ready) {
+                    conn.on_ready_fn(conn.context, conn);
+                    return;
+                }
+            }
+            // Need more bytes — re-submit recv.
+            if (conn.state == .receiving) {
+                conn.submit_recv();
             }
         }
 
@@ -274,20 +308,45 @@ pub fn ConnectionType(comptime IO: type) type {
             stdx.maybe(result <= 0);
             if (result <= 0) {
                 log.mark.debug("send: error fd={d} result={d}", .{ conn.fd, result });
-                conn.state = .closing;
+                conn.do_close();
                 return;
             }
 
             conn.send_pos += @intCast(result);
             assert(conn.send_pos <= conn.send_len);
-            conn.send_activity = true;
 
-            stdx.maybe(conn.send_pos < conn.send_len);
             if (conn.send_pos >= conn.send_len) {
                 conn.send_complete();
+            } else {
+                // Partial send — re-submit immediately for remaining bytes.
+                conn.submit_send();
             }
-            // If partially sent, stay in sending state.
-            // Server tick will call submit_send again.
+        }
+
+        /// Close the connection: close fd, reset state, notify server.
+        /// TB pattern: close happens immediately in the callback, not
+        /// deferred to tick. The server's on_close_fn decrements
+        /// connections_used and handles any pipeline cleanup.
+        pub fn do_close(conn: *Connection) void {
+            if (conn.fd > 0) {
+                log.debug("closing connection fd={d}", .{conn.fd});
+                conn.io.close(conn.fd);
+            }
+            // Reset all per-request state. Preserve IO/callback
+            // fields — the connection slot is reused on next accept.
+            conn.state = .free;
+            conn.fd = 0;
+            conn.recv_pos = 0;
+            conn.recv_completion = .{};
+            conn.send_completion = .{};
+            conn.request_consumed = 0;
+            conn.recv_activity = false;
+            conn.send_activity = false;
+            conn.keep_alive = true;
+            conn.is_datastar_request = false;
+            conn.active_next = null;
+            conn.active_prev = null;
+            conn.on_close_fn(conn.context, conn);
         }
     };
 }

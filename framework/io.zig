@@ -36,8 +36,6 @@ pub const IO = struct {
         const epoll_fd = try posix.epoll_create1(linux.EPOLL.CLOEXEC);
         return .{
             .epoll_fd = epoll_fd,
-            .completions = undefined,
-            .completion_count = 0,
         };
     }
 

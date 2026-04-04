@@ -311,6 +311,7 @@ const TestHarness = struct {
         h.sm = StateMachine.init(&h.storage, 0, test_key);
         h.tracer = try Trace.Tracer.init(h.allocator, time_sim.time(), .{});
         h.server = try Server.init(h.allocator, &h.io, &h.sm, &h.tracer, http_listen_fd, time_sim.time(), null);
+        h.server.wire_connections();
         try h.server.wire_sidecar(h.allocator, null);
         h.server.sidecar_bus.listen_fd = sidecar_listen_fd;
 
