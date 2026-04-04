@@ -212,14 +212,16 @@ unchanged. Same handler serves HTML and JSON — the framework picks the encodin
 Right primitive: the developer states what happened, the framework handles the protocol.
 
 # current
-review recent changes
-generate new multicart trace.json
-finish tracing plan
-finish sidecar plan
-look in th eproject for illegal posix and other syscalls that are not simulation friendly
-
+look in the project for illegal posix and other syscalls that are not simulation friendly
 
 # Backlog
+
+- Component benchmarks: HTTP parser, auth sign+verify, render encoding,
+  tracer overhead, frame build/parse, sidecar e2e (µs/op). Add as
+  dual-mode in bench.zig when touching those components.
+- CI benchmark tracking: run `zig build bench` on merge, store JSON,
+  week-over-week comparison. TB does this manually — defer until
+  automated CI is set up.
 
 - design a system for deriving docs from the code, and documenting the bible, architecture, and docs separately
 - TS sidecar render: effects array instead of single string
