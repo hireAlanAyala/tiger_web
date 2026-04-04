@@ -950,7 +950,7 @@ const TestIO = struct {
         buffer: ?[]u8 = null,
         buffer_const: ?[]const u8 = null,
 
-        const Op = enum { none, accept, recv, send, readable };
+        const Op = enum { none, recv, send };
     };
 
     pub fn recv(_: *TestIO, fd: fd_t, buffer: []u8, completion: *Completion, context: *anyopaque, callback: *const fn (*anyopaque, i32) void) void {
@@ -969,8 +969,6 @@ const TestIO = struct {
     pub fn try_accept(_: *TestIO, _: fd_t) ?fd_t {
         return null; // sim wires connections manually
     }
-
-    pub fn accept(_: *TestIO, _: fd_t, _: *Completion, _: *anyopaque, _: *const fn (*anyopaque, i32) void) void {}
 
     pub fn shutdown(_: *TestIO, fd: fd_t, how: posix.ShutdownHow) void {
         posix.shutdown(fd, how) catch {};

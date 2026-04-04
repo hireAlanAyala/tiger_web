@@ -27,10 +27,8 @@ pub const SimIO = struct {
 
         const Op = enum {
             none,
-            accept,
             recv,
             send,
-            readable,
         };
     };
 
@@ -404,7 +402,7 @@ pub const SimIO = struct {
     /// Returns the fd of the first connected-but-not-accepted client
     /// targeting this listen_fd, or null if none pending.
     pub fn try_accept(self: *SimIO, listen_fd: fd_t) ?fd_t {
-        if (self.fault(.accept)) return null;
+        if (self.prng.chance(self.accept_fault_probability)) return null;
         for (&self.clients) |*client| {
             if (client.connected and !client.accepted and
                 client.target_listen_fd == listen_fd)
@@ -414,27 +412,6 @@ pub const SimIO = struct {
             }
         }
         return null;
-    }
-
-    pub fn accept(self: *SimIO, listen_fd: fd_t, completion: *Completion, context: *anyopaque, callback: *const fn (*anyopaque, i32) void) void {
-        assert(completion.operation == .none);
-        completion.* = .{
-            .fd = listen_fd,
-            .operation = .accept,
-            .context = context,
-            .callback = callback,
-        };
-        self.enqueue(completion);
-    }
-
-    /// Readability notification — fires the callback immediately with 0.
-    pub fn readable(self: *SimIO, _: fd_t, completion: *Completion, context: *anyopaque, callback: *const fn (*anyopaque, i32) void) void {
-        completion.* = .{
-            .operation = .readable,
-            .context = context,
-            .callback = callback,
-        };
-        self.enqueue(completion);
     }
 
     pub fn recv(self: *SimIO, fd: fd_t, buffer: []u8, completion: *Completion, context: *anyopaque, callback: *const fn (*anyopaque, i32) void) void {
@@ -541,24 +518,6 @@ pub const SimIO = struct {
         completion.operation = .none;
 
         switch (op) {
-            .accept => {
-                if (self.fault(.accept)) {
-                    completion.callback(completion.context, -1);
-                    return;
-                }
-                for (&self.clients) |*client| {
-                    if (client.connected and !client.accepted and
-                        client.target_listen_fd == completion.fd)
-                    {
-                        const fd = client.fd;
-                        client.accepted = true;
-                        completion.callback(completion.context, fd);
-                        return;
-                    }
-                }
-                completion.operation = .accept;
-                self.enqueue(completion);
-            },
             .recv => {
                 if (self.fault(.recv)) {
                     completion.callback(completion.context, -1);
@@ -609,19 +568,14 @@ pub const SimIO = struct {
                 }
                 completion.callback(completion.context, -1);
             },
-            .readable => {
-                completion.callback(completion.context, 0);
-            },
             .none => unreachable,
         }
     }
 
     fn fault(self: *SimIO, op: Completion.Op) bool {
         const probability = switch (op) {
-            .accept => self.accept_fault_probability,
             .recv => self.recv_fault_probability,
             .send => self.send_fault_probability,
-            .readable => PRNG.Ratio.zero(),
             .none => unreachable,
         };
         return self.prng.chance(probability);

@@ -23,7 +23,6 @@ pub const IO = struct {
             none,
             recv,
             send,
-            readable, // Notify when fd is readable, don't consume data.
         };
     };
 
@@ -210,7 +209,7 @@ pub const IO = struct {
 
     fn register(self: *IO, completion: *Completion) void {
         const events: u32 = switch (completion.operation) {
-            .recv, .readable => linux.EPOLL.IN,
+            .recv => linux.EPOLL.IN,
             .send => linux.EPOLL.OUT,
             .none => unreachable,
         };
@@ -243,10 +242,6 @@ pub const IO = struct {
                 const result = posix.send(completion.fd, buf, 0);
                 const n: i32 = if (result) |bytes| @intCast(bytes) else |_| -1;
                 completion.callback(completion.context, n);
-            },
-            .readable => {
-                // Just notify — don't read. The caller handles reading.
-                completion.callback(completion.context, 0);
             },
             .none => unreachable,
         }
