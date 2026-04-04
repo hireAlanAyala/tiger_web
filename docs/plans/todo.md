@@ -68,45 +68,15 @@
    `sleep 0.1`), verifies the supervisor detects exit via waitpid,
    and respawns with correct argv. Not a sim test — real processes.
 
-12. **Runtime trace toggle** — safe production tracing
+12. **Runtime trace toggle** — DONE
+   `tiger-web start --trace --trace-max=50mb` for startup tracing.
+   `tiger-web trace --max=50mb :3000` for runtime toggle via admin socket.
+   Bounded, auto-named, size limit enforced, RunState struct (no globals).
+   Budget assertions in benchmark (smoke mode, ~10x actual values).
 
-   Two entry points, both bounded:
-
-   ```
-   # Init tracing — captures startup spans
-   tiger-web start --port=3000 --trace --trace-max=50mb
-
-   # Runtime tracing — attaches to running server
-   tiger-web trace :3000 --max=50mb
-   # → "tracing started on server :3000 (max 50 MB)"
-   # Ctrl-C or size limit reached
-   # → "trace stopped: trace-2026-04-03-163012.json (50 MB, 30s)"
-   ```
-
-   **Design:**
-   - `--trace-max` required with `--trace` (startup error if missing).
-     TB says no unbounded limits. Unfamiliar users will forget to stop.
-   - `--max` required with `tiger-web trace` (same rule).
-   - File auto-named `trace-{timestamp}.json` in current directory.
-     No user-specified names — one fewer decision, no overwrites.
-   - Three stop conditions: Ctrl-C, size limit, server shutdown.
-     All close the file cleanly (valid Chrome Tracing JSON).
-   - `tiger-web trace` connects via admin Unix socket derived from
-     port: `/tmp/tiger_web_admin_{port}.sock`. Local-only, no network
-     surface, filesystem permissions enforce access.
-   - CLI prints file path and size on stop.
-
-   **Current state:** `--trace=path` exists but is unbounded and
-   requires restart. Remove the path argument, add `--trace-max`,
-   add admin socket + `trace` subcommand.
-
-13. **Extract admin socket from main.zig** — cleanup
-   main.zig is ~350 lines of composition root. The admin socket
-   (AdminSocket struct, poll, respond), runtime trace state
-   (module-level vars), and trace toggle logic in run_loop should
-   move to their own file if we add more admin commands. For now
-   it's one command (trace toggle) so it's fine inline. Trigger:
-   second admin command added.
+13. **Extract admin socket from main.zig** — cleanup (trigger: second admin command)
+   AdminSocket struct + trace toggle logic inline in main.zig.
+   Fine for one command. Extract when a second admin command is added.
 
 14. **Delete dead protocol code** — cleanup
    `protocol.read_frame`, `write_frame`, `recv_exact`, `send_exact`

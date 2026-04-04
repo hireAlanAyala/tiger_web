@@ -46,9 +46,13 @@ npm run build               # codegen + scan annotations + generate dispatch
 npm run dev                 # start sidecar + server on port 3000
 
 # --- Zig-native development (no sidecar) ---
-./zig/zig build run                         # run the server (default port 3000)
-./zig/zig build run-worker                  # run the worker (polls server)
-./zig/zig build run -- --log-debug          # enable debug log output
+./zig/zig build run -- start                            # run the server (default port 3000)
+./zig/zig build run -- start --log-debug                # enable debug log output
+./zig/zig build run -- start --trace --trace-max=50mb   # startup tracing (bounded)
+./zig/zig build run-worker                              # run the worker (polls server)
+
+# --- Runtime tracing (attach to running server) ---
+./zig/zig build run -- trace --max=50mb :3000   # toggle tracing via admin socket
 
 # --- Testing ---
 ./zig/zig build unit-test    # unit tests (message, state_machine, http, marks, codec)
