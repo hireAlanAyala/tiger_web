@@ -205,21 +205,72 @@ pub fn ConnectionType(comptime IO: type) type {
             conn.state = .sending;
         }
 
-        /// Start sending the response.
+        /// Start sending the response. TB pattern: try synchronous
+        /// send first (fast-path), only fall back to async epoll
+        /// send if the socket would block. Avoids a kernel round-trip
+        /// per response for small payloads that fit in the send buffer.
         pub fn submit_send(conn: *Connection, io: *IO) void {
             assert(conn.state == .sending);
             assert(conn.send_pos < conn.send_len);
+
+            // Fast-path: try synchronous non-blocking send.
+            while (conn.send_pos < conn.send_len) {
+                const abs_pos = conn.send_start + conn.send_pos;
+                const abs_end = conn.send_start + conn.send_len;
+                const buf = conn.send_buf[abs_pos..abs_end];
+                const sent = io.send_now(conn.fd, buf) orelse break;
+                conn.send_pos += @intCast(sent);
+                conn.send_activity = true;
+            }
+
+            // Check if fast-path completed the send.
+            if (conn.send_pos >= conn.send_len) {
+                conn.send_complete();
+                return;
+            }
+
+            // Slow-path: submit async send for remaining bytes.
             const abs_pos = conn.send_start + conn.send_pos;
             const abs_end = conn.send_start + conn.send_len;
             const buf = conn.send_buf[abs_pos..abs_end];
             io.send(conn.fd, buf, &conn.send_completion, @ptrCast(conn), send_callback);
         }
 
+        /// Complete a fully-sent response — shared by fast-path and callback.
+        fn send_complete(conn: *Connection) void {
+            assert(conn.send_pos >= conn.send_len);
+            if (!conn.keep_alive) {
+                conn.state = .closing;
+                return;
+            }
+            // Keep-alive: shift pipelined bytes, go back to receiving.
+            assert(conn.request_consumed > 0);
+            assert(conn.request_consumed <= conn.recv_pos);
+            const remaining = conn.recv_pos - conn.request_consumed;
+            stdx.maybe(remaining > 0);
+            if (remaining > 0) {
+                std.mem.copyForwards(
+                    u8,
+                    conn.recv_buf[0..remaining],
+                    conn.recv_buf[conn.request_consumed..conn.recv_pos],
+                );
+            }
+            conn.recv_pos = @intCast(remaining);
+            assert(conn.recv_pos <= conn.recv_buf.len);
+            conn.request_consumed = 0;
+            conn.is_datastar_request = false;
+            conn.state = .receiving;
+
+            if (conn.recv_pos > 0) {
+                conn.try_parse_request();
+            }
+        }
+
         fn send_callback(ctx: *anyopaque, result: i32) void {
             const conn: *Connection = @ptrCast(@alignCast(ctx));
             assert(conn.state == .sending);
             defer conn.invariants();
-            // Peer may close or error at any time.
+
             stdx.maybe(result <= 0);
             if (result <= 0) {
                 log.mark.debug("send: error fd={d} result={d}", .{ conn.fd, result });
@@ -231,45 +282,9 @@ pub fn ConnectionType(comptime IO: type) type {
             assert(conn.send_pos <= conn.send_len);
             conn.send_activity = true;
 
-            // Partial sends are expected — TCP may accept fewer bytes than requested.
             stdx.maybe(conn.send_pos < conn.send_len);
-
             if (conn.send_pos >= conn.send_len) {
-                // Fully sent.
-                // Client may or may not want keep-alive.
-                stdx.maybe(conn.keep_alive);
-                if (!conn.keep_alive) {
-                    // HTTP/1.0 or Connection: close — close the connection.
-                    conn.state = .closing;
-                    return;
-                }
-                // Keep-alive: go back to receiving.
-                // Shift any leftover bytes (pipelined next request) to the front.
-                assert(conn.request_consumed > 0);
-                assert(conn.request_consumed <= conn.recv_pos);
-                const remaining = conn.recv_pos - conn.request_consumed;
-                // Pipelined data may or may not be present.
-                stdx.maybe(remaining > 0);
-                if (remaining > 0) {
-                    std.mem.copyForwards(
-                        u8,
-                        conn.recv_buf[0..remaining],
-                        conn.recv_buf[conn.request_consumed..conn.recv_pos],
-                    );
-                }
-                conn.recv_pos = @intCast(remaining);
-                assert(conn.recv_pos <= conn.recv_buf.len);
-                conn.request_consumed = 0;
-                conn.is_datastar_request = false;
-                conn.state = .receiving;
-
-                // Try to parse pipelined data immediately. If a complete
-                // request is already buffered, go to .ready without waiting
-                // for another recv callback.
-                if (conn.recv_pos > 0) {
-                    conn.try_parse_request();
-                }
-                // If still .receiving, server tick will submit a recv.
+                conn.send_complete();
             }
             // If partially sent, stay in sending state.
             // Server tick will call submit_send again.

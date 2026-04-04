@@ -442,12 +442,13 @@ pub const SimIO = struct {
         self.enqueue(completion);
     }
 
-    /// Non-blocking send — SimIO equivalent. Returns null based on
-    /// send_now_fault_probability. Matches real IO: null means
-    /// "can't complete now, fall back to async."
+    /// Non-blocking send — SimIO equivalent. Returns null on fault
+    /// (both send_now_fault and send_fault), forcing fallback to async
+    /// where send_fault is properly reported via callback.
     pub fn send_now(self: *SimIO, fd: fd_t, buffer: []const u8) ?usize {
         assert(buffer.len > 0);
         if (self.prng.chance(self.send_now_fault_probability)) return null;
+        if (self.prng.chance(self.send_fault_probability)) return null;
         for (&self.clients) |*client| {
             if (client.fd == fd and client.connected) {
                 const max = @min(buffer.len, client.recv_buf.len - client.recv_len);

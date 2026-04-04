@@ -18,6 +18,10 @@ pub const IO = struct {
         callback: *const fn (*anyopaque, i32) void = undefined,
         buffer: ?[]u8 = null,
         buffer_const: ?[]const u8 = null,
+        /// Result from execute, stored for deferred callback.
+        result: i32 = 0,
+        /// Intrusive linked list for deferred callback queue.
+        next: ?*Completion = null,
 
         const Op = enum {
             none,
@@ -27,10 +31,6 @@ pub const IO = struct {
     };
 
     epoll_fd: fd_t,
-    completions: [max_completions]*Completion,
-    completion_count: u32,
-
-    const max_completions = 128;
 
     pub fn init() !IO {
         const epoll_fd = try posix.epoll_create1(linux.EPOLL.CLOEXEC);
@@ -196,15 +196,40 @@ pub const IO = struct {
     }
 
     /// Poll for IO events and fire callbacks. Returns after at most `ns` nanoseconds.
+    ///
+    /// TB pattern: deferred callback queue. Collect completions from epoll,
+    /// execute the syscalls (recv/send), store results, then drain callbacks
+    /// in a separate pass. This prevents re-entrancy — a callback that
+    /// submits new IO won't have its completion processed mid-drain.
     pub fn run_for_ns(self: *IO, ns: u64) void {
         const timeout_ms: i32 = @intCast(@min(ns / std.time.ns_per_ms, std.math.maxInt(u31)));
 
         var events: [64]std.os.linux.epoll_event = undefined;
         const ready = posix.epoll_wait(self.epoll_fd, &events, timeout_ms);
 
+        // Phase 1: Execute syscalls and queue results.
+        var completed_head: ?*Completion = null;
+        var completed_tail: ?*Completion = null;
         for (events[0..ready]) |event| {
             const completion: *Completion = @ptrFromInt(event.data.ptr);
             self.execute(completion);
+            // Push to completed list.
+            completion.next = null;
+            if (completed_tail) |tail| {
+                tail.next = completion;
+            } else {
+                completed_head = completion;
+            }
+            completed_tail = completion;
+        }
+
+        // Phase 2: Drain callbacks. Callbacks may submit new IO,
+        // which goes to epoll for the NEXT run_for_ns call.
+        var current = completed_head;
+        while (current) |c| {
+            current = c.next;
+            c.next = null;
+            c.callback(c.context, c.result);
         }
     }
 
@@ -225,26 +250,26 @@ pub const IO = struct {
         };
     }
 
+    /// Execute the syscall and store the result. Callback is NOT called
+    /// here — it's called from the deferred drain in run_for_ns.
     fn execute(self: *IO, completion: *Completion) void {
         _ = self;
         const op = completion.operation;
         assert(op != .none);
         completion.operation = .none;
 
-        switch (op) {
-            .recv => {
+        completion.result = switch (op) {
+            .recv => blk: {
                 const buf = completion.buffer.?;
                 const result = posix.recv(completion.fd, buf, 0);
-                const n: i32 = if (result) |bytes| @intCast(bytes) else |_| -1;
-                completion.callback(completion.context, n);
+                break :blk if (result) |bytes| @intCast(bytes) else |_| -1;
             },
-            .send => {
+            .send => blk: {
                 const buf = completion.buffer_const.?;
                 const result = posix.send(completion.fd, buf, 0);
-                const n: i32 = if (result) |bytes| @intCast(bytes) else |_| -1;
-                completion.callback(completion.context, n);
+                break :blk if (result) |bytes| @intCast(bytes) else |_| -1;
             },
             .none => unreachable,
-        }
+        };
     }
 };
