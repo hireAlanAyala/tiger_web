@@ -624,14 +624,21 @@ that same platform layer (futex → os_unfair_lock → WaitOnAddress).
 ## Relationship to completed work
 
 **Message bus (✅ DONE):** `ConnectionType(IO)` + `MessageBusType(IO)`
-with async handlers, `.pending` + callback resume. The shared memory
-transport replaces the IO layer, not raw socket calls.
+with async handlers, `.pending` + callback resume. Direct `try_accept`
+(no epoll for accepts). Plan deleted — decisions in code.
 
 **Concurrent pipeline (✅ DONE, Stage 3):** Per-slot handlers,
 round-robin dispatch, handle_lock, per-slot tracer. SM is pure
 framework services (auth, transactions). Handlers are per-slot on
 the server. All connections active — no standby concept. Sim-tested
-at 2x throughput with 2 slots.
+at 2x throughput with 2 slots. Multi-sidecar accept verified in
+Perfetto (overlapping spans on separate tracks).
+
+**Trace infrastructure (✅ DONE):** TB-pattern tracer with 7 boundary
+events, Chrome Tracing JSON, per-operation/per-status metrics.
+CLI: `tiger-web start --trace --trace-max=50mb` (bounded startup),
+`tiger-web trace --max=50mb :3000` (runtime toggle via admin socket).
+Budget assertions in smoke benchmarks. Plan deleted — decisions in code.
 
 **Recommended implementation order (revised after measurement):**
 1. Phase 3: Typed schemas — correctness fix (safety > performance)
@@ -821,8 +828,8 @@ via QUERY. Per-handler decision at build time.
 
 Deploy after Phase 1 + Phase 3 and re-measure. Each optimization
 targets a different bottleneck. The instrumentation (`--log-trace`)
-shows exactly where time goes — implement whichever the data says
-is the next bottleneck.
+shows exactly where time goes (`tiger-web trace --max=50mb :port`) —
+implement whichever the data says is the next bottleneck.
 
 ### Request batching
 
