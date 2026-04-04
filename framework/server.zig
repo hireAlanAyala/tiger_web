@@ -337,23 +337,22 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
 
         // --- Accept ---
 
-        /// Accept one pending connection per tick. Direct non-blocking
+        /// Drain all pending connections per tick. Direct non-blocking
         /// accept — same primitive as the sidecar bus. No epoll
         /// registration, no ONESHOT race, deterministic per-tick.
         fn maybe_accept(server: *Server) void {
-            // All slots may be busy under load.
-            if (server.connections_used == server.connections.len) return;
+            while (server.connections_used < server.connections.len) {
+                const accepted_fd = server.io.try_accept(server.listen_fd) orelse return;
+                IO.set_tcp_options(accepted_fd);
 
-            const accepted_fd = server.io.try_accept(server.listen_fd) orelse return;
-            IO.set_tcp_options(accepted_fd);
+                const conn = for (server.connections) |*conn| {
+                    if (conn.state == .free) break conn;
+                } else unreachable;
 
-            const conn = for (server.connections) |*conn| {
-                if (conn.state == .free) break conn;
-            } else unreachable;
-
-            conn.on_accept(server.io, accepted_fd, server.tick_count);
-            server.connections_used += 1;
-            log.debug("accepted connection fd={d}", .{accepted_fd});
+                conn.on_accept(server.io, accepted_fd, server.tick_count);
+                server.connections_used += 1;
+                log.debug("accepted connection fd={d}", .{accepted_fd});
+            }
         }
 
         // --- Inbox: process ready requests ---
