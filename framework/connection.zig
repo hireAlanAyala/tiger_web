@@ -21,7 +21,7 @@ pub fn ConnectionType(comptime IO: type) type {
             free,
             /// Accumulating request bytes.
             receiving,
-            /// A complete request is in the inbox, waiting for the server tick.
+            /// A complete request is in the inbox. on_ready_fn dispatches it.
             ready,
             /// The server has placed a response in the outbox, sending it.
             sending,
@@ -33,9 +33,10 @@ pub fn ConnectionType(comptime IO: type) type {
         fd: IO.fd_t,
         io: *IO,
 
-        /// Intrusive linked list for suspended connection queue.
+        /// Intrusive singly-linked list for suspended connection queue.
+        /// Connections with a complete request that couldn't dispatch
+        /// (no free pipeline slot) are queued for retry.
         active_next: ?*Connection = null,
-        active_prev: ?*Connection = null,
 
         /// Server callback: dispatched when a complete HTTP request
         /// is parsed. The server dispatches to the pipeline immediately.
@@ -191,7 +192,7 @@ pub fn ConnectionType(comptime IO: type) type {
         /// path in send_callback (pipelined data may already be buffered).
         ///
         /// Pure frame detection — validates that a complete HTTP request is
-        /// buffered. Application logic (auth, routing) runs in the server tick.
+        /// buffered. on_ready_fn dispatches to the pipeline immediately.
         fn try_parse_request(conn: *Connection) void {
             assert(conn.state == .receiving);
             switch (http.parse_request(conn.recv_buf[0..conn.recv_pos])) {
@@ -215,7 +216,6 @@ pub fn ConnectionType(comptime IO: type) type {
             return current_tick -% conn.last_activity_tick > timeout_ticks;
         }
 
-        /// Called by the server tick to continue receiving if we need more bytes.
         /// Place an encoded HTTP response and send immediately.
         /// TB pattern: don't wait for tick to flush — send now.
         pub fn set_response(conn: *Connection, offset: u32, len: u32) void {
@@ -344,7 +344,6 @@ pub fn ConnectionType(comptime IO: type) type {
             conn.keep_alive = true;
             conn.is_datastar_request = false;
             conn.active_next = null;
-            conn.active_prev = null;
             conn.on_close_fn(conn.context, conn);
         }
     };

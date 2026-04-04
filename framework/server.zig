@@ -328,11 +328,10 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
 
         fn suspend_connection(server: *Server, conn: *Connection) void {
             // Don't add duplicates.
-            if (conn.active_next != null or conn.active_prev != null) return;
+            if (conn.active_next != null) return;
             if (server.suspended_head == conn) return;
 
             conn.active_next = null;
-            conn.active_prev = server.suspended_tail;
             if (server.suspended_tail) |tail| {
                 tail.active_next = conn;
             } else {
@@ -352,7 +351,6 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
             while (conn) |c| {
                 const next = c.active_next;
                 c.active_next = null;
-                c.active_prev = null;
                 conn = next;
 
                 if (c.state == .ready) {
