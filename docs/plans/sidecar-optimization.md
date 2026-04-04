@@ -1,25 +1,25 @@
 # Sidecar optimization
 
-## Current state (measured 2026-04-04, ReleaseSafe, stable runs)
+## Current state (measured 2026-04-04, clean system, 200K requests)
 
-| Mode | 1 conn (req/s) | 32 conn | 64 conn | 128 conn |
-|---|---|---|---|---|
-| Native Zig | ~10K | ~49K | ~76K | ~102K |
-| 1 sidecar | ~4K | — | ~8K | — |
-| 2 sidecars | ~4K | ~23K | ~23K | ~24K |
-| Express (prior) | — | — | — | ~2,300 |
+| Mode | c=32 | c=64 | c=128 |
+|---|---|---|---|
+| Native Zig | 73K | 75K | 72K |
+| 1 sidecar | 8.5K | 8.6K | 10K |
+| 2 sidecars | 25K | 25K | 25K |
+| Express | — | — | ~2.3K |
 
-**Corrected measurements (2026-04-04):** The earlier 55K sidecar number
-was a V8 JIT warmup anomaly. Stable repeated runs show 23-24K with
-2 sidecars. Multiple runs confirm: 23.5K, 23.6K, 24.3K. The callback-
-driven execution model (TB pattern) is performance-neutral vs the
-tick model — both produce identical sidecar throughput.
+**11× faster than Express.** Callback model is 32% faster than tick
+model for sidecar (25K vs 19K on clean system). Native: 72K stable
+across all concurrency levels with 200K requests per run.
 
-Native Zig at c=64: ~76K req/s. perf shows 58% CPU in HTTP string
-matching (mem.eqlBytes, mem.indexOf). SQLite is not the bottleneck
-for in-memory reads — the OS page cache serves them.
+**Bottleneck:** perf shows 58% CPU in HTTP string matching for native.
+Sidecar bottleneck is 4 protocol round-trips (~33µs coordination/RT).
+SQLite is not the bottleneck (OS page cache serves in-memory reads).
 
-**10× faster than Express.** 2 sidecars at 24K vs Express at 2.3K.
+**IMPORTANT:** Earlier measurements of 55K-140K were inflated by
+orphaned Node.js processes (63 leaked across benchmark runs).
+Always use `scripts/loadtest.sh` or verify zero orphans manually.
 
 ## Cost breakdown (isolated benchmarks)
 

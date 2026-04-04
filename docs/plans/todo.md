@@ -96,7 +96,14 @@
    with 0-2 suspended, the scan is trivial — defer until connection
    count grows.
 
-15. **Extract admin socket from main.zig** — cleanup (trigger: second admin command)
+15. **MessagePool for >128 connection scaling** — future
+   Each connection embeds 270KB (8KB recv + 256KB send). 512
+   connections = 135MB, exceeding L3 cache. TB's message_pool.zig
+   (343 lines, isolated from consensus) provides shared buffer pools.
+   Copy via `cp` when >128 connections is needed. Connections would
+   hold pool buffer pointers instead of embedded arrays.
+
+16. **Extract admin socket from main.zig** — cleanup (trigger: second admin command)
    AdminSocket struct + trace toggle logic inline in main.zig.
    Fine for one command. Extract when a second admin command is added.
 

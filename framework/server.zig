@@ -418,27 +418,20 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
             server.* = undefined;
         }
 
-        /// One tick of the server. Called from the main event loop.
+        /// One tick of the server. Periodic work only — no connection
+        /// scanning. TB pattern: callbacks drive request processing
+        /// (recv_callback → dispatch → send). The tick handles:
         ///
-        /// 1. Accept new connections if slots available
-        /// 2. Process inbox: execute ready requests
-        /// 3. Process follow-ups: dashboard refresh after SSE mutations
-        /// 4. Flush outbox: start sending responses
-        /// 5. Continue receiving on connections that need more bytes
-        /// 6. Close dead connections
+        /// 1. Accept new connections (drain pending)
+        /// 2. Update wall-clock time
+        /// 3. Resume suspended connections (no-slot retry)
+        /// 4. Wake handle_lock waiters
+        /// 5. Sidecar response timeout (scans pipeline_slots_max only)
+        /// 6. Metrics emission
         pub fn tick(server: *Server) void {
             server.tick_count +%= 1;
-            server.time.tick(); // Advance simulated time (no-op for TimeReal)
+            server.time.tick();
             defer server.invariants();
-            // Ordering constraint: sidecar bus tick_accept runs BEFORE
-            // process_inbox. process_inbox calls commit_dispatch (sets
-            // slot.dispatch_entered = true). sidecar_on_frame also
-            // calls commit_dispatch. If tick_accept ran during or after
-            // process_inbox, a bus recv callback could fire while
-            // slot.dispatch_entered is true → assertion failure.
-            // tick_accept only accepts new connections — it never
-            // delivers frames (that happens in IO.run_for_ns, which
-            // runs after tick returns). This ordering is safe.
             if (App.sidecar_enabled) server.sidecar_bus.tick_accept();
             server.maybe_accept();
             server.update_time();
