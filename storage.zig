@@ -55,8 +55,19 @@ fn stmt_cache_slot(comptime sql: [*:0]const u8) comptime_int {
 pub const SqliteStorage = struct {
     pub const LoginCodeEntry = message.LoginCodeEntry;
 
+    /// Query result cache constants.
+    const query_cache_slots = 64;
+    const query_cache_value_max = 1024;
+    const QueryCacheEntry = struct {
+        sql_slot: u32 = 0,
+        param_hash: u64 = 0,
+        valid: bool = false,
+        len: u32 = 0,
+        data: [query_cache_value_max]u8 align(16) = undefined,
+    };
+
     /// Read-only view of SqliteStorage for the prefetch phase.
-    /// Exposes query/query_all and legacy read methods.
+    /// Exposes query/query_all.
     /// Write methods (execute, put, update, delete, begin, commit) are absent.
     /// The framework uses this type — handlers receive it as `storage: anytype`.
     pub const ReadView = struct {
@@ -237,6 +248,9 @@ pub const SqliteStorage = struct {
     /// on the hot path (was 22% of CPU before caching).
     stmt_cache: [stmt_cache_size]?*c.sqlite3_stmt,
 
+    /// Per-query result cache. Keyed by (sql_slot XOR param_hash).
+    /// Invalidated on any write. Skips SQLite for repeated reads.
+    query_cache: [query_cache_slots]QueryCacheEntry,
 
     pub fn init(path: [*:0]const u8) !SqliteStorage {
         var db: ?*c.sqlite3 = null;
@@ -271,6 +285,7 @@ pub const SqliteStorage = struct {
         return .{
             .db = real_db,
             .stmt_cache = .{null} ** stmt_cache_size,
+            .query_cache = .{@as(QueryCacheEntry, .{})} ** query_cache_slots,
         };
     }
 
@@ -298,6 +313,43 @@ pub const SqliteStorage = struct {
         _ = c.sqlite3_close(self.db);
     }
 
+    // --- Query cache helpers ---
+
+    fn hash_params(args: anytype) u64 {
+        var h: u64 = 0x517cc1b727220a95;
+        inline for (@typeInfo(@TypeOf(args)).@"struct".fields) |field| {
+            const val = @field(args, field.name);
+            const bytes = std.mem.asBytes(&val);
+            for (bytes) |b| {
+                h ^= b;
+                h *%= 0x100000001b3;
+            }
+        }
+        return h;
+    }
+
+    fn cache_index(comptime sql_str: [*:0]const u8, ph: u64) u32 {
+        return @intCast((@as(u64, stmt_cache_slot(sql_str)) ^ ph) & (query_cache_slots - 1));
+    }
+
+    fn cache_lookup(self: *SqliteStorage, comptime sql_str: [*:0]const u8, ph: u64, comptime size: usize) ?*const [size]u8 {
+        const e = &self.query_cache[cache_index(sql_str, ph)];
+        if (e.valid and e.sql_slot == stmt_cache_slot(sql_str) and e.param_hash == ph and e.len == size)
+            return e.data[0..size];
+        return null;
+    }
+
+    fn cache_store(self: *SqliteStorage, comptime sql_str: [*:0]const u8, ph: u64, bytes: []const u8) void {
+        if (bytes.len > query_cache_value_max) return;
+        const e = &self.query_cache[cache_index(sql_str, ph)];
+        e.* = .{ .sql_slot = stmt_cache_slot(sql_str), .param_hash = ph, .valid = true, .len = @intCast(bytes.len) };
+        @memcpy(e.data[0..bytes.len], bytes);
+    }
+
+    fn cache_invalidate(self: *SqliteStorage) void {
+        for (&self.query_cache) |*e| e.valid = false;
+    }
+
     // --- Typed SQL interface ---
     //
     // The production-path API. Handlers call db.query() / db.execute()
@@ -320,22 +372,37 @@ pub const SqliteStorage = struct {
     /// or on step error (busy/locked). Prepare failure is an assert — the
     /// SQL is comptime, so if it doesn't prepare, the schema and code disagree.
     pub fn query(self: *SqliteStorage, comptime T: type, comptime sql_str: [*:0]const u8, args: anytype) ?T {
-        const stmt = self.prepare_and_bind(sql_str, args);
-        assert(c.sqlite3_stmt_readonly(stmt) != 0); // query() called with a mutating statement
+        const ph = hash_params(args);
+        if (comptime @sizeOf(T) <= query_cache_value_max) {
+            if (self.cache_lookup(sql_str, ph, @sizeOf(T))) |cached|
+                return @as(*const T, @ptrCast(@alignCast(cached))).*;
+        }
 
+        const stmt = self.prepare_and_bind(sql_str, args);
+        assert(c.sqlite3_stmt_readonly(stmt) != 0);
         if (step_result(stmt) != .row) return null;
         const mapping = build_column_mapping(T, stmt);
-        return read_row_mapped(T, stmt, mapping);
+        const result = read_row_mapped(T, stmt, mapping);
+
+        if (comptime @sizeOf(T) <= query_cache_value_max)
+            self.cache_store(sql_str, ph, std.mem.asBytes(&result));
+        return result;
     }
 
     /// Query multiple rows into a bounded array. Returns null on step error.
     /// Column→field name mapping is built once on the first row, then reused
     /// for all subsequent rows — no per-row string comparisons.
     pub fn query_all(self: *SqliteStorage, comptime T: type, comptime max: usize, comptime sql_str: [*:0]const u8, args: anytype) ?BoundedList(T, max) {
-        const stmt = self.prepare_and_bind(sql_str, args);
-        assert(c.sqlite3_stmt_readonly(stmt) != 0); // query_all() called with a mutating statement
+        const Result = BoundedList(T, max);
+        const ph = hash_params(args);
+        if (comptime @sizeOf(Result) <= query_cache_value_max) {
+            if (self.cache_lookup(sql_str, ph, @sizeOf(Result))) |cached|
+                return @as(*const Result, @ptrCast(@alignCast(cached))).*;
+        }
 
-        var result = BoundedList(T, max){};
+        const stmt = self.prepare_and_bind(sql_str, args);
+        assert(c.sqlite3_stmt_readonly(stmt) != 0);
+        var result = Result{};
         var mapping_built = false;
         var mapping: ColumnMapping(T) = undefined;
         while (step_result(stmt) == .row) {
@@ -347,6 +414,8 @@ pub const SqliteStorage = struct {
             result.items[result.len] = read_row_mapped(T, stmt, mapping);
             result.len += 1;
         }
+        if (comptime @sizeOf(Result) <= query_cache_value_max)
+            self.cache_store(sql_str, ph, std.mem.asBytes(&result));
         return result;
     }
 
@@ -354,9 +423,10 @@ pub const SqliteStorage = struct {
     /// step error (busy/constraint). Prepare failure is an assert.
     pub fn execute(self: *SqliteStorage, comptime sql_str: [*:0]const u8, args: anytype) bool {
         const stmt = self.prepare_and_bind(sql_str, args);
-        assert(c.sqlite3_stmt_readonly(stmt) == 0); // execute() called with a read-only statement
-
-        return step_result(stmt) == .done;
+        assert(c.sqlite3_stmt_readonly(stmt) == 0);
+        const ok = step_result(stmt) == .done;
+        if (ok) self.cache_invalidate();
+        return ok;
     }
 
     // =================================================================
