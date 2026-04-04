@@ -28,13 +28,28 @@ commit_dispatch runs the sidecar CALL synchronously, then the
 RESULT arrives on the next run_for_ns. The tick model dispatched
 from process_inbox which could batch multiple connections per tick.
 
-**Next steps:**
-1. Profile the sidecar path on both models to find the specific cause
-2. The tick model's process_inbox dispatches ALL ready connections in
-   one sweep. The callback model dispatches one at a time from each
-   recv_callback. This may cause interleaving that reduces throughput.
-3. Consider hybrid: callback-driven for native HTTP, tick-driven
-   dispatch for sidecar pipeline stages
+**Root cause found:** The deferred callback queue (commit 6079d3c)
+is the cause, NOT the callback execution model itself. Bisecting
+shows 19K on the deferred queue commit (still tick model) vs 94K
+on the commit before it.
+
+The deferred queue collects completions, executes syscalls, stores
+results, THEN fires callbacks in a second pass. This adds one
+extra phase delay to every sidecar round-trip. With 4 RTs per
+request, that's 4 extra phase delays. TB uses deferred queues
+because io_uring requires batch collection from a kernel ring
+buffer. Our epoll model executes syscalls inline — deferring
+callbacks adds latency with no benefit.
+
+**Fix:** Revert deferred callback queue. Fire callbacks immediately
+after each syscall execution, same as the pre-6079d3c model. The
+re-entrancy concern doesn't apply to epoll — each event is
+processed sequentially within the epoll_wait loop. Keep the
+callback-driven connection model (on_ready_fn, on_close_fn) which
+has zero regression for native Zig.
+
+Note: the deferred queue IS correct for io_uring (future). Add it
+back when migrating to io_uring, where batch collection is required.
 
 ## Problem
 

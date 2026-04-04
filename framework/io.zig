@@ -193,41 +193,26 @@ pub const IO = struct {
         posix.close(fd);
     }
 
-    /// Poll for IO events and fire callbacks. Returns after at most `ns` nanoseconds.
+    /// Poll for IO events and fire callbacks immediately.
+    /// Direct execution — no deferred queue. Each callback fires
+    /// right after its syscall completes. This is correct for epoll
+    /// where events are processed sequentially (no re-entrancy risk).
     ///
-    /// TB pattern: deferred callback queue. Collect completions from epoll,
-    /// execute the syscalls (recv/send), store results, then drain callbacks
-    /// in a separate pass. This prevents re-entrancy — a callback that
-    /// submits new IO won't have its completion processed mid-drain.
+    /// Note: TB uses a deferred queue because io_uring collects
+    /// completions from a kernel ring buffer in batches. With epoll,
+    /// we execute syscalls inline — deferring adds latency (4×
+    /// regression measured with sidecar). Add deferred queue back
+    /// only when migrating to io_uring.
     pub fn run_for_ns(self: *IO, ns: u64) void {
         const timeout_ms: i32 = @intCast(@min(ns / std.time.ns_per_ms, std.math.maxInt(u31)));
 
         var events: [64]std.os.linux.epoll_event = undefined;
         const ready = posix.epoll_wait(self.epoll_fd, &events, timeout_ms);
 
-        // Phase 1: Execute syscalls and queue results.
-        var completed_head: ?*Completion = null;
-        var completed_tail: ?*Completion = null;
         for (events[0..ready]) |event| {
             const completion: *Completion = @ptrFromInt(event.data.ptr);
             self.execute(completion);
-            // Push to completed list.
-            completion.next = null;
-            if (completed_tail) |tail| {
-                tail.next = completion;
-            } else {
-                completed_head = completion;
-            }
-            completed_tail = completion;
-        }
-
-        // Phase 2: Drain callbacks. Callbacks may submit new IO,
-        // which goes to epoll for the NEXT run_for_ns call.
-        var current = completed_head;
-        while (current) |c| {
-            current = c.next;
-            c.next = null;
-            c.callback(c.context, c.result);
+            completion.callback(completion.context, completion.result);
         }
     }
 
