@@ -45,40 +45,44 @@ cd examples/ecommerce-ts && npm install  # one-time: install example dependencie
 npm run build               # codegen + scan annotations + generate dispatch
 npm run dev                 # start sidecar + server on port 3000
 
-# --- Zig-native development (no sidecar) ---
-./zig/zig build run -- start                            # run the server (default port 3000)
-./zig/zig build run -- start --log-debug                # enable debug log output
-./zig/zig build run -- start --trace --trace-max=50mb   # startup tracing (bounded)
-./zig/zig build run-worker                              # run the worker (polls server)
+# --- Runtime commands (tiger-web binary) ---
+#
+# start — run the server
+./zig/zig build run -- start                                # default port 3000
+./zig/zig build run -- start --log-debug                    # enable debug log output
+./zig/zig build run -- start --trace --trace-max=50mb       # startup tracing (bounded)
+#
+# trace — attach to a running server, capture a Chrome Tracing file
+./zig/zig build run -- trace --max=50mb :3000               # toggle tracing via admin socket
 
-# --- Runtime tracing (attach to running server) ---
-./zig/zig build run -- trace --max=50mb :3000   # toggle tracing via admin socket
-
-# --- Testing ---
+# --- Development commands (zig build targets) ---
+#
+# test — prove the code is correct
 ./zig/zig build unit-test    # unit tests (message, state_machine, http, marks, codec)
 ./zig/zig build test         # simulation tests (27 full-stack scenarios + PRNG fuzz, seeded)
 ./zig/zig build fuzz -- state_machine              # random seed
 ./zig/zig build fuzz -- state_machine 12345        # specific seed
 ./zig/zig build fuzz -- --events-max=1000 state_machine  # with options
 ./zig/zig build fuzz -- smoke                      # all fuzzers, small event counts
+#
+# scan — validate handler annotations against the database schema
 ./zig/zig build scan -- examples/ecommerce-ts/handlers/  # validate annotations
-./zig/zig build fuzz -- --events-max=1000 state_machine  # with options
-./zig/zig build fuzz -- smoke                      # all fuzzers, small event counts
+#
+# bench — measure how fast the internals are (per-operation µs/op, budget assertions)
 ./zig/zig build bench           # state machine benchmark (real measurements)
-
-# --- Load testing ---
-./zig/zig build load                         # default: 10 connections, 10K requests
-./zig/zig build load -Doptimize=ReleaseSafe  # release build for meaningful numbers
+#
+# load — measure how many requests the server handles under real traffic
 ./zig/zig build load -Doptimize=ReleaseSafe -- --connections=128 --requests=100000
 ./zig/zig build load -- --port=3000          # against existing server
 ./zig/zig build load -- --ops=create_product:80,list_products:20  # custom weights
-# When using `hey`: use 200K+ requests at high concurrency. Short runs
-# (<50K at c=128) show false collapse from keep-alive reconnection overhead.
-#   hey -n 200000 -c 128 http://localhost:3000/products
+#
+# loadtest — full throughput benchmark with orphan safety (native + sidecar)
+sh scripts/loadtest.sh              # native only
+sh scripts/loadtest.sh sidecar      # native + 1 sidecar + 2 sidecars
 
 # --- Profiling (requires `perf` — sudo pacman -S perf) ---
 ./zig/zig build -Doptimize=ReleaseSafe       # build with symbols
-zig-out/bin/tiger-web --port=0 --db=bench.db >port.txt 2>/dev/null &
+zig-out/bin/tiger-web start --port=0 --db=bench.db >port.txt 2>/dev/null &
 perf record -g --call-graph dwarf -p $! -o perf.data &
 zig-out/bin/tiger-load --port=$(cat port.txt) --connections=128 --requests=100000
 kill %2; kill %1                             # stop perf, stop server

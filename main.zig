@@ -610,9 +610,17 @@ const Command = union(enum) {
         \\  tiger-web start [options] [-- sidecar-command...]
         \\  tiger-web trace --max=<size> :<port>
         \\
-        \\Subcommands:
-        \\  start   Start the server
-        \\  trace   Attach to a running server and capture a trace
+        \\Runtime commands:
+        \\  start   Run the server
+        \\  trace   Attach to a running server, capture a Chrome Tracing file
+        \\
+        \\Development commands (via zig build):
+        \\  zig build test       Simulation tests (correctness)
+        \\  zig build unit-test  Unit tests
+        \\  zig build bench      Micro-benchmark (per-operation µs/op)
+        \\  zig build load       HTTP throughput (req/s under load)
+        \\  zig build scan       Validate handler annotations
+        \\  zig build fuzz       Fuzz testing
         \\
     ;
 };
