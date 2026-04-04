@@ -97,6 +97,9 @@ pub const Process = struct {
         child.stdin_behavior = .Ignore;
         child.stdout_behavior = .Inherit;
         child.stderr_behavior = .Inherit;
+        // New process group — kill(-pgid) kills the entire tree
+        // (npx → node → tsx → handler). Prevents orphaned processes.
+        child.pgid = 0; // 0 = child's PID becomes the group ID
 
         try child.spawn();
 
@@ -157,7 +160,12 @@ pub const Process = struct {
         }
         if (self.child) |*child| {
             log.info("shutting down sidecar pid={d}", .{child.id});
-            _ = posix.kill(child.id, posix.SIG.TERM) catch {};
+            // Kill the entire process group — not just the direct child.
+            // npx spawns node → tsx → handler. Killing only the direct
+            // child (npx) leaves grandchildren orphaned.
+            // Negate PID to kill process group (POSIX: kill(-pgid, sig))
+            const pgid: posix.pid_t = -child.id;
+            _ = posix.kill(pgid, posix.SIG.TERM) catch {};
             _ = child.wait() catch {};
         }
         self.child = null;
