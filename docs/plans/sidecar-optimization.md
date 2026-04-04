@@ -2,16 +2,16 @@
 
 ## Current state (measured 2026-04-03, ReleaseSafe, post-warmup)
 
-| Mode | 1 conn (req/s) | 128 conn (req/s) | Serial latency |
-|---|---|---|---|
-| Native Zig | 9,130 | 54,559 | 110µs |
-| 1 sidecar | 3,725 | 6,853 | 268µs |
-| 2 sidecars | ~4,000 | 45,089 | ~250µs |
-| Express (prior) | — | ~2,300 | ~440µs |
+| Mode | 1 conn (req/s) | 32 conn | 64 conn | 128 conn |
+|---|---|---|---|---|
+| Native Zig | 11,547 | 56,551 | 58,618 | 56,981 |
+| 2 sidecars | 11,675 | 48,462 | 56,211 | 55,299 |
+| Express (prior) | — | — | — | ~2,300 |
 
-**2 sidecars reach 83% of native throughput at high concurrency.**
-Already 19× faster than Express. The sidecar overhead is 158µs per
-request (268µs - 110µs), spread across 4 RTs (~40µs/RT).
+**2 sidecars reach 97% of native throughput at 128 connections.**
+24× faster than Express. The sidecar overhead at high concurrency
+is negligible — the Zig server becomes the bottleneck, not the
+sidecar. At serial (1 conn), both native and sidecar are ~11.5K.
 
 ## Cost breakdown (isolated benchmarks)
 
