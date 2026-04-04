@@ -57,6 +57,11 @@ pub const SqliteStorage = struct {
 
     /// Query result cache constants.
     const query_cache_slots = 64;
+    // 1KB — fits point reads (single row). List results (BoundedList)
+    // exceed this and skip cache at comptime. 32KB was benchmarked but
+    // memcpy cost exceeded SQLite in-memory query cost for small result
+    // sets (10 products: cache -7% to -16% slower). Only increase for
+    // disk-backed storage with high-latency reads.
     const query_cache_value_max = 1024;
     const QueryCacheEntry = struct {
         sql_slot: u32 = 0,
