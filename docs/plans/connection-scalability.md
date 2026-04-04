@@ -189,6 +189,46 @@ Not worth it for HTTP.
 that eliminate scanning and reduce syscalls). Then 2 if latency
 matters. Skip 5 and 6 unless profiling shows need.
 
+## Implementation status
+
+**Committed (working):**
+- Deferred callback queue in io.zig (TB flush pattern)
+- Send fast-path in connection.zig (send_now before async)
+- SimIO.send_now respects send_fault_probability
+
+**Stashed (WIP, 4 sim tests failing):**
+`git stash list` — "WIP: callback-driven model — needs TB message suspension pattern"
+
+Changes in stash:
+- connection.zig: callback-driven (on_ready_fn, on_close_fn, do_close, submit_send/recv use conn.io)
+- server.zig: wire_connections(), on_connection_ready, on_connection_close, removed process_inbox/flush_outbox/continue_receives/update_activity/close_dead
+- sim.zig: wire_connections() after every Server.init (24 sites)
+- sim_io.zig: current_tick + ready_at timestamps on PendingOp
+
+**Root cause of failures:** The callback model dispatches once from recv_callback. If the pipeline returns busy (storage fault), nobody retries. The old model retried via process_inbox scanning .ready connections every tick.
+
+**TB's solution:** Message suspension + resume. When a message can't be processed (resource unavailable), the message stays in the recv buffer marked as suspended. When the resource frees up (write slot available, repair slot available), the replica calls bus.resume_receive() which submits a zero-timeout that fires on the next step, re-draining the suspended buffer.
+
+**What we need to implement (match TB exactly):**
+
+1. **SimIO: timestamp-based completion scheduling** (partially done in stash)
+   - PendingOp has ready_at tick
+   - enqueue sets ready_at = current_tick + 1
+   - run_for_ns advances current_tick, processes only ready completions
+   - Loop until nothing is ready (TB's step() pattern)
+
+2. **Connection: message suspension** (TB's recv_buffer_drain pattern)
+   - When on_ready_fn returns without dispatching (no slot, busy), the connection is "suspended"
+   - Server tracks suspended connections in a queue
+   - When a pipeline slot frees up or a retry is appropriate, server calls resume which re-dispatches
+
+3. **Server: resume mechanism** (TB's resume_receive pattern)
+   - After pipeline_reset frees a slot → check suspended connections
+   - After handle_lock released → check suspended connections
+   - After storage busy clears → retry the connection
+
+4. **The key insight from TB:** The recv buffer holds the message. The message isn't consumed until it's successfully dispatched. Suspension means "I have a message but can't process it now — try again when resources free up." This is fundamentally different from "dispatch failed, retry on next tick scan."
+
 ## Verification
 
 After each change:
