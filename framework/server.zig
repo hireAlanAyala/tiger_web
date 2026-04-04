@@ -305,8 +305,8 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
             // Sidecar not connected → 503 immediately.
             if (App.sidecar_enabled and !server.sidecar_any_ready()) {
                 const resp = sidecar_unavailable_response(conn);
-                conn.set_response(resp.offset, resp.len);
                 conn.keep_alive = false;
+                conn.set_response(resp.offset, resp.len);
                 return;
             }
 
@@ -591,8 +591,8 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
                             if (handler.is_handler_pending()) return;
                             log.mark.warn("unmapped request: {s} {s} fd={d}", .{ @tagName(parsed.method), parsed.path, conn.fd });
                             const resp = unmapped_response(conn);
-                            conn.set_response(resp.offset, resp.len);
                             conn.keep_alive = false;
+                            conn.set_response(resp.offset, resp.len);
                             server.pipeline_reset(slot);
                             return;
                         };
@@ -782,8 +782,11 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
             const trace_idx = server.slot_index(slot);
             server.tracer.stop(.{ .pipeline_stage = .{ .stage = .render, .slot = trace_idx, .op = @intFromEnum(msg.operation) } });
 
-            conn.set_response(commit_result.response.offset, commit_result.response.len);
+            // Set keep_alive BEFORE set_response — set_response triggers
+            // submit_send which may complete synchronously via send_now.
+            // send_complete checks keep_alive to decide close vs recv.
             conn.keep_alive = commit_result.response.keep_alive;
+            conn.set_response(commit_result.response.offset, commit_result.response.len);
 
             server.pipeline_reset(slot);
         }

@@ -88,7 +88,15 @@
    After: storage has 3 read methods (query, query_all, query_raw) and
    1 write method (execute, execute_raw). Cache wraps these uniformly.
 
-14. **Extract admin socket from main.zig** — cleanup (trigger: second admin command)
+14. **Event-driven resume_suspended** — optimization
+   resume_suspended is called unconditionally every tick. TB calls
+   resume_receive only when a resource frees (journal slot, repair slot).
+   We should call resume_suspended only when a pipeline slot frees
+   (from pipeline_reset) instead of every tick. At 128 connections
+   with 0-2 suspended, the scan is trivial — defer until connection
+   count grows.
+
+15. **Extract admin socket from main.zig** — cleanup (trigger: second admin command)
    AdminSocket struct + trace toggle logic inline in main.zig.
    Fine for one command. Extract when a second admin command is added.
 
