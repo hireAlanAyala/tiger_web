@@ -245,6 +245,7 @@ look in the project for illegal posix and other syscalls that are not simulation
 
 # Backlog
 
+- ensure the srver is compatble with http 2/3
 - Component benchmarks: HTTP parser, auth sign+verify, render encoding,
   tracer overhead, frame build/parse, sidecar e2e (µs/op). Add as
   dual-mode in bench.zig when touching those components.
