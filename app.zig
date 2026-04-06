@@ -232,11 +232,14 @@ pub const sidecar_count: u8 = @import("build_options").sidecar_count;
 /// Matches TB: Replica resolves MessageBus, passes it to Client.
 pub fn HandlersFor(comptime StorageParam: type, comptime IOParam: type) type {
     if (sidecar_enabled) {
-        // Bus options — sized for worst-case: 1 CALL + queries_max QUERY_RESULTs.
-        // The sidecar protocol is serial (one QUERY at a time), but the
-        // transport must not assert-crash if a rogue sidecar bursts QUERYs.
+        // Bus options — sized for worst-case per connection. With multiplexing,
+        // multiple pipeline slots share one connection. Each slot can have
+        // 1 CALL + 1 QUERY_RESULT in the send queue simultaneously.
+        // slots_per_conn = ceil(pipeline_slots_max / sidecar_count).
+        const constants = @import("framework/constants.zig");
+        const slots_per_conn = (constants.pipeline_slots_max + sidecar_count - 1) / sidecar_count;
         const bus_options: message_bus.Options = .{
-            .send_queue_max = 1 + protocol.queries_max,
+            .send_queue_max = slots_per_conn * (1 + protocol.queries_max),
             .frame_max = protocol.frame_max,
             .connections_max = sidecar_count,
         };
@@ -355,6 +358,12 @@ pub fn encode_response(
     const set_cookie: ?[]const u8 = if (cookie_hdr.len > 0) cookie_hdr.slice() else null;
 
     if (is_datastar_request) {
+        const body_budget = send_buf.len - sse.headers_max;
+        if (html.len > body_budget) {
+            @panic("render output exceeded send buffer (" ++
+                std.fmt.comptimePrint("{}KB", .{http.send_buf_max / 1024}) ++
+                ") — reduce items per page or shrink templates");
+        }
         var pos: usize = 0;
         pos += sse.encode_headers(send_buf[pos..], set_cookie);
         if (html.len > 0) {
@@ -365,6 +374,12 @@ pub fn encode_response(
             .response = .{ .offset = 0, .len = @intCast(pos), .keep_alive = false },
         };
     } else {
+        const body_budget = send_buf.len - http_response.header_reserve;
+        if (html.len > body_budget) {
+            @panic("render output exceeded send buffer (" ++
+                std.fmt.comptimePrint("{}KB", .{http.send_buf_max / 1024}) ++
+                ") — reduce items per page or shrink templates");
+        }
         if (html.len > 0) {
             @memcpy(send_buf[http_response.header_reserve..][0..html.len], html);
         }
