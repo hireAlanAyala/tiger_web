@@ -426,6 +426,17 @@ numbers + acquire/release prevent torn reads. CRC validates
 integrity. See sidecar-shm-transport.md for full layout,
 memory ordering, and crash recovery design.
 
+**TODO (TB audit):**
+- CRC must cover len_bytes ++ payload_bytes (include length in
+  CRC input). A corrupted length that exceeds real payload would
+  CRC over uninitialized memory. Match the socket bus convention.
+- SimShmBus for fuzz testing: PRNG-driven torn writes, stale
+  sequences, CRC mismatches, partial payloads. The transport is
+  untested without this.
+- Consolidate IO systems: epoll (HTTP) + io_uring (shm) is
+  hybrid technical debt. Plan to migrate HTTP to io_uring or
+  document why the hybrid is permanent.
+
 13. Add io_uring setup to io.zig (small ring, futex ops only)
 14. Implement SharedMemoryBus (mmap region + io_uring futex)
 15. Node.js native addon (mmap + futex_wake, ~80 LOC)
