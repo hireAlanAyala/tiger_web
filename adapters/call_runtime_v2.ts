@@ -161,7 +161,7 @@ function processFrames(): void {
 
 // --- CALL dispatch ---
 
-function handleCall(frame: Uint8Array): void {
+async function handleCall(frame: Uint8Array): Promise<void> {
   const dv = new DataView(frame.buffer, frame.byteOffset, frame.byteLength);
   const requestId = dv.getUint32(1, false);
   const nameLen = dv.getUint16(5, false);
@@ -174,7 +174,7 @@ function handleCall(frame: Uint8Array): void {
         dispatchRoute(requestId, args);
         break;
       case "prefetch":
-        dispatchPrefetch(requestId, args);
+        await dispatchPrefetch(requestId, args);
         break;
       case "handle":
         dispatchHandle(requestId, args);
@@ -264,7 +264,7 @@ function dispatchRoute(requestId: number, args: Uint8Array): void {
 // CALL args: [operation: u8][id: 16 bytes LE][params_json_len: u16 BE][params_json]
 // RESULT: [sql_len: u16 BE][sql][param_count: u8][param values...]
 
-function dispatchPrefetch(requestId: number, _args: Uint8Array): void {
+async function dispatchPrefetch(requestId: number, _args: Uint8Array): Promise<void> {
   const req = requests.get(requestId);
   if (!req) {
     sendFrame(conn, buildResult(requestId, ResultFlag.failure, new Uint8Array(0)));
@@ -294,7 +294,7 @@ function dispatchPrefetch(requestId: number, _args: Uint8Array): void {
     queryAll: (sql: string, ...params: unknown[]) => { capturedSql = sql; capturedParams = params; captured = true; return CAPTURE_SENTINEL; },
   };
 
-  const queryDecl = mod.prefetch(msg, captureDb);
+  const queryDecl = await mod.prefetch(msg, captureDb);
 
   // Extract the key name from the v1 return value: { products: SENTINEL }
   if (captured && queryDecl && typeof queryDecl === "object" && !Array.isArray(queryDecl)) {
@@ -371,13 +371,18 @@ function dispatchHandle(requestId: number, args: Uint8Array): void {
 
   // Parse rows from framework.
   if (args.length > 0) {
+    console.error(`[v2] handle: args.length=${args.length} first4=[${Array.from(args.subarray(0, 4)).map(b => b.toString(16).padStart(2, '0')).join(',')}]`);
     try {
       const rowsDv = new DataView(args.buffer, args.byteOffset, args.byteLength);
       const { result } = readRowSet(rowsDv, 0);
+      console.error(`[v2] handle: readRowSet rows=${result?.rows?.length ?? 'null'}`);
       req.rows = result?.rows || [];
-    } catch {
+    } catch (e: any) {
+      console.error(`[v2] handle: readRowSet error: ${e.message}`);
       req.rows = [];
     }
+  } else {
+    console.error(`[v2] handle: no args (empty rows)`);
   }
 
   const mod = modules[req.operation];
@@ -497,6 +502,7 @@ function dispatchRender(requestId: number, _args: Uint8Array): void {
       prefetched,
       is_sse: false,
     };
+    console.error(`[v2] render: prefetchKey=${prefetchKey} rows=${req.rows.length} prefetched_keys=${Object.keys(prefetched)}`);
     html = mod.render(ctx) || "";
   }
 
