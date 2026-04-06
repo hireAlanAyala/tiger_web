@@ -228,7 +228,7 @@ pub const sidecar_count: u8 = @import("build_options").sidecar_count;
 /// V2 pipelined protocol — experimental. When true, the server uses
 /// SidecarDispatchType instead of SidecarHandlersType for sidecar
 /// requests. Enable for benchmarking the 4-RT pipelined dispatch.
-pub const protocol_v2: bool = false; // Experimental — set true to enable v2 dispatch
+pub const protocol_v2: bool = false; // Experimental — set true to test v2 dispatch
 
 /// Resolve the Handlers type based on sidecar_enabled.
 /// Native path ignores IO. Sidecar path resolves Bus from IO

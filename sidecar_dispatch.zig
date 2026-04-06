@@ -198,12 +198,15 @@ pub fn SidecarDispatchType(comptime StorageParam: type, comptime Bus: type) type
             entry.stage = .route_pending;
             entry.request_id = request_id;
             entry.connection = connection;
+            log.debug("start_request: sent route CALL request_id={d}", .{request_id});
             return true;
         }
 
         /// Process a received frame — route to entry by request_id.
         pub fn on_frame(self: *Self, frame: []const u8, storage: *StorageParam) void {
             defer self.invariants();
+
+            log.debug("on_frame: len={d} tag=0x{x:0>2}", .{ frame.len, if (frame.len > 0) frame[0] else 0 });
 
             if (frame.len < 5) {
                 log.warn("dispatch: frame too short ({d} bytes)", .{frame.len});
@@ -432,8 +435,14 @@ pub fn SidecarDispatchType(comptime StorageParam: type, comptime Bus: type) type
         // =============================================================
 
         fn send_call(self: *Self, b: *Bus, function_name: []const u8, args: []const u8, request_id: u32) bool {
-            if (!b.is_connection_ready(self.connection_index)) return false;
-            if (!b.can_send_to(self.connection_index)) return false;
+            if (!b.is_connection_ready(self.connection_index)) {
+                log.warn("send_call: connection {d} not ready for {s}", .{ self.connection_index, function_name });
+                return false;
+            }
+            if (!b.can_send_to(self.connection_index)) {
+                log.warn("send_call: send queue full for {s}", .{function_name});
+                return false;
+            }
 
             const msg = b.get_message();
             const call_len = protocol.build_call(
@@ -457,6 +466,8 @@ pub fn SidecarDispatchType(comptime StorageParam: type, comptime Bus: type) type
         fn execute_prefetch_sql(self: *Self, entry: *Entry, storage: *StorageParam) void {
             entry.stage = .sql_executing;
 
+            log.debug("execute_prefetch_sql: sql_len={d} param_count={d}", .{ entry.prefetch_sql.len, entry.prefetch_param_count });
+
             const result = storage.query_raw(
                 entry.prefetch_sql,
                 entry.prefetch_params,
@@ -465,6 +476,7 @@ pub fn SidecarDispatchType(comptime StorageParam: type, comptime Bus: type) type
                 &self.sql_out_buf,
             );
 
+            log.debug("execute_prefetch_sql: result={s}", .{if (result != null) "data" else "null"});
             if (result) |rows| {
                 // Copy rows into entry — but rows may be large.
                 // Use the shared sql_out_buf; the data is valid until

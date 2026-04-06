@@ -279,16 +279,46 @@ function dispatchPrefetch(requestId: number, _args: Uint8Array): void {
   }
 
   const msg = { operation: req.operation, id: req.id, body: req.body, ...req.params };
-  const queryDecl = mod.prefetch(msg);
 
-  // queryDecl is [sql, ...params] or empty array.
-  if (!Array.isArray(queryDecl) || queryDecl.length === 0) {
+  // Compatibility: v1 handlers use `await db.queryAll(...)`, v2 returns [sql, ...params].
+  // Capture proxy extracts SQL when v1 handler calls db methods. Also captures the
+  // return value key name (e.g. "products") so handle/render can receive rows under
+  // the same key via ctx.prefetched.
+  let capturedSql = "";
+  let capturedParams: unknown[] = [];
+  let captured = false;
+  let capturedKey = "rows";
+  const CAPTURE_SENTINEL = Symbol("capture");
+  const captureDb = {
+    query: (sql: string, ...params: unknown[]) => { capturedSql = sql; capturedParams = params; captured = true; return CAPTURE_SENTINEL; },
+    queryAll: (sql: string, ...params: unknown[]) => { capturedSql = sql; capturedParams = params; captured = true; return CAPTURE_SENTINEL; },
+  };
+
+  const queryDecl = mod.prefetch(msg, captureDb);
+
+  // Extract the key name from the v1 return value: { products: SENTINEL }
+  if (captured && queryDecl && typeof queryDecl === "object" && !Array.isArray(queryDecl)) {
+    for (const [k, v] of Object.entries(queryDecl)) {
+      if (v === CAPTURE_SENTINEL) { capturedKey = k; break; }
+    }
+  }
+  (req as any).prefetchKey = capturedKey;
+
+  let sql: string;
+  let params: unknown[];
+
+  if (captured) {
+    // V1 handler called db.queryAll — use captured SQL.
+    sql = capturedSql;
+    params = capturedParams;
+  } else if (Array.isArray(queryDecl) && queryDecl.length > 0) {
+    // V2 handler returned [sql, ...params].
+    sql = String(queryDecl[0]);
+    params = queryDecl.slice(1);
+  } else {
     sendFrame(conn, buildResult(requestId, ResultFlag.success, new Uint8Array(0)));
     return;
   }
-
-  const sql = String(queryDecl[0]);
-  const params = queryDecl.slice(1);
   const sqlBytes = _encoder.encode(sql);
 
   // Build result: [sql_len: u16 BE][sql][param_count: u8][param_values...]
@@ -353,12 +383,18 @@ function dispatchHandle(requestId: number, args: Uint8Array): void {
   const mod = modules[req.operation];
   const writes: Array<[string, ...any[]]> = [];
 
+  // Build ctx with rows under the key the v1 handler expects.
+  const prefetchKey = (req as any).prefetchKey || "rows";
+  const prefetched: Record<string, any> = {};
+  prefetched[prefetchKey] = req.rows;
+
   const ctx = {
     operation: req.operation,
     id: req.id,
     body: req.body,
     params: req.params,
     rows: req.rows,
+    prefetched,
     write: (decl: [string, ...any[]]) => { writes.push(decl); },
   };
 
@@ -447,6 +483,10 @@ function dispatchRender(requestId: number, _args: Uint8Array): void {
   let html = "";
 
   if (mod?.render) {
+    const prefetchKey = (req as any).prefetchKey || "rows";
+    const prefetched: Record<string, any> = {};
+    prefetched[prefetchKey] = req.rows;
+
     const ctx = {
       operation: req.operation,
       id: req.id,
@@ -454,7 +494,7 @@ function dispatchRender(requestId: number, _args: Uint8Array): void {
       body: req.body,
       params: req.params,
       rows: req.rows,
-      prefetched: { rows: req.rows }, // backward compat
+      prefetched,
       is_sse: false,
     };
     html = mod.render(ctx) || "";

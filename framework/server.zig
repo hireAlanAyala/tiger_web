@@ -376,10 +376,12 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
                         server.handle_lock = @intCast(entry_idx);
 
                         const sm = server.state_machine;
+                        log.debug("v2 write: mutation={} write_count={d} writes_len={d}", .{ entry.is_mutation, entry.handle_write_count, entry.handle_writes.len });
                         if (entry.is_mutation) sm.begin_batch();
 
-                        // Execute writes via SidecarClient's execute_writes pattern.
+                        // Execute writes through WriteView (same as v1 path).
                         if (entry.handle_write_count > 0) {
+                            var write_view = Storage.WriteView.init(sm.storage);
                             const data = entry.handle_writes;
                             var dpos: usize = 0;
                             for (0..entry.handle_write_count) |_| {
@@ -394,7 +396,8 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
                                 dpos += 1;
                                 const params_start = dpos;
                                 dpos = @import("../sidecar.zig").SidecarClientType(SidecarBus).skip_params(data, dpos, param_count) orelse break;
-                                _ = sm.storage.execute_raw(sql, data[params_start..dpos], param_count);
+                                const write_ok = write_view.execute_raw(sql, data[params_start..dpos], param_count);
+                                log.debug("v2 execute_raw: ok={} sql_len={d} params={d}", .{ write_ok, sql.len, param_count });
                             }
                         }
 
