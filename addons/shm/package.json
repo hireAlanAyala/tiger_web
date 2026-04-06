@@ -2,9 +2,6 @@
   "name": "tiger-shm",
   "private": true,
   "scripts": {
-    "install": "node-gyp rebuild"
-  },
-  "dependencies": {
-    "node-gyp": "*"
+    "build": "../../zig/zig cc -shared -o shm.node shm.c -I/usr/include/node -lrt -fPIC"
   }
 }

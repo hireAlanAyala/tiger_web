@@ -6,8 +6,8 @@
 //
 // Usage: import { ShmClient } from './shm_client';
 
-const shmAddon = require(process.cwd() + "/node_modules/tiger-shm/build/Release/shm.node")
-  ?? require("../addons/shm/build/Release/shm.node");
+// Built with: cd addons/shm && npm run build (uses zig cc, no node-gyp).
+const shmAddon = require("../addons/shm/shm.node");
 
 import { crc32 } from "node:zlib";
 
