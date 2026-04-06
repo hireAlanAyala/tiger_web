@@ -76,6 +76,7 @@ pub fn SidecarDispatchType(comptime StorageParam: type, comptime Bus: type) type
             handle_len: usize = 0,
 
             // Parsed prefetch declaration.
+            prefetch_mode: protocol.QueryMode = .query_all,
             prefetch_sql: []const u8 = "",
             prefetch_param_count: u8 = 0,
             prefetch_params: []const u8 = "",
@@ -472,7 +473,7 @@ pub fn SidecarDispatchType(comptime StorageParam: type, comptime Bus: type) type
                 entry.prefetch_sql,
                 entry.prefetch_params,
                 entry.prefetch_param_count,
-                .query_all,
+                entry.prefetch_mode,
                 &self.sql_out_buf,
             );
 
@@ -538,12 +539,15 @@ pub fn SidecarDispatchType(comptime StorageParam: type, comptime Bus: type) type
                 return;
             }
 
-            if (data.len < 3) {
+            if (data.len < 4) { // mode(1) + sql_len(2) + param_count(1)
                 entry.reset();
                 return;
             }
 
             var pos: usize = 0;
+            // Mode: 0x00 = query (single row), 0x01 = queryAll.
+            entry.prefetch_mode = if (data[pos] == 0x00) .query else .query_all;
+            pos += 1;
             const sql_len = std.mem.readInt(u16, data[pos..][0..2], .big);
             pos += 2;
             if (pos + sql_len + 1 > data.len) {

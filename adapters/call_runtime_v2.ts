@@ -288,10 +288,11 @@ async function dispatchPrefetch(requestId: number, _args: Uint8Array): Promise<v
   let capturedParams: unknown[] = [];
   let captured = false;
   let capturedKey = "rows";
+  let capturedMode: "query" | "queryAll" = "queryAll";
   const CAPTURE_SENTINEL = Symbol("capture");
   const captureDb = {
-    query: (sql: string, ...params: unknown[]) => { capturedSql = sql; capturedParams = params; captured = true; return CAPTURE_SENTINEL; },
-    queryAll: (sql: string, ...params: unknown[]) => { capturedSql = sql; capturedParams = params; captured = true; return CAPTURE_SENTINEL; },
+    query: (sql: string, ...params: unknown[]) => { capturedSql = sql; capturedParams = params; captured = true; capturedMode = "query"; return CAPTURE_SENTINEL; },
+    queryAll: (sql: string, ...params: unknown[]) => { capturedSql = sql; capturedParams = params; captured = true; capturedMode = "queryAll"; return CAPTURE_SENTINEL; },
   };
 
   const queryDecl = await mod.prefetch(msg, captureDb);
@@ -303,6 +304,7 @@ async function dispatchPrefetch(requestId: number, _args: Uint8Array): Promise<v
     }
   }
   (req as any).prefetchKey = capturedKey;
+  (req as any).prefetchMode = capturedMode;
 
   let sql: string;
   let params: unknown[];
@@ -321,13 +323,15 @@ async function dispatchPrefetch(requestId: number, _args: Uint8Array): Promise<v
   }
   const sqlBytes = _encoder.encode(sql);
 
-  // Build result: [sql_len: u16 BE][sql][param_count: u8][param_values...]
+  // Build result: [mode: u8][sql_len: u16 BE][sql][param_count: u8][param_values...]
+  // mode: 0x00 = query (single row), 0x01 = queryAll (multiple rows)
   // Param values: [type_tag: u8][value...] per param.
   // Type tags match protocol.zig TypeTag.
   const buf = new Uint8Array(FRAME_MAX);
   const bufDv = new DataView(buf.buffer);
   let pos = 0;
 
+  buf[pos] = capturedMode === "query" ? 0x00 : 0x01; pos += 1;
   bufDv.setUint16(pos, sqlBytes.length, false); pos += 2;
   buf.set(sqlBytes, pos); pos += sqlBytes.length;
   buf[pos] = params.length; pos += 1;
@@ -389,9 +393,14 @@ function dispatchHandle(requestId: number, args: Uint8Array): void {
   const writes: Array<[string, ...any[]]> = [];
 
   // Build ctx with rows under the key the v1 handler expects.
+  // For "query" mode (single row), return first row or null.
+  // For "queryAll" mode (list), return the array.
   const prefetchKey = (req as any).prefetchKey || "rows";
+  const prefetchMode = (req as any).prefetchMode || "queryAll";
   const prefetched: Record<string, any> = {};
-  prefetched[prefetchKey] = req.rows;
+  prefetched[prefetchKey] = prefetchMode === "query"
+    ? (req.rows.length > 0 ? req.rows[0] : null)
+    : req.rows;
 
   const ctx = {
     operation: req.operation,
@@ -489,8 +498,11 @@ function dispatchRender(requestId: number, _args: Uint8Array): void {
 
   if (mod?.render) {
     const prefetchKey = (req as any).prefetchKey || "rows";
+    const prefetchMode = (req as any).prefetchMode || "queryAll";
     const prefetched: Record<string, any> = {};
-    prefetched[prefetchKey] = req.rows;
+    prefetched[prefetchKey] = prefetchMode === "query"
+      ? (req.rows.length > 0 ? req.rows[0] : null)
+      : req.rows;
 
     const ctx = {
       operation: req.operation,
