@@ -34,9 +34,11 @@ comptime {
 // Pipeline — concurrent dispatch slots.
 // ---------------------------------------------------------------------------
 
-/// Number of concurrent pipeline slots. One per sidecar connection.
+/// Number of concurrent pipeline slots. Decoupled from sidecar_count
+/// to allow N slots sharing M connections (N >= M). With async
+/// multiplexing, one TS process handles many concurrent requests.
 /// Native handlers (no sidecar) use 1 slot (synchronous).
-pub const pipeline_slots_max: u8 = if (sidecar_enabled) sidecar_count else 1;
+pub const pipeline_slots_max: u8 = if (sidecar_enabled) build_options.pipeline_slots else 1;
 
 comptime {
     assert(pipeline_slots_max >= 1);
@@ -75,20 +77,9 @@ comptime {
     assert(queries_max >= 1);
 }
 
-// ---------------------------------------------------------------------------
-// HTTP — buffer sizes.
-// ---------------------------------------------------------------------------
-
-/// Receive buffer per connection — must fit one complete HTTP request.
-pub const recv_buf_max: u32 = 8 * 1024; // 8 KB
-
-/// Send buffer per connection — must fit one complete HTTP response.
-pub const send_buf_max: u32 = 256 * 1024; // 256 KB
-
-comptime {
-    assert(recv_buf_max >= 1024);
-    assert(send_buf_max >= recv_buf_max);
-}
+// HTTP buffer sizes live in framework/http.zig — the single source of truth
+// for recv_buf_max, send_buf_max, max_header_size, body_max. Not duplicated
+// here because http.zig is imported by everything that needs buffer sizes.
 
 // ---------------------------------------------------------------------------
 // WAL — write-ahead log.

@@ -436,7 +436,7 @@ pub const OrderSummaryList = extern struct {
 
     comptime {
         assert(stdx.no_padding(OrderSummaryList));
-        assert(@sizeOf(OrderSummaryList) == 5616);
+        assert(@sizeOf(OrderSummaryList) == 2032);
     }
 };
 
@@ -733,7 +733,7 @@ pub const Message = extern struct {
 /// Maximum number of items returned in a single list response.
 /// Constrained by send_buf_max — the rendered HTML for list_max items
 /// must fit in one response. See comptime assertion below.
-pub const list_max = 50;
+pub const list_max = 18;
 
 /// Maximum rendered HTML size per row type. HTML escaping expands
 /// special characters up to 5x (& → &amp;). These are worst-case
@@ -765,7 +765,7 @@ pub const ProductList = extern struct {
 
     comptime {
         assert(stdx.no_padding(ProductList));
-        assert(@sizeOf(ProductList) == 33616);
+        assert(@sizeOf(ProductList) == 12112);
     }
 };
 
@@ -776,7 +776,7 @@ pub const CollectionWithProducts = extern struct {
 
     comptime {
         assert(stdx.no_padding(CollectionWithProducts));
-        assert(@sizeOf(CollectionWithProducts) == 33776);
+        assert(@sizeOf(CollectionWithProducts) == 12272);
     }
 };
 
@@ -787,7 +787,7 @@ pub const CollectionList = extern struct {
 
     comptime {
         assert(stdx.no_padding(CollectionList));
-        assert(@sizeOf(CollectionList) == 8016);
+        assert(@sizeOf(CollectionList) == 2896);
     }
 };
 
@@ -812,7 +812,7 @@ pub const PageLoadDashboardResult = extern struct {
 
     comptime {
         assert(stdx.no_padding(PageLoadDashboardResult));
-        assert(@sizeOf(PageLoadDashboardResult) == 47248);
+        assert(@sizeOf(PageLoadDashboardResult) == 17040);
         // The state machine must cap lists before constructing this result.
         // render.zig derives its buffer math from dashboard_list_max, not list_max.
         // If this assert is wrong, fix the state machine — not the buffer.

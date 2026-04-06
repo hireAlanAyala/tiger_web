@@ -5,18 +5,18 @@ const auth = @import("auth.zig");
 /// Maximum HTTP header size. Requests with headers exceeding this are rejected.
 pub const max_header_size = 8192;
 
-/// Maximum incoming request body size. Enough for any product JSON.
+/// Maximum incoming request body size.
 pub const body_max = 4096;
 
 /// Maximum total recv buffer: HTTP headers + body.
 pub const recv_buf_max = max_header_size + body_max;
 
 /// Maximum send buffer: HTTP response headers + body.
-/// Send buffer size per connection. Must accommodate the largest possible
-/// rendered response: list_max × worst-case escaped product card + headers.
-/// Comptime assertion in message.zig verifies list responses fit.
-/// 128 connections × 256KB = 32MB total — acceptable for a server process.
-pub const send_buf_max = 256 * 1024;
+/// Sized for paginated list responses (list_max=18 worst-case product cards).
+/// Benchmarked: 256KB→64KB = +38% throughput, -60% memory at 128 connections.
+/// 32KB was 9% faster but halves list_max to 9 — not worth the tradeoff.
+/// See docs/internal/decision-send-buffer-size.md.
+pub const send_buf_max = 64 * 1024;
 
 pub const ParseResult = union(enum) {
     /// Not enough bytes to parse a complete request.
