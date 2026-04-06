@@ -120,7 +120,7 @@ pub fn SidecarDispatchType(comptime StorageParam: type, comptime Bus: type) type
         // Dispatch state
         // =============================================================
 
-        entries: [max_entries]Entry = .{.{}} ** max_entries,
+        entries: [max_entries]Entry = [_]Entry{.{}} ** max_entries,
         next_request_id: u32 = 1,
         next_sequence: u32 = 1,
 
@@ -271,7 +271,8 @@ pub fn SidecarDispatchType(comptime StorageParam: type, comptime Bus: type) type
         }
 
         /// Advance all entries that can progress. Called after on_frame
-        /// and after write commits.
+        /// and after write commits. Loops until no more progress (TB's
+        /// bounded loop pattern — max iterations = entries × stages).
         pub fn advance(self: *Self, storage: *StorageParam) void {
             // Re-entrancy guard.
             if (self.dispatch_entered) return;
@@ -282,11 +283,17 @@ pub fn SidecarDispatchType(comptime StorageParam: type, comptime Bus: type) type
             }
 
             const b = self.bus orelse return;
+            const max_iterations = max_entries * 13; // entries × stages
+            var iteration: usize = 0;
+            var progress = true;
+
+            while (progress and iteration < max_iterations) : (iteration += 1) {
+                progress = false;
 
             for (&self.entries) |*entry| {
+                const prev_stage = entry.stage;
                 switch (entry.stage) {
                     .route_complete => {
-                        // Assign sequence after route (classification known).
                         entry.sequence = self.next_sequence;
                         self.next_sequence +%= 1;
                         entry.is_mutation = entry.operation.is_mutation();
@@ -296,8 +303,6 @@ pub fn SidecarDispatchType(comptime StorageParam: type, comptime Bus: type) type
                                 self.lowest_pending_mutation_seq = entry.sequence;
                             }
                         }
-
-                        // Send RT2 (prefetch).
                         var args_buf: [17]u8 = undefined;
                         args_buf[0] = @intFromEnum(entry.operation);
                         std.mem.writeInt(u128, args_buf[1..17], entry.msg.id, .little);
@@ -307,7 +312,6 @@ pub fn SidecarDispatchType(comptime StorageParam: type, comptime Bus: type) type
                     },
                     .prefetch_complete => {
                         if (entry.prefetch_sql.len > 0) {
-                            // Write-boundary check: O(1).
                             if (!self.can_prefetch(entry)) continue;
                             self.execute_prefetch_sql(entry, storage);
                         } else {
@@ -316,7 +320,6 @@ pub fn SidecarDispatchType(comptime StorageParam: type, comptime Bus: type) type
                         }
                     },
                     .sql_complete => {
-                        // Send RT3 (handle) with prefetched rows.
                         if (self.send_call(b, "handle", entry.rows_data, entry.request_id)) {
                             entry.stage = .handle_pending;
                         }
@@ -325,7 +328,6 @@ pub fn SidecarDispatchType(comptime StorageParam: type, comptime Bus: type) type
                         entry.stage = .write_pending;
                     },
                     .write_complete => {
-                        // Send RT4 (render).
                         const args = [_]u8{@intFromEnum(entry.handle_status)};
                         if (self.send_call(b, "render", &args, entry.request_id)) {
                             entry.stage = .render_pending;
@@ -333,7 +335,9 @@ pub fn SidecarDispatchType(comptime StorageParam: type, comptime Bus: type) type
                     },
                     else => {},
                 }
+                if (entry.stage != prev_stage) progress = true;
             }
+            } // while
         }
 
         /// Write-boundary check: O(1) via watermark.
