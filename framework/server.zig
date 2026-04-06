@@ -55,6 +55,11 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
     const SidecarBus = if (App.sidecar_enabled) Handlers.BusType else void;
     const SidecarClient = if (App.sidecar_enabled) Handlers.ClientType else void;
 
+    // V2 dispatch — pipelined stateless protocol. Coexists with v1
+    // handlers. The server routes frames to either v1 or v2 based
+    // on protocol version (TODO: version negotiation).
+    const DispatchV2 = if (App.sidecar_enabled) @import("../sidecar_dispatch.zig").SidecarDispatchType(Storage, SidecarBus) else void;
+
     // Pipeline slot count — derived from bus connections.
     const slots_max: u8 = if (App.sidecar_enabled) SidecarBus.connections_max else 1;
     const StateMachine = App.StateMachineWith(Storage);
@@ -198,6 +203,7 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
         //   pipeline_slots[i] — per-request state for slot i
         //   handlers[i]       — domain dispatch for slot i
         //   sidecar_clients[i] — protocol state machine for slot i
+        dispatch_v2: if (App.sidecar_enabled) DispatchV2 else void = if (App.sidecar_enabled) .{} else {},
         sidecar_bus: SidecarBus = if (App.sidecar_enabled) undefined else {},
         sidecar_clients: if (App.sidecar_enabled)
             [pipeline_slots_max]SidecarClient
@@ -312,9 +318,14 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
             // Already dispatched to a slot — don't double-dispatch.
             if (server.connection_dispatched(conn)) return;
 
-            // Find a free pipeline slot.
+            // V2 dispatch path — pipelined stateless protocol.
+            if (App.sidecar_enabled and App.protocol_v2) {
+                server.try_dispatch_v2(conn);
+                return;
+            }
+
+            // V1 path — sequential slot-based dispatch.
             const slot = server.find_free_slot() orelse {
-                // No slot — suspend. Resume when a slot frees up.
                 server.suspend_connection(conn);
                 return;
             };
@@ -323,6 +334,114 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
             slot.pending_since = server.tick_count;
             slot.connection = conn;
             server.commit_dispatch(slot);
+        }
+
+        // =============================================================
+        // V2 dispatch — pipelined stateless protocol
+        // =============================================================
+
+        fn try_dispatch_v2(server: *Server, conn: *Connection) void {
+            if (!App.sidecar_enabled or !App.protocol_v2) unreachable;
+
+            const entry = server.dispatch_v2.acquire_entry() orelse {
+                server.suspend_connection(conn);
+                return;
+            };
+
+            // Parse HTTP to get method/path/body for the route CALL.
+            const parsed = switch (http.parse_request(conn.recv_buf[0..conn.recv_pos])) {
+                .complete => |p| p,
+                .incomplete, .invalid => unreachable,
+            };
+            conn.is_datastar_request = parsed.is_datastar_request;
+
+            if (!server.dispatch_v2.start_request(entry, parsed.method, parsed.path, parsed.body, @ptrCast(conn))) {
+                entry.reset();
+                server.suspend_connection(conn);
+                return;
+            }
+        }
+
+        /// V2: process completed entries — encode response and send.
+        fn process_v2_completions(server: *Server) void {
+            if (!App.sidecar_enabled or !App.protocol_v2) return;
+
+            for (&server.dispatch_v2.entries) |*entry| {
+                switch (entry.stage) {
+                    .write_pending => {
+                        // Execute writes under handle_lock.
+                        if (server.handle_lock != null) continue;
+
+                        const entry_idx = (@intFromPtr(entry) - @intFromPtr(&server.dispatch_v2.entries)) / @sizeOf(DispatchV2.Entry);
+                        server.handle_lock = @intCast(entry_idx);
+
+                        const sm = server.state_machine;
+                        if (entry.is_mutation) sm.begin_batch();
+
+                        // Execute writes via SidecarClient's execute_writes pattern.
+                        if (entry.handle_write_count > 0) {
+                            const data = entry.handle_writes;
+                            var dpos: usize = 0;
+                            for (0..entry.handle_write_count) |_| {
+                                if (dpos + 2 > data.len) break;
+                                const sql_len = std.mem.readInt(u16, data[dpos..][0..2], .big);
+                                dpos += 2;
+                                if (dpos + sql_len > data.len) break;
+                                const sql = data[dpos..][0..sql_len];
+                                dpos += sql_len;
+                                if (dpos >= data.len) break;
+                                const param_count = data[dpos];
+                                dpos += 1;
+                                const params_start = dpos;
+                                dpos = @import("../sidecar.zig").SidecarClientType(SidecarBus).skip_params(data, dpos, param_count) orelse break;
+                                _ = sm.storage.execute_raw(sql, data[params_start..dpos], param_count);
+                            }
+                        }
+
+                        if (entry.is_mutation) sm.commit_batch();
+
+                        server.handle_lock = null;
+                        server.dispatch_v2.write_committed(entry);
+                        server.dispatch_v2.advance(sm.storage);
+                    },
+                    .render_complete => {
+                        // Encode response and send to the connection.
+                        const conn: *Connection = @ptrCast(@alignCast(entry.connection orelse {
+                            server.dispatch_v2.release_entry(entry);
+                            continue;
+                        }));
+
+                        const sm = server.state_machine;
+                        const commit_result = App.encode_response(
+                            entry.handle_status,
+                            entry.html,
+                            &conn.send_buf,
+                            conn.is_datastar_request,
+                            entry.handle_session_action,
+                            entry.msg.user_id,
+                            false, // is_authenticated — TODO: wire from entry
+                            false, // is_new_visitor — TODO: wire from entry
+                            sm.secret_key,
+                        );
+
+                        conn.keep_alive = commit_result.response.keep_alive;
+                        conn.set_response(commit_result.response.offset, commit_result.response.len);
+
+                        server.dispatch_v2.release_entry(entry);
+
+                        // Resume a suspended connection into the freed entry.
+                        if (server.suspended_head) |susp| {
+                            server.suspended_head = susp.active_next;
+                            if (server.suspended_head == null) server.suspended_tail = null;
+                            susp.active_next = null;
+                            if (susp.state == .ready) {
+                                server.try_dispatch(susp);
+                            }
+                        }
+                    },
+                    else => {},
+                }
+            }
         }
 
         fn suspend_connection(server: *Server, conn: *Connection) void {
@@ -392,11 +511,11 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
                 client.* = SidecarClient.init();
                 handler.sidecar_client = client;
                 handler.sidecar_bus = &server.sidecar_bus;
-                // Slots share connections round-robin. With N slots and
-                // M connections (M ≤ N), slot i uses connection i % M.
-                // When M=1 (multiplexed), all slots share connection 0.
                 handler.connection_index = @intCast(i % App.sidecar_count);
             }
+            // Wire v2 dispatch module.
+            server.dispatch_v2.bus = &server.sidecar_bus;
+            server.dispatch_v2.connection_index = 0;
             try server.sidecar_bus.init_pool(
                 allocator,
                 server.io,
@@ -442,6 +561,7 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
             server.resume_suspended();
             server.wake_handle_waiters();
             if (App.sidecar_enabled) server.timeout_sidecar_response();
+            server.process_v2_completions();
             server.log_metrics();
         }
 
@@ -853,9 +973,10 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
                     server.sidecar_bus.terminate_connection(connection_index);
                     return;
                 };
-                if (ready.version != protocol.protocol_version) {
+                const accepted_version = if (App.protocol_v2) 2 else protocol.protocol_version;
+                if (ready.version != accepted_version) {
                     log.warn("sidecar: version mismatch: expected {d}, got {d}", .{
-                        protocol.protocol_version, ready.version,
+                        accepted_version, ready.version,
                     });
                     server.sidecar_bus.terminate_connection(connection_index);
                     return;
@@ -865,9 +986,14 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
                 return;
             }
 
-            // Route frame to the correct handler/slot.
-            // 1:1 mode (pipeline_slots_max == sidecar_count): direct mapping.
-            // Multiplexed (pipeline_slots_max > sidecar_count): match by request_id.
+            // V2 dispatch — route frame to dispatch module.
+            if (App.protocol_v2) {
+                server.dispatch_v2.on_frame(frame, server.state_machine.storage);
+                server.process_v2_completions();
+                return;
+            }
+
+            // V1: route frame to the correct handler/slot.
             const slot_idx: u8 = if (pipeline_slots_max == App.sidecar_count)
                 connection_index
             else
