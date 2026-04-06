@@ -1,0 +1,10 @@
+{
+  "name": "tiger-shm",
+  "private": true,
+  "scripts": {
+    "install": "node-gyp rebuild"
+  },
+  "dependencies": {
+    "node-gyp": "*"
+  }
+}
