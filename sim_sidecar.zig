@@ -1,10 +1,10 @@
 //! Sidecar simulation tests — full-stack tests with deterministic IO.
 //!
-//! Exercises the complete sidecar pipeline (route → prefetch → handle →
-//! render) through the real Server + SM + MessageBus + Connection stack.
-//! SimSidecar acts as the sidecar process: parses CALL frames, builds
-//! RESULT frames, injects via SimIO. Hardcoded responses — tests the
-//! framework pipeline, not handler logic.
+//! Exercises the complete 1-CALL sidecar pipeline through the real
+//! Server + SM + MessageBus + Connection stack. SimSidecar acts as
+//! the sidecar process: parses CALL "request" frames, builds combined
+//! RESULT frames (operation + status + writes + html), injects via SimIO.
+//! Hardcoded responses — tests the framework pipeline, not handler logic.
 //!
 //! This binary is compiled with sidecar_enabled = true (via build_options).
 
@@ -178,7 +178,9 @@ const SimSidecar = struct {
         pos += 1;
 
         // Result data depends on function name.
-        if (std.mem.eql(u8, name, "route")) {
+        if (std.mem.eql(u8, name, "request")) {
+            pos += build_request_result(result_payload[pos..], args);
+        } else if (std.mem.eql(u8, name, "route")) {
             pos += build_route_result(result_payload[pos..], args);
         } else if (std.mem.eql(u8, name, "prefetch")) {
             // Empty result — just success flag (already written).
@@ -243,6 +245,64 @@ const SimSidecar = struct {
         pos += 1;
         buf[pos] = 0; // write_count = 0
         pos += 1;
+        return pos;
+    }
+
+    /// Build combined "request" RESULT data (1-CALL protocol):
+    /// [operation: u8][id: 16 LE][event_body_len: u16 BE][event_body]
+    /// [status_len: u16 BE]["ok"][session_action: 0][write_count: 0]
+    /// [html]
+    fn build_request_result(buf: []u8, args: []const u8) usize {
+        var pos: usize = 0;
+
+        // Route part — reuse route logic to get operation + id.
+        pos += build_route_result(buf[pos..], args);
+
+        // Insert event_body_len after route result.
+        // Route result is: [operation: u8][id: 16 LE][body...]
+        // We need to add event_body_len before the body.
+        // The route result already wrote operation(1) + id(16) + body.
+        // We need to restructure: operation(1) + id(16) + body_len(2) + body.
+        //
+        // Simplest: build route fields directly here.
+        pos = 0;
+        assert(args.len >= 5);
+        var apos: usize = 0;
+        _ = args[apos]; // method byte
+        apos += 1;
+        const path_len = std.mem.readInt(u16, args[apos..][0..2], .big);
+        apos += 2;
+        const path = args[apos..][0..path_len];
+        apos += path_len;
+        const body_len = std.mem.readInt(u16, args[apos..][0..2], .big);
+        apos += 2;
+        const body = args[apos..][0..body_len];
+
+        const op: message.Operation = if (std.mem.eql(u8, path, "/products"))
+            .create_product
+        else
+            .list_products;
+
+        buf[pos] = @intFromEnum(op);
+        pos += 1;
+        @memset(buf[pos..][0..16], 0); // zero UUID
+        pos += 16;
+        // event_body_len + event_body
+        std.mem.writeInt(u16, buf[pos..][0..2], @intCast(body.len), .big);
+        pos += 2;
+        if (body.len > 0) {
+            @memcpy(buf[pos..][0..body.len], body);
+            pos += body.len;
+        }
+
+        // Handle part.
+        pos += build_handle_result(buf[pos..]);
+
+        // Render part — HTML at end.
+        const html_content = "<div>sim</div>";
+        @memcpy(buf[pos..][0..html_content.len], html_content);
+        pos += html_content.len;
+
         return pos;
     }
 };
@@ -991,5 +1051,57 @@ test "concurrent: throughput scales with slot count" {
             "concurrent pipeline not faster: single={d} tpr ({d} ticks/{d} reqs), dual={d} tpr ({d} ticks/{d} reqs)",
             .{ single_tpr, single_ticks, request_count, dual_tpr, dual_ticks, request_count },
         );
+    }
+}
+
+test "sidecar: response contains rendered HTML" {
+    // End-to-end content test: POST a product through the sidecar
+    // pipeline, then verify the response body contains expected HTML.
+    // This catches data flow bugs where the protocol delivers status 200
+    // but the rendered content is wrong (e.g., wrong operation, missing
+    // fields, byte offset errors in RESULT parsing).
+    //
+    // The SimSidecar returns hardcoded HTML ("<div>sim</div>") for all
+    // render CALLs. This test verifies that HTML actually appears in
+    // the HTTP response body — proving the full pipeline from CALL
+    // "render" → RESULT → encode_response → send_buf → HTTP response
+    // is intact.
+    var h: TestHarness = undefined;
+    try h.init();
+    defer h.deinit();
+
+    h.connect_sidecar();
+    h.connect_http();
+    h.inject_post();
+
+    const resp = h.wait_response() orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(u16, 200), resp.status_code);
+    // The SimSidecar renders "<div>sim</div>" for all operations.
+    // Verify the HTML appears in the response body.
+    try std.testing.expect(resp.body.len > 0);
+    try std.testing.expect(std.mem.indexOf(u8, resp.body, "<div>sim</div>") != null);
+}
+
+test "sidecar: handle RESULT payload preserved through pipeline" {
+    // Verifies that the handle RESULT (status + session_action + writes)
+    // flows correctly through handler_execute → pipeline response.
+    // The SimSidecar returns status="ok", session_action=none, 0 writes.
+    // If the RESULT parsing is wrong, the status would be garbage and
+    // the response would either be a 503 or contain wrong content.
+    var h: TestHarness = undefined;
+    try h.init();
+    defer h.deinit();
+
+    h.connect_sidecar();
+    h.connect_http();
+
+    // Multiple requests — exercises RESULT parsing across request
+    // boundaries (stale state between requests).
+    for (0..3) |_| {
+        h.prepare_next_request();
+        h.inject_post();
+        const resp = h.wait_response() orelse return error.TestUnexpectedResult;
+        try std.testing.expectEqual(@as(u16, 200), resp.status_code);
+        try std.testing.expect(std.mem.indexOf(u8, resp.body, "<div>sim</div>") != null);
     }
 }
