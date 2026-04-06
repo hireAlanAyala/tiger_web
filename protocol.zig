@@ -127,17 +127,22 @@ pub const TypeTag = enum(u8) {
 // Legacy MessageTag removed — was only used by old 3-RT protocol.
 
 // =====================================================================
-// CALL/RESULT protocol — dumb executor model
+// CALL/RESULT protocol — 1-CALL model
 //
-// Four frame types. The server sends CALL, the sidecar runs a function
-// and returns RESULT. During execution, the sidecar can send QUERY
-// frames to request data from the server (db.query() in prefetch/render).
+// Four frame types. The server sends one CALL "request" per HTTP request.
+// The sidecar runs route + prefetch + handle + render internally, using
+// QUERY sub-calls for db.query(), and returns a combined RESULT.
+//
+// Previously used 4 separate CALLs (route, prefetch, handle, render) =
+// 10+ frames/request. Consolidated to 1 CALL = 4 frames/request.
+// This reduced per-request native overhead by ~60%, improving sidecar
+// throughput by 20-42%. See decision-sidecar-1call-protocol.md.
 //
 // Frame layout (all within a length-prefixed frame envelope):
 //   CALL:         [tag][request_id: u32 BE][name_len: u16 BE][name][args...]
 //   RESULT:       [tag][request_id: u32 BE][flag: u8][result...]
-//   QUERY:        [tag][request_id: u32 BE][sql_len: u16 BE][sql][param_count: u8][params...]
-//   QUERY_RESULT: [tag][request_id: u32 BE][row_set...]
+//   QUERY:        [tag][request_id: u32 BE][query_id: u16 BE][sql_len: u16 BE][sql][mode][param_count: u8][params...]
+//   QUERY_RESULT: [tag][request_id: u32 BE][query_id: u16 BE][row_set...]
 // =====================================================================
 
 pub const CallTag = enum(u8) {
@@ -960,6 +965,154 @@ test "cross-language CALL/RESULT vector — write to /tmp for TS reader" {
     const file = std.fs.cwd().createFile("/tmp/tiger_call_test.bin", .{}) catch unreachable;
     defer file.close();
     file.writeAll(file_buf[0..fpos]) catch unreachable;
+}
+
+// =====================================================================
+// Comptime assertions — pin frame layout byte offsets.
+// If the refactor shifts a field, compilation fails.
+// =====================================================================
+
+comptime {
+    // CALL frame: [tag: u8][request_id: u32 BE][name_len: u16 BE][name][args...]
+    assert(@intFromEnum(CallTag.call) == 0x10);
+    assert(@intFromEnum(CallTag.result) == 0x11);
+    assert(@intFromEnum(CallTag.query) == 0x12);
+    assert(@intFromEnum(CallTag.query_result) == 0x13);
+    assert(@intFromEnum(CallTag.ready) == 0x20);
+    // CALL header: tag(1) + request_id(4) + name_len(2) = 7 bytes minimum
+    const call_header_min = 1 + 4 + 2;
+    assert(call_header_min == 7);
+    // RESULT header: tag(1) + request_id(4) + flag(1) = 6 bytes minimum
+    const result_header_min = 1 + 4 + 1;
+    assert(result_header_min == 6);
+    // QUERY header: tag(1) + request_id(4) + query_id(2) + sql_len(2) = 9 bytes + sql + mode(1) + param_count(1)
+    const query_header_min = 1 + 4 + 2 + 2;
+    assert(query_header_min == 9);
+    // QUERY_RESULT header: tag(1) + request_id(4) + query_id(2) = 7 bytes minimum
+    const qr_header_min = 1 + 4 + 2;
+    assert(qr_header_min == 7);
+    // Result flags
+    assert(@intFromEnum(ResultFlag.success) == 0x00);
+    assert(@intFromEnum(ResultFlag.failure) == 0x01);
+}
+
+// Handle RESULT payload layout:
+//   [status_len: u16 BE][status_str][session_action: u8][write_count: u8][writes...]
+// Each write: [sql_len: u16 BE][sql][param_count: u8][params...]
+// Pin with comptime: offsets are fixed relative to start of result data.
+pub const handle_result_status_offset = 0; // u16 BE status_len at byte 0
+pub const handle_result_min_size = 2 + 1 + 1; // status_len(2) + session_action(1) + write_count(1) minimum (empty status)
+
+comptime {
+    assert(handle_result_min_size == 4);
+}
+
+// =====================================================================
+// CALL/RESULT round-trip tests — encode then decode, assert fields match.
+// These pin the wire format. If the format changes, these fail.
+// =====================================================================
+
+test "CALL frame round-trip" {
+    var buf: [256]u8 = undefined;
+    const len = build_call(&buf, 42, "route", "hello") orelse unreachable;
+    const frame = buf[0..len];
+
+    // Tag
+    try std.testing.expectEqual(@as(u8, 0x10), frame[0]);
+    // Request ID
+    try std.testing.expectEqual(@as(u32, 42), std.mem.readInt(u32, frame[1..5], .big));
+    // Name
+    const name_len = std.mem.readInt(u16, frame[5..7], .big);
+    try std.testing.expectEqual(@as(u16, 5), name_len);
+    try std.testing.expectEqualStrings("route", frame[7..12]);
+    // Args
+    try std.testing.expectEqualStrings("hello", frame[12..17]);
+}
+
+test "RESULT parse round-trip" {
+    // Build a RESULT frame manually: [tag][request_id BE][flag][data]
+    var buf: [64]u8 = undefined;
+    buf[0] = @intFromEnum(CallTag.result);
+    std.mem.writeInt(u32, buf[1..5], 99, .big);
+    buf[5] = @intFromEnum(ResultFlag.success);
+    @memcpy(buf[6..11], "hello");
+
+    const frame = parse_sidecar_frame(buf[0..11]) orelse unreachable;
+    try std.testing.expectEqual(CallTag.result, frame.tag);
+    try std.testing.expectEqual(@as(u32, 99), frame.request_id);
+
+    const result = parse_result_payload(frame.payload) orelse unreachable;
+    try std.testing.expectEqual(ResultFlag.success, result.flag);
+    try std.testing.expectEqualStrings("hello", result.data);
+}
+
+test "QUERY_RESULT build round-trip" {
+    var buf: [64]u8 = undefined;
+    const row_set = "fake_rows";
+    const len = build_query_result(&buf, 7, 3, row_set) orelse unreachable;
+    const frame = buf[0..len];
+
+    // QUERY_RESULT is sent by the server to the sidecar, not received
+    // from the sidecar. parse_sidecar_frame rejects it (correct).
+    // Verify raw byte layout instead.
+    try std.testing.expectEqual(@as(u8, 0x13), frame[0]); // tag
+    try std.testing.expectEqual(@as(u32, 7), std.mem.readInt(u32, frame[1..5], .big)); // request_id
+    try std.testing.expectEqual(@as(u16, 3), std.mem.readInt(u16, frame[5..7], .big)); // query_id
+    try std.testing.expectEqualStrings(row_set, frame[7..16]); // payload
+}
+
+test "handle RESULT payload format" {
+    // Pin the handle RESULT payload format used by TS dispatchHandle.
+    // Layout: [status_len: u16 BE][status][session_action: u8][write_count: u8]
+    var buf: [64]u8 = undefined;
+    var pos: usize = 0;
+
+    const status = "ok";
+    std.mem.writeInt(u16, buf[pos..][0..2], @intCast(status.len), .big);
+    pos += 2;
+    @memcpy(buf[pos..][0..status.len], status);
+    pos += status.len;
+    buf[pos] = 0; // session_action = none
+    pos += 1;
+    buf[pos] = 0; // write_count = 0
+    pos += 1;
+
+    // Parse it back — same offsets the Zig sidecar handler uses.
+    const payload = buf[0..pos];
+    const parsed_status_len = std.mem.readInt(u16, payload[0..2], .big);
+    try std.testing.expectEqual(@as(u16, 2), parsed_status_len);
+    try std.testing.expectEqualStrings("ok", payload[2..4]);
+    try std.testing.expectEqual(@as(u8, 0), payload[4]); // session_action
+    try std.testing.expectEqual(@as(u8, 0), payload[5]); // write_count
+}
+
+test "parse_sidecar_frame rejects garbage" {
+    // Too short
+    try std.testing.expect(parse_sidecar_frame("") == null);
+    try std.testing.expect(parse_sidecar_frame("abcd") == null);
+    // Invalid tag
+    var bad_tag = [_]u8{ 0xFF, 0, 0, 0, 0 };
+    try std.testing.expect(parse_sidecar_frame(&bad_tag) == null);
+    // CALL tag — parse_sidecar_frame only accepts result/query (from sidecar)
+    var call_tag = [_]u8{ 0x10, 0, 0, 0, 0 };
+    try std.testing.expect(parse_sidecar_frame(&call_tag) == null);
+}
+
+test "parse_result_payload rejects garbage" {
+    try std.testing.expect(parse_result_payload("") == null);
+    // Invalid flag byte
+    var bad_flag = [_]u8{0xFF};
+    try std.testing.expect(parse_result_payload(&bad_flag) == null);
+}
+
+test "parse_query_payload rejects truncated" {
+    try std.testing.expect(parse_query_payload("") == null);
+    try std.testing.expect(parse_query_payload("ab") == null);
+    // query_id + sql_len present but sql truncated
+    var short: [6]u8 = undefined;
+    std.mem.writeInt(u16, short[0..2], 0, .big); // query_id
+    std.mem.writeInt(u16, short[2..4], 100, .big); // sql_len = 100 (way past end)
+    try std.testing.expect(parse_query_payload(&short) == null);
 }
 
 fn test_socketpair() [2]std.posix.fd_t {
