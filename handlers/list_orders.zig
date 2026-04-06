@@ -9,14 +9,24 @@ pub const Context = t.HandlerContext(Prefetch, t.Operation.EventType(.list_order
 
 // [route] .list_orders
 // match GET /orders
+// query cursor
 pub fn route(params: t.RouteParams, body: []const u8) ?t.Message {
-    _ = params; _ = body;
-    return t.Message.init(.list_orders, 0, 0, std.mem.zeroes(t.ListParams));
+    _ = body;
+    var lp = std.mem.zeroes(t.ListParams);
+    if (params.get("cursor")) |c| {
+        lp.cursor = t.stdx.parse_uuid(c) orelse return null;
+    }
+    return t.Message.init(.list_orders, 0, 0, lp);
 }
 
 // [prefetch] .list_orders
 pub fn prefetch(storage: anytype, msg: *const t.Message) ?Prefetch {
-    _ = msg;
+    const params = msg.body_as(t.ListParams);
+    if (params.cursor != 0) {
+        return .{ .orders = storage.query_all(t.OrderRow, t.list_max,
+            "SELECT id, total_cents, items_len, status, timeout_at, payment_ref FROM orders WHERE id > ?1 ORDER BY id LIMIT ?2;",
+            .{ params.cursor, @as(u32, t.list_max) }) };
+    }
     return .{ .orders = storage.query_all(t.OrderRow, t.list_max,
         "SELECT id, total_cents, items_len, status, timeout_at, payment_ref FROM orders ORDER BY id LIMIT ?1;",
         .{@as(u32, t.list_max)}) };
@@ -34,11 +44,11 @@ pub fn handle(ctx: Context, db: anytype) t.HandleResult {
 pub fn render(ctx: Context) []const u8 {
     const h = t.html;
     var buf = ctx.render_buf;
-    var pos: usize = 0;
 
     const orders = (ctx.prefetched.orders orelse return "").slice();
     if (orders.len == 0) return "<div>No orders</div>";
 
+    var pos: usize = 0;
     for (orders) |order| {
         pos += h.raw(buf[pos..], "<div class=\"card\">Order <strong>");
         pos += h.uuid(buf[pos..], order.id);
@@ -52,6 +62,14 @@ pub fn render(ctx: Context) []const u8 {
         pos += h.raw(buf[pos..], " &mdash; ");
         pos += h.price_u64(buf[pos..], order.total_cents);
         pos += h.raw(buf[pos..], "</div>");
+    }
+
+    if (orders.len == t.list_max) {
+        const last_id = orders[orders.len - 1].id;
+        pos += h.raw(buf[pos..],
+            "<div data-on-intersect=\"@get('/orders?cursor=");
+        pos += h.uuid(buf[pos..], last_id);
+        pos += h.raw(buf[pos..], "')\"></div>");
     }
 
     return buf[0..pos];
