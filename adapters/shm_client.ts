@@ -125,11 +125,15 @@ export class ShmClient {
     shmAddon.futexWake(this.buf, hdr + SIDECAR_SEQ_OFFSET);
   }
 
-  // Start polling loop. Checks for new requests at interval.
-  // In production, replace with futex_wait or eventfd for lower latency.
-  startPolling(intervalMs: number = 0): NodeJS.Timeout {
-    return setInterval(() => {
+  // Start tight polling loop via setImmediate. Checks for new
+  // requests every event loop iteration (~0.1ms, much faster than
+  // setInterval's ~1ms minimum). For production, replace with
+  // futex_wait for near-zero latency.
+  startPolling(): void {
+    const tick = () => {
       this.poll();
-    }, intervalMs);
+      setImmediate(tick);
+    };
+    setImmediate(tick);
   }
 }

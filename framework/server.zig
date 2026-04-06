@@ -234,6 +234,8 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
         /// process_inbox for 503 gating.
         pub fn sidecar_any_ready(server: *const Server) bool {
             if (!App.sidecar_enabled) return false;
+            // Shared memory transport is ready immediately — no handshake.
+            if (App.protocol_v2_shm) return server.shm_bus.ready;
             for (server.sidecar_connections_ready) |ready| {
                 if (ready) return true;
             }
@@ -532,12 +534,21 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
             }
             // Wire v2 dispatch module.
             if (App.protocol_v2_shm) {
-                // Shared memory transport — create shm region, wire to dispatch.
+                // Init io_uring for futex signaling.
+                try server.io.init_uring();
+
+                // Shared memory transport — create shm region.
                 const pid = @as(u32, @intCast(std.os.linux.getpid()));
                 var shm_name_buf: [64]u8 = undefined;
                 const shm_name = std.fmt.bufPrint(&shm_name_buf, "tiger-{d}", .{pid}) catch "tiger-shm";
                 try server.shm_bus.create(shm_name, &server.io.uring.?, shm_on_frame, @ptrCast(server));
                 server.dispatch_v2.bus = &server.shm_bus;
+
+                // Shared memory is ready immediately — no handshake needed.
+                // The sidecar polls the region directly.
+                server.shm_bus.set_ready();
+                server.shm_bus.start_watching();
+                log.info("shm transport: /dev/shm/{s}", .{shm_name});
             } else {
                 server.dispatch_v2.bus = &server.sidecar_bus;
             }

@@ -243,7 +243,9 @@ pub fn SharedMemoryBusType(comptime options: Options) type {
             const sidecar_seq_ptr: *u32 = &slot.header.sidecar_seq;
             const sidecar_seq = @atomicLoad(u32, sidecar_seq_ptr, .acquire);
 
-            if (sidecar_seq < self.server_seqs[slot_idx]) return; // Stale.
+            // No request sent yet, or stale response.
+            if (self.server_seqs[slot_idx] == 0) return;
+            if (sidecar_seq < self.server_seqs[slot_idx]) return;
 
             const response_len = slot.header.response_len;
             if (response_len > slot_data_size) {

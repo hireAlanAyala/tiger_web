@@ -390,7 +390,7 @@ pub const IoUring = struct {
         @atomicStore(u32, self.sq.tail, tail +% 1, .release);
 
         // Submit to kernel.
-        _ = linux.io_uring_enter(self.fd, 1, 0, 0);
+        _ = linux.io_uring_enter(self.fd, 1, 0, 0, null);
         return true;
     }
 

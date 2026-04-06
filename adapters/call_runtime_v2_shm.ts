@@ -81,7 +81,7 @@ client.setFrameHandler((slotIndex: number, data: Buffer) => {
 });
 
 // Start polling for requests.
-client.startPolling(0);
+client.startPolling();
 console.log("[v2-shm] polling started");
 
 // --- Result builder ---
