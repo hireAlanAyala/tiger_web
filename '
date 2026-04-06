@@ -1,0 +1,19 @@
+
+# prefetch db is sidecar talking to a secondary storage interface
+prefetch db.query is pure ts for db reads only, instead of calling to zig.
+avoids a lot of latency in scenarios like this:
+
+prefetch                                                                                                                                                                                       
+const id = await db.query('get user id')                                                                                                                                                       
+const user  = await db.query('get user')                                                                                                                                                       
+
+Gain: 17k -> 25k
+
+
+# new
+  Currently with the QUERY sub-protocol, the flow is:                                                                                                                                          
+  slot gets request → send CALL → wait → TS queries via QUERY → Zig reads SQLite → sends QR → wait → TS finishes → RESULT → execute → encode → send
+                                                                                                                                                                                               
+  With native prefetch:                                                                                                                                                                        
+  slot gets request → Zig reads SQLite → send CALL (with data) → wait → TS runs (no await) → RESULT → execute → encode → send
+

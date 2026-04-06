@@ -27,7 +27,7 @@ const log = std.log.scoped(.shm_bus);
 pub fn SharedMemoryBusType(comptime options: Options) type {
     return struct {
         const Self = @This();
-        const slot_count = options.slot_count;
+        pub const slot_count = options.slot_count;
 
         pub const frame_header_size: u32 = 0;
 
@@ -280,6 +280,11 @@ pub fn SharedMemoryBusType(comptime options: Options) type {
             if (self.on_frame_fn) |cb| {
                 cb(self.context.?, slot_idx, slot.response[0..response_len]);
             }
+
+            // Mark as consumed — prevent re-delivery on next poll/tick.
+            // Reset sidecar_seq to 0 so the check `sidecar_seq >= server_seq`
+            // fails until the sidecar writes a new response.
+            slot.header.sidecar_seq = 0;
 
             // Re-submit futex wait for next response.
             self.submit_futex_wait(slot_idx);

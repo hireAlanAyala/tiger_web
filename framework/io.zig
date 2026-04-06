@@ -215,12 +215,21 @@ pub const IO = struct {
     /// we execute syscalls inline — deferring adds latency (4×
     /// regression measured with sidecar). Add deferred queue back
     /// only when migrating to io_uring.
-    pub fn run_for_ns(self: *IO, ns: u64) void {
-        // Drain io_uring completions first (non-blocking peek).
-        // DISABLED: debugging HTTP stall.
-        // if (self.uring) |*ring| ring.drain_completions();
+    // Callback for shared memory polling — set by the server when
+    // shm transport is active. Called every run_for_ns iteration.
+    shm_poll_fn: ?*const fn () void = null,
 
-        const timeout_ms: i32 = @intCast(@min(ns / std.time.ns_per_ms, std.math.maxInt(u31)));
+    pub fn run_for_ns(self: *IO, ns: u64) void {
+        // Poll shm responses (non-blocking).
+        if (self.shm_poll_fn) |poll| poll();
+
+        // When shm is active, use 0 timeout to busy-poll. Otherwise
+        // use the requested timeout. Shm responses need sub-ms latency
+        // that the 10ms tick can't provide.
+        const timeout_ms: i32 = if (self.shm_poll_fn != null)
+            0
+        else
+            @intCast(@min(ns / std.time.ns_per_ms, std.math.maxInt(u31)));
 
         var events: [64]std.os.linux.epoll_event = undefined;
         const ready = posix.epoll_wait(self.epoll_fd, &events, timeout_ms);
@@ -230,10 +239,6 @@ pub const IO = struct {
             self.execute(completion);
             completion.callback(completion.context, completion.result);
         }
-
-        // Drain again after epoll.
-        // DISABLED: debugging HTTP stall.
-        // if (self.uring) |*ring| ring.drain_completions();
     }
 
     fn register(self: *IO, completion: *Completion) void {

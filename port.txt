@@ -1,0 +1,17 @@
+warning(main): SECRET_KEY not set — using development default (not safe for production)
+info(storage): storage initialized: :memory:
+info(io): listener bound fd=4
+info(wal): created new WAL
+info(main): admin socket: /tmp/tiger_web_admin_40367.sock
+info(main): storage=sqlite wal=tiger_web.wal tick_interval=10ms connections=128
+info(main): listening on port 40367
+40367
+run
++- run tiger-web failure
+error: the following command terminated unexpectedly:
+/home/walker/Documents/personal/tiger_web/zig-out/bin/tiger-web start --port=0 --db=:memory: 
+Build Summary: 16/18 steps succeeded; 1 failed
+run transitive failure
++- run tiger-web failure
+error: the following build command failed with exit code 1:
+/home/walker/Documents/personal/tiger_web/.zig-cache/o/13179ddec22c41ef4d0892cf24760006/build /home/walker/Documents/personal/tiger_web/zig/zig zig/lib /home/walker/Documents/personal/tiger_web /home/walker/Documents/personal/tiger_web/.zig-cache /home/walker/.cache/zig --seed 0x6235fe69 -Z3c0080b619d13462 run -- start --port=0 --db=:memory:

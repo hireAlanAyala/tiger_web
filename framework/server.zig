@@ -455,6 +455,19 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
             }
         }
 
+        // Global server pointer for shm_poll_all callback.
+        // Set during wire_sidecar. Only used when protocol_v2_shm is active.
+        var shm_poll_server: ?*Server = null;
+
+        fn shm_poll_all() void {
+            const server = shm_poll_server orelse return;
+            if (!App.sidecar_enabled or !App.protocol_v2_shm) return;
+            for (0..DispatchV2Bus.slot_count) |i| {
+                server.shm_bus.check_response(@intCast(i));
+            }
+            server.process_v2_completions();
+        }
+
         /// Shared memory frame callback — routes frames to v2 dispatch.
         fn shm_on_frame(ctx: *anyopaque, _: u8, frame: []const u8) void {
             const server: *Server = @ptrCast(@alignCast(ctx));
@@ -541,7 +554,9 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
                 try server.shm_bus.create(shm_name, &server.io.uring.?, shm_on_frame, @ptrCast(server));
                 server.dispatch_v2.bus = &server.shm_bus;
                 server.shm_bus.set_ready();
-                server.shm_bus.start_watching();
+                // Register shm poll in run_for_ns — responses need sub-ms polling.
+                shm_poll_server = server;
+                server.io.shm_poll_fn = &shm_poll_all;
                 log.info("shm transport: /dev/shm/{s}", .{shm_name});
             } else {
                 server.dispatch_v2.bus = &server.sidecar_bus;
