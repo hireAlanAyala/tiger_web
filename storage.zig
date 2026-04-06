@@ -349,6 +349,16 @@ pub const SqliteStorage = struct {
     /// Column→field name mapping is built once on the first row, then reused
     /// for all subsequent rows — no per-row string comparisons.
     pub fn query_all(self: *SqliteStorage, comptime T: type, comptime max: usize, comptime sql_str: [*:0]const u8, args: anytype) ?BoundedList(T, max) {
+        comptime {
+            const sql: []const u8 = std.mem.span(sql_str);
+            var upper: [sql.len]u8 = undefined;
+            for (sql, 0..) |ch, i| {
+                upper[i] = std.ascii.toUpper(ch);
+            }
+            if (std.mem.indexOf(u8, &upper, "LIMIT") == null) {
+                @compileError("query_all requires LIMIT in SQL — unbounded SELECT is not allowed: " ++ sql);
+            }
+        }
         const stmt = self.prepare_and_bind(sql_str, args);
         assert(c.sqlite3_stmt_readonly(stmt) != 0);
 
@@ -1042,7 +1052,7 @@ test "query_all: multiple rows" {
 
     const PriceRow = struct { price_cents: u32 };
     const result = s.query_all(PriceRow, 10,
-        "SELECT price_cents FROM products ORDER BY price_cents;",
+        "SELECT price_cents FROM products ORDER BY price_cents LIMIT 10;",
         .{},
     ) orelse unreachable;
 
@@ -1058,7 +1068,7 @@ test "query_all: empty result" {
 
     const PriceRow = struct { price_cents: u32 };
     const result = s.query_all(PriceRow, 10,
-        "SELECT price_cents FROM products;",
+        "SELECT price_cents FROM products LIMIT 10;",
         .{},
     ) orelse unreachable;
 
@@ -1101,7 +1111,7 @@ test "typed: bool round-trip" {
     try std.testing.expect(s.execute("INSERT INTO t (flag) VALUES (?1);", .{true}));
     try std.testing.expect(s.execute("INSERT INTO t (flag) VALUES (?1);", .{false}));
 
-    const rows = s.query_all(FlagRow, 10, "SELECT flag FROM t ORDER BY rowid;", .{}) orelse unreachable;
+    const rows = s.query_all(FlagRow, 10, "SELECT flag FROM t ORDER BY rowid LIMIT 10;", .{}) orelse unreachable;
     try std.testing.expectEqual(@as(usize, 2), rows.len);
     try std.testing.expect(rows.items[0].flag == true);
     try std.testing.expect(rows.items[1].flag == false);

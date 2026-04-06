@@ -27,8 +27,8 @@ pub fn prefetch(storage: anytype, msg: *const t.Message) ?Prefetch {
             "SELECT id, total_cents, items_len, status, timeout_at, payment_ref FROM orders WHERE id = ?1;",
             .{msg.id}),
         .items = storage.query_all(t.OrderItemRow, t.order_items_max,
-            "SELECT product_id, name, quantity, price_cents, line_total_cents FROM order_items WHERE order_id = ?1;",
-            .{msg.id}),
+            "SELECT product_id, name, quantity, price_cents, line_total_cents FROM order_items WHERE order_id = ?1 LIMIT ?2;",
+            .{ msg.id, @as(u32, t.order_items_max) }),
     };
 }
 
