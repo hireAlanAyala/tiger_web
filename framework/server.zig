@@ -58,7 +58,12 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
     // V2 dispatch — pipelined stateless protocol. Coexists with v1
     // handlers. The server routes frames to either v1 or v2 based
     // on protocol version (TODO: version negotiation).
-    const DispatchV2 = if (App.sidecar_enabled) @import("../sidecar_dispatch.zig").SidecarDispatchType(Storage, SidecarBus) else void;
+    const ShmBus = if (App.sidecar_enabled and App.protocol_v2_shm)
+        @import("shm_bus.zig").SharedMemoryBusType(.{ .slot_count = @import("constants.zig").pipeline_slots_max })
+    else
+        void;
+    const DispatchV2Bus = if (App.sidecar_enabled and App.protocol_v2_shm) ShmBus else SidecarBus;
+    const DispatchV2 = if (App.sidecar_enabled) @import("../sidecar_dispatch.zig").SidecarDispatchType(Storage, DispatchV2Bus) else void;
 
     // Pipeline slot count — derived from bus connections.
     const slots_max: u8 = if (App.sidecar_enabled) SidecarBus.connections_max else 1;
@@ -204,6 +209,7 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
         //   handlers[i]       — domain dispatch for slot i
         //   sidecar_clients[i] — protocol state machine for slot i
         dispatch_v2: if (App.sidecar_enabled) DispatchV2 else void = if (App.sidecar_enabled) .{} else {},
+        shm_bus: if (App.sidecar_enabled and App.protocol_v2_shm) ShmBus else void = if (App.sidecar_enabled and App.protocol_v2_shm) .{} else {},
         sidecar_bus: SidecarBus = if (App.sidecar_enabled) undefined else {},
         sidecar_clients: if (App.sidecar_enabled)
             [pipeline_slots_max]SidecarClient
@@ -447,6 +453,14 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
             }
         }
 
+        /// Shared memory frame callback — routes frames to v2 dispatch.
+        fn shm_on_frame(ctx: *anyopaque, _: u8, frame: []const u8) void {
+            const server: *Server = @ptrCast(@alignCast(ctx));
+            if (!App.sidecar_enabled or !App.protocol_v2) return;
+            server.dispatch_v2.on_frame(frame, server.state_machine.storage);
+            server.process_v2_completions();
+        }
+
         fn suspend_connection(server: *Server, conn: *Connection) void {
             // Don't add duplicates.
             if (conn.active_next != null) return;
@@ -517,7 +531,16 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
                 handler.connection_index = @intCast(i % App.sidecar_count);
             }
             // Wire v2 dispatch module.
-            server.dispatch_v2.bus = &server.sidecar_bus;
+            if (App.protocol_v2_shm) {
+                // Shared memory transport — create shm region, wire to dispatch.
+                const pid = @as(u32, @intCast(std.os.linux.getpid()));
+                var shm_name_buf: [64]u8 = undefined;
+                const shm_name = std.fmt.bufPrint(&shm_name_buf, "tiger-{d}", .{pid}) catch "tiger-shm";
+                try server.shm_bus.create(shm_name, &server.io.uring.?, shm_on_frame, @ptrCast(server));
+                server.dispatch_v2.bus = &server.shm_bus;
+            } else {
+                server.dispatch_v2.bus = &server.sidecar_bus;
+            }
             server.dispatch_v2.connection_index = 0;
             try server.sidecar_bus.init_pool(
                 allocator,

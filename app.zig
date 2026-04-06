@@ -229,6 +229,7 @@ pub const sidecar_count: u8 = @import("build_options").sidecar_count;
 /// SidecarDispatchType instead of SidecarHandlersType for sidecar
 /// requests. Enable for benchmarking the 4-RT pipelined dispatch.
 pub const protocol_v2: bool = false; // Experimental — set true to test v2 dispatch
+pub const protocol_v2_shm: bool = false; // Experimental — shared memory transport for v2
 
 /// Resolve the Handlers type based on sidecar_enabled.
 /// Native path ignores IO. Sidecar path resolves Bus from IO
