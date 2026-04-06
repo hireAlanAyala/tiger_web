@@ -145,25 +145,43 @@ gaps. This is correct, not a flaw. The pipeline must not be the
 bottleneck when requests are available, but need not guarantee
 saturation when requests aren't.
 
-## Why pipelining + 4 RTs works
+## Throughput model (validated by measurement)
 
-Throughput = 1 / max(T_ts, T_zig). With pipelining, TS and Zig
-work overlap across requests.
+Original projections assumed ~3µs per RT in TS (user function
+only). Measured: **~19µs per RT** including frame I/O in Node
+(socket read, CRC validation, buffer copy, function name
+parsing). The TS per-RT cost dominates, not Zig frame processing.
 
-**T_ts per request:** ~12µs (route + prefetch + handle + render)
-**T_zig per request:** ~10µs (HTTP parse + SQL read + SQL write
-+ response encode) + N_frames × frame_cost
+Throughput = 1 / (N_rts × T_per_rt_ts) when TS is the bottleneck
+(which it is — pipeline saturates TS at 52K calls/s = 13K req/s).
 
-With unix sockets (frame_cost ~2µs):
-- 8 frames: T_zig = 10 + 16 = 26µs → ceiling ~38K
-- 6 frames: T_zig = 10 + 12 = 22µs → ceiling ~45K
+**Measured baseline (unix sockets):**
+- V2 1-slot: 8.7K req/s (no pipelining)
+- V2 8-slot: 13K req/s (pipelined, TS saturated)
+- V1 1-CALL: 17K req/s (4 frames, fewer RTs wins)
 
-With shared memory (frame_cost ~0.5µs):
-- 8 frames: T_zig = 10 + 4 = 14µs → ceiling ~71K
-- 6 frames: T_zig = 10 + 3 = 13µs → ceiling ~77K
+**Projected with optimizations:**
 
-**With shared memory, 8 frames and 2 frames have nearly the same
-throughput.** Frame cost is negligible. Keep all 4 functions.
+| Phase | Frames/req | Per-RT (TS) | 1 proc | vs Fastify |
+|---|---|---|---|---|
+| Current v2 (measured) | 8 | ~19µs | 13K | 27% |
+| + RT0 prefetch | 6 | ~19µs | 17K | 35% |
+| + Shared memory | 8 | ~3µs | 42K | 86% |
+| + RT0 + shared memory | 6 | ~3µs | 56K | 114% |
+
+Shared memory eliminates most of the per-RT TS overhead (no
+socket read/write, no CRC, direct buffer access). This is the
+key unlock — without it, the 4-RT model can't exceed ~17K
+with 1 process.
+
+With 2 processes (horizontal scaling):
+- Unix sockets: 2 × 13K = 26K (53% of Fastify)
+- Shared memory: 2 × 42K = 84K (171% of Fastify)
+
+**Conclusion:** the architecture is correct. The dispatch model
+pipelines correctly (TS saturated at 100%). The transport is
+the bottleneck. Shared memory (Phase 4) is the critical path
+to Fastify-class throughput.
 
 ## RT0: prefetch extraction (optimization)
 
@@ -185,14 +203,15 @@ from 8 frames to 6 per request.
 Every typical CRUD handler qualifies: the prefetch SQL is a
 string literal, the params are `msg.field` pass-throughs.
 
-## Projected throughput
+## Projected throughput (updated with measurements)
 
 | Phase | Change | 1 proc req/s | vs Fastify |
 |---|---|---|---|
-| Current | 1-CALL + QUERY | 17K | 35% |
-| Phase 1+2 | Stateless 4-RT + pipelining | 38K | 78% |
-| Phase 3 | + RT0 prefetch extraction | 43-50K | 88-102% |
-| Phase 4 | + Shared memory | 65-71K | 133-145% |
+| V1 | 1-CALL + QUERY | 17K | 35% |
+| Phase 1+2 (measured) | Stateless 4-RT + pipelining | 13K | 27% |
+| Phase 3 | + RT0 prefetch extraction | 17K | 35% |
+| Phase 4 | + Shared memory | 42K | 86% |
+| Phase 3+4 | + RT0 + shared memory | 56K | 114% |
 
 ## Determinism: write-boundary ordering
 
