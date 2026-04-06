@@ -46,12 +46,15 @@ pub fn ConnectionType(comptime IO: type) type {
         on_close_fn: *const fn (*anyopaque, *Connection) void,
         context: *anyopaque,
 
-        // Receive buffer: accumulate incoming HTTP bytes until a full request arrives.
+        // Buffers are embedded, not pooled. At 64KB send + 12KB recv per
+        // connection, 128 connections = 9.5MB — fits in L3, no cache thrashing.
+        // Benchmarked flat throughput from 1 to 1024 connections (native and
+        // sidecar). A MessagePool was investigated and deferred — pagination
+        // solved the buffer size problem. See decision-send-buffer-size.md.
         recv_buf: [http.recv_buf_max]u8,
         recv_pos: u32,
         recv_completion: IO.Completion,
 
-        // Send buffer: holds the HTTP response being sent.
         send_buf: [http.send_buf_max]u8,
         send_start: u32,
         send_len: u32,
