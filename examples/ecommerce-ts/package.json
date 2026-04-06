@@ -8,8 +8,11 @@
     "dev": "../../tiger-web dev"
   },
   "devDependencies": {
-    "tsx": "^4",
     "concurrently": "^9",
+    "tsx": "^4",
     "typescript": "^5"
+  },
+  "dependencies": {
+    "better-sqlite3": "^12.8.0"
   }
 }
