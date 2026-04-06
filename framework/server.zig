@@ -4,6 +4,7 @@ const stdx = @import("stdx");
 const http = @import("http.zig");
 const ConnectionType = @import("connection.zig").ConnectionType;
 const Time = @import("time.zig").Time;
+const constants = @import("constants.zig");
 const marks = @import("marks.zig");
 const log = marks.wrap_log(std.log.scoped(.server));
 const WalType = @import("wal.zig").WalType;
@@ -71,7 +72,7 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
     return struct {
         const Server = @This();
 
-        pub const max_connections = 128;
+        pub const max_connections = constants.max_connections;
 
         /// Number of pipeline slots — one per sidecar connection.
         /// Native handlers (no sidecar) use 1 slot (synchronous).
@@ -210,10 +211,10 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
         /// this to skip slots whose connections aren't ready.
         /// Comptime-eliminated when sidecar is disabled.
         sidecar_connections_ready: if (App.sidecar_enabled)
-            [pipeline_slots_max]bool
+            [App.sidecar_count]bool
         else
             void = if (App.sidecar_enabled)
-            .{false} ** pipeline_slots_max
+            .{false} ** App.sidecar_count
         else {},
 
         /// Whether any sidecar connection is ready.
@@ -391,7 +392,10 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
                 client.* = SidecarClient.init();
                 handler.sidecar_client = client;
                 handler.sidecar_bus = &server.sidecar_bus;
-                handler.connection_index = @intCast(i);
+                // Slots share connections round-robin. With N slots and
+                // M connections (M ≤ N), slot i uses connection i % M.
+                // When M=1 (multiplexed), all slots share connection 0.
+                handler.connection_index = @intCast(i % App.sidecar_count);
             }
             try server.sidecar_bus.init_pool(
                 allocator,
@@ -483,7 +487,8 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
             while (i < pipeline_slots_max) : (i += 1) {
                 const idx = (server.next_slot +% i) % pipeline_slots_max;
                 const slot = &server.pipeline_slots[idx];
-                if (slot.stage == .idle and server.sidecar_connections_ready[idx]) {
+                const conn_idx = idx % App.sidecar_count;
+                if (slot.stage == .idle and server.sidecar_connections_ready[conn_idx]) {
                     server.next_slot = (idx +% 1) % pipeline_slots_max;
                     return slot;
                 }
@@ -630,13 +635,18 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
                         // Invariant: handle result not yet produced.
                         assert(slot.pipeline_resp == null);
 
+                        const is_mutation = msg.operation.is_mutation();
+
                         // Exclusive write lock — SQLite WAL allows
                         // concurrent reads but one writer at a time.
-                        if (server.handle_lock) |_| {
-                            slot.stage = .handle_wait;
-                            return;
+                        // Read-only operations skip the lock entirely.
+                        if (is_mutation) {
+                            if (server.handle_lock) |_| {
+                                slot.stage = .handle_wait;
+                                return;
+                            }
+                            server.handle_lock = idx;
                         }
-                        server.handle_lock = idx;
 
                         const cache = slot.cache.?;
                         const identity = slot.identity.?;
@@ -648,9 +658,9 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
                         };
 
                         // Execute handler inside a transaction.
-                        sm.begin_batch();
+                        if (is_mutation) sm.begin_batch();
 
-                        var write_view = if (server.wal != null)
+                        var write_view = if (is_mutation and server.wal != null)
                             Storage.WriteView.init_recording(sm.storage, &server.wal_record_scratch)
                         else
                             Storage.WriteView.init(sm.storage);
@@ -663,19 +673,20 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
                         );
 
                         // WAL: log SQL writes.
-                        if (server.wal) |wal| {
-                            if (!wal.disabled and msg.operation.is_mutation()) {
-                                wal.append_writes(
-                                    msg.operation,
-                                    sm.now,
-                                    if (write_view.record_buf) |buf| buf[0..write_view.record_pos] else "",
-                                    write_view.record_count,
-                                    &server.wal_scratch,
-                                );
+                        if (is_mutation) {
+                            if (server.wal) |wal| {
+                                if (!wal.disabled) {
+                                    wal.append_writes(
+                                        msg.operation,
+                                        sm.now,
+                                        if (write_view.record_buf) |buf| buf[0..write_view.record_pos] else "",
+                                        write_view.record_count,
+                                        &server.wal_scratch,
+                                    );
+                                }
                             }
+                            sm.commit_batch();
                         }
-
-                        sm.commit_batch();
 
                         // Build pipeline response from handler result + auth.
                         const is_auth = identity.is_authenticated != 0 or
@@ -693,9 +704,11 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
                         server.tracer.count(.{ .requests_by_operation = .{ .operation = msg.operation } }, 1);
                         server.tracer.count(.{ .requests_by_status = .{ .status = handle_result.status } }, 1);
 
-                        // Release write lock.
-                        assert(server.handle_lock.? == idx);
-                        server.handle_lock = null;
+                        // Release write lock (mutations only).
+                        if (is_mutation) {
+                            assert(server.handle_lock.? == idx);
+                            server.handle_lock = null;
+                        }
 
                         slot.stage = .render;
                         server.tracer.start(.{ .pipeline_stage = .{ .stage = .render, .slot = idx, .op = @intFromEnum(msg.operation) } });
@@ -795,6 +808,19 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
             }
             server.handlers[idx].reset_handler_state();
             slot.reset();
+
+            // Immediately dispatch the next suspended connection to
+            // the freed slot. Without this, the slot idles until the
+            // next tick() calls resume_suspended — adding up to one
+            // full tick interval (~10ms) of latency per request.
+            if (server.suspended_head) |conn| {
+                server.suspended_head = conn.active_next;
+                if (server.suspended_head == null) server.suspended_tail = null;
+                conn.active_next = null;
+                if (conn.state == .ready) {
+                    server.try_dispatch(conn);
+                }
+            }
         }
 
         // =============================================================
@@ -839,53 +865,73 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
                 return;
             }
 
-            // All connections are active — each serves its own pipeline
-            // slot. No active/standby concept. Do NOT add a standby
-            // check here — it would prevent concurrent dispatch.
-            // Each connection is permanently paired with its slot
-            // (slot index = connection index). Routing is direct.
-            const handler = &server.handlers[connection_index];
+            // Route frame to the correct handler/slot.
+            // 1:1 mode (pipeline_slots_max == sidecar_count): direct mapping.
+            // Multiplexed (pipeline_slots_max > sidecar_count): match by request_id.
+            const slot_idx: u8 = if (pipeline_slots_max == App.sidecar_count)
+                connection_index
+            else
+                server.find_slot_by_frame(frame) orelse {
+                    log.warn("sidecar: frame with unknown request_id on connection {d}", .{connection_index});
+                    return;
+                };
+
+            const handler = &server.handlers[slot_idx];
             handler.process_sidecar_frame(frame, server.state_machine.storage);
 
-            // Protocol violation → terminate connection.
-            if (server.sidecar_clients[connection_index].protocol_violation) {
-                log.warn("sidecar: protocol violation detected on slot {d}, terminating", .{connection_index});
+            // Protocol violation → terminate the bus connection.
+            if (server.sidecar_clients[slot_idx].protocol_violation) {
+                log.warn("sidecar: protocol violation on slot {d}, terminating connection {d}", .{ slot_idx, connection_index });
                 server.terminate_sidecar_connection(connection_index);
                 return;
             }
 
-            // Resume pipeline on the connection's paired slot.
-            const slot = &server.pipeline_slots[connection_index];
+            // Resume pipeline on the matched slot.
+            const slot = &server.pipeline_slots[slot_idx];
             if (slot.stage != .idle and !handler.is_handler_pending()) {
                 server.commit_dispatch(slot);
             }
         }
 
-        /// Called when the sidecar bus connection closes.
+        /// Called when the sidecar bus connection closes. Resets all
+        /// pipeline slots that were using this connection.
         pub fn sidecar_on_close(ctx: *anyopaque, connection_index: u8, reason: Handlers.BusType.Connection.CloseReason) void {
             if (!App.sidecar_enabled) unreachable;
             const server: *Server = @ptrCast(@alignCast(ctx));
-            log.info("sidecar: slot {d} disconnected (reason={s})", .{ connection_index, @tagName(reason) });
+            log.info("sidecar: connection {d} disconnected (reason={s})", .{ connection_index, @tagName(reason) });
 
-            // Clear per-connection ready state — slot is disabled until
-            // the sidecar reconnects and completes a new READY handshake.
             server.sidecar_connections_ready[connection_index] = false;
 
-            // Pipeline recovery — reset handler and recover slot.
-            server.handlers[connection_index].on_sidecar_close();
+            // Reset all slots that map to this connection.
+            for (&server.handlers, &server.pipeline_slots, 0..) |*handler, *slot, i| {
+                if (handler.connection_index != connection_index) continue;
+                handler.on_sidecar_close();
 
-            const slot = &server.pipeline_slots[connection_index];
-            if (slot.stage == .render) {
-                server.render_crash_fallback(slot);
-                return;
+                if (slot.stage == .render) {
+                    server.render_crash_fallback(slot);
+                } else if (slot.stage != .idle) {
+                    server.tracer.cancel_slot(@intCast(i));
+                    server.pipeline_reset(slot);
+                } else {
+                    handler.reset_handler_state();
+                }
             }
+        }
 
-            if (slot.stage != .idle) {
-                server.tracer.cancel_slot(connection_index);
-                server.pipeline_reset(slot);
-            } else {
-                server.handlers[connection_index].reset_handler_state();
+        /// Find which pipeline slot a sidecar frame belongs to by
+        /// matching the request_id in the frame against each slot's
+        /// expected_request_id. Returns null if no match (stale frame).
+        fn find_slot_by_frame(server: *Server, frame: []const u8) ?u8 {
+            if (!App.sidecar_enabled) unreachable;
+            // request_id is at bytes 1..5 (after tag byte), big-endian.
+            if (frame.len < 5) return null;
+            const request_id = std.mem.readInt(u32, frame[1..5], .big);
+            for (&server.sidecar_clients, 0..) |*client, i| {
+                if (client.call_state == .receiving and client.expected_request_id == request_id) {
+                    return @intCast(i);
+                }
             }
+            return null;
         }
 
         /// Terminate a specific sidecar bus connection. on_close will
