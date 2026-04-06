@@ -398,11 +398,41 @@ Do not commit to Phase 3 or 4 based on arithmetic alone.
 11. Framework executes prefetch natively for extracted handlers
 12. Benchmark: RT0 impact
 
-### Phase 4: Shared memory transport
+### Phase 4: Shared memory + io_uring transport
 
-13. Replace unix socket with mmap + futex for sidecar frames
-14. Protocol (CALL/RESULT with request_id) unchanged
-15. Benchmark: final throughput numbers
+Replace unix socket with mmap shared memory. Signaling via
+io_uring futex ops (IORING_OP_FUTEX_WAIT/WAKE) instead of
+eventfd. io_uring runs alongside epoll — epoll handles HTTP
+connections, io_uring handles sidecar shared memory signaling.
+
+**Why io_uring over eventfd:** 2µs less per RT (no eventfd
+write/read syscalls — the futex wait completes directly in
+the ring when the sequence number changes). At 4 RTs per
+request, 8µs saved. Same shared memory layout, same memory
+ordering (acquire/release on seq), same CRC validation.
+
+**Scope:** ~130 lines total. io_uring setup + submit + drain
+in io.zig (~100 lines). Futex ops in shm_bus.zig (~20 lines).
+Node addon: futex_wake instead of eventfd_write (~10 lines).
+HTTP stays on epoll. No full IO layer migration.
+
+**Requires:** Linux 6.7+ for IORING_OP_FUTEX_WAIT.
+
+**Layout:** N slot pairs in mmap'd region (extern struct,
+comptime-verified). Header per slot: server_seq, sidecar_seq,
+request_len, response_len, request_crc, response_crc. Server
+writes request slots, sidecar writes response slots. Sequence
+numbers + acquire/release prevent torn reads. CRC validates
+integrity. See sidecar-shm-transport.md for full layout,
+memory ordering, and crash recovery design.
+
+13. Add io_uring setup to io.zig (small ring, futex ops only)
+14. Implement SharedMemoryBus (mmap region + io_uring futex)
+15. Node.js native addon (mmap + futex_wake, ~80 LOC)
+16. Update call_runtime_v2.ts to use addon for shm read/write
+17. Wire shm bus into dispatch module (same interface as socket bus)
+18. Fuzz: torn writes, stale seqs, CRC mismatch, crash recovery
+19. Benchmark: target ~42K req/s (1 proc)
 
 ## Backpressure
 
