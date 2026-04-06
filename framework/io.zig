@@ -47,6 +47,7 @@ pub const IO = struct {
     /// Call after init() when shared memory bus is needed.
     pub fn init_uring(self: *IO) !void {
         self.uring = try IoUring.init();
+        log.info("io_uring initialized: fd={d}", .{self.uring.?.fd});
     }
 
     pub fn deinit(self: *IO) void {
@@ -216,7 +217,8 @@ pub const IO = struct {
     /// only when migrating to io_uring.
     pub fn run_for_ns(self: *IO, ns: u64) void {
         // Drain io_uring completions first (non-blocking peek).
-        if (self.uring) |*ring| ring.drain_completions();
+        // DISABLED: debugging HTTP stall.
+        // if (self.uring) |*ring| ring.drain_completions();
 
         const timeout_ms: i32 = @intCast(@min(ns / std.time.ns_per_ms, std.math.maxInt(u31)));
 
@@ -229,9 +231,9 @@ pub const IO = struct {
             completion.callback(completion.context, completion.result);
         }
 
-        // Drain again after epoll — sends/responses may have produced
-        // new uring completions during callback processing.
-        if (self.uring) |*ring| ring.drain_completions();
+        // Drain again after epoll.
+        // DISABLED: debugging HTTP stall.
+        // if (self.uring) |*ring| ring.drain_completions();
     }
 
     fn register(self: *IO, completion: *Completion) void {
@@ -401,7 +403,8 @@ pub const IoUring = struct {
 
     /// Drain completed futex operations. Non-blocking.
     pub fn drain_completions(self: *IoUring) void {
-        while (true) {
+        var drained: u32 = 0;
+        while (drained < ring_entries) : (drained += 1) {
             const head = self.cq.head.*;
             const tail = @atomicLoad(u32, self.cq.tail, .acquire);
             if (head == tail) break; // No completions.

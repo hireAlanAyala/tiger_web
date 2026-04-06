@@ -534,18 +534,12 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
             }
             // Wire v2 dispatch module.
             if (App.protocol_v2_shm) {
-                // Init io_uring for futex signaling.
                 try server.io.init_uring();
-
-                // Shared memory transport — create shm region.
                 const pid = @as(u32, @intCast(std.os.linux.getpid()));
                 var shm_name_buf: [64]u8 = undefined;
                 const shm_name = std.fmt.bufPrint(&shm_name_buf, "tiger-{d}", .{pid}) catch "tiger-shm";
                 try server.shm_bus.create(shm_name, &server.io.uring.?, shm_on_frame, @ptrCast(server));
                 server.dispatch_v2.bus = &server.shm_bus;
-
-                // Shared memory is ready immediately — no handshake needed.
-                // The sidecar polls the region directly.
                 server.shm_bus.set_ready();
                 server.shm_bus.start_watching();
                 log.info("shm transport: /dev/shm/{s}", .{shm_name});

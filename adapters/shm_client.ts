@@ -40,7 +40,9 @@ export class ShmClient {
     this.slotPairSize = HEADER_SIZE + this.slotDataSize * 2;
 
     const regionSize = this.slotCount * this.slotPairSize;
-    this.buf = shmAddon.mmapShm(opts.shmName, regionSize);
+    // shm_open requires leading slash.
+    const shmPath = opts.shmName.startsWith("/") ? opts.shmName : "/" + opts.shmName;
+    this.buf = shmAddon.mmapShm(shmPath, regionSize);
     this.lastSeenSeqs = new Uint32Array(this.slotCount);
 
     console.log(`[shm] mapped ${opts.shmName}: ${regionSize} bytes, ${this.slotCount} slots`);
@@ -56,8 +58,9 @@ export class ShmClient {
   private responseOffset(slot: number): number { return this.requestOffset(slot) + this.slotDataSize; }
 
   // Read a u32 BE from the buffer.
-  private readU32(offset: number): number { return this.buf.readUInt32BE(offset); }
-  private writeU32(offset: number, val: number): void { this.buf.writeUInt32BE(val, offset); }
+  // Native byte order (LE on x86) — must match Zig's @atomicStore.
+  private readU32(offset: number): number { return this.buf.readUInt32LE(offset); }
+  private writeU32(offset: number, val: number): void { this.buf.writeUInt32LE(val, offset); }
 
   // Poll all slots for new requests. Returns number of requests found.
   poll(): number {
@@ -76,7 +79,7 @@ export class ShmClient {
         // Validate CRC (len ++ payload).
         const storedCrc = this.readU32(hdr + REQUEST_CRC_OFFSET);
         const lenBuf = Buffer.alloc(4);
-        lenBuf.writeUInt32BE(requestLen, 0);
+        lenBuf.writeUInt32LE(requestLen, 0);
         const crcLen = crc32(lenBuf);
         const payload = this.buf.subarray(this.requestOffset(i), this.requestOffset(i) + requestLen);
         const computedCrc = requestLen > 0 ? crc32(payload, crcLen) : crcLen;
@@ -107,7 +110,7 @@ export class ShmClient {
 
     // CRC covers len ++ payload.
     const lenBuf = Buffer.alloc(4);
-    lenBuf.writeUInt32BE(data.length, 0);
+    lenBuf.writeUInt32LE(data.length, 0);
     const crcLen = crc32(lenBuf);
     const computedCrc = data.length > 0
       ? crc32(Buffer.from(data), crcLen)

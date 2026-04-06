@@ -71,9 +71,9 @@ pub fn SharedMemoryBusType(comptime options: Options) type {
         // =============================================================
 
         pub const Message = struct {
-            buffer: [protocol.frame_max]u8 = undefined,
-            references: u32 = 1,
-            slot_index: u8 = 0,
+            buffer: [protocol.frame_max]u8,
+            references: u32,
+            slot_index: u8,
         };
 
         pub const Connection = struct {
@@ -90,8 +90,10 @@ pub fn SharedMemoryBusType(comptime options: Options) type {
 
         server_seqs: [slot_count]u32 = [_]u32{0} ** slot_count,
 
-        message_pool: [slot_count * 2]Message = [_]Message{.{}} ** (slot_count * 2),
+        // Message pool — heap-allocated to avoid 4MB inline in Server struct.
+        message_pool: ?[*]Message = null,
         next_message: u8 = 0,
+        next_slot: u8 = 0,
 
         ready: bool = false,
 
@@ -115,6 +117,15 @@ pub fn SharedMemoryBusType(comptime options: Options) type {
             self.on_frame_fn = on_frame_fn;
             self.context = context;
             self.uring = uring;
+
+            // Allocate message pool on the heap (16 × 256KB = 4MB).
+            const pool_count = slot_count * 2;
+            const pool = std.heap.page_allocator.alloc(Message, pool_count) catch return error.PoolAllocFailed;
+            for (pool) |*m| {
+                m.references = 0;
+                m.slot_index = 0;
+            }
+            self.message_pool = pool.ptr;
 
             // Store name for sidecar to open.
             assert(name.len < self.shm_name.len);
@@ -194,10 +205,11 @@ pub fn SharedMemoryBusType(comptime options: Options) type {
         }
 
         pub fn get_message(self: *Self) *Message {
+            const pool = self.message_pool orelse @panic("shm bus: message pool not initialized");
             const idx = self.next_message;
             self.next_message = (self.next_message + 1) % (slot_count * 2);
-            self.message_pool[idx].references = 1;
-            return &self.message_pool[idx];
+            pool[idx].references = 1;
+            return &pool[idx];
         }
 
         pub fn unref(_: *Self, _: *Message) void {}
@@ -205,8 +217,9 @@ pub fn SharedMemoryBusType(comptime options: Options) type {
         /// Write a CALL payload to shared memory for the given slot.
         pub fn send_message_to(self: *Self, _: u8, message: *Message, payload_len: u32) void {
             const region = self.region orelse return;
-            const slot_idx = message.slot_index;
-            assert(slot_idx < slot_count);
+            // Round-robin slot assignment.
+            const slot_idx = self.next_slot;
+            self.next_slot = (self.next_slot + 1) % slot_count;
             var slot = &region.slots[slot_idx];
 
             // Write payload to request area.
