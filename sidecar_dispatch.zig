@@ -199,7 +199,6 @@ pub fn SidecarDispatchType(comptime StorageParam: type, comptime Bus: type) type
             entry.stage = .route_pending;
             entry.request_id = request_id;
             entry.connection = connection;
-            log.debug("start_request: sent route CALL request_id={d}", .{request_id});
             return true;
         }
 
@@ -378,6 +377,14 @@ pub fn SidecarDispatchType(comptime StorageParam: type, comptime Bus: type) type
             }
             self.pending_mutation_count = 0;
             self.lowest_pending_mutation_seq = std.math.maxInt(u32);
+        }
+
+        pub fn count_active(self: *const Self) u32 {
+            var n: u32 = 0;
+            for (&self.entries) |*entry| {
+                if (entry.stage != .free) n += 1;
+            }
+            return n;
         }
 
         pub fn any_pending(self: *const Self) bool {
