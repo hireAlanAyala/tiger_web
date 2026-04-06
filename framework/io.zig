@@ -32,6 +32,10 @@ pub const IO = struct {
 
     epoll_fd: fd_t,
 
+    // io_uring for shared memory futex signaling (optional).
+    // Runs alongside epoll — epoll for HTTP, uring for shm futex.
+    uring: ?IoUring = null,
+
     pub fn init() !IO {
         const epoll_fd = try posix.epoll_create1(linux.EPOLL.CLOEXEC);
         return .{
@@ -39,7 +43,14 @@ pub const IO = struct {
         };
     }
 
+    /// Initialize the io_uring ring for futex operations.
+    /// Call after init() when shared memory bus is needed.
+    pub fn init_uring(self: *IO) !void {
+        self.uring = try IoUring.init();
+    }
+
     pub fn deinit(self: *IO) void {
+        if (self.uring) |*ring| ring.deinit();
         posix.close(self.epoll_fd);
     }
 
@@ -204,6 +215,9 @@ pub const IO = struct {
     /// regression measured with sidecar). Add deferred queue back
     /// only when migrating to io_uring.
     pub fn run_for_ns(self: *IO, ns: u64) void {
+        // Drain io_uring completions first (non-blocking peek).
+        if (self.uring) |*ring| ring.drain_completions();
+
         const timeout_ms: i32 = @intCast(@min(ns / std.time.ns_per_ms, std.math.maxInt(u31)));
 
         var events: [64]std.os.linux.epoll_event = undefined;
@@ -214,6 +228,10 @@ pub const IO = struct {
             self.execute(completion);
             completion.callback(completion.context, completion.result);
         }
+
+        // Drain again after epoll — sends/responses may have produced
+        // new uring completions during callback processing.
+        if (self.uring) |*ring| ring.drain_completions();
     }
 
     fn register(self: *IO, completion: *Completion) void {
@@ -254,5 +272,154 @@ pub const IO = struct {
             },
             .none => unreachable,
         };
+    }
+};
+
+// =====================================================================
+// IoUring — minimal ring for futex operations (shm bus signaling).
+// Runs alongside epoll. Not a general-purpose io_uring wrapper —
+// only supports FUTEX_WAIT and FUTEX_WAKE.
+// =====================================================================
+
+pub const IoUring = struct {
+    fd: posix.fd_t,
+    sq: SubmissionQueue,
+    cq: CompletionQueue,
+    mmap_sq: []u8,
+    mmap_cq: []u8,
+    mmap_sqes: []u8,
+
+    const ring_entries = 16; // Small — only futex ops.
+
+    pub const FutexCompletion = struct {
+        context: *anyopaque,
+        callback: *const fn (*anyopaque, i32) void,
+        user_data: u64,
+    };
+
+    // Pending completions — fixed pool, no allocation.
+    var pending: [ring_entries]?FutexCompletion = .{null} ** ring_entries;
+
+    const SubmissionQueue = struct {
+        head: *volatile u32,
+        tail: *volatile u32,
+        mask: u32,
+        sqes: [*]linux.io_uring_sqe,
+    };
+
+    const CompletionQueue = struct {
+        head: *volatile u32,
+        tail: *volatile u32,
+        mask: u32,
+        cqes: [*]linux.io_uring_cqe,
+    };
+
+    pub fn init() !IoUring {
+        var params = std.mem.zeroes(linux.io_uring_params);
+        const fd = linux.io_uring_setup(ring_entries, &params);
+        if (@as(i32, @bitCast(@as(u32, @truncate(fd)))) < 0) return error.IoUringSetupFailed;
+        const ring_fd: posix.fd_t = @intCast(fd);
+
+        // Map submission queue ring.
+        const sq_ring_size = params.sq_off.array + params.sq_entries * @sizeOf(u32);
+        const sq_ring = posix.mmap(null, sq_ring_size, posix.PROT.READ | posix.PROT.WRITE, .{ .TYPE = .SHARED }, ring_fd, linux.IORING_OFF_SQ_RING) catch return error.MmapFailed;
+
+        // Map completion queue ring.
+        const cq_ring_size = params.cq_off.cqes + params.cq_entries * @sizeOf(linux.io_uring_cqe);
+        const cq_ring = posix.mmap(null, cq_ring_size, posix.PROT.READ | posix.PROT.WRITE, .{ .TYPE = .SHARED }, ring_fd, linux.IORING_OFF_CQ_RING) catch return error.MmapFailed;
+
+        // Map SQE array.
+        const sqes_size = params.sq_entries * @sizeOf(linux.io_uring_sqe);
+        const sqes_ring = posix.mmap(null, sqes_size, posix.PROT.READ | posix.PROT.WRITE, .{ .TYPE = .SHARED }, ring_fd, linux.IORING_OFF_SQES) catch return error.MmapFailed;
+
+        return .{
+            .fd = ring_fd,
+            .sq = .{
+                .head = @ptrFromInt(@intFromPtr(sq_ring.ptr) + params.sq_off.head),
+                .tail = @ptrFromInt(@intFromPtr(sq_ring.ptr) + params.sq_off.tail),
+                .mask = @as(*u32, @ptrFromInt(@intFromPtr(sq_ring.ptr) + params.sq_off.ring_mask)).*,
+                .sqes = @ptrCast(@alignCast(sqes_ring.ptr)),
+            },
+            .cq = .{
+                .head = @ptrFromInt(@intFromPtr(cq_ring.ptr) + params.cq_off.head),
+                .tail = @ptrFromInt(@intFromPtr(cq_ring.ptr) + params.cq_off.tail),
+                .mask = @as(*u32, @ptrFromInt(@intFromPtr(cq_ring.ptr) + params.cq_off.ring_mask)).*,
+                .cqes = @ptrCast(@alignCast(@as([*]u8, @ptrCast(cq_ring.ptr)) + params.cq_off.cqes)),
+            },
+            .mmap_sq = sq_ring,
+            .mmap_cq = cq_ring,
+            .mmap_sqes = sqes_ring,
+        };
+    }
+
+    pub fn deinit(self: *IoUring) void {
+        posix.munmap(self.mmap_sq);
+        posix.munmap(self.mmap_cq);
+        posix.munmap(self.mmap_sqes);
+        posix.close(self.fd);
+    }
+
+    /// Submit a FUTEX_WAIT: wait until *addr != expected_val.
+    /// When the futex completes, the callback fires.
+    pub fn submit_futex_wait(
+        self: *IoUring,
+        addr: *volatile u32,
+        expected_val: u32,
+        context: *anyopaque,
+        callback: *const fn (*anyopaque, i32) void,
+    ) bool {
+        const tail = self.sq.tail.*;
+        const head = self.sq.head.*;
+        if (tail -% head >= ring_entries) return false; // Queue full.
+
+        const idx = tail & self.sq.mask;
+        const sqe = &self.sq.sqes[idx];
+        sqe.* = std.mem.zeroes(linux.io_uring_sqe);
+        sqe.opcode = .FUTEX_WAIT;
+        sqe.addr = @intFromPtr(addr);
+        sqe.len = 1; // FUTEX_WAIT expects val in fd field for comparison.
+        sqe.fd = @bitCast(expected_val);
+        sqe.user_data = idx;
+
+        pending[idx] = .{
+            .context = context,
+            .callback = callback,
+            .user_data = idx,
+        };
+
+        std.atomic.fence(.release);
+        self.sq.tail.* = tail +% 1;
+
+        // Submit to kernel.
+        _ = linux.io_uring_enter(self.fd, 1, 0, 0);
+        return true;
+    }
+
+    /// Wake a futex address (used by the sidecar side, or for testing).
+    pub fn futex_wake(addr: *const volatile u32) void {
+        _ = linux.futex_wake(@ptrCast(@constCast(addr)), linux.FUTEX.PRIVATE_FLAG | linux.FUTEX.WAKE, 1);
+    }
+
+    /// Drain completed futex operations. Non-blocking.
+    pub fn drain_completions(self: *IoUring) void {
+        while (true) {
+            const head = self.cq.head.*;
+            const tail = self.cq.tail.*;
+            if (head == tail) break; // No completions.
+
+            std.atomic.fence(.acquire);
+            const idx = head & self.cq.mask;
+            const cqe = &self.cq.cqes[idx];
+
+            const pending_idx = cqe.user_data;
+            if (pending_idx < ring_entries) {
+                if (pending[pending_idx]) |completion| {
+                    completion.callback(completion.context, cqe.res);
+                    pending[pending_idx] = null;
+                }
+            }
+
+            self.cq.head.* = head +% 1;
+        }
     }
 };
