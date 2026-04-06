@@ -36,12 +36,12 @@ pub fn SharedMemoryBusType(comptime options: Options) type {
         // =============================================================
 
         pub const SlotHeader = extern struct {
-            server_seq: u32 align(1) = 0,
-            sidecar_seq: u32 align(1) = 0,
-            request_len: u32 align(1) = 0,
-            response_len: u32 align(1) = 0,
-            request_crc: u32 align(1) = 0,
-            response_crc: u32 align(1) = 0,
+            server_seq: u32 = 0,
+            sidecar_seq: u32 = 0,
+            request_len: u32 = 0,
+            response_len: u32 = 0,
+            request_crc: u32 = 0,
+            response_crc: u32 = 0,
             _pad: [40]u8 = [_]u8{0} ** 40,
 
             comptime {
@@ -61,7 +61,7 @@ pub fn SharedMemoryBusType(comptime options: Options) type {
             slots: [slot_count]SlotPair,
 
             comptime {
-                assert(@sizeOf(Region) == slot_count * @sizeOf(SlotPair));
+                assert(@sizeOf(Region) == @as(usize, slot_count) * @sizeOf(SlotPair));
                 assert(@sizeOf(Region) <= 16 * 1024 * 1024);
             }
         };
@@ -131,7 +131,7 @@ pub fn SharedMemoryBusType(comptime options: Options) type {
             // Create shared memory.
             const fd = std.c.shm_open(
                 path.ptr,
-                @bitCast(@as(u32, std.c.O.CREAT | std.c.O.RDWR | std.c.O.EXCL)),
+                @bitCast(linux.O{ .ACCMODE = .RDWR, .CREAT = true, .EXCL = true }),
                 0o600,
             );
             if (fd < 0) return error.ShmOpenFailed;
@@ -217,14 +217,15 @@ pub fn SharedMemoryBusType(comptime options: Options) type {
             crc.update(std.mem.asBytes(&payload_len));
             crc.update(slot.request[0..payload_len]);
 
-            // Update header.
-            @as(*volatile u32, @ptrCast(&slot.header.request_len)).* = payload_len;
-            @as(*volatile u32, @ptrCast(&slot.header.request_crc)).* = crc.final();
+            // Update header (non-atomic — only seq needs ordering).
+            slot.header.request_len = payload_len;
+            slot.header.request_crc = crc.final();
 
-            // Increment seq with release ordering.
+            // Increment seq with release ordering — all payload stores
+            // are visible before the seq update.
             self.server_seqs[slot_idx] += 1;
-            std.atomic.fence(.release);
-            @as(*volatile u32, @ptrCast(&slot.header.server_seq)).* = self.server_seqs[slot_idx];
+            const seq_ptr: *u32 = &slot.header.server_seq;
+            @atomicStore(u32, seq_ptr, self.server_seqs[slot_idx], .release);
 
             // Wake sidecar via futex on server_seq.
             IoUring.futex_wake(@ptrCast(&slot.header.server_seq));
@@ -237,20 +238,21 @@ pub fn SharedMemoryBusType(comptime options: Options) type {
             assert(slot_idx < slot_count);
             const slot = &region.slots[slot_idx];
 
-            // Acquire fence before reading response.
-            std.atomic.fence(.acquire);
-            const sidecar_seq = @as(*volatile u32, @ptrCast(&slot.header.sidecar_seq)).*;
+            // Acquire load on sidecar_seq — all response payload reads
+            // are ordered after this load.
+            const sidecar_seq_ptr: *u32 = &slot.header.sidecar_seq;
+            const sidecar_seq = @atomicLoad(u32, sidecar_seq_ptr, .acquire);
 
             if (sidecar_seq < self.server_seqs[slot_idx]) return; // Stale.
 
-            const response_len = @as(*volatile u32, @ptrCast(&slot.header.response_len)).*;
+            const response_len = slot.header.response_len;
             if (response_len > slot_data_size) {
                 log.warn("shm: invalid response_len {d} on slot {d}", .{ response_len, slot_idx });
                 return;
             }
 
             // Validate CRC (len ++ payload).
-            const stored_crc = @as(*volatile u32, @ptrCast(&slot.header.response_crc)).*;
+            const stored_crc = slot.header.response_crc;
             var crc = Crc32.init();
             crc.update(std.mem.asBytes(&response_len));
             crc.update(slot.response[0..response_len]);

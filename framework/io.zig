@@ -285,9 +285,9 @@ pub const IoUring = struct {
     fd: posix.fd_t,
     sq: SubmissionQueue,
     cq: CompletionQueue,
-    mmap_sq: []u8,
-    mmap_cq: []u8,
-    mmap_sqes: []u8,
+    mmap_sq: []align(4096) u8,
+    mmap_cq: []align(4096) u8,
+    mmap_sqes: []align(4096) u8,
 
     const ring_entries = 16; // Small — only futex ops.
 
@@ -387,8 +387,7 @@ pub const IoUring = struct {
             .user_data = idx,
         };
 
-        std.atomic.fence(.release);
-        self.sq.tail.* = tail +% 1;
+        @atomicStore(u32, self.sq.tail, tail +% 1, .release);
 
         // Submit to kernel.
         _ = linux.io_uring_enter(self.fd, 1, 0, 0);
@@ -396,7 +395,7 @@ pub const IoUring = struct {
     }
 
     /// Wake a futex address (used by the sidecar side, or for testing).
-    pub fn futex_wake(addr: *const volatile u32) void {
+    pub fn futex_wake(addr: *const u32) void {
         _ = linux.futex_wake(@ptrCast(@constCast(addr)), linux.FUTEX.PRIVATE_FLAG | linux.FUTEX.WAKE, 1);
     }
 
@@ -404,10 +403,9 @@ pub const IoUring = struct {
     pub fn drain_completions(self: *IoUring) void {
         while (true) {
             const head = self.cq.head.*;
-            const tail = self.cq.tail.*;
+            const tail = @atomicLoad(u32, self.cq.tail, .acquire);
             if (head == tail) break; // No completions.
 
-            std.atomic.fence(.acquire);
             const idx = head & self.cq.mask;
             const cqe = &self.cq.cqes[idx];
 
