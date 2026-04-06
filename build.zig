@@ -15,9 +15,11 @@ pub fn build(b: *std.Build) void {
     // --- Build options ---
     const sidecar_enabled = b.option(bool, "sidecar", "Enable sidecar handler mode") orelse false;
     const sidecar_count: u8 = b.option(u8, "sidecar-count", "Number of sidecar connections (default 1)") orelse 1;
+    const pipeline_slots: u8 = b.option(u8, "pipeline-slots", "Number of concurrent pipeline slots (default = sidecar-count)") orelse sidecar_count;
     const build_options = b.addOptions();
     build_options.addOption(bool, "sidecar_enabled", sidecar_enabled);
     build_options.addOption(u8, "sidecar_count", sidecar_count);
+    build_options.addOption(u8, "pipeline_slots", pipeline_slots);
 
     // --- Main executable ---
     const exe = b.addExecutable(.{
@@ -62,6 +64,7 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
     load_exe.root_module.addImport("stdx", stdx_module);
+    load_exe.root_module.addOptions("build_options", build_options);
     load_exe.linkLibC();
     b.installArtifact(load_exe);
 
@@ -112,6 +115,7 @@ pub fn build(b: *std.Build) void {
     const sidecar_sim_options = b.addOptions();
     sidecar_sim_options.addOption(bool, "sidecar_enabled", true);
     sidecar_sim_options.addOption(u8, "sidecar_count", 2);
+    sidecar_sim_options.addOption(u8, "pipeline_slots", 2);
 
     const sidecar_sim = b.addTest(.{
         .root_source_file = b.path("sim_sidecar.zig"),
