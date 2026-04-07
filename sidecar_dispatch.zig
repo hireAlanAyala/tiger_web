@@ -100,6 +100,7 @@ pub fn SidecarDispatchType(comptime StorageParam: type, comptime Bus: type) type
             // render_complete, when it's copied to render_buf.
             combined_html_offset: usize = 0,
             combined_html_len: usize = 0,
+            is_combined: bool = false, // true = 1-RT path, skip render CALL
 
             pub fn reset(self: *Entry) void {
                 const stage_default: Stage = .free;
@@ -124,6 +125,7 @@ pub fn SidecarDispatchType(comptime StorageParam: type, comptime Bus: type) type
                 self.html = "";
                 self.combined_html_offset = 0;
                 self.combined_html_len = 0;
+                self.is_combined = false;
             }
         };
 
@@ -305,6 +307,20 @@ pub fn SidecarDispatchType(comptime StorageParam: type, comptime Bus: type) type
             };
 
             if (result.flag != .success) {
+                // Clean up mutation tracking before reset.
+                if (entry.is_mutation) {
+                    switch (entry.stage) {
+                        .route_complete, .prefetch_pending, .prefetch_complete,
+                        .sql_executing, .sql_complete, .handle_pending,
+                        .handle_complete, .write_pending,
+                        .combined_pending, .combined_complete => {
+                            assert(self.pending_mutation_count > 0);
+                            self.pending_mutation_count -= 1;
+                            self.recompute_lowest_pending_mutation();
+                        },
+                        else => {},
+                    }
+                }
                 entry.reset();
                 return;
             }
@@ -409,14 +425,18 @@ pub fn SidecarDispatchType(comptime StorageParam: type, comptime Bus: type) type
                     .write_complete => {
                         // 1-RT path: HTML stored in handle_buf — copy to
                         // render_buf now that writes are done.
-                        if (entry.combined_html_len > 0) {
-                            const hl = entry.combined_html_len;
-                            const ho = entry.combined_html_offset;
-                            @memcpy(self.render_buf[0..hl], entry.handle_buf[ho..][0..hl]);
-                            entry.html = self.render_buf[0..hl];
-                            entry.stage = .render_complete;
-                        } else if (entry.html.len > 0) {
-                            // Shouldn't happen, but handle gracefully.
+                        // Detect 1-RT by checking if we came through combined_complete
+                        // (entry has combined_html_offset/len set, even if len=0).
+                        if (entry.is_combined) {
+                            // 1-RT — HTML in handle_buf, copy to render_buf.
+                            if (entry.combined_html_len > 0) {
+                                const hl = entry.combined_html_len;
+                                const ho = entry.combined_html_offset;
+                                @memcpy(self.render_buf[0..hl], entry.handle_buf[ho..][0..hl]);
+                                entry.html = self.render_buf[0..hl];
+                            } else {
+                                entry.html = "";
+                            }
                             entry.stage = .render_complete;
                         } else {
                             const args = [_]u8{@intFromEnum(entry.handle_status)};
@@ -707,6 +727,7 @@ pub fn SidecarDispatchType(comptime StorageParam: type, comptime Bus: type) type
         /// Parse combined handle+render RESULT.
         /// Format: [status_len:2 BE][status][session_action:1][write_count:1][writes...][html to end]
         fn parse_combined_result(_: *Self, entry: *Entry, data: []const u8) void {
+            log.debug("parse_combined_result: data.len={d}", .{data.len});
             if (data.len < 4) {
                 entry.handle_status = .storage_error;
                 entry.stage = .combined_complete;
@@ -751,7 +772,9 @@ pub fn SidecarDispatchType(comptime StorageParam: type, comptime Bus: type) type
                     if (wpos >= write_data.len) break;
                     const param_count = write_data[wpos];
                     wpos += 1;
+                    log.debug("parse_combined: write sql_len={d} param_count={d} wpos_before_params={d}", .{ sql_len, param_count, wpos });
                     wpos = @import("sidecar.zig").SidecarClientType(Bus).skip_params(write_data, wpos, param_count) orelse break;
+                    log.debug("parse_combined: wpos_after_params={d} write_data.len={d}", .{ wpos, write_data.len });
                 }
                 const writes_len = wpos;
                 const copy_len = @min(writes_len, entry.handle_buf.len);
@@ -773,7 +796,10 @@ pub fn SidecarDispatchType(comptime StorageParam: type, comptime Bus: type) type
             }
             entry.combined_html_offset = html_start;
             entry.combined_html_len = html_len;
-            // Don't set entry.html yet — wait for write_complete.
+            entry.is_combined = true;
+            log.debug("parse_combined_result: status={s} write_count={d} html_offset={d} html_len={d}", .{
+                @tagName(entry.handle_status), entry.handle_write_count, html_start, html_len,
+            });
 
             entry.stage = .combined_complete;
         }

@@ -95,7 +95,7 @@ client.setDispatchHandler((_slotIndex: number, funcIndex: number, requestId: num
       default: return buildResult(requestId, 0x01, new Uint8Array(0));
     }
   } catch (e: any) {
-    console.error(`[v2-shm] func ${funcIndex} error:`, e.message);
+    console.error(`[v2-shm] func ${funcIndex} error:`, e.message, e.stack?.split('\n')[1] || '');
     return buildResult(requestId, 0x01, new Uint8Array(0));
   }
 });
@@ -352,7 +352,10 @@ function dispatchHandleRender(requestId: number, args: Uint8Array): Uint8Array {
   // Parse: [operation:1][id:16 LE][body_len:2 BE][body][row_set_count:1][row_sets...]
   const opValue = args[pos]; pos += 1;
   const opName = reverseOpMap[opValue];
-  if (!opName) return buildResult(requestId, 0x01, new Uint8Array(0));
+  if (!opName) {
+    console.error(`[1rt] unknown opValue=${opValue} args.len=${args.length}`);
+    return buildResult(requestId, 0x01, new Uint8Array(0));
+  }
 
   // Decode id (16 bytes LE → hex string, no dashes).
   let id = "";
@@ -362,7 +365,16 @@ function dispatchHandleRender(requestId: number, args: Uint8Array): Uint8Array {
   pos += 16;
 
   const bodyLen = dv.getUint16(pos, false); pos += 2;
-  const body = bodyLen > 0 ? JSON.parse(_decoder.decode(args.subarray(pos, pos + bodyLen))) : {};
+  let body: any = {};
+  if (bodyLen > 0) {
+    const bodyStr = _decoder.decode(args.subarray(pos, pos + bodyLen));
+    try {
+      body = JSON.parse(bodyStr);
+    } catch (e: any) {
+      console.error(`[1rt] JSON parse fail: bodyLen=${bodyLen} str=${JSON.stringify(bodyStr.slice(0, 80))} pos=${pos} argsLen=${args.length}`);
+      throw e;
+    }
+  }
   pos += bodyLen;
 
   const rowSetCount = args[pos]; pos += 1;
