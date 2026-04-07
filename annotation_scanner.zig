@@ -106,6 +106,23 @@ comptime {
     }
 }
 
+/// Extracted prefetch query specification — used to generate
+/// prefetch.generated.zig for 1-RT dispatch. The framework
+/// executes these SQL queries natively instead of calling
+/// the sidecar for the prefetch phase.
+const PrefetchQuery = struct {
+    sql: []const u8,
+    mode: enum { query, query_all },
+    params: []const ParamSpec,
+    key: []const u8, // return key name e.g. "product", "products"
+};
+
+const ParamSpec = struct {
+    source: enum { id, body_field, literal_int },
+    field: []const u8, // body field name when source = .body_field
+    int_val: i64, // value when source = .literal_int
+};
+
 /// A registered annotation with its source location.
 const Annotation = struct {
     phase: Phase,
@@ -114,6 +131,8 @@ const Annotation = struct {
     line: u32,
     has_body: bool,
     route_match: ?RouteMatch = null,
+    dynamic_prefetch: bool = false, // @dynamic-prefetch opt-in
+    prefetch_queries: []const PrefetchQuery = &.{},
 };
 
 /// Comment prefix by file extension.
@@ -307,6 +326,17 @@ fn validate_route_pattern(pattern: []const u8) ?[]const u8 {
 }
 
 /// Map internal phase names back to user-facing names for error messages.
+/// Parse `// @dynamic-prefetch` directive. Returns true if found.
+/// Marks a prefetch handler as requiring 4-RT dispatch (dynamic SQL
+/// that can't be extracted at build time).
+fn parse_dynamic_prefetch_directive(line: []const u8, prefix: []const u8) bool {
+    const trimmed = std.mem.trimLeft(u8, line, " \t");
+    if (!std.mem.startsWith(u8, trimmed, prefix)) return false;
+    const after_prefix = std.mem.trimLeft(u8, trimmed[prefix.len..], " \t");
+    const after_trimmed = std.mem.trimRight(u8, after_prefix, " \t\r");
+    return std.mem.eql(u8, after_trimmed, "@dynamic-prefetch");
+}
+
 fn user_phase_name(phase: Phase) []const u8 {
     return switch (phase) {
         .translate => "route",
@@ -590,6 +620,7 @@ fn scan_file_content(
     var lines = std.mem.splitScalar(u8, content, '\n');
     var prev_annotation: ?struct { phase: Phase, operation: []const u8, line: u32 } = null;
     var pending_match: ?RouteMatch = null;
+    var pending_dynamic_prefetch: bool = false;
 
     while (lines.next()) |line| {
         line_num += 1;
@@ -630,6 +661,27 @@ fn scan_file_content(
                                 }
                                 continue;
                             }
+                        }
+                    }
+
+                    // `// @dynamic-prefetch` — opt into 4-RT dispatch.
+                    // Only valid after [prefetch]. Tells the scanner not
+                    // to extract SQL (the handler has dynamic queries).
+                    if (ann.phase == .prefetch and next_ann == null) {
+                        if (parse_dynamic_prefetch_directive(line, prefix)) {
+                            pending_dynamic_prefetch = true;
+                            continue;
+                        }
+                    }
+
+                    // `// @dynamic-prefetch` on non-prefetch phases is an error.
+                    if (ann.phase != .prefetch and next_ann == null) {
+                        if (parse_dynamic_prefetch_directive(line, prefix)) {
+                            try stderr.print("error: {s}:{d}: @dynamic-prefetch only valid after [prefetch], not [{s}]\n", .{ path, line_num, user_phase_name(ann.phase) });
+                            errors += 1;
+                            prev_annotation = null;
+                            pending_dynamic_prefetch = false;
+                            continue;
                         }
                     }
 
@@ -687,10 +739,12 @@ fn scan_file_content(
                             .line = ann.line,
                             .has_body = true,
                             .route_match = pending_match,
+                            .dynamic_prefetch = pending_dynamic_prefetch,
                         });
                     }
                     prev_annotation = null;
                     pending_match = null;
+                    pending_dynamic_prefetch = false;
                     continue;
                 }
             } else {
@@ -953,6 +1007,27 @@ pub fn main() !void {
                         ann.file, ann.line, ann.operation,
                     });
                 }
+
+                // Extract prefetch SQL for 1-RT dispatch.
+                // @dynamic-prefetch handlers skip extraction.
+                // All others must have extractable SQL or it's a build error.
+                if (!ann.dynamic_prefetch and found_sql) {
+                    if (extract_prefetch_queries(allocator, body, quote)) |pqs| {
+                        // Store on annotation — mutable access via index.
+                        for (annotations.items, 0..) |*a, ai| {
+                            _ = ai;
+                            if (a.phase == .prefetch and std.mem.eql(u8, a.operation, ann.operation)) {
+                                a.prefetch_queries = pqs;
+                                break;
+                            }
+                        }
+                    } else {
+                        try stderr.print("error: {s}:{d}: [prefetch] .{s} SQL extraction failed — use // @dynamic-prefetch if queries are dynamic\n", .{
+                            ann.file, ann.line, ann.operation,
+                        });
+                        errors += 1;
+                    }
+                }
             },
             .execute => {
                 var sql_iter = SqlStringIterator.init(content, ann.line, quote);
@@ -1156,6 +1231,243 @@ fn body_references_sql(body: []const u8, phase: Phase) bool {
 
 fn sql_preview(sql: []const u8) []const u8 {
     return sql[0..@min(sql.len, 40)];
+}
+
+// =====================================================================
+// Prefetch SQL extraction — for 1-RT dispatch
+// =====================================================================
+
+const max_prefetch_queries = 4;
+const max_prefetch_params = 8;
+
+/// Extract prefetch queries from a function body.
+/// Scans for `db.query(` and `db.queryAll(` calls, extracts the SQL
+/// string and parameter expressions. Returns null if extraction fails
+/// (dynamic SQL, unrecognized param pattern, loop-based queries).
+fn extract_prefetch_queries(
+    allocator: std.mem.Allocator,
+    body: []const u8,
+    quote: u8,
+) ?[]const PrefetchQuery {
+    var queries: [max_prefetch_queries]PrefetchQuery = undefined;
+    var query_count: usize = 0;
+
+    // Detect loops — if the body contains `for ` or `while ` before a
+    // db.query call, the query count is dynamic. Bail out.
+    if (std.mem.indexOf(u8, body, "for ") != null or
+        std.mem.indexOf(u8, body, "for(") != null)
+    {
+        return null;
+    }
+
+    // Scan for db.query( and db.queryAll( calls.
+    var pos: usize = 0;
+    while (pos < body.len) {
+        // Find next db.query or db.queryAll call.
+        const query_call = find_db_query_call(body, pos) orelse break;
+        pos = query_call.after_paren;
+
+        if (query_count >= max_prefetch_queries) return null;
+
+        // Extract SQL string — the first quoted argument.
+        const sql_start = std.mem.indexOfScalarPos(u8, body, pos, quote) orelse return null;
+        var sql_end = sql_start + 1;
+        while (sql_end < body.len) : (sql_end += 1) {
+            if (body[sql_end] == '\\') { sql_end += 1; continue; }
+            if (body[sql_end] == quote) break;
+        }
+        if (sql_end >= body.len) return null;
+
+        const sql = body[sql_start + 1 .. sql_end];
+        if (!sql_starts_with_select(sql)) return null;
+
+        pos = sql_end + 1;
+
+        // Extract params — everything between the SQL closing quote and the
+        // closing ) of the db.query() call. Skip the comma after the SQL string.
+        const params = extract_param_specs(allocator, body, pos, quote) orelse return null;
+        pos = params.end_pos;
+
+        queries[query_count] = .{
+            .sql = sql,
+            .mode = query_call.mode,
+            .params = params.specs,
+            .key = "", // filled in by extract_return_keys
+        };
+        query_count += 1;
+    }
+
+    if (query_count == 0) return &.{};
+
+    // Extract return keys from `return { key1: ..., key2: ... }`.
+    const keys = extract_return_keys(body, query_count) orelse return null;
+    for (0..query_count) |i| {
+        queries[i].key = keys[i];
+    }
+
+    return allocator.dupe(PrefetchQuery, queries[0..query_count]) catch return null;
+}
+
+const DbQueryCall = struct {
+    mode: @TypeOf(@as(PrefetchQuery, undefined).mode),
+    after_paren: usize, // position after the opening (
+};
+
+/// Find the next `db.query(` or `db.queryAll(` in body starting at pos.
+fn find_db_query_call(body: []const u8, start: usize) ?DbQueryCall {
+    var pos = start;
+    while (pos + 9 < body.len) { // "db.query(" is 9 chars
+        if (std.mem.startsWith(u8, body[pos..], "db.queryAll(")) {
+            return .{ .mode = .query_all, .after_paren = pos + 12 };
+        }
+        if (std.mem.startsWith(u8, body[pos..], "db.query(")) {
+            return .{ .mode = .query, .after_paren = pos + 9 };
+        }
+        pos += 1;
+    }
+    return null;
+}
+
+const ExtractedParams = struct {
+    specs: []const ParamSpec,
+    end_pos: usize,
+};
+
+/// Extract parameter specs after the SQL string in a db.query() call.
+/// Parses: `, msg.id`, `, msg.body.field`, `, 50`, etc.
+/// Returns null if any param is unrecognized.
+fn extract_param_specs(
+    allocator: std.mem.Allocator,
+    body: []const u8,
+    start: usize,
+    quote: u8,
+) ?ExtractedParams {
+    var specs: [max_prefetch_params]ParamSpec = undefined;
+    var count: usize = 0;
+    const pos = start;
+
+    // Find the closing ) — track depth for nested parens.
+    var depth: u32 = 1;
+    const call_end = blk: {
+        var p = pos;
+        while (p < body.len) : (p += 1) {
+            if (body[p] == quote) {
+                // Skip string literals.
+                p += 1;
+                while (p < body.len and body[p] != quote) : (p += 1) {
+                    if (body[p] == '\\') p += 1;
+                }
+                continue;
+            }
+            if (body[p] == '(') depth += 1;
+            if (body[p] == ')') {
+                depth -= 1;
+                if (depth == 0) break :blk p;
+            }
+        }
+        return null;
+    };
+
+    // Everything between pos and call_end is the param list after SQL.
+    const param_text = body[pos..call_end];
+
+    // Split by comma, parse each param expression.
+    var it = std.mem.splitScalar(u8, param_text, ',');
+    _ = it.next(); // Skip first segment (empty or part of SQL string closing)
+
+    while (it.next()) |raw_param| {
+        const param = std.mem.trim(u8, raw_param, " \t\r\n");
+        if (param.len == 0) continue;
+        if (count >= max_prefetch_params) return null;
+
+        if (std.mem.eql(u8, param, "msg.id")) {
+            specs[count] = .{ .source = .id, .field = "", .int_val = 0 };
+        } else if (std.mem.startsWith(u8, param, "msg.body.")) {
+            const field = param["msg.body.".len..];
+            if (field.len == 0) return null;
+            specs[count] = .{ .source = .body_field, .field = field, .int_val = 0 };
+        } else if (parse_int_literal(param)) |val| {
+            specs[count] = .{ .source = .literal_int, .field = "", .int_val = val };
+        } else {
+            // Unrecognized param pattern — extraction fails.
+            return null;
+        }
+        count += 1;
+    }
+
+    return .{
+        .specs = allocator.dupe(ParamSpec, specs[0..count]) catch return null,
+        .end_pos = call_end + 1,
+    };
+}
+
+/// Parse an integer literal from a string (e.g., "50", "100").
+fn parse_int_literal(s: []const u8) ?i64 {
+    if (s.len == 0) return null;
+    var val: i64 = 0;
+    var neg = false;
+    var i: usize = 0;
+    if (s[0] == '-') { neg = true; i = 1; }
+    if (i >= s.len) return null;
+    while (i < s.len) : (i += 1) {
+        if (s[i] < '0' or s[i] > '9') return null;
+        val = val * 10 + @as(i64, s[i] - '0');
+    }
+    return if (neg) -val else val;
+}
+
+/// Extract return key names from `return { key1: ..., key2: ... }`.
+/// Returns an array of key names in declaration order.
+fn extract_return_keys(body: []const u8, expected_count: usize) ?[max_prefetch_queries][]const u8 {
+    var keys: [max_prefetch_queries][]const u8 = .{""} ** max_prefetch_queries;
+    var count: usize = 0;
+
+    // Find `return {` or `return({` pattern.
+    const return_pos = std.mem.indexOf(u8, body, "return ") orelse
+        std.mem.indexOf(u8, body, "return{") orelse
+        return null;
+    var pos = return_pos + 7; // skip "return "
+    // Skip whitespace and optional `(`.
+    while (pos < body.len and (body[pos] == ' ' or body[pos] == '(' or body[pos] == '\n')) pos += 1;
+    if (pos >= body.len or body[pos] != '{') return null;
+    pos += 1; // skip `{`
+
+    // Parse keys: `key1: expr, key2: expr`.
+    while (pos < body.len and count < max_prefetch_queries) {
+        // Skip whitespace.
+        while (pos < body.len and (body[pos] == ' ' or body[pos] == '\t' or body[pos] == '\n' or body[pos] == '\r')) pos += 1;
+        if (pos >= body.len or body[pos] == '}') break;
+
+        // Read identifier — stop at `:`, `,`, `}`, space, or newline.
+        const key_start = pos;
+        while (pos < body.len and body[pos] != ':' and body[pos] != ',' and
+            body[pos] != '}' and body[pos] != ' ' and body[pos] != '\n' and body[pos] != '\r') pos += 1;
+        if (pos == key_start) return null;
+
+        keys[count] = body[key_start..pos];
+        count += 1;
+
+        // Skip whitespace after key.
+        while (pos < body.len and (body[pos] == ' ' or body[pos] == '\t')) pos += 1;
+
+        if (pos < body.len and body[pos] == ':') {
+            // `key: expr` — skip past the value expression.
+            pos += 1;
+            var depth2: u32 = 0;
+            while (pos < body.len) : (pos += 1) {
+                if (body[pos] == '(' or body[pos] == '[') depth2 += 1;
+                if (body[pos] == ')' or body[pos] == ']') {
+                    if (depth2 > 0) depth2 -= 1;
+                }
+                if (depth2 == 0 and (body[pos] == ',' or body[pos] == '}')) break;
+            }
+        }
+        // Shorthand `{ key }` or `{ key, key2 }` — no `:`, already at `,` or `}`.
+        if (pos < body.len and body[pos] == ',') pos += 1;
+    }
+
+    if (count != expected_count) return null;
+    return keys;
 }
 
 fn has_name(ss: *const StatusSet, name: []const u8) bool {

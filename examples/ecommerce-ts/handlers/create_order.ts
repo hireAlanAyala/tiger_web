@@ -11,6 +11,7 @@ export function route(req: RouteRequest): RouteResult | null {
 }
 
 // [prefetch] .create_order
+// @dynamic-prefetch
 export async function prefetch(msg: PrefetchMessage, db: PrefetchDb) {
   const items = msg.body.items as Array<{ product_id: string; quantity: number }>;
   const queries: Record<string, any> = {};
