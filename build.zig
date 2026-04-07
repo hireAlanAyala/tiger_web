@@ -57,6 +57,13 @@ pub fn build(b: *std.Build) void {
     worker_step.dependOn(&worker_cmd.step);
 
     // --- Load test ---
+    // Own build_options — decoupled from server so `zig build load`
+    // without `-Dsidecar=true` doesn't contaminate the server binary.
+    const load_build_options = b.addOptions();
+    load_build_options.addOption(bool, "sidecar_enabled", sidecar_enabled);
+    load_build_options.addOption(u8, "sidecar_count", sidecar_count);
+    load_build_options.addOption(u8, "pipeline_slots", pipeline_slots);
+
     const load_exe = b.addExecutable(.{
         .name = "tiger-load",
         .root_source_file = b.path("load_driver.zig"),
@@ -64,12 +71,15 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
     load_exe.root_module.addImport("stdx", stdx_module);
-    load_exe.root_module.addOptions("build_options", build_options);
+    load_exe.root_module.addOptions("build_options", load_build_options);
     load_exe.linkLibC();
     b.installArtifact(load_exe);
 
     const load_cmd = b.addRunArtifact(load_exe);
-    load_cmd.step.dependOn(b.getInstallStep());
+    // Only depend on the load binary install, not the full install step.
+    // `zig build load` without `-Dsidecar=true` would otherwise rebuild
+    // tiger-web with sidecar_enabled=false, overwriting the sidecar binary.
+    load_cmd.step.dependOn(&b.addInstallArtifact(load_exe, .{}).step);
     if (b.args) |args| load_cmd.addArgs(args);
     const load_step = b.step("load", "Run HTTP load test");
     load_step.dependOn(&load_cmd.step);
