@@ -1,24 +1,20 @@
 // Shared memory sidecar client — reads CALL frames from shared memory,
-// writes RESULT frames back. Signals via futex_wake.
-//
-// Replaces the unix socket transport in call_runtime_v2.ts.
-// Same dispatch logic, different transport.
-//
-// Usage: import { ShmClient } from './shm_client';
+// writes RESULT frames back. Signals via futex.
 
-// Built with: cd addons/shm && npm run build (uses zig cc, no node-gyp).
 const shmAddon = require("../addons/shm/shm.node");
-
 import { crc32 } from "node:zlib";
 
 export interface ShmClientOptions {
   shmName: string;
   slotCount: number;
-  slotDataSize: number; // frame_max
+  slotDataSize: number;
+  skipCrc?: boolean;
 }
 
-// Layout matches shm_bus.zig SlotHeader (64 bytes).
-const HEADER_SIZE = 64;
+const REGION_HEADER_SIZE = 64;
+const EPOCH_OFFSET = 0;
+
+const SLOT_HEADER_SIZE = 64;
 const SERVER_SEQ_OFFSET = 0;
 const SIDECAR_SEQ_OFFSET = 4;
 const REQUEST_LEN_OFFSET = 8;
@@ -32,37 +28,34 @@ export class ShmClient {
   private slotDataSize: number;
   private slotPairSize: number;
   private lastSeenSeqs: Uint32Array;
+  private skipCrc: boolean;
+  private crcBuf = Buffer.alloc(4);
   private onFrame: ((slotIndex: number, data: Buffer) => void) | null = null;
 
   constructor(opts: ShmClientOptions) {
     this.slotCount = opts.slotCount;
     this.slotDataSize = opts.slotDataSize;
-    this.slotPairSize = HEADER_SIZE + this.slotDataSize * 2;
+    this.slotPairSize = SLOT_HEADER_SIZE + this.slotDataSize * 2;
+    this.skipCrc = opts.skipCrc ?? false;
 
-    const regionSize = this.slotCount * this.slotPairSize;
-    // shm_open requires leading slash.
+    const regionSize = REGION_HEADER_SIZE + this.slotCount * this.slotPairSize;
     const shmPath = opts.shmName.startsWith("/") ? opts.shmName : "/" + opts.shmName;
     this.buf = shmAddon.mmapShm(shmPath, regionSize);
     this.lastSeenSeqs = new Uint32Array(this.slotCount);
 
-    console.log(`[shm] mapped ${opts.shmName}: ${regionSize} bytes, ${this.slotCount} slots`);
+    console.log(`[shm] mapped ${opts.shmName}: ${regionSize} bytes, ${this.slotCount} slots${this.skipCrc ? " (no-crc)" : ""}`);
   }
 
   setFrameHandler(handler: (slotIndex: number, data: Buffer) => void) {
     this.onFrame = handler;
   }
 
-  // Slot offsets.
-  private headerOffset(slot: number): number { return slot * this.slotPairSize; }
-  private requestOffset(slot: number): number { return this.headerOffset(slot) + HEADER_SIZE; }
+  private headerOffset(slot: number): number { return REGION_HEADER_SIZE + slot * this.slotPairSize; }
+  private requestOffset(slot: number): number { return this.headerOffset(slot) + SLOT_HEADER_SIZE; }
   private responseOffset(slot: number): number { return this.requestOffset(slot) + this.slotDataSize; }
-
-  // Read a u32 BE from the buffer.
-  // Native byte order (LE on x86) — must match Zig's @atomicStore.
   private readU32(offset: number): number { return this.buf.readUInt32LE(offset); }
   private writeU32(offset: number, val: number): void { this.buf.writeUInt32LE(val, offset); }
 
-  // Poll all slots for new requests. Returns number of requests found.
   poll(): number {
     let found = 0;
     for (let i = 0; i < this.slotCount; i++) {
@@ -71,72 +64,61 @@ export class ShmClient {
 
       if (serverSeq > this.lastSeenSeqs[i]) {
         this.lastSeenSeqs[i] = serverSeq;
-
-        // Read request.
         const requestLen = this.readU32(hdr + REQUEST_LEN_OFFSET);
         if (requestLen > this.slotDataSize) continue;
 
-        // Validate CRC (len ++ payload).
-        const storedCrc = this.readU32(hdr + REQUEST_CRC_OFFSET);
-        const lenBuf = Buffer.alloc(4);
-        lenBuf.writeUInt32LE(requestLen, 0);
-        const crcLen = crc32(lenBuf);
         const payload = this.buf.subarray(this.requestOffset(i), this.requestOffset(i) + requestLen);
-        const computedCrc = requestLen > 0 ? crc32(payload, crcLen) : crcLen;
-        if ((computedCrc >>> 0) !== (storedCrc >>> 0)) {
-          console.error(`[shm] CRC mismatch on slot ${i}`);
-          continue;
+
+        if (!this.skipCrc) {
+          const storedCrc = this.readU32(hdr + REQUEST_CRC_OFFSET);
+          this.crcBuf.writeUInt32LE(requestLen, 0);
+          const crcLen = crc32(this.crcBuf);
+          const computedCrc = requestLen > 0 ? crc32(payload, crcLen) : crcLen;
+          if ((computedCrc >>> 0) !== (storedCrc >>> 0)) {
+            console.error(`[shm] CRC mismatch on slot ${i}`);
+            continue;
+          }
         }
 
-        // Deliver to handler.
-        if (this.onFrame) {
-          this.onFrame(i, payload);
-        }
+        if (this.onFrame) this.onFrame(i, payload);
         found++;
       }
     }
     return found;
   }
 
-  // Write a response to a slot and signal the server.
   writeResponse(slot: number, data: Uint8Array): void {
     const hdr = this.headerOffset(slot);
     const respOffset = this.responseOffset(slot);
 
-    // Write payload.
-    if (data.length > 0) {
-      this.buf.set(data, respOffset);
+    if (data.length > 0) this.buf.set(data, respOffset);
+
+    this.writeU32(hdr + RESPONSE_LEN_OFFSET, data.length);
+
+    if (!this.skipCrc) {
+      this.crcBuf.writeUInt32LE(data.length, 0);
+      const crcLen = crc32(this.crcBuf);
+      const computedCrc = data.length > 0 ? crc32(Buffer.from(data), crcLen) : crcLen;
+      this.writeU32(hdr + RESPONSE_CRC_OFFSET, computedCrc >>> 0);
+    } else {
+      this.writeU32(hdr + RESPONSE_CRC_OFFSET, 0);
     }
 
-    // CRC covers len ++ payload.
-    const lenBuf = Buffer.alloc(4);
-    lenBuf.writeUInt32LE(data.length, 0);
-    const crcLen = crc32(lenBuf);
-    const computedCrc = data.length > 0
-      ? crc32(Buffer.from(data), crcLen)
-      : crcLen;
-
-    // Update header: length, CRC, then seq.
-    this.writeU32(hdr + RESPONSE_LEN_OFFSET, data.length);
-    this.writeU32(hdr + RESPONSE_CRC_OFFSET, computedCrc >>> 0);
-
-    // Increment sidecar_seq (release ordering via write order).
     const currentSeq = this.readU32(hdr + SIDECAR_SEQ_OFFSET);
     this.writeU32(hdr + SIDECAR_SEQ_OFFSET, currentSeq + 1);
-
-    // Wake server's futex wait on sidecar_seq.
     shmAddon.futexWake(this.buf, hdr + SIDECAR_SEQ_OFFSET);
   }
 
-  // Start tight polling loop via setImmediate. Checks for new
-  // requests every event loop iteration (~0.1ms, much faster than
-  // setInterval's ~1ms minimum). For production, replace with
-  // futex_wait for near-zero latency.
-  startPolling(): void {
-    const tick = () => {
+  startWaiting(): void {
+    let lastEpoch = this.readU32(EPOCH_OFFSET);
+    while (true) {
+      lastEpoch = shmAddon.spinWait(this.buf, EPOCH_OFFSET, lastEpoch, 100000);
       this.poll();
-      setImmediate(tick);
-    };
+    }
+  }
+
+  startPolling(): void {
+    const tick = () => { this.poll(); setImmediate(tick); };
     setImmediate(tick);
   }
 }
