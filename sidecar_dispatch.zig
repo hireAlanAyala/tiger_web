@@ -96,6 +96,10 @@ pub fn SidecarDispatchType(comptime StorageParam: type, comptime Bus: type) type
 
             // Render result — stored in shared render_buf, not per-entry.
             html: []const u8 = "",
+            // 1-RT: HTML stored in handle_buf at this offset until
+            // render_complete, when it's copied to render_buf.
+            combined_html_offset: usize = 0,
+            combined_html_len: usize = 0,
 
             pub fn reset(self: *Entry) void {
                 const stage_default: Stage = .free;
@@ -118,6 +122,8 @@ pub fn SidecarDispatchType(comptime StorageParam: type, comptime Bus: type) type
                 self.handle_write_count = 0;
                 self.handle_writes = "";
                 self.html = "";
+                self.combined_html_offset = 0;
+                self.combined_html_len = 0;
             }
         };
 
@@ -401,10 +407,16 @@ pub fn SidecarDispatchType(comptime StorageParam: type, comptime Bus: type) type
                         entry.stage = .write_pending;
                     },
                     .write_complete => {
-                        // 1-RT path: html already set in combined result.
-                        // 4-RT path: need to send render CALL.
-                        if (entry.html.len > 0) {
-                            // 1-RT — combined result already has HTML.
+                        // 1-RT path: HTML stored in handle_buf — copy to
+                        // render_buf now that writes are done.
+                        if (entry.combined_html_len > 0) {
+                            const hl = entry.combined_html_len;
+                            const ho = entry.combined_html_offset;
+                            @memcpy(self.render_buf[0..hl], entry.handle_buf[ho..][0..hl]);
+                            entry.html = self.render_buf[0..hl];
+                            entry.stage = .render_complete;
+                        } else if (entry.html.len > 0) {
+                            // Shouldn't happen, but handle gracefully.
                             entry.stage = .render_complete;
                         } else {
                             const args = [_]u8{@intFromEnum(entry.handle_status)};
@@ -694,7 +706,7 @@ pub fn SidecarDispatchType(comptime StorageParam: type, comptime Bus: type) type
 
         /// Parse combined handle+render RESULT.
         /// Format: [status_len:2 BE][status][session_action:1][write_count:1][writes...][html to end]
-        fn parse_combined_result(self: *Self, entry: *Entry, data: []const u8) void {
+        fn parse_combined_result(_: *Self, entry: *Entry, data: []const u8) void {
             if (data.len < 4) {
                 entry.handle_status = .storage_error;
                 entry.stage = .combined_complete;
@@ -750,11 +762,18 @@ pub fn SidecarDispatchType(comptime StorageParam: type, comptime Bus: type) type
                 entry.handle_writes = "";
             }
 
-            // HTML is the remainder.
+            // HTML is the remainder. Store in handle_buf after the writes
+            // data — we can't use shared render_buf yet because writes
+            // haven't executed. Copy to render_buf later in process_v2_completions.
             const html_data = data[pos..];
-            const html_len = @min(html_data.len, http.send_buf_max);
-            @memcpy(self.render_buf[0..html_len], html_data[0..html_len]);
-            entry.html = self.render_buf[0..html_len];
+            const html_len = @min(html_data.len, entry.handle_buf.len - @min(entry.handle_writes.len, entry.handle_buf.len));
+            const html_start = if (entry.handle_write_count > 0) entry.handle_writes.len else 0;
+            if (html_start + html_len <= entry.handle_buf.len) {
+                @memcpy(entry.handle_buf[html_start..][0..html_len], html_data[0..html_len]);
+            }
+            entry.combined_html_offset = html_start;
+            entry.combined_html_len = html_len;
+            // Don't set entry.html yet — wait for write_complete.
 
             entry.stage = .combined_complete;
         }

@@ -348,6 +348,8 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
         // V2 dispatch — pipelined stateless protocol
         // =============================================================
 
+        const prefetch_specs = @import("../generated/prefetch.generated.zig");
+
         fn try_dispatch_v2(server: *Server, conn: *Connection) void {
             if (!App.sidecar_enabled or !App.protocol_v2) unreachable;
 
@@ -363,11 +365,178 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
             };
             conn.is_datastar_request = parsed.is_datastar_request;
 
+            // 1-RT path: native route + prefetch SQL + combined CALL.
+            if (server.try_dispatch_1rt(entry, conn, parsed.method, parsed.path, parsed.body)) return;
+
+            // 4-RT fallback: send route CALL to sidecar.
             if (!server.dispatch_v2.start_request(entry, parsed.method, parsed.path, parsed.body, @ptrCast(conn))) {
                 entry.reset();
                 server.suspend_connection(conn);
                 return;
             }
+        }
+
+        /// 1-RT dispatch: route natively, execute prefetch SQL, send
+        /// combined handle_render CALL. Returns true if dispatched.
+        fn try_dispatch_1rt(
+            server: *Server,
+            entry: *DispatchV2.Entry,
+            conn: *Connection,
+            method: http.Method,
+            path: []const u8,
+            body: []const u8,
+        ) bool {
+            // Match HTTP method + path → operation using the compiled
+            // route table. Doesn't run the handler's route() function —
+            // just pattern matching. The TS sidecar handles body parsing.
+            const parse = @import("parse.zig");
+            const gen = @import("../generated/routes.generated.zig");
+            const message = @import("../message.zig");
+
+            const query_sep = std.mem.indexOfScalar(u8, path, '?');
+            const clean_path = if (query_sep) |q| path[0..q] else path;
+
+            var operation: ?message.Operation = null;
+            var matched_id: u128 = 0;
+            inline for (gen.routes) |route| {
+                if (method == route.method) {
+                    if (parse.match_route(clean_path, route.pattern)) |path_params| {
+                        operation = route.operation;
+                        // Extract :id param if present for the Message.
+                        for (path_params.keys[0..path_params.len], path_params.values[0..path_params.len]) |k, v| {
+                            if (std.mem.eql(u8, k, "id")) {
+                                matched_id = stdx.parse_uuid(v) orelse 0;
+                            }
+                        }
+                        break;
+                    }
+                }
+            }
+            const op = operation orelse return false;
+
+            // Build a minimal Message with operation + id.
+            var msg = std.mem.zeroes(message.Message);
+            msg.operation = op;
+            msg.id = matched_id;
+            // Copy body into msg.body for the sidecar.
+            if (body.len > 0 and body.len <= message.body_max) {
+                @memcpy(msg.body[0..body.len], body);
+            }
+
+            // Look up prefetch spec. null = @dynamic-prefetch or no-prefetch-with-null-spec.
+            const op_idx = @intFromEnum(msg.operation);
+            if (op_idx >= prefetch_specs.specs.len) return false;
+            const spec = prefetch_specs.specs[op_idx] orelse return false;
+
+            // Execute prefetch SQL and serialize row sets.
+            var rows_buf: [@import("../protocol.zig").frame_max]u8 = undefined;
+            var rows_pos: usize = 0;
+            const row_set_count: u8 = @intCast(spec.queries.len);
+
+            for (spec.queries) |query| {
+                // Assemble params in binary wire format.
+                var param_buf: [256]u8 = undefined;
+                var param_pos: usize = 0;
+                var param_count: u8 = 0;
+
+                for (query.params) |p| {
+                    switch (p.source) {
+                        .id => {
+                            // msg.id as text param (hex UUID).
+                            const id_hex = std.fmt.bufPrint(
+                                param_buf[param_pos + 3 ..][0..32],
+                                "{x:0>32}",
+                                .{msg.id},
+                            ) catch return false;
+                            param_buf[param_pos] = @intFromEnum(@import("../protocol.zig").TypeTag.text);
+                            std.mem.writeInt(u16, param_buf[param_pos + 1 ..][0..2], @intCast(id_hex.len), .big);
+                            param_pos += 3 + id_hex.len;
+                            param_count += 1;
+                        },
+                        .body_field => {
+                            // Extract JSON field value from body.
+                            const val = json_extract_string(body, p.field) orelse return false;
+                            param_buf[param_pos] = @intFromEnum(@import("../protocol.zig").TypeTag.text);
+                            std.mem.writeInt(u16, param_buf[param_pos + 1 ..][0..2], @intCast(val.len), .big);
+                            param_pos += 3;
+                            @memcpy(param_buf[param_pos..][0..val.len], val);
+                            param_pos += val.len;
+                            param_count += 1;
+                        },
+                        .literal_int => {
+                            param_buf[param_pos] = @intFromEnum(@import("../protocol.zig").TypeTag.integer);
+                            std.mem.writeInt(i64, param_buf[param_pos + 1 ..][0..8], p.int_val, .little);
+                            param_pos += 9;
+                            param_count += 1;
+                        },
+                        .none => {},
+                    }
+                }
+
+                // Execute SQL.
+                const sm = server.state_machine;
+                const result = sm.storage.query_raw(
+                    query.sql,
+                    param_buf[0..param_pos],
+                    param_count,
+                    query.mode,
+                    rows_buf[rows_pos..],
+                );
+
+                if (result) |rows| {
+                    rows_pos += rows.len;
+                } else {
+                    // SQL execution failed — empty row set.
+                    // Write a minimal empty row set header.
+                    if (rows_pos + 6 <= rows_buf.len) {
+                        // col_count=0, row_count=0
+                        std.mem.writeInt(u16, rows_buf[rows_pos..][0..2], 0, .big);
+                        std.mem.writeInt(u32, rows_buf[rows_pos + 2 ..][0..4], 0, .big);
+                        rows_pos += 6;
+                    }
+                }
+            }
+
+            // Send combined CALL.
+            if (!server.dispatch_v2.start_combined_request(
+                entry,
+                msg.operation,
+                msg,
+                body,
+                rows_buf[0..rows_pos],
+                row_set_count,
+                @ptrCast(conn),
+            )) {
+                return false;
+            }
+            return true;
+        }
+
+        /// Minimal JSON string field extractor. Finds "field":"value" in body.
+        /// No full parser — bounded scan, no allocations.
+        fn json_extract_string(body: []const u8, field: []const u8) ?[]const u8 {
+            // Search for "field":" pattern.
+            var pos: usize = 0;
+            while (pos + field.len + 4 < body.len) : (pos += 1) {
+                if (body[pos] == '"' and
+                    pos + 1 + field.len + 2 < body.len and
+                    std.mem.eql(u8, body[pos + 1 ..][0..field.len], field) and
+                    body[pos + 1 + field.len] == '"')
+                {
+                    // Found "field" — skip to value.
+                    var vpos = pos + 1 + field.len + 1; // after closing "
+                    // Skip : and whitespace.
+                    while (vpos < body.len and (body[vpos] == ':' or body[vpos] == ' ')) vpos += 1;
+                    if (vpos >= body.len or body[vpos] != '"') return null;
+                    vpos += 1; // skip opening "
+                    const val_start = vpos;
+                    while (vpos < body.len and body[vpos] != '"') : (vpos += 1) {
+                        if (body[vpos] == '\\') vpos += 1;
+                    }
+                    return body[val_start..vpos];
+                }
+            }
+            return null;
         }
 
         /// V2: process completed entries — encode response and send.

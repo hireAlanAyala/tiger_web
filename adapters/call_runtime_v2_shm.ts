@@ -32,6 +32,37 @@ interface RequestState {
 
 const requests = new Map<number, RequestState>();
 
+// Reverse map: operation int value → operation name.
+const reverseOpMap: Record<number, string> = {};
+for (const [name, val] of Object.entries(OperationValues)) {
+  reverseOpMap[val as number] = name;
+}
+
+// Prefetch key + mode map: operation name → [{key, mode}] in query order.
+// Extracted from handler source. mode determines single-row vs array.
+interface PrefetchKeyInfo { key: string; mode: "query" | "queryAll"; }
+const prefetchKeyMap: Record<string, PrefetchKeyInfo[]> = {};
+for (const [opName, mod] of Object.entries(modules)) {
+  if (!mod?.prefetch) continue;
+  const src = mod.prefetch.toString();
+  const infos: PrefetchKeyInfo[] = [];
+  // Find all db.query / db.queryAll calls in order.
+  const callRe = /db\.(query|queryAll)\s*\(/g;
+  let cm;
+  while ((cm = callRe.exec(src)) !== null) {
+    infos.push({ key: "", mode: cm[1] === "query" ? "query" : "queryAll" });
+  }
+  // Extract keys from return statement.
+  const m = src.match(/return\s*(?:\{|\(\s*\{)\s*([^}]+)\}/);
+  if (m) {
+    const parts = m[1].split(",").map(p => p.split(":")[0].trim()).filter(Boolean);
+    for (let i = 0; i < Math.min(parts.length, infos.length); i++) {
+      infos[i].key = parts[i];
+    }
+  }
+  if (infos.length > 0 && infos[0].key) prefetchKeyMap[opName] = infos;
+}
+
 // --- SHM setup ---
 
 const shmName = process.argv[2];
@@ -60,6 +91,7 @@ client.setDispatchHandler((_slotIndex: number, funcIndex: number, requestId: num
       case 1: return dispatchPrefetch(requestId, args);
       case 2: return dispatchHandle(requestId, args);
       case 3: return dispatchRender(requestId, args);
+      case 4: return dispatchHandleRender(requestId, args);
       default: return buildResult(requestId, 0x01, new Uint8Array(0));
     }
   } catch (e: any) {
@@ -309,4 +341,112 @@ function dispatchRender(requestId: number, _args: Uint8Array): Uint8Array {
 
   requests.delete(requestId);
   return buildResult(requestId, 0x00, _encoder.encode(html));
+}
+
+// --- Combined Handle+Render (1-RT) ---
+
+function dispatchHandleRender(requestId: number, args: Uint8Array): Uint8Array {
+  const dv = new DataView(args.buffer, args.byteOffset, args.byteLength);
+  let pos = 0;
+
+  // Parse: [operation:1][id:16 LE][body_len:2 BE][body][row_set_count:1][row_sets...]
+  const opValue = args[pos]; pos += 1;
+  const opName = reverseOpMap[opValue];
+  if (!opName) return buildResult(requestId, 0x01, new Uint8Array(0));
+
+  // Decode id (16 bytes LE → hex string, no dashes).
+  let id = "";
+  for (let i = 15; i >= 0; i--) {
+    id += args[pos + i].toString(16).padStart(2, "0");
+  }
+  pos += 16;
+
+  const bodyLen = dv.getUint16(pos, false); pos += 2;
+  const body = bodyLen > 0 ? JSON.parse(_decoder.decode(args.subarray(pos, pos + bodyLen))) : {};
+  pos += bodyLen;
+
+  const rowSetCount = args[pos]; pos += 1;
+
+  // Deserialize row sets.
+  const keyInfos = prefetchKeyMap[opName] || [];
+  const prefetched: Record<string, any> = {};
+  for (let i = 0; i < rowSetCount; i++) {
+    try {
+      const rsDv = new DataView(args.buffer, args.byteOffset + pos, args.byteLength - pos);
+      const rsResult = readRowSet(rsDv, 0);
+      const rows = rsResult.result?.rows || [];
+      pos += rsResult.offset;
+
+      if (i < keyInfos.length) {
+        const info = keyInfos[i];
+        prefetched[info.key] = info.mode === "query"
+          ? (rows.length > 0 ? rows[0] : null) : rows;
+      }
+    } catch {
+      pos = args.byteLength; // skip remaining on error
+    }
+  }
+
+  const mod = modules[opName];
+
+  // Handle phase.
+  const writes: Array<[string, ...any[]]> = [];
+  const ctx = {
+    operation: opName, id, body, params: {},
+    rows: [], prefetched,
+    write: (decl: [string, ...any[]]) => { writes.push(decl); },
+  };
+
+  let status = "ok";
+  let sessionAction = 0;
+  if (mod?.handle) {
+    const r = mod.handle(ctx, { execute: (...a: any[]) => ctx.write(a as any) });
+    if (typeof r === "string") status = r || "ok";
+    else if (r && typeof r === "object") {
+      status = (r as any).status || "ok";
+      const sa = (r as any).sessionAction;
+      if (sa === "set_authenticated") sessionAction = 1;
+      else if (sa === "clear") sessionAction = 2;
+    }
+  }
+
+  // Render phase.
+  let html = "";
+  if (mod?.render) {
+    html = mod.render({
+      operation: opName, id, status, body, params: {},
+      rows: [], prefetched, is_sse: false,
+    }) || "";
+  }
+
+  // Build combined RESULT: [status_len:2 BE][status][session_action:1][write_count:1][writes...][html]
+  const statusBytes = _encoder.encode(status);
+  const htmlBytes = _encoder.encode(html);
+  const buf = new Uint8Array(FRAME_MAX);
+  const bufDv = new DataView(buf.buffer);
+  let rpos = 0;
+  bufDv.setUint16(rpos, statusBytes.length, false); rpos += 2;
+  buf.set(statusBytes, rpos); rpos += statusBytes.length;
+  buf[rpos] = sessionAction; rpos += 1;
+  buf[rpos] = writes.length; rpos += 1;
+  for (const w of writes) {
+    const sqlB = _encoder.encode(String(w[0]));
+    const wParams = w.slice(1);
+    bufDv.setUint16(rpos, sqlB.length, false); rpos += 2;
+    buf.set(sqlB, rpos); rpos += sqlB.length;
+    buf[rpos] = wParams.length; rpos += 1;
+    for (const p of wParams) {
+      if (p === null || p === undefined) { buf[rpos] = 0x05; rpos += 1; }
+      else if (typeof p === "number") { buf[rpos] = 0x01; rpos += 1; bufDv.setBigInt64(rpos, BigInt(Math.trunc(p)), true); rpos += 8; }
+      else if (typeof p === "boolean") { buf[rpos] = 0x01; rpos += 1; bufDv.setBigInt64(rpos, BigInt(p ? 1 : 0), true); rpos += 8; }
+      else if (typeof p === "string") { buf[rpos] = 0x03; rpos += 1; const s = _encoder.encode(String(p)); bufDv.setUint16(rpos, s.length, false); rpos += 2; buf.set(s, rpos); rpos += s.length; }
+      else if (typeof p === "bigint") { buf[rpos] = 0x01; rpos += 1; bufDv.setBigInt64(rpos, p, true); rpos += 8; }
+      else if (p instanceof Uint8Array) { buf[rpos] = 0x04; rpos += 1; bufDv.setUint16(rpos, p.length, false); rpos += 2; buf.set(p, rpos); rpos += p.length; }
+      else { buf[rpos] = 0x05; rpos += 1; }
+    }
+  }
+  // HTML as remainder.
+  buf.set(htmlBytes, rpos); rpos += htmlBytes.length;
+
+  return buildResult(requestId, 0x00, buf.subarray(0, rpos));
 }
