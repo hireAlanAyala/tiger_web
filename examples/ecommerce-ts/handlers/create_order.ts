@@ -11,26 +11,29 @@ export function route(req: RouteRequest): RouteResult | null {
 }
 
 // [prefetch] .create_order
-// @dynamic-prefetch
+// @param json_array items.product_id
 export async function prefetch(msg: PrefetchMessage, db: PrefetchDb) {
   const items = msg.body.items as Array<{ product_id: string; quantity: number }>;
-  const queries: Record<string, any> = {};
-  for (let i = 0; i < items.length; i++) {
-    queries[`product_${i}`] = await db.query(
-      "SELECT id, name, description, price_cents, inventory, version, active FROM products WHERE id = ?1",
-      items[i].product_id,
-    );
-  }
-  return queries;
+  const ids = items.map(i => i.product_id);
+  const products = await db.queryAll(
+    "SELECT id, name, description, price_cents, inventory, version, active FROM products WHERE id IN (SELECT value FROM json_each(?1))",
+    JSON.stringify(ids),
+  );
+  return { products };
 }
 
 // [handle] .create_order
 export function handle(ctx: HandleContext, db: WriteDb): string {
   const items = ctx.body.items as Array<{ product_id: string; quantity: number }>;
-  let total = 0;
+  const products = (ctx.prefetched.products || []) as any[];
 
+  // Build lookup map from prefetched list.
+  const byId = new Map<string, any>();
+  for (const p of products) byId.set(p.id, p);
+
+  let total = 0;
   for (let i = 0; i < items.length; i++) {
-    const product = ctx.prefetched[`product_${i}`];
+    const product = byId.get(items[i].product_id);
     if (!product) return "not_found";
     if (!product.active) return "not_found";
     if (product.inventory < items[i].quantity) return "insufficient_inventory";
@@ -39,7 +42,7 @@ export function handle(ctx: HandleContext, db: WriteDb): string {
 
   // Deduct inventory.
   for (let i = 0; i < items.length; i++) {
-    const product = ctx.prefetched[`product_${i}`];
+    const product = byId.get(items[i].product_id)!;
     db.execute(
       "UPDATE products SET inventory = ?2, version = ?3 WHERE id = ?1",
       items[i].product_id, product.inventory - items[i].quantity, product.version + 1,
@@ -54,7 +57,7 @@ export function handle(ctx: HandleContext, db: WriteDb): string {
 
   // Create order items.
   for (let i = 0; i < items.length; i++) {
-    const product = ctx.prefetched[`product_${i}`];
+    const product = byId.get(items[i].product_id)!;
     db.execute(
       "INSERT INTO order_items (order_id, product_id, name, quantity, price_cents, line_total_cents) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
       ctx.body.id, items[i].product_id, product.name, items[i].quantity, product.price_cents, product.price_cents * items[i].quantity,

@@ -352,8 +352,10 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
 
         fn try_dispatch_v2(server: *Server, conn: *Connection) void {
             if (!App.sidecar_enabled or !App.protocol_v2) unreachable;
+            log.debug("try_dispatch_v2: fd={d}", .{conn.fd});
 
             const entry = server.dispatch_v2.acquire_entry() orelse {
+                log.debug("try_dispatch_v2: no entry, suspending fd={d}", .{conn.fd});
                 server.suspend_connection(conn);
                 return;
             };
@@ -412,7 +414,10 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
                     }
                 }
             }
-            const op = operation orelse return false;
+            const op = operation orelse {
+                log.debug("1rt: no route match", .{});
+                return false;
+            };
 
             // Build a minimal Message with operation + id.
             var msg = std.mem.zeroes(message.Message);
@@ -435,7 +440,7 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
 
             for (spec.queries) |query| {
                 // Assemble params in binary wire format.
-                var param_buf: [256]u8 = undefined;
+                var param_buf: [4096]u8 = undefined;
                 var param_pos: usize = 0;
                 var param_count: u8 = 0;
 
@@ -467,6 +472,18 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
                             param_buf[param_pos] = @intFromEnum(@import("../protocol.zig").TypeTag.integer);
                             std.mem.writeInt(i64, param_buf[param_pos + 1 ..][0..8], p.int_val, .little);
                             param_pos += 9;
+                            param_count += 1;
+                        },
+                        .body_json_array => {
+                            // Parse body JSON, extract array field, map subfield,
+                            // build JSON array string for json_each(?1).
+                            var json_arr_buf: [4096]u8 = undefined;
+                            const json_val = build_json_array_param(body, p.field, p.subfield, &json_arr_buf) orelse return false;
+                            param_buf[param_pos] = @intFromEnum(@import("../protocol.zig").TypeTag.text);
+                            std.mem.writeInt(u16, param_buf[param_pos + 1 ..][0..2], @intCast(json_val.len), .big);
+                            param_pos += 3;
+                            @memcpy(param_buf[param_pos..][0..json_val.len], json_val);
+                            param_pos += json_val.len;
                             param_count += 1;
                         },
                         .none => {},
@@ -510,6 +527,73 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
                 return false;
             }
             return true;
+        }
+
+        /// Build a JSON array string from a body field's array of objects.
+        /// Given body=`{"items":[{"product_id":"abc"},{"product_id":"def"}]}`,
+        /// field="items", subfield="product_id", returns `["abc","def"]`.
+        /// Uses std.json for safe parsing. Returns null on any error.
+        fn build_json_array_param(
+            body: []const u8,
+            field: []const u8,
+            subfield: []const u8,
+            out_buf: []u8,
+        ) ?[]const u8 {
+            if (body.len == 0) return null;
+
+            // Parse JSON body using std.json with a fixed-buffer allocator.
+            var fba_buf: [8192]u8 = undefined;
+            var fba = std.heap.FixedBufferAllocator.init(&fba_buf);
+            const parsed = std.json.parseFromSlice(std.json.Value, fba.allocator(), body, .{}) catch return null;
+
+            // Navigate to the array field.
+            const root = switch (parsed.value) {
+                .object => |obj| obj,
+                else => return null,
+            };
+            const array_val = root.get(field) orelse return null;
+            const array = switch (array_val) {
+                .array => |a| a,
+                else => return null,
+            };
+
+            // Build JSON array of subfield values: ["val1","val2",...]
+            var pos: usize = 0;
+            if (pos >= out_buf.len) return null;
+            out_buf[pos] = '[';
+            pos += 1;
+
+            for (array.items, 0..) |item, i| {
+                const obj = switch (item) {
+                    .object => |o| o,
+                    else => continue,
+                };
+                const val = obj.get(subfield) orelse continue;
+                const str = switch (val) {
+                    .string => |s| s,
+                    else => continue,
+                };
+
+                if (i > 0) {
+                    if (pos >= out_buf.len) return null;
+                    out_buf[pos] = ',';
+                    pos += 1;
+                }
+                // Write quoted string: "value"
+                if (pos + 2 + str.len > out_buf.len) return null;
+                out_buf[pos] = '"';
+                pos += 1;
+                @memcpy(out_buf[pos..][0..str.len], str);
+                pos += str.len;
+                out_buf[pos] = '"';
+                pos += 1;
+            }
+
+            if (pos >= out_buf.len) return null;
+            out_buf[pos] = ']';
+            pos += 1;
+
+            return out_buf[0..pos];
         }
 
         /// Minimal JSON string field extractor. Finds "field":"value" in body.

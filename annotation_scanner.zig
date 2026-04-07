@@ -118,8 +118,9 @@ const PrefetchQuery = struct {
 };
 
 const ParamSpec = struct {
-    source: enum { id, body_field, literal_int },
-    field: []const u8, // body field name when source = .body_field
+    source: enum { id, body_field, literal_int, body_json_array },
+    field: []const u8, // body field name when source = .body_field or .body_json_array
+    subfield: []const u8 = "", // nested field for body_json_array (e.g., "product_id" from items[].product_id)
     int_val: i64, // value when source = .literal_int
 };
 
@@ -133,6 +134,15 @@ const Annotation = struct {
     route_match: ?RouteMatch = null,
     dynamic_prefetch: bool = false, // @dynamic-prefetch opt-in
     prefetch_queries: []const PrefetchQuery = &.{},
+    param_hints: [max_annotation_param_hints]?ParamHint = .{null} ** max_annotation_param_hints,
+    param_hint_count: u8 = 0,
+};
+
+const max_annotation_param_hints = 4;
+const ParamHint = struct {
+    source: enum { json_array },
+    field: []const u8,
+    subfield: []const u8,
 };
 
 /// Comment prefix by file extension.
@@ -326,6 +336,28 @@ fn validate_route_pattern(pattern: []const u8) ?[]const u8 {
 }
 
 /// Map internal phase names back to user-facing names for error messages.
+/// Parse `// @param json_array field.subfield` directive.
+/// Returns field and subfield, or null if not a param directive.
+fn parse_param_directive(line: []const u8, prefix: []const u8) ?struct { field: []const u8, subfield: []const u8 } {
+    const trimmed = std.mem.trimLeft(u8, line, " \t");
+    if (!std.mem.startsWith(u8, trimmed, prefix)) return null;
+    const after_prefix = std.mem.trimLeft(u8, trimmed[prefix.len..], " \t");
+    if (!std.mem.startsWith(u8, after_prefix, "@param ")) return null;
+    const rest = std.mem.trimLeft(u8, after_prefix["@param ".len..], " \t");
+
+    // Parse: json_array field.subfield
+    if (!std.mem.startsWith(u8, rest, "json_array ")) return null;
+    const spec = std.mem.trimRight(u8, std.mem.trimLeft(u8, rest["json_array ".len..], " \t"), " \t\r");
+
+    // Split field.subfield
+    const dot = std.mem.indexOfScalar(u8, spec, '.') orelse return null;
+    if (dot == 0 or dot + 1 >= spec.len) return null;
+    return .{
+        .field = spec[0..dot],
+        .subfield = spec[dot + 1 ..],
+    };
+}
+
 /// Parse `// @dynamic-prefetch` directive. Returns true if found.
 /// Marks a prefetch handler as requiring 4-RT dispatch (dynamic SQL
 /// that can't be extracted at build time).
@@ -621,6 +653,8 @@ fn scan_file_content(
     var prev_annotation: ?struct { phase: Phase, operation: []const u8, line: u32 } = null;
     var pending_match: ?RouteMatch = null;
     var pending_dynamic_prefetch: bool = false;
+    var pending_params: [max_annotation_param_hints]?ParamHint = .{null} ** max_annotation_param_hints;
+    var pending_param_count: u8 = 0;
 
     while (lines.next()) |line| {
         line_num += 1;
@@ -670,6 +704,19 @@ fn scan_file_content(
                     if (ann.phase == .prefetch and next_ann == null) {
                         if (parse_dynamic_prefetch_directive(line, prefix)) {
                             pending_dynamic_prefetch = true;
+                            continue;
+                        }
+                        // `// @param json_array field.subfield` — declares a
+                        // body_json_array param for the next query.
+                        if (parse_param_directive(line, prefix)) |pd| {
+                            if (pending_param_count < pending_params.len) {
+                                pending_params[pending_param_count] = .{
+                                    .source = .json_array,
+                                    .field = pd.field,
+                                    .subfield = pd.subfield,
+                                };
+                                pending_param_count += 1;
+                            }
                             continue;
                         }
                     }
@@ -740,11 +787,15 @@ fn scan_file_content(
                             .has_body = true,
                             .route_match = pending_match,
                             .dynamic_prefetch = pending_dynamic_prefetch,
+                            .param_hints = pending_params,
+                            .param_hint_count = pending_param_count,
                         });
                     }
                     prev_annotation = null;
                     pending_match = null;
                     pending_dynamic_prefetch = false;
+                    pending_param_count = 0;
+                    pending_params = .{null} ** 4;
                     continue;
                 }
             } else {
@@ -1015,7 +1066,7 @@ pub fn main() !void {
                 // @dynamic-prefetch handlers skip extraction.
                 // All others must have extractable SQL or it's a build error.
                 if (!ann.dynamic_prefetch and found_sql) {
-                    if (extract_prefetch_queries(allocator, body, quote)) |pqs| {
+                    if (extract_prefetch_queries(allocator, body, quote, ann.param_hints, ann.param_hint_count)) |pqs| {
                         // Store on annotation — mutable access via index.
                         for (annotations.items, 0..) |*a, ai| {
                             _ = ai;
@@ -1257,6 +1308,8 @@ fn extract_prefetch_queries(
     allocator: std.mem.Allocator,
     body: []const u8,
     quote: u8,
+    param_hints: [max_annotation_param_hints]?ParamHint,
+    hint_count: u8,
 ) ?[]const PrefetchQuery {
     var queries: [max_prefetch_queries]PrefetchQuery = undefined;
     var query_count: usize = 0;
@@ -1294,7 +1347,7 @@ fn extract_prefetch_queries(
 
         // Extract params — everything between the SQL closing quote and the
         // closing ) of the db.query() call. Skip the comma after the SQL string.
-        const params = extract_param_specs(allocator, body, pos, quote) orelse return null;
+        const params = extract_param_specs(allocator, body, pos, quote, param_hints, hint_count) orelse return null;
         pos = params.end_pos;
 
         queries[query_count] = .{
@@ -1350,6 +1403,8 @@ fn extract_param_specs(
     body: []const u8,
     start: usize,
     quote: u8,
+    param_hints: [max_annotation_param_hints]?ParamHint,
+    hint_count: u8,
 ) ?ExtractedParams {
     var specs: [max_prefetch_params]ParamSpec = undefined;
     var count: usize = 0;
@@ -1397,6 +1452,17 @@ fn extract_param_specs(
             specs[count] = .{ .source = .body_field, .field = field, .int_val = 0 };
         } else if (parse_int_literal(param)) |val| {
             specs[count] = .{ .source = .literal_int, .field = "", .int_val = val };
+        } else if (std.mem.startsWith(u8, param, "JSON.stringify(")) {
+            // JSON.stringify(...) — use @param hint to determine the source.
+            if (count < hint_count) {
+                if (param_hints[count]) |hint| {
+                    switch (hint.source) {
+                        .json_array => {
+                            specs[count] = .{ .source = .body_json_array, .field = hint.field, .subfield = hint.subfield, .int_val = 0 };
+                        },
+                    }
+                } else return null;
+            } else return null;
         } else {
             // Unrecognized param pattern — extraction fails.
             return null;
@@ -2008,11 +2074,12 @@ fn emit_prefetch_zig(
         \\
         \\const protocol = @import("../protocol.zig");
         \\
-        \\pub const ParamSource = enum { none, id, body_field, literal_int };
+        \\pub const ParamSource = enum { none, id, body_field, literal_int, body_json_array };
         \\
         \\pub const ParamSpec = struct {
         \\    source: ParamSource,
         \\    field: []const u8,
+        \\    subfield: []const u8 = "",
         \\    int_val: i64,
         \\};
         \\
@@ -2069,6 +2136,7 @@ fn emit_prefetch_zig(
                         .id => try w.print(".{{ .source = .id, .field = \"\", .int_val = 0 }}", .{}),
                         .body_field => try w.print(".{{ .source = .body_field, .field = \"{s}\", .int_val = 0 }}", .{p.field}),
                         .literal_int => try w.print(".{{ .source = .literal_int, .field = \"\", .int_val = {d} }}", .{p.int_val}),
+                        .body_json_array => try w.print(".{{ .source = .body_json_array, .field = \"{s}\", .subfield = \"{s}\", .int_val = 0 }}", .{ p.field, p.subfield }),
                     }
                 }
                 try w.print("}},\n", .{});
