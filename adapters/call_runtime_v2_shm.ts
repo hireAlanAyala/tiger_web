@@ -35,16 +35,17 @@ const requests = new Map<number, RequestState>();
 // --- SHM setup ---
 
 const shmName = process.argv[2];
+const slotCount = parseInt(process.argv[3] || "8", 10); // Must match pipeline_slots_max.
 if (!shmName) {
-  console.error("Usage: npx tsx adapters/call_runtime_v2_shm.ts <shm-name>");
+  console.error("Usage: npx tsx adapters/call_runtime_v2_shm.ts <shm-name> [slot-count]");
   process.exit(1);
 }
-
-const slotCount = 8; // Must match pipeline_slots_max.
+const skipCrc = process.argv.includes("--no-crc");
 const client = new ShmClient({
   shmName,
   slotCount,
   slotDataSize: FRAME_MAX,
+  skipCrc,
 });
 
 console.log(`[v2-shm] connected to ${shmName}`);
@@ -80,7 +81,10 @@ client.setFrameHandler((slotIndex: number, data: Buffer) => {
   client.writeResponse(slotIndex, resultData);
 });
 
-// Start polling for requests.
+// Start polling. setImmediate gives higher throughput than futex
+// under load (~15K vs ~8K) because V8 JIT stays hot between ticks.
+// Futex is better for idle CPU (0% vs 100%) — use startWaiting()
+// when idle efficiency matters more than peak throughput.
 client.startPolling();
 console.log("[v2-shm] polling started");
 
@@ -182,12 +186,18 @@ function dispatchPrefetch(requestId: number, _args: Uint8Array): Uint8Array {
   // await resolves immediately for non-Promise values.
   const queryDecl = mod.prefetch(msg, captureDb);
 
-  // Extract key from v1 return value.
-  const resolved = queryDecl instanceof Promise ? null : queryDecl; // Can't await in sync — use captured values.
-  if (captured && resolved && typeof resolved === "object" && !Array.isArray(resolved)) {
-    for (const [k, v] of Object.entries(resolved)) {
+  // Extract the prefetch key from the return value.
+  // Sync handlers return { key: SENTINEL } directly.
+  // Async handlers return a Promise — can't await in sync context.
+  // For async, extract the key from the function source as fallback.
+  if (queryDecl && typeof queryDecl === "object" && !Array.isArray(queryDecl) && !(queryDecl instanceof Promise)) {
+    for (const [k, v] of Object.entries(queryDecl)) {
       if (v === SENTINEL) { capturedKey = k; break; }
     }
+  } else if (captured && queryDecl instanceof Promise) {
+    const src = mod.prefetch.toString();
+    const m = src.match(/return\s*(?:\{|\(\s*\{)\s*(\w+)/);
+    if (m) capturedKey = m[1];
   }
   req.prefetchKey = capturedKey;
   req.prefetchMode = capturedMode;
