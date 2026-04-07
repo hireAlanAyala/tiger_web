@@ -604,7 +604,10 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
             if (App.sidecar_enabled) server.sidecar_bus.tick_accept();
             server.maybe_accept();
             server.update_time();
-            server.resume_suspended();
+            // Don't call resume_suspended() here — with 0ms tick and
+            // many suspended connections, it burns O(N) per loop iteration.
+            // Suspended connections are resumed from render_complete when
+            // a pipeline slot frees up (demand-driven, not polling).
             server.wake_handle_waiters();
             if (App.sidecar_enabled) server.timeout_sidecar_response();
             server.process_v2_completions();
