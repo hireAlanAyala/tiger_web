@@ -40,6 +40,7 @@ pub fn SidecarDispatchType(comptime StorageParam: type, comptime Bus: type) type
 
         pub const Stage = enum {
             free,
+            // 4-RT stages (fallback for @dynamic-prefetch handlers).
             route_pending,
             route_complete,
             prefetch_pending,
@@ -52,6 +53,9 @@ pub fn SidecarDispatchType(comptime StorageParam: type, comptime Bus: type) type
             write_complete,
             render_pending,
             render_complete,
+            // 1-RT stage — handle+render combined.
+            combined_pending,
+            combined_complete,
         };
 
         pub const Entry = struct {
@@ -202,6 +206,67 @@ pub fn SidecarDispatchType(comptime StorageParam: type, comptime Bus: type) type
             return true;
         }
 
+        /// Start a 1-RT request: send combined handle_render CALL.
+        /// The server has already routed and executed prefetch SQL.
+        /// rows_data contains serialized row sets from prefetch.
+        pub fn start_combined_request(
+            self: *Self,
+            entry: *Entry,
+            operation: message.Operation,
+            msg: message.Message,
+            body: []const u8,
+            rows_data: []const u8,
+            row_set_count: u8,
+            connection: *anyopaque,
+        ) bool {
+            const b = self.bus orelse return false;
+
+            const request_id = self.next_request_id;
+            self.next_request_id +%= 1;
+
+            // Build combined CALL: [operation:1][id:16 LE][body_len:2 BE][body][row_set_count:1][row_sets...]
+            const args_max = 1 + 16 + 2 + http.body_max + 1 + protocol.frame_max;
+            var args_buf: [args_max]u8 = undefined;
+            var pos: usize = 0;
+
+            args_buf[pos] = @intFromEnum(operation);
+            pos += 1;
+            std.mem.writeInt(u128, args_buf[pos..][0..16], msg.id, .little);
+            pos += 16;
+            std.mem.writeInt(u16, args_buf[pos..][0..2], @intCast(body.len), .big);
+            pos += 2;
+            if (body.len > 0) {
+                @memcpy(args_buf[pos..][0..body.len], body);
+                pos += body.len;
+            }
+            args_buf[pos] = row_set_count;
+            pos += 1;
+            if (rows_data.len > 0) {
+                @memcpy(args_buf[pos..][0..rows_data.len], rows_data);
+                pos += rows_data.len;
+            }
+
+            if (!self.send_call(b, "handle_render", args_buf[0..pos], request_id, self.entry_index(entry))) {
+                return false;
+            }
+
+            entry.stage = .combined_pending;
+            entry.request_id = request_id;
+            entry.operation = operation;
+            entry.msg = msg;
+            entry.connection = connection;
+            entry.sequence = self.next_sequence;
+            self.next_sequence +%= 1;
+            entry.is_mutation = operation.is_mutation();
+            if (entry.is_mutation) {
+                self.pending_mutation_count += 1;
+                if (entry.sequence < self.lowest_pending_mutation_seq) {
+                    self.lowest_pending_mutation_seq = entry.sequence;
+                }
+            }
+            return true;
+        }
+
         /// Process a received frame — route to entry by request_id.
         pub fn on_frame(self: *Self, frame: []const u8, storage: *StorageParam) void {
             defer self.invariants();
@@ -263,6 +328,10 @@ pub fn SidecarDispatchType(comptime StorageParam: type, comptime Bus: type) type
                     @memcpy(self.render_buf[0..len], result.data[0..len]);
                     entry.html = self.render_buf[0..len];
                     entry.stage = .render_complete;
+                },
+                .combined_pending => {
+                    // Combined RESULT: [status_len:2 BE][status][session_action:1][write_count:1][writes...][html...]
+                    self.parse_combined_result(entry, result.data);
                 },
                 else => {
                     log.warn("dispatch: RESULT in unexpected stage {s}", .{@tagName(entry.stage)});
@@ -328,13 +397,20 @@ pub fn SidecarDispatchType(comptime StorageParam: type, comptime Bus: type) type
                             entry.stage = .handle_pending;
                         }
                     },
-                    .handle_complete => {
+                    .handle_complete, .combined_complete => {
                         entry.stage = .write_pending;
                     },
                     .write_complete => {
-                        const args = [_]u8{@intFromEnum(entry.handle_status)};
-                        if (self.send_call(b, "render", &args, entry.request_id, entry_idx)) {
-                            entry.stage = .render_pending;
+                        // 1-RT path: html already set in combined result.
+                        // 4-RT path: need to send render CALL.
+                        if (entry.html.len > 0) {
+                            // 1-RT — combined result already has HTML.
+                            entry.stage = .render_complete;
+                        } else {
+                            const args = [_]u8{@intFromEnum(entry.handle_status)};
+                            if (self.send_call(b, "render", &args, entry.request_id, entry_idx)) {
+                                entry.stage = .render_pending;
+                            }
                         }
                     },
                     else => {},
@@ -391,7 +467,7 @@ pub fn SidecarDispatchType(comptime StorageParam: type, comptime Bus: type) type
         pub fn any_pending(self: *const Self) bool {
             for (&self.entries) |*entry| {
                 switch (entry.stage) {
-                    .route_pending, .prefetch_pending, .handle_pending, .render_pending => return true,
+                    .route_pending, .prefetch_pending, .handle_pending, .render_pending, .combined_pending => return true,
                     else => {},
                 }
             }
@@ -427,7 +503,8 @@ pub fn SidecarDispatchType(comptime StorageParam: type, comptime Bus: type) type
                     switch (entry.stage) {
                         .route_complete, .prefetch_pending, .prefetch_complete,
                         .sql_executing, .sql_complete, .handle_pending,
-                        .handle_complete, .write_pending => {
+                        .handle_complete, .write_pending,
+                        .combined_pending, .combined_complete => {
                             mutations_pending += 1;
                         },
                         else => {},
@@ -615,6 +692,73 @@ pub fn SidecarDispatchType(comptime StorageParam: type, comptime Bus: type) type
             entry.stage = .handle_complete;
         }
 
+        /// Parse combined handle+render RESULT.
+        /// Format: [status_len:2 BE][status][session_action:1][write_count:1][writes...][html to end]
+        fn parse_combined_result(self: *Self, entry: *Entry, data: []const u8) void {
+            if (data.len < 4) {
+                entry.handle_status = .storage_error;
+                entry.stage = .combined_complete;
+                return;
+            }
+
+            var pos: usize = 0;
+            const status_len = std.mem.readInt(u16, data[pos..][0..2], .big);
+            pos += 2;
+            if (pos + status_len + 2 > data.len) {
+                entry.handle_status = .storage_error;
+                entry.stage = .combined_complete;
+                return;
+            }
+
+            entry.handle_status = message.Status.from_string(data[pos..][0..status_len]) orelse .storage_error;
+            pos += status_len;
+
+            entry.handle_session_action = switch (data[pos]) {
+                0 => .none,
+                1 => .set_authenticated,
+                2 => .clear,
+                else => .none,
+            };
+            pos += 1;
+
+            entry.handle_write_count = data[pos];
+            pos += 1;
+
+            // Skip past writes to find HTML start.
+            if (entry.handle_write_count > 0) {
+                // Copy writes into handle_buf for later execution.
+                const writes_start = pos;
+                const write_data = data[writes_start..];
+                var wpos: usize = 0;
+                for (0..entry.handle_write_count) |_| {
+                    if (wpos + 2 > write_data.len) break;
+                    const sql_len = std.mem.readInt(u16, write_data[wpos..][0..2], .big);
+                    wpos += 2;
+                    if (wpos + sql_len > write_data.len) break;
+                    wpos += sql_len;
+                    if (wpos >= write_data.len) break;
+                    const param_count = write_data[wpos];
+                    wpos += 1;
+                    wpos = @import("sidecar.zig").SidecarClientType(Bus).skip_params(write_data, wpos, param_count) orelse break;
+                }
+                const writes_len = wpos;
+                const copy_len = @min(writes_len, entry.handle_buf.len);
+                @memcpy(entry.handle_buf[0..copy_len], write_data[0..copy_len]);
+                entry.handle_writes = entry.handle_buf[0..copy_len];
+                pos += writes_len;
+            } else {
+                entry.handle_writes = "";
+            }
+
+            // HTML is the remainder.
+            const html_data = data[pos..];
+            const html_len = @min(html_data.len, http.send_buf_max);
+            @memcpy(self.render_buf[0..html_len], html_data[0..html_len]);
+            entry.html = self.render_buf[0..html_len];
+
+            entry.stage = .combined_complete;
+        }
+
         // =============================================================
         // Internal helpers
         // =============================================================
@@ -647,7 +791,8 @@ pub fn SidecarDispatchType(comptime StorageParam: type, comptime Bus: type) type
                 switch (entry.stage) {
                     .route_complete, .prefetch_pending, .prefetch_complete,
                     .sql_executing, .sql_complete, .handle_pending,
-                    .handle_complete, .write_pending => {
+                    .handle_complete, .write_pending,
+                    .combined_pending, .combined_complete => {
                         if (entry.sequence < lowest) lowest = entry.sequence;
                     },
                     else => {},
