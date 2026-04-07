@@ -242,9 +242,12 @@ pub fn HandlersFor(comptime StorageParam: type, comptime IOParam: type) type {
         // 1 CALL + 1 QUERY_RESULT in the send queue simultaneously.
         // slots_per_conn = ceil(pipeline_slots_max / sidecar_count).
         const constants = @import("framework/constants.zig");
-        const slots_per_conn = (constants.pipeline_slots_max + sidecar_count - 1) / sidecar_count;
+        const slots_per_conn: u16 = (@as(u16, constants.pipeline_slots_max) + sidecar_count - 1) / sidecar_count;
+        // Socket bus send queue — sized for multiplexed v1 protocol.
+        // Cap at u8 max; SHM transport doesn't use the send queue.
+        const raw_queue: u16 = slots_per_conn * (1 + protocol.queries_max);
         const bus_options: message_bus.Options = .{
-            .send_queue_max = slots_per_conn * (1 + protocol.queries_max),
+            .send_queue_max = if (raw_queue > 255) 255 else @intCast(raw_queue),
             .frame_max = protocol.frame_max,
             .connections_max = sidecar_count,
         };
