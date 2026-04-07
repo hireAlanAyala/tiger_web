@@ -192,7 +192,7 @@ pub fn SidecarDispatchType(comptime StorageParam: type, comptime Bus: type) type
                 pos += body.len;
             }
 
-            if (!self.send_call(b, "route", args_buf[0..pos], request_id)) {
+            if (!self.send_call(b, "route", args_buf[0..pos], request_id, self.entry_index(entry))) {
                 return false;
             }
 
@@ -286,14 +286,15 @@ pub fn SidecarDispatchType(comptime StorageParam: type, comptime Bus: type) type
             }
 
             const b = self.bus orelse return;
-            const max_iterations = max_entries * 13; // entries × stages
+            const max_iterations: u32 = @as(u32, max_entries) * 13; // entries × stages
             var iteration: usize = 0;
             var progress = true;
 
             while (progress and iteration < max_iterations) : (iteration += 1) {
                 progress = false;
 
-            for (&self.entries) |*entry| {
+            for (&self.entries, 0..) |*entry, ei| {
+                const entry_idx: u8 = @intCast(ei);
                 const prev_stage = entry.stage;
                 switch (entry.stage) {
                     .route_complete => {
@@ -309,7 +310,7 @@ pub fn SidecarDispatchType(comptime StorageParam: type, comptime Bus: type) type
                         var args_buf: [17]u8 = undefined;
                         args_buf[0] = @intFromEnum(entry.operation);
                         std.mem.writeInt(u128, args_buf[1..17], entry.msg.id, .little);
-                        if (self.send_call(b, "prefetch", &args_buf, entry.request_id)) {
+                        if (self.send_call(b, "prefetch", &args_buf, entry.request_id, entry_idx)) {
                             entry.stage = .prefetch_pending;
                         }
                     },
@@ -323,7 +324,7 @@ pub fn SidecarDispatchType(comptime StorageParam: type, comptime Bus: type) type
                         }
                     },
                     .sql_complete => {
-                        if (self.send_call(b, "handle", entry.rows_data, entry.request_id)) {
+                        if (self.send_call(b, "handle", entry.rows_data, entry.request_id, entry_idx)) {
                             entry.stage = .handle_pending;
                         }
                     },
@@ -332,7 +333,7 @@ pub fn SidecarDispatchType(comptime StorageParam: type, comptime Bus: type) type
                     },
                     .write_complete => {
                         const args = [_]u8{@intFromEnum(entry.handle_status)};
-                        if (self.send_call(b, "render", &args, entry.request_id)) {
+                        if (self.send_call(b, "render", &args, entry.request_id, entry_idx)) {
                             entry.stage = .render_pending;
                         }
                     },
@@ -442,7 +443,7 @@ pub fn SidecarDispatchType(comptime StorageParam: type, comptime Bus: type) type
         // Frame sending — direct to bus, no SidecarClient
         // =============================================================
 
-        fn send_call(self: *Self, b: *Bus, function_name: []const u8, args: []const u8, request_id: u32) bool {
+        fn send_call(self: *Self, b: *Bus, function_name: []const u8, args: []const u8, request_id: u32, entry_idx: u8) bool {
             if (!b.is_connection_ready(self.connection_index)) {
                 log.warn("send_call: connection {d} not ready for {s}", .{ self.connection_index, function_name });
                 return false;
@@ -453,6 +454,10 @@ pub fn SidecarDispatchType(comptime StorageParam: type, comptime Bus: type) type
             }
 
             const msg = b.get_message();
+            // Pin message to the entry's SHM slot (1:1 mapping).
+            if (@hasField(Bus.Message, "slot_index")) {
+                msg.slot_index = entry_idx;
+            }
             const call_len = protocol.build_call(
                 msg.buffer[Bus.frame_header_size..],
                 request_id,
@@ -613,6 +618,17 @@ pub fn SidecarDispatchType(comptime StorageParam: type, comptime Bus: type) type
         // =============================================================
         // Internal helpers
         // =============================================================
+
+        /// Compute entry index from pointer — entry's position in the
+        /// entries array. Used to pin SHM slots 1:1 to dispatch entries.
+        fn entry_index(self: *const Self, entry: *const Entry) u8 {
+            const base = @intFromPtr(&self.entries);
+            const ptr = @intFromPtr(entry);
+            assert(ptr >= base);
+            const idx = (ptr - base) / @sizeOf(Entry);
+            assert(idx < max_entries);
+            return @intCast(idx);
+        }
 
         fn find_entry_by_request_id(self: *Self, request_id: u32) ?*Entry {
             for (&self.entries) |*entry| {

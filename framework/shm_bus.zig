@@ -57,12 +57,25 @@ pub fn SharedMemoryBusType(comptime options: Options) type {
             response: [slot_data_size]u8,
         };
 
+        pub const RegionHeader = extern struct {
+            /// Epoch counter — bumped after every CALL write.
+            /// Sidecar futex-waits on this address. One futex for
+            /// all slots instead of per-slot futex.
+            epoch: u32 = 0,
+            _pad: [60]u8 = [_]u8{0} ** 60,
+
+            comptime {
+                assert(@sizeOf(RegionHeader) == 64);
+            }
+        };
+
         pub const Region = extern struct {
+            header: RegionHeader,
             slots: [slot_count]SlotPair,
 
             comptime {
-                assert(@sizeOf(Region) == @as(usize, slot_count) * @sizeOf(SlotPair));
-                assert(@sizeOf(Region) <= 16 * 1024 * 1024);
+                assert(@sizeOf(Region) == 64 + @as(usize, slot_count) * @sizeOf(SlotPair));
+                assert(@sizeOf(Region) <= 32 * 1024 * 1024);
             }
         };
 
@@ -89,11 +102,11 @@ pub fn SharedMemoryBusType(comptime options: Options) type {
         uring: ?*IoUring = null,
 
         server_seqs: [slot_count]u32 = [_]u32{0} ** slot_count,
+        slot_delivered: [slot_count]bool = [_]bool{false} ** slot_count,
 
         // Message pool — heap-allocated to avoid 4MB inline in Server struct.
         message_pool: ?[*]Message = null,
         next_message: u8 = 0,
-        next_slot: u8 = 0,
 
         ready: bool = false,
 
@@ -215,12 +228,17 @@ pub fn SharedMemoryBusType(comptime options: Options) type {
         pub fn unref(_: *Self, _: *Message) void {}
 
         /// Write a CALL payload to shared memory for the given slot.
+        /// The slot is determined by message.slot_index — pinned 1:1
+        /// to dispatch entries. No round-robin, no collisions.
         pub fn send_message_to(self: *Self, _: u8, message: *Message, payload_len: u32) void {
             const region = self.region orelse return;
-            // Round-robin slot assignment.
-            const slot_idx = self.next_slot;
-            self.next_slot = (self.next_slot + 1) % slot_count;
+            const slot_idx = message.slot_index;
+            assert(slot_idx < slot_count);
             var slot = &region.slots[slot_idx];
+
+            // New CALL on this slot — clear delivery flag so
+            // check_response will deliver the next response.
+            self.slot_delivered[slot_idx] = false;
 
             // Write payload to request area.
             @memcpy(slot.request[0..payload_len], message.buffer[0..payload_len]);
@@ -240,8 +258,13 @@ pub fn SharedMemoryBusType(comptime options: Options) type {
             const seq_ptr: *u32 = &slot.header.server_seq;
             @atomicStore(u32, seq_ptr, self.server_seqs[slot_idx], .release);
 
-            // Wake sidecar via futex on server_seq.
-            IoUring.futex_wake(@ptrCast(&slot.header.server_seq));
+            // Bump epoch — one atomic counter the sidecar futex-waits on.
+            // Release ordering: all slot writes visible before epoch update.
+            const epoch_ptr: *u32 = &region.header.epoch;
+            _ = @atomicRmw(u32, epoch_ptr, .Add, 1, .release);
+
+            // Wake sidecar via futex on epoch.
+            IoUring.futex_wake(@ptrCast(epoch_ptr));
         }
 
         /// Check for responses. Called from the io_uring futex_wait
@@ -256,9 +279,10 @@ pub fn SharedMemoryBusType(comptime options: Options) type {
             const sidecar_seq_ptr: *u32 = &slot.header.sidecar_seq;
             const sidecar_seq = @atomicLoad(u32, sidecar_seq_ptr, .acquire);
 
-            // No request sent yet, or stale response.
+            // No request sent yet, stale response, or already delivered.
             if (self.server_seqs[slot_idx] == 0) return;
             if (sidecar_seq < self.server_seqs[slot_idx]) return;
+            if (self.slot_delivered[slot_idx]) return;
 
             const response_len = slot.header.response_len;
             if (response_len > slot_data_size) {
@@ -276,15 +300,15 @@ pub fn SharedMemoryBusType(comptime options: Options) type {
                 return;
             }
 
+            // Mark as consumed BEFORE the callback — the callback may
+            // send a new CALL on this same slot (clearing the flag).
+            // Setting after would overwrite the cleared flag.
+            self.slot_delivered[slot_idx] = true;
+
             // Deliver frame to dispatch module.
             if (self.on_frame_fn) |cb| {
                 cb(self.context.?, slot_idx, slot.response[0..response_len]);
             }
-
-            // Mark as consumed — prevent re-delivery on next poll/tick.
-            // Reset sidecar_seq to 0 so the check `sidecar_seq >= server_seq`
-            // fails until the sidecar writes a new response.
-            slot.header.sidecar_seq = 0;
 
             // Re-submit futex wait for next response.
             self.submit_futex_wait(slot_idx);

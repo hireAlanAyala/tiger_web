@@ -36,6 +36,10 @@ pub const IO = struct {
     // Runs alongside epoll — epoll for HTTP, uring for shm futex.
     uring: ?IoUring = null,
 
+    // Callback for shared memory polling — set by the server when
+    // shm transport is active. Called every run_for_ns iteration.
+    shm_poll_fn: ?*const fn () void = null,
+
     pub fn init() !IO {
         const epoll_fd = try posix.epoll_create1(linux.EPOLL.CLOEXEC);
         return .{
@@ -215,10 +219,6 @@ pub const IO = struct {
     /// we execute syscalls inline — deferring adds latency (4×
     /// regression measured with sidecar). Add deferred queue back
     /// only when migrating to io_uring.
-    // Callback for shared memory polling — set by the server when
-    // shm transport is active. Called every run_for_ns iteration.
-    shm_poll_fn: ?*const fn () void = null,
-
     pub fn run_for_ns(self: *IO, ns: u64) void {
         // Poll shm responses (non-blocking).
         if (self.shm_poll_fn) |poll| poll();
@@ -401,9 +401,10 @@ pub const IoUring = struct {
         return true;
     }
 
-    /// Wake a futex address (used by the sidecar side, or for testing).
+    /// Wake a futex address. No PRIVATE_FLAG — shared memory
+    /// is cross-process (server ↔ sidecar).
     pub fn futex_wake(addr: *const u32) void {
-        _ = linux.futex_wake(@ptrCast(@constCast(addr)), linux.FUTEX.PRIVATE_FLAG | linux.FUTEX.WAKE, 1);
+        _ = linux.futex_wake(@ptrCast(@constCast(addr)), linux.FUTEX.WAKE, 1);
     }
 
     /// Drain completed futex operations. Non-blocking.
