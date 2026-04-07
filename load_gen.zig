@@ -126,7 +126,7 @@ pub const OpsFlag = struct {
         while (pos < value.len) {
             // Find operation name.
             const colon = std.mem.indexOfPos(u8, value, pos, ":") orelse {
-                diagnostic.* = "expected 'operation:weight' format";
+                diagnostic.* = "expected 'operation:weight' format:";
                 return error.InvalidFlagValue;
             };
             const name = value[pos..colon];
@@ -136,7 +136,7 @@ pub const OpsFlag = struct {
             const weight_str = value[colon + 1 .. comma];
 
             const weight = std.fmt.parseInt(u32, weight_str, 10) catch {
-                diagnostic.* = "weight must be a number";
+                diagnostic.* = "weight must be a number:";
                 return error.InvalidFlagValue;
             };
 
@@ -149,7 +149,7 @@ pub const OpsFlag = struct {
                 }
             }
             if (!found) {
-                diagnostic.* = "unknown operation name";
+                diagnostic.* = "unknown operation name:";
                 return error.InvalidFlagValue;
             }
 
@@ -162,7 +162,7 @@ pub const OpsFlag = struct {
             if (@field(weights, field.name) > 0) any_nonzero = true;
         }
         if (!any_nonzero) {
-            diagnostic.* = "at least one operation must have non-zero weight";
+            diagnostic.* = "at least one operation must have non-zero weight:";
             return error.InvalidFlagValue;
         }
 
