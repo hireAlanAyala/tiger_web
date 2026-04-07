@@ -1,14 +1,14 @@
-# Plan: 1-RT SHM Sidecar Protocol
+# Plan: 1-RT SHM Sidecar Protocol + Native Frame Parsing
 
 ## Context
 
-The V2 4-RT SHM protocol gets 15K req/s. The sidecar is CPU-bound at 110% — each of the 4 handler invocations costs ~17µs, totaling ~68µs/request. The sidecar has spare capacity per-invocation (60K stages/s > Fastify's 49K/s), but 4 invocations per request waste it.
+The V2 4-RT SHM protocol gets 15K req/s. The sidecar is CPU-bound at 110% — each of the 4 handler invocations costs ~17µs, totaling ~68µs/request. Of the ~17µs, ~6-10µs is JS protocol overhead (DataView/TextDecoder for frame parsing, Uint8Array for response building). The actual handler JS work is ~8-10µs.
 
-Two of the four round trips are redundant:
-- **Route**: The framework already routes natively via `app.zig:handler_route()` using a compiled route table
-- **Prefetch**: 19/20 handlers use static SQL extractable at build time
+Two problems to solve:
+1. **Too many round trips**: 4 RTs where 2 are redundant (route + prefetch can be native)
+2. **Per-RT JS protocol overhead**: Frame parsing/building in JS is ~3-5× slower than C-based HTTP parsing (llhttp). Moving it to the C addon matches what Fastify gets for free.
 
-Collapsing to 1 RT: framework does route + prefetch natively, sends `{operation, rows, body}` to sidecar, gets back `{status, writes, html}`. At ~17µs for handle+render combined, throughput = ~59K/s theoretical, ~42K realistic with pipeline overhead.
+Combined fix: 1 RT with native frame parsing. Framework does route + prefetch natively, C addon parses the CALL frame and builds the RESULT frame. JS only runs handle + render. Target: ~10µs per request → 60K+ theoretical, 42K+ realistic.
 
 ## Handler syntax: unchanged
 
@@ -23,7 +23,7 @@ Developers write the same 4 functions. The build step determines what runs where
 | No prefetch | 3 | 1-RT | logout, page_load_login |
 | Multi-query static SQL | 2 | 1-RT | page_load_dashboard (3 queries), transfer_inventory (2 queries) |
 | Body-derived param | 1 | 1-RT | search_products (`msg.body.query`) |
-| Dynamic loop query | 1 | 4-RT fallback | create_order (N queries for N items) |
+| Dynamic loop query | 1 | 4-RT (explicit `@dynamic-prefetch`) | create_order (N queries for N items) |
 
 19/20 handlers use 1-RT. `create_order` falls back to 4-RT.
 
@@ -45,7 +45,7 @@ Add a `PrefetchSqlExtractor` that scans `db.query(` / `db.queryAll(` calls in th
 - Parse params after the SQL string's closing quote
 - Parse return key from the `return { key: ... }` pattern
 
-If any param is unrecognized or the body has loops/conditionals around SQL calls → mark as `fallback`.
+If any param is unrecognized or the body has loops/conditionals around SQL calls → **build error**, not silent fallback. The developer must either fix the syntax or add `// @dynamic-prefetch` annotation to explicitly opt into 4-RT. No silent degradation — every handler's dispatch mode is intentional and visible.
 
 Add `--prefetch-zig=PATH` CLI flag. Emit `prefetch.generated.zig`:
 
