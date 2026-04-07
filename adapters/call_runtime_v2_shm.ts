@@ -40,45 +40,32 @@ if (!shmName) {
   console.error("Usage: npx tsx adapters/call_runtime_v2_shm.ts <shm-name> [slot-count]");
   process.exit(1);
 }
-const skipCrc = process.argv.includes("--no-crc");
 const client = new ShmClient({
   shmName,
   slotCount,
   slotDataSize: FRAME_MAX,
-  skipCrc,
 });
 
 console.log(`[v2-shm] connected to ${shmName}`);
 
 // --- Frame dispatch ---
+// C addon pre-parses CALL frames: tag, request_id, function name → funcIndex.
+// JS only runs handler logic. C writes RESULT back to SHM.
+// funcIndex: 0=route, 1=prefetch, 2=handle, 3=render, 4=handle_render
 
-client.setFrameHandler((slotIndex: number, data: Buffer) => {
-  // Parse CALL frame: [tag][request_id: u32 BE][name_len: u16 BE][name][args]
-  if (data.length < 7) return;
-  if (data[0] !== 0x10) return; // Not a CALL tag.
-
-  const requestId = data.readUInt32BE(1);
-  const nameLen = data.readUInt16BE(5);
-  const name = _decoder.decode(data.subarray(7, 7 + nameLen));
-  const args = data.subarray(7 + nameLen);
-
-  let resultData: Uint8Array;
+client.setDispatchHandler((_slotIndex: number, funcIndex: number, requestId: number, args: Buffer): Uint8Array => {
   try {
-    switch (name) {
-      case "route": resultData = dispatchRoute(requestId, args); break;
-      case "prefetch": resultData = dispatchPrefetch(requestId, args); break;
-      case "handle": resultData = dispatchHandle(requestId, args); break;
-      case "render": resultData = dispatchRender(requestId, args); break;
-      default:
-        resultData = buildResult(requestId, 0x01, new Uint8Array(0));
+    switch (funcIndex) {
+      case 0: return dispatchRoute(requestId, args);
+      case 1: return dispatchPrefetch(requestId, args);
+      case 2: return dispatchHandle(requestId, args);
+      case 3: return dispatchRender(requestId, args);
+      default: return buildResult(requestId, 0x01, new Uint8Array(0));
     }
   } catch (e: any) {
-    console.error(`[v2-shm] ${name} error:`, e.message);
-    resultData = buildResult(requestId, 0x01, new Uint8Array(0));
+    console.error(`[v2-shm] func ${funcIndex} error:`, e.message);
+    return buildResult(requestId, 0x01, new Uint8Array(0));
   }
-
-  // Write response to shared memory.
-  client.writeResponse(slotIndex, resultData);
 });
 
 // Start polling. setImmediate gives higher throughput than futex

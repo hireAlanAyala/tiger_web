@@ -2,6 +2,6 @@
   "name": "tiger-shm",
   "private": true,
   "scripts": {
-    "build": "../../zig/zig cc -shared -o shm.node shm.c -I/usr/include/node -lrt -fPIC"
+    "build": "../../zig/zig cc -shared -o shm.node shm.c -I/usr/include/node -lrt -lz -fPIC"
   }
 }

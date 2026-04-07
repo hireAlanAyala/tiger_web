@@ -1,26 +1,18 @@
 // Shared memory sidecar client — reads CALL frames from shared memory,
-// writes RESULT frames back. Signals via futex.
+// writes RESULT frames back. All SHM I/O, CRC, frame parsing, and
+// response writing happens in C (pollDispatch). JS only runs handlers.
 
 const shmAddon = require("../addons/shm/shm.node");
-import { crc32 } from "node:zlib";
 
 export interface ShmClientOptions {
   shmName: string;
   slotCount: number;
   slotDataSize: number;
-  skipCrc?: boolean;
 }
 
 const REGION_HEADER_SIZE = 64;
 const EPOCH_OFFSET = 0;
-
 const SLOT_HEADER_SIZE = 64;
-const SERVER_SEQ_OFFSET = 0;
-const SIDECAR_SEQ_OFFSET = 4;
-const REQUEST_LEN_OFFSET = 8;
-const RESPONSE_LEN_OFFSET = 12;
-const REQUEST_CRC_OFFSET = 16;
-const RESPONSE_CRC_OFFSET = 20;
 
 export class ShmClient {
   private buf: Buffer;
@@ -28,97 +20,96 @@ export class ShmClient {
   private slotDataSize: number;
   private slotPairSize: number;
   private lastSeenSeqs: Uint32Array;
-  private skipCrc: boolean;
-  private crcBuf = Buffer.alloc(4);
-  private onFrame: ((slotIndex: number, data: Buffer) => void) | null = null;
+  // Handler receives pre-parsed fields: (slotIndex, funcIndex, requestId, argsBuffer)
+  // funcIndex: 0=route, 1=prefetch, 2=handle, 3=render, 4=handle_render
+  // Must return Uint8Array with the RESULT frame payload.
+  private onDispatch: ((slotIndex: number, funcIndex: number, requestId: number, args: Buffer) => Uint8Array) | null = null;
 
   constructor(opts: ShmClientOptions) {
     this.slotCount = opts.slotCount;
     this.slotDataSize = opts.slotDataSize;
     this.slotPairSize = SLOT_HEADER_SIZE + this.slotDataSize * 2;
-    this.skipCrc = opts.skipCrc ?? false;
 
     const regionSize = REGION_HEADER_SIZE + this.slotCount * this.slotPairSize;
     const shmPath = opts.shmName.startsWith("/") ? opts.shmName : "/" + opts.shmName;
     this.buf = shmAddon.mmapShm(shmPath, regionSize);
     this.lastSeenSeqs = new Uint32Array(this.slotCount);
 
-    console.log(`[shm] mapped ${opts.shmName}: ${regionSize} bytes, ${this.slotCount} slots${this.skipCrc ? " (no-crc)" : ""}`);
+    console.log(`[shm] mapped ${opts.shmName}: ${regionSize} bytes, ${this.slotCount} slots`);
   }
 
+  setDispatchHandler(handler: (slotIndex: number, funcIndex: number, requestId: number, args: Buffer) => Uint8Array) {
+    this.onDispatch = handler;
+  }
+
+  // Legacy: raw frame handler for compat. Wraps as dispatch handler.
   setFrameHandler(handler: (slotIndex: number, data: Buffer) => void) {
-    this.onFrame = handler;
+    // Can't use pollDispatch with raw frame handler — fall back to JS poll.
+    this.onDispatch = null;
+    (this as any)._legacyHandler = handler;
   }
 
-  private headerOffset(slot: number): number { return REGION_HEADER_SIZE + slot * this.slotPairSize; }
-  private requestOffset(slot: number): number { return this.headerOffset(slot) + SLOT_HEADER_SIZE; }
-  private responseOffset(slot: number): number { return this.requestOffset(slot) + this.slotDataSize; }
-  private readU32(offset: number): number { return this.buf.readUInt32LE(offset); }
-  private writeU32(offset: number, val: number): void { this.buf.writeUInt32LE(val, offset); }
-
+  // Native poll+dispatch+respond — all in C. JS only runs the handler.
   poll(): number {
+    if (!this.onDispatch) {
+      // Legacy path for raw frame handlers.
+      return this._legacyPoll();
+    }
+    return shmAddon.pollDispatch(
+      this.buf,
+      this.slotCount,
+      this.slotPairSize,
+      REGION_HEADER_SIZE,
+      this.slotDataSize,
+      this.lastSeenSeqs,
+      this.onDispatch,
+    );
+  }
+
+  // JS-side poll fallback for legacy frame handlers.
+  private _legacyPoll(): number {
+    const handler = (this as any)._legacyHandler;
+    if (!handler) return 0;
     let found = 0;
     for (let i = 0; i < this.slotCount; i++) {
-      const hdr = this.headerOffset(i);
-      const serverSeq = this.readU32(hdr + SERVER_SEQ_OFFSET);
-
+      const hdr = REGION_HEADER_SIZE + i * this.slotPairSize;
+      const serverSeq = this.buf.readUInt32LE(hdr);
       if (serverSeq > this.lastSeenSeqs[i]) {
         this.lastSeenSeqs[i] = serverSeq;
-        const requestLen = this.readU32(hdr + REQUEST_LEN_OFFSET);
+        const requestLen = this.buf.readUInt32LE(hdr + 8);
         if (requestLen > this.slotDataSize) continue;
-
-        const payload = this.buf.subarray(this.requestOffset(i), this.requestOffset(i) + requestLen);
-
-        if (!this.skipCrc) {
-          const storedCrc = this.readU32(hdr + REQUEST_CRC_OFFSET);
-          this.crcBuf.writeUInt32LE(requestLen, 0);
-          const crcLen = crc32(this.crcBuf);
-          const computedCrc = requestLen > 0 ? crc32(payload, crcLen) : crcLen;
-          if ((computedCrc >>> 0) !== (storedCrc >>> 0)) {
-            console.error(`[shm] CRC mismatch on slot ${i}`);
-            continue;
-          }
-        }
-
-        if (this.onFrame) this.onFrame(i, payload);
+        const payload = this.buf.subarray(hdr + SLOT_HEADER_SIZE, hdr + SLOT_HEADER_SIZE + requestLen);
+        handler(i, payload);
         found++;
       }
     }
     return found;
   }
 
+  // No longer needed — writeResponse is done in C by pollDispatch.
+  // Kept for legacy compat only.
   writeResponse(slot: number, data: Uint8Array): void {
-    const hdr = this.headerOffset(slot);
-    const respOffset = this.responseOffset(slot);
-
+    const hdr = REGION_HEADER_SIZE + slot * this.slotPairSize;
+    const respOffset = hdr + SLOT_HEADER_SIZE + this.slotDataSize;
     if (data.length > 0) this.buf.set(data, respOffset);
-
-    this.writeU32(hdr + RESPONSE_LEN_OFFSET, data.length);
-
-    if (!this.skipCrc) {
-      this.crcBuf.writeUInt32LE(data.length, 0);
-      const crcLen = crc32(this.crcBuf);
-      const computedCrc = data.length > 0 ? crc32(Buffer.from(data), crcLen) : crcLen;
-      this.writeU32(hdr + RESPONSE_CRC_OFFSET, computedCrc >>> 0);
-    } else {
-      this.writeU32(hdr + RESPONSE_CRC_OFFSET, 0);
-    }
-
-    const currentSeq = this.readU32(hdr + SIDECAR_SEQ_OFFSET);
-    this.writeU32(hdr + SIDECAR_SEQ_OFFSET, currentSeq + 1);
-    shmAddon.futexWake(this.buf, hdr + SIDECAR_SEQ_OFFSET);
-  }
-
-  startWaiting(): void {
-    let lastEpoch = this.readU32(EPOCH_OFFSET);
-    while (true) {
-      lastEpoch = shmAddon.spinWait(this.buf, EPOCH_OFFSET, lastEpoch, 100000);
-      this.poll();
-    }
+    this.buf.writeUInt32LE(data.length, hdr + 12);
+    // CRC skipped in legacy path — pollDispatch handles CRC in C.
+    this.buf.writeUInt32LE(0, hdr + 20);
+    const curSeq = this.buf.readUInt32LE(hdr + 4);
+    this.buf.writeUInt32LE(curSeq + 1, hdr + 4);
+    shmAddon.futexWake(this.buf, hdr + 4);
   }
 
   startPolling(): void {
     const tick = () => { this.poll(); setImmediate(tick); };
     setImmediate(tick);
+  }
+
+  startWaiting(): void {
+    let lastEpoch = this.buf.readUInt32LE(EPOCH_OFFSET);
+    while (true) {
+      lastEpoch = shmAddon.spinWait(this.buf, EPOCH_OFFSET, lastEpoch, 100000);
+      this.poll();
+    }
   }
 }
