@@ -257,6 +257,33 @@ unchanged. Same handler serves HTML and JSON — the framework picks the encodin
 
 Right primitive: the developer states what happened, the framework handles the protocol.
 
+## Native read-only fast path (0-RT) — skip sidecar for trivial operations
+
+For get/list operations where the Zig handler can render HTML directly,
+skip the SHM round trip entirely. Saves ~5µs IPC cost per request.
+get_product would go from 98K to ~160K (native Zig is 80K without
+sidecar overhead). Requires: Zig-native render templates for handlers
+that opt in. The native handlers already exist — just need to wire them
+into the 1-RT dispatch as a "0-RT" path when the operation has a native
+renderer.
+
+## Typed schemas — type-safe TS interfaces from SQL schema
+
+Generate TypeScript interfaces from the SQLite schema so
+`ctx.prefetched.product` has typed fields instead of `any`. The
+annotation scanner already knows column names from the SQL. Emit
+`.d.ts` files with `{ id: string; name: string; price_cents: number; ... }`.
+Correctness fix (catch typos at build time), not perf.
+
+## Remote auth via worker pattern
+
+Auth strategies requiring remote validation (JWT JWKS, API key sync,
+revocation lists, user/permission sync) can't resolve in the
+single-threaded pipeline — no outbound HTTP client. Pattern: worker
+fetches periodically, keeps local storage current, state machine
+resolves per-request from local data. Already works for login codes.
+Generalize when a second auth strategy is needed.
+
 # current
 look in the project for illegal posix and other syscalls that are not simulation friendly
 
