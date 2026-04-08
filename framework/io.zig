@@ -41,9 +41,6 @@ pub const IO = struct {
 
     inner: InnerIO,
 
-    /// Compatibility shims — kept to avoid changing server.zig wire_sidecar.
-    shm_poll_fn: ?*const fn () bool = null,
-    uring: ?void = null,
 
     pub fn init() !IO {
         return .{
@@ -186,6 +183,24 @@ pub const IO = struct {
         };
     }
 
-    /// Init uring — no-op, the ring is created in init().
-    pub fn init_uring(_: *IO) !void {}
+    /// Submit a FUTEX_WAIT through the ring. Completes when *addr != expected.
+    /// Used by SHM bus to wait for sidecar epoch changes instead of busy-polling.
+    pub fn futex_wait(self: *IO, addr: *volatile u32, expected: u32, completion: *Completion, context: *anyopaque, callback: CallbackFn) void {
+        completion.context = context;
+        completion.callback = callback;
+        self.inner.futex_wait(
+            *Completion,
+            completion,
+            futex_wait_bridge,
+            &completion.inner,
+            addr,
+            expected,
+        );
+    }
+
+    fn futex_wait_bridge(completion: *Completion, _: *InnerIO.Completion, result: InnerIO.FutexWaitError!void) void {
+        const res: i32 = if (result) |_| 0 else |_| -1;
+        completion.callback(completion.context, res);
+    }
+
 };
