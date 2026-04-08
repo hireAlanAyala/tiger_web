@@ -281,31 +281,73 @@ pub fn SidecarDispatchType(comptime StorageParam: type, comptime Bus: type) type
 
             const request_id = self.next_request_id;
             self.next_request_id +%= 1;
+            const entry_idx = self.entry_index(entry);
 
-            // Build combined CALL: [operation:1][id:16 LE][body_len:2 BE][body][row_set_count:1][row_sets...]
-            const args_max = 1 + 16 + 2 + http.body_max + 1 + protocol.frame_max;
-            var args_buf: [args_max]u8 = undefined;
-            var pos: usize = 0;
+            // Direct SHM write — build CALL frame directly in the slot's
+            // request buffer. Eliminates the 260KB stack buffer + two memcpy.
+            if (@hasDecl(Bus, "get_slot_request_buf")) {
+                const slot_buf = b.get_slot_request_buf(entry_idx) orelse return false;
 
-            args_buf[pos] = @intFromEnum(operation);
-            pos += 1;
-            std.mem.writeInt(u128, args_buf[pos..][0..16], msg.id, .little);
-            pos += 16;
-            std.mem.writeInt(u16, args_buf[pos..][0..2], @intCast(body.len), .big);
-            pos += 2;
-            if (body.len > 0) {
-                @memcpy(args_buf[pos..][0..body.len], body);
-                pos += body.len;
-            }
-            args_buf[pos] = row_set_count;
-            pos += 1;
-            if (rows_data.len > 0) {
-                @memcpy(args_buf[pos..][0..rows_data.len], rows_data);
-                pos += rows_data.len;
-            }
+                // Build CALL header: [tag:1][request_id:4 BE][name_len:2 BE]["handle_render"]
+                const func_name = "handle_render";
+                var pos: usize = 0;
+                slot_buf[pos] = 0x10; // CALL tag
+                pos += 1;
+                slot_buf[pos] = @intCast((request_id >> 24) & 0xff);
+                slot_buf[pos + 1] = @intCast((request_id >> 16) & 0xff);
+                slot_buf[pos + 2] = @intCast((request_id >> 8) & 0xff);
+                slot_buf[pos + 3] = @intCast(request_id & 0xff);
+                pos += 4;
+                std.mem.writeInt(u16, slot_buf[pos..][0..2], func_name.len, .big);
+                pos += 2;
+                @memcpy(slot_buf[pos..][0..func_name.len], func_name);
+                pos += func_name.len;
 
-            if (!self.send_call(b, "handle_render", args_buf[0..pos], request_id, self.entry_index(entry))) {
-                return false;
+                // Args: [operation:1][id:16 LE][body_len:2 BE][body][row_set_count:1][row_sets...]
+                slot_buf[pos] = @intFromEnum(operation);
+                pos += 1;
+                std.mem.writeInt(u128, slot_buf[pos..][0..16], msg.id, .little);
+                pos += 16;
+                std.mem.writeInt(u16, slot_buf[pos..][0..2], @intCast(body.len), .big);
+                pos += 2;
+                if (body.len > 0) {
+                    @memcpy(slot_buf[pos..][0..body.len], body);
+                    pos += body.len;
+                }
+                slot_buf[pos] = row_set_count;
+                pos += 1;
+                if (rows_data.len > 0) {
+                    @memcpy(slot_buf[pos..][0..rows_data.len], rows_data);
+                    pos += rows_data.len;
+                }
+
+                b.finalize_slot_send(entry_idx, @intCast(pos));
+            } else {
+                // Non-SHM bus fallback — use intermediate buffer.
+                const args_max = 1 + 16 + 2 + http.body_max + 1 + protocol.frame_max;
+                var args_buf: [args_max]u8 = undefined;
+                var pos: usize = 0;
+
+                args_buf[pos] = @intFromEnum(operation);
+                pos += 1;
+                std.mem.writeInt(u128, args_buf[pos..][0..16], msg.id, .little);
+                pos += 16;
+                std.mem.writeInt(u16, args_buf[pos..][0..2], @intCast(body.len), .big);
+                pos += 2;
+                if (body.len > 0) {
+                    @memcpy(args_buf[pos..][0..body.len], body);
+                    pos += body.len;
+                }
+                args_buf[pos] = row_set_count;
+                pos += 1;
+                if (rows_data.len > 0) {
+                    @memcpy(args_buf[pos..][0..rows_data.len], rows_data);
+                    pos += rows_data.len;
+                }
+
+                if (!self.send_call(b, "handle_render", args_buf[0..pos], request_id, entry_idx)) {
+                    return false;
+                }
             }
 
             entry.stage = .combined_pending;

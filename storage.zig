@@ -37,6 +37,7 @@ const c = @cImport({
 /// Statement cache size — must be large enough to avoid FNV-1a
 /// collisions across all SQL strings. 256 slots for ~35 strings.
 const stmt_cache_size = 256;
+const raw_stmt_cache_size = 32;
 
 /// Comptime slot assignment for prepared statement caching.
 /// FNV-1a hash of the SQL string content, masked to cache size.
@@ -255,6 +256,12 @@ pub const SqliteStorage = struct {
     /// on the hot path (was 22% of CPU before caching).
     stmt_cache: [stmt_cache_size]?*c.sqlite3_stmt,
 
+    /// Runtime prepared statement cache for query_raw / execute_raw.
+    /// Keyed by SQL string pointer identity (prefetch.generated.zig
+    /// strings are comptime — same pointer every call).
+    raw_cache_keys: [raw_stmt_cache_size]?[*]const u8 = .{null} ** raw_stmt_cache_size,
+    raw_cache_stmts: [raw_stmt_cache_size]?*c.sqlite3_stmt = .{null} ** raw_stmt_cache_size,
+
     pub fn init(path: [*:0]const u8) !SqliteStorage {
         var db: ?*c.sqlite3 = null;
         const rc = c.sqlite3_open(path, &db);
@@ -420,8 +427,18 @@ pub const SqliteStorage = struct {
         mode: proto.QueryMode,
         out_buf: []u8,
     ) ?[]const u8 {
-        const real_stmt = self.prepare_raw(sql) orelse return null;
-        defer _ = c.sqlite3_finalize(real_stmt);
+        // Try cached prepared statement (keyed by pointer identity).
+        const cached = self.raw_cache_get(sql);
+        const real_stmt = if (cached) |stmt| blk: {
+            _ = c.sqlite3_reset(stmt);
+            _ = c.sqlite3_clear_bindings(stmt);
+            break :blk stmt;
+        } else blk: {
+            const stmt = self.prepare_raw(sql) orelse return null;
+            self.raw_cache_put(sql, stmt);
+            break :blk stmt;
+        };
+        // Don't finalize — cached for reuse.
 
         // Belt-and-suspenders: scanner validates SELECT at build time,
         // runtime validates here. Catches sidecar bugs.
@@ -516,6 +533,28 @@ pub const SqliteStorage = struct {
             return null;
         }
         return stmt.?;
+    }
+
+    /// Look up a cached prepared statement by SQL pointer identity.
+    fn raw_cache_get(self: *SqliteStorage, sql: []const u8) ?*c.sqlite3_stmt {
+        const key = sql.ptr;
+        const slot = @as(usize, @intFromPtr(key)) % raw_stmt_cache_size;
+        if (self.raw_cache_keys[slot]) |cached_key| {
+            if (cached_key == key) return self.raw_cache_stmts[slot];
+        }
+        return null;
+    }
+
+    /// Cache a prepared statement by SQL pointer identity.
+    fn raw_cache_put(self: *SqliteStorage, sql: []const u8, stmt: *c.sqlite3_stmt) void {
+        const key = sql.ptr;
+        const slot = @as(usize, @intFromPtr(key)) % raw_stmt_cache_size;
+        // Evict existing entry if present.
+        if (self.raw_cache_stmts[slot]) |old| {
+            _ = c.sqlite3_finalize(old);
+        }
+        self.raw_cache_keys[slot] = key;
+        self.raw_cache_stmts[slot] = stmt;
     }
 
     /// Bind parameters from the binary wire format to a prepared statement.

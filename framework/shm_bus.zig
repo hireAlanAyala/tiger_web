@@ -227,6 +227,39 @@ pub fn SharedMemoryBusType(comptime options: Options) type {
 
         pub fn unref(_: *Self, _: *Message) void {}
 
+        /// Get direct write access to a slot's request buffer.
+        /// Caller writes the CALL frame directly, then calls finalize_slot_send.
+        /// Eliminates intermediate buffer copies.
+        pub fn get_slot_request_buf(self: *Self, slot_idx: u8) ?[]u8 {
+            const region = self.region orelse return null;
+            assert(slot_idx < slot_count);
+            self.slot_delivered[slot_idx] = false;
+            return &region.slots[slot_idx].request;
+        }
+
+        /// Finalize a direct-write send: compute CRC, bump seq, wake sidecar.
+        /// Call after writing payload into the buffer returned by get_slot_request_buf.
+        pub fn finalize_slot_send(self: *Self, slot_idx: u8, payload_len: u32) void {
+            const region = self.region orelse return;
+            assert(slot_idx < slot_count);
+            const slot = &region.slots[slot_idx];
+
+            var crc = Crc32.init();
+            crc.update(std.mem.asBytes(&payload_len));
+            crc.update(slot.request[0..payload_len]);
+
+            slot.header.request_len = payload_len;
+            slot.header.request_crc = crc.final();
+
+            self.server_seqs[slot_idx] += 1;
+            const seq_ptr: *u32 = &slot.header.server_seq;
+            @atomicStore(u32, seq_ptr, self.server_seqs[slot_idx], .release);
+
+            const epoch_ptr: *u32 = &region.header.epoch;
+            _ = @atomicRmw(u32, epoch_ptr, .Add, 1, .release);
+            IoUring.futex_wake(@ptrCast(epoch_ptr));
+        }
+
         /// Write a CALL payload to shared memory for the given slot.
         /// The slot is determined by message.slot_index — pinned 1:1
         /// to dispatch entries. No round-robin, no collisions.
