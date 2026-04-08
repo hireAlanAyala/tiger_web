@@ -55,9 +55,9 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
     const SidecarBus = if (App.sidecar_enabled) Handlers.BusType else void;
     const SidecarClient = if (App.sidecar_enabled) Handlers.ClientType else void;
 
-    // V2 dispatch — pipelined stateless protocol. Coexists with v1
-    // handlers. The server routes frames to either v1 or v2 based
-    // on protocol version (TODO: version negotiation).
+    // V2 dispatch — 1-RT and 2-RT protocol over SHM. Selected at
+    // compile time via App.protocol_v2. No runtime negotiation —
+    // server and sidecar are deployed together.
     const ShmBus = if (App.sidecar_enabled and App.protocol_v2_shm)
         @import("shm_bus.zig").SharedMemoryBusType(.{ .slot_count = @import("constants.zig").pipeline_slots_max })
     else
@@ -807,8 +807,8 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
                             conn.is_datastar_request,
                             entry.handle_session_action,
                             entry.msg.user_id,
-                            false, // is_authenticated — TODO: wire from entry
-                            false, // is_new_visitor — TODO: wire from entry
+                            false, // is_authenticated — sidecar doesn't resolve identity yet
+                            false, // is_new_visitor — requires cookie check before dispatch
                             sm.secret_key,
                         );
 
