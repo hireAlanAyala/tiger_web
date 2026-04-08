@@ -128,6 +128,31 @@ regression — investigate before proceeding.
 run the gate, commit. Small commits make bisection trivial if a
 regression is found later.
 
+## Step 7: Fuzz new paths
+
+After consolidation, add fuzz coverage for code that didn't exist
+before this session. These are boundary operations on untrusted input:
+
+| Target | What to fuzz | File |
+|---|---|---|
+| JSON array scanner | Random body bytes → `build_json_array_param` | `framework/server.zig` |
+| SQL extraction | Random handler source → `extract_prefetch_queries` | `annotation_scanner.zig` |
+| Combined RESULT parser | Random frame bytes → `parse_combined_result` | `sidecar_dispatch.zig` |
+| Route-prefetch RESULT parser | Random frame bytes → `parse_route_prefetch_result` | `sidecar_dispatch.zig` |
+| Prefetch param assembly | Random spec + body → param_buf builder | `framework/server.zig` |
+
+Pattern: throw random bytes at each function, assert it either
+returns valid output or returns null/error — never crashes, never
+reads out of bounds. Add to `codec_fuzz.zig` or a new `dispatch_fuzz.zig`.
+
+## Step 8: Checklist audit
+
+Run `docs/internal/checklist.md` on all surviving code:
+- Domain constraints, assertions, pair assertions
+- Fuzzer coverage for new encoding paths
+- Sim coverage for new state transitions
+- Function length (<70 lines), hot-loop extraction, argument passing
+
 ## Risk
 
 Low. All deleted code is behind compile-time flags that are never
