@@ -139,7 +139,7 @@ pub const specs = [25]?PrefetchSpec{
             .key = "target",
         },
     } }, // .transfer_inventory
-    null, // .create_order — no queries
+    null, // .create_order — 2-RT
     .{ .queries = &.{
         .{
             .sql = "SELECT id, total_cents, items_len, status, timeout_at, payment_ref FROM orders WHERE id = ?1",
@@ -172,7 +172,7 @@ pub const specs = [25]?PrefetchSpec{
             .key = "order",
         },
     } }, // .cancel_order
-    null, // .search_products — @dynamic-prefetch
+    null, // .search_products — 2-RT
     .{ .queries = &.{
         .{
             .sql = "SELECT id, name, description, price_cents, inventory, version, active FROM products WHERE active = 1 ORDER BY id LIMIT ?1",
@@ -193,7 +193,7 @@ pub const specs = [25]?PrefetchSpec{
             .key = "orders",
         },
     } }, // .page_load_dashboard
-    null, // .request_login_code — no queries
+    .{ .queries = &.{} }, // .request_login_code — no SQL
     .{ .queries = &.{
         .{
             .sql = "SELECT email, code, expires_at FROM login_codes WHERE email = ?1",
@@ -202,8 +202,8 @@ pub const specs = [25]?PrefetchSpec{
             .key = "login_code",
         },
     } }, // .verify_login_code
-    null, // .logout — no queries
-    null, // .page_load_login — no queries
+    .{ .queries = &.{} }, // .logout — no SQL
+    .{ .queries = &.{} }, // .page_load_login — no SQL
 };
 
 pub const operation_count = 25;

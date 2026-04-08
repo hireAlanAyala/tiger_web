@@ -133,6 +133,7 @@ const Annotation = struct {
     has_body: bool,
     route_match: ?RouteMatch = null,
     dynamic_prefetch: bool = false, // @dynamic-prefetch opt-in
+    extraction_failed: bool = false, // SQL extraction attempted but failed
     prefetch_queries: []const PrefetchQuery = &.{},
     param_hints: [max_annotation_param_hints]?ParamHint = .{null} ** max_annotation_param_hints,
     param_hint_count: u8 = 0,
@@ -1078,6 +1079,13 @@ pub fn main() !void {
                         try stderr.print("note: {s}:{d}: [prefetch] .{s} uses 2-RT dispatch (SQL not statically extractable)\n", .{
                             ann.file, ann.line, ann.operation,
                         });
+                        // Mark extraction as failed so emitter uses null (2-RT).
+                        for (annotations.items) |*a| {
+                            if (a.phase == .prefetch and std.mem.eql(u8, a.operation, ann.operation)) {
+                                a.extraction_failed = true;
+                                break;
+                            }
+                        }
                     }
                 }
             },
@@ -2135,11 +2143,14 @@ fn emit_prefetch_zig(
         } else null;
 
         if (prefetch_ann) |ann| {
-            if (ann.dynamic_prefetch or ann.prefetch_queries.len == 0) {
-                try w.print("    null, // .{s} — {s}\n", .{
-                    name,
-                    if (ann.dynamic_prefetch) "@dynamic-prefetch" else "no queries",
-                });
+            if (ann.dynamic_prefetch or ann.extraction_failed) {
+                // Dynamic prefetch or extraction failed — use 2-RT.
+                try w.print("    null, // .{s} — 2-RT\n", .{name});
+                continue;
+            }
+            if (ann.prefetch_queries.len == 0) {
+                // No SQL queries — 1-RT with no prefetch (handle_render only).
+                try w.print("    .{{ .queries = &.{{}} }}, // .{s} — no SQL\n", .{name});
                 continue;
             }
 
