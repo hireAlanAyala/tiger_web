@@ -352,10 +352,8 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
 
         fn try_dispatch_v2(server: *Server, conn: *Connection) void {
             if (!App.sidecar_enabled or !App.protocol_v2) unreachable;
-            log.debug("try_dispatch_v2: fd={d}", .{conn.fd});
 
             const entry = server.dispatch_v2.acquire_entry() orelse {
-                log.debug("try_dispatch_v2: no entry, suspending fd={d}", .{conn.fd});
                 server.suspend_connection(conn);
                 return;
             };
@@ -416,10 +414,7 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
                     }
                 }
             }
-            const op = operation orelse {
-                log.debug("1rt: no route match", .{});
-                return false;
-            };
+            const op = operation orelse return false;
 
             // Build a minimal Message with operation + id.
             var msg = std.mem.zeroes(message.Message);

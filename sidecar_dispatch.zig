@@ -837,7 +837,6 @@ pub fn SidecarDispatchType(comptime StorageParam: type, comptime Bus: type) type
         /// Parse combined handle+render RESULT.
         /// Format: [status_len:2 BE][status][session_action:1][write_count:1][writes...][html to end]
         fn parse_combined_result(_: *Self, entry: *Entry, data: []const u8) void {
-            log.debug("parse_combined_result: data.len={d}", .{data.len});
             if (data.len < 4) {
                 entry.handle_status = .storage_error;
                 entry.stage = .combined_complete;
@@ -882,9 +881,7 @@ pub fn SidecarDispatchType(comptime StorageParam: type, comptime Bus: type) type
                     if (wpos >= write_data.len) break;
                     const param_count = write_data[wpos];
                     wpos += 1;
-                    log.debug("parse_combined: write sql_len={d} param_count={d} wpos_before_params={d}", .{ sql_len, param_count, wpos });
                     wpos = @import("sidecar.zig").SidecarClientType(Bus).skip_params(write_data, wpos, param_count) orelse break;
-                    log.debug("parse_combined: wpos_after_params={d} write_data.len={d}", .{ wpos, write_data.len });
                 }
                 const writes_len = wpos;
                 const copy_len = @min(writes_len, entry.handle_buf.len);
@@ -907,9 +904,6 @@ pub fn SidecarDispatchType(comptime StorageParam: type, comptime Bus: type) type
             entry.combined_html_offset = html_start;
             entry.combined_html_len = html_len;
             entry.is_combined = true;
-            log.debug("parse_combined_result: status={s} write_count={d} html_offset={d} html_len={d}", .{
-                @tagName(entry.handle_status), entry.handle_write_count, html_start, html_len,
-            });
 
             entry.stage = .combined_complete;
         }
