@@ -2095,25 +2095,49 @@ fn emit_prefetch_zig(
         \\
     );
 
-    // Build a map from operation name → prefetch annotation.
-    const operation_count = valid_operations.len;
-    try w.print("pub const specs = [_]?PrefetchSpec{{\n", .{});
+    // Emit specs indexed by enum VALUE (not declaration order).
+    // The Operation enum may have non-sequential values, so we
+    // compute the max value at comptime and emit a fixed-size array.
+    const max_enum_value = comptime blk: {
+        const fields = @typeInfo(Operation).@"enum".fields;
+        var max: usize = 0;
+        for (fields) |f| {
+            if (f.value > max) max = f.value;
+        }
+        break :blk max;
+    };
+    const spec_count = max_enum_value + 1;
 
-    for (valid_operations) |op_name| {
-        if (std.mem.eql(u8, op_name, "root")) {
+    // Build a comptime map: enum value → operation name.
+    const enum_names = comptime blk: {
+        var names: [spec_count]?[]const u8 = .{null} ** spec_count;
+        for (@typeInfo(Operation).@"enum".fields) |f| {
+            names[f.value] = f.name;
+        }
+        break :blk names;
+    };
+
+    try w.print("pub const specs = [{d}]?PrefetchSpec{{\n", .{spec_count});
+
+    for (enum_names, 0..) |maybe_name, val| {
+        if (maybe_name == null) {
+            try w.print("    null, // unused value {d}\n", .{val});
+            continue;
+        }
+        if (std.mem.eql(u8, maybe_name.?, "root")) {
             try w.print("    null, // .root\n", .{});
             continue;
         }
 
-        // Find the prefetch annotation for this operation.
+        const name = maybe_name.?;
         const prefetch_ann: ?Annotation = for (annotations) |ann| {
-            if (ann.phase == .prefetch and std.mem.eql(u8, ann.operation, op_name)) break ann;
+            if (ann.phase == .prefetch and std.mem.eql(u8, ann.operation, name)) break ann;
         } else null;
 
         if (prefetch_ann) |ann| {
             if (ann.dynamic_prefetch or ann.prefetch_queries.len == 0) {
                 try w.print("    null, // .{s} — {s}\n", .{
-                    op_name,
+                    name,
                     if (ann.dynamic_prefetch) "@dynamic-prefetch" else "no queries",
                 });
                 continue;
@@ -2142,16 +2166,16 @@ fn emit_prefetch_zig(
                 try w.print("            .key = \"{s}\",\n", .{q.key});
                 try w.print("        }},\n", .{});
             }
-            try w.print("    }} }}, // .{s}\n", .{op_name});
+            try w.print("    }} }}, // .{s}\n", .{name});
         } else {
             // No prefetch annotation — some operations have none (e.g., logout).
             // Emit a spec with no queries (framework skips prefetch).
-            try w.print("    .{{ .queries = &.{{}} }}, // .{s} — no prefetch\n", .{op_name});
+            try w.print("    .{{ .queries = &.{{}} }}, // .{s} — no prefetch\n", .{name});
         }
     }
 
     try w.print("}};\n\n", .{});
-    try w.print("pub const operation_count = {d};\n", .{operation_count});
+    try w.print("pub const operation_count = {d};\n", .{spec_count});
 
     const file = try std.fs.cwd().createFile(out_path, .{});
     defer file.close();

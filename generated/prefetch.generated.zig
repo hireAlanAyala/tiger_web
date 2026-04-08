@@ -27,7 +27,7 @@ pub const PrefetchSpec = struct {
     queries: []const QuerySpec,
 };
 
-pub const specs = [_]?PrefetchSpec{
+pub const specs = [25]?PrefetchSpec{
     null, // .root
     .{ .queries = &.{
         .{
@@ -79,54 +79,6 @@ pub const specs = [_]?PrefetchSpec{
     } }, // .get_product_inventory
     .{ .queries = &.{
         .{
-            .sql = "SELECT id, name, description, price_cents, inventory, version, active FROM products WHERE id = ?1",
-            .mode = .query,
-            .params = &.{.{ .source = .id, .field = "", .int_val = 0 }},
-            .key = "source",
-        },
-        .{
-            .sql = "SELECT id, name, description, price_cents, inventory, version, active FROM products WHERE id = ?1",
-            .mode = .query,
-            .params = &.{.{ .source = .body_field, .field = "target_id", .int_val = 0 }},
-            .key = "target",
-        },
-    } }, // .transfer_inventory
-    null, // .create_order — no queries
-    .{ .queries = &.{
-        .{
-            .sql = "SELECT id, total_cents, items_len, status, timeout_at, payment_ref FROM orders WHERE id = ?1",
-            .mode = .query,
-            .params = &.{.{ .source = .id, .field = "", .int_val = 0 }},
-            .key = "order",
-        },
-    } }, // .get_order
-    .{ .queries = &.{
-        .{
-            .sql = "SELECT id, total_cents, items_len, status, timeout_at, payment_ref FROM orders ORDER BY id LIMIT ?1",
-            .mode = .query_all,
-            .params = &.{.{ .source = .literal_int, .field = "", .int_val = 50 }},
-            .key = "orders",
-        },
-    } }, // .list_orders
-    .{ .queries = &.{
-        .{
-            .sql = "SELECT id, total_cents, items_len, status, timeout_at, payment_ref FROM orders WHERE id = ?1",
-            .mode = .query,
-            .params = &.{.{ .source = .id, .field = "", .int_val = 0 }},
-            .key = "order",
-        },
-    } }, // .complete_order
-    .{ .queries = &.{
-        .{
-            .sql = "SELECT id, total_cents, items_len, status, timeout_at, payment_ref FROM orders WHERE id = ?1",
-            .mode = .query,
-            .params = &.{.{ .source = .id, .field = "", .int_val = 0 }},
-            .key = "order",
-        },
-    } }, // .cancel_order
-    null, // .search_products — @dynamic-prefetch
-    .{ .queries = &.{
-        .{
             .sql = "SELECT id FROM collections WHERE id = ?1",
             .mode = .query,
             .params = &.{.{ .source = .id, .field = "", .int_val = 0 }},
@@ -175,6 +127,54 @@ pub const specs = [_]?PrefetchSpec{
     } }, // .remove_collection_member
     .{ .queries = &.{
         .{
+            .sql = "SELECT id, name, description, price_cents, inventory, version, active FROM products WHERE id = ?1",
+            .mode = .query,
+            .params = &.{.{ .source = .id, .field = "", .int_val = 0 }},
+            .key = "source",
+        },
+        .{
+            .sql = "SELECT id, name, description, price_cents, inventory, version, active FROM products WHERE id = ?1",
+            .mode = .query,
+            .params = &.{.{ .source = .body_field, .field = "target_id", .int_val = 0 }},
+            .key = "target",
+        },
+    } }, // .transfer_inventory
+    null, // .create_order — no queries
+    .{ .queries = &.{
+        .{
+            .sql = "SELECT id, total_cents, items_len, status, timeout_at, payment_ref FROM orders WHERE id = ?1",
+            .mode = .query,
+            .params = &.{.{ .source = .id, .field = "", .int_val = 0 }},
+            .key = "order",
+        },
+    } }, // .get_order
+    .{ .queries = &.{
+        .{
+            .sql = "SELECT id, total_cents, items_len, status, timeout_at, payment_ref FROM orders ORDER BY id LIMIT ?1",
+            .mode = .query_all,
+            .params = &.{.{ .source = .literal_int, .field = "", .int_val = 50 }},
+            .key = "orders",
+        },
+    } }, // .list_orders
+    .{ .queries = &.{
+        .{
+            .sql = "SELECT id, total_cents, items_len, status, timeout_at, payment_ref FROM orders WHERE id = ?1",
+            .mode = .query,
+            .params = &.{.{ .source = .id, .field = "", .int_val = 0 }},
+            .key = "order",
+        },
+    } }, // .complete_order
+    .{ .queries = &.{
+        .{
+            .sql = "SELECT id, total_cents, items_len, status, timeout_at, payment_ref FROM orders WHERE id = ?1",
+            .mode = .query,
+            .params = &.{.{ .source = .id, .field = "", .int_val = 0 }},
+            .key = "order",
+        },
+    } }, // .cancel_order
+    null, // .search_products — @dynamic-prefetch
+    .{ .queries = &.{
+        .{
             .sql = "SELECT id, name, description, price_cents, inventory, version, active FROM products WHERE active = 1 ORDER BY id LIMIT ?1",
             .mode = .query_all,
             .params = &.{.{ .source = .literal_int, .field = "", .int_val = 50 }},
@@ -193,7 +193,6 @@ pub const specs = [_]?PrefetchSpec{
             .key = "orders",
         },
     } }, // .page_load_dashboard
-    null, // .page_load_login — no queries
     null, // .request_login_code — no queries
     .{ .queries = &.{
         .{
@@ -204,6 +203,7 @@ pub const specs = [_]?PrefetchSpec{
         },
     } }, // .verify_login_code
     null, // .logout — no queries
+    null, // .page_load_login — no queries
 };
 
 pub const operation_count = 25;
