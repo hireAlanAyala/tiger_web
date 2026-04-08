@@ -184,6 +184,9 @@ pub fn SidecarDispatchType(comptime Bus: type) type {
             var args_buf: [args_max]u8 = undefined;
             var pos: usize = 0;
 
+            assert(path.len <= http.max_header_size);
+            assert(body.len <= http.body_max);
+
             args_buf[pos] = @intFromEnum(method);
             pos += 1;
             std.mem.writeInt(u16, args_buf[pos..][0..2], @intCast(path.len), .big);
@@ -714,7 +717,7 @@ pub fn SidecarDispatchType(comptime Bus: type) type {
             const base = @intFromPtr(&self.entries);
             const ptr = @intFromPtr(entry);
             assert(ptr >= base);
-            const idx = (ptr - base) / @sizeOf(Entry);
+            const idx = @divExact(ptr - base, @sizeOf(Entry));
             assert(idx < max_entries);
             return @intCast(idx);
         }

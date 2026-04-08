@@ -362,15 +362,13 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
             if (server.try_dispatch_1rt(entry, conn, method, path, body)) return;
 
             // 2-RT fallback: send route_prefetch CALL to sidecar.
-            if (!server.shm_dispatch.start_request_2rt(entry, method, path, body, @ptrCast(conn))) {
+            if (!server.shm_dispatch.start_request_2rt(entry, method, path, body, @ptrCast(@alignCast(conn)))) {
                 entry.reset();
                 server.suspend_connection(conn);
                 return;
             }
         }
 
-        /// 1-RT dispatch: route natively, execute prefetch SQL, send
-        /// combined handle_render CALL. Returns true if dispatched.
         /// 1-RT dispatch: route natively, execute prefetch SQL, send
         /// combined handle_render CALL. Returns true if dispatched.
         fn try_dispatch_1rt(
@@ -412,7 +410,7 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
                 body,
                 rows_buf[0..prefetch_result.rows_len],
                 prefetch_result.row_set_count,
-                @ptrCast(conn),
+                @ptrCast(@alignCast(conn)),
             );
         }
 
@@ -441,8 +439,6 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
             return null;
         }
 
-        /// Execute prefetch SQL queries and serialize row sets into rows_buf.
-        /// Pure data — no dispatch, no state mutation.
         /// Execute prefetch SQL queries and serialize row sets into rows_buf.
         fn execute_prefetch_queries(
             storage: *Storage,
@@ -536,13 +532,10 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
             return .{ .len = pos, .count = count };
         }
 
-        /// Build a JSON array string from a body field's array of objects.
-        /// Given body=`{"items":[{"product_id":"abc"},{"product_id":"def"}]}`,
-        /// field="items", subfield="product_id", returns `["abc","def"]`.
-        /// Uses std.json for safe parsing. Returns null on any error.
         /// Build a JSON array from a body field's array of objects.
         /// E.g. body=`{"items":[{"pid":"a"},{"pid":"b"}]}`,
         /// field="items", subfield="pid" → `["a","b"]`.
+        /// Returns null on malformed input.
         fn build_json_array_param(body: []const u8, field: []const u8, subfield: []const u8, out_buf: []u8) ?[]const u8 {
             assert(field.len > 0);
             assert(subfield.len > 0);
@@ -601,9 +594,15 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
             if (vpos >= body.len or body[vpos] != '"') return null;
             vpos += 1;
             const val_start = vpos;
-            while (vpos < body.len and body[vpos] != '"') : (vpos += 1) {
-                if (body[vpos] == '\\') vpos += 1;
+            while (vpos < body.len) {
+                if (body[vpos] == '"') break;
+                if (body[vpos] == '\\') {
+                    vpos += 1; // Skip escaped character.
+                    if (vpos >= body.len) return null; // Unterminated escape.
+                }
+                vpos += 1;
             }
+            if (vpos >= body.len) return null; // Unterminated string.
             return body[val_start..vpos];
         }
 

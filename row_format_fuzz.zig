@@ -352,8 +352,8 @@ fn fuzz_skip_params(prng: *PRNG, stats: *Stats) void {
                     std.mem.writeInt(u64, buf[pos..][0..8], prng.int(u64), .little);
                     pos += 8;
                 },
-                2 => { // text
-                    const tlen = prng.range_inclusive(u16, 0, 32);
+                2 => { // text — occasionally test large lengths to hit u16 boundary.
+                    const tlen = if (prng.boolean()) prng.range_inclusive(u16, 0, 32) else prng.range_inclusive(u16, 0, 512);
                     buf[pos] = @intFromEnum(TypeTag.text);
                     pos += 1;
                     if (pos + 2 + tlen > buf.len) break;
@@ -364,8 +364,8 @@ fn fuzz_skip_params(prng: *PRNG, stats: *Stats) void {
                     }
                     pos += tlen;
                 },
-                3 => { // blob
-                    const blen = prng.range_inclusive(u16, 0, 32);
+                3 => { // blob — occasionally test large lengths.
+                    const blen = if (prng.boolean()) prng.range_inclusive(u16, 0, 32) else prng.range_inclusive(u16, 0, 512);
                     buf[pos] = @intFromEnum(TypeTag.blob);
                     pos += 1;
                     if (pos + 2 + blen > buf.len) break;
@@ -381,7 +381,8 @@ fn fuzz_skip_params(prng: *PRNG, stats: *Stats) void {
         }
         const result = protocol.skip_params(&buf, 0, count);
         if (result) |end_pos| {
-            assert(end_pos <= pos);
+            // Exact consumption: skip_params must land at the end of what we built.
+            assert(end_pos == pos);
             stats.skip_params_valid += 1;
         } else {
             stats.skip_params_rejected += 1;
