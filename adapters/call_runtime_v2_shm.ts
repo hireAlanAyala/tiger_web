@@ -17,6 +17,10 @@ const _encoder = new TextEncoder();
 
 const FRAME_MAX = 256 * 1024;
 
+// Pre-computed hex lookup — avoids toString(16) + padStart per byte.
+const _hexTable: string[] = new Array(256);
+for (let i = 0; i < 256; i++) _hexTable[i] = i.toString(16).padStart(2, "0");
+
 // --- Per-request state ---
 
 interface RequestState {
@@ -31,6 +35,21 @@ interface RequestState {
 }
 
 const requests = new Map<number, RequestState>();
+
+// Pre-allocated objects for handle_render hot path — reduces GC pressure.
+const _writes: Array<[string, ...any[]]> = [];
+const _emptyRows: any[] = [];
+const _emptyParams: Record<string, string> = {};
+const _handleCtx: any = {
+  operation: "", id: "", body: {}, params: _emptyParams,
+  rows: _emptyRows, prefetched: {},
+  write: (decl: [string, ...any[]]) => { _writes.push(decl); },
+};
+const _writeDb = { execute: (...a: any[]) => { _writes.push(a as any); } };
+const _renderCtx: any = {
+  operation: "", id: "", status: "", body: {}, params: _emptyParams,
+  rows: _emptyRows, prefetched: {}, is_sse: false,
+};
 
 // Reverse map: operation int value → operation name.
 const reverseOpMap: Record<number, string> = {};
@@ -109,16 +128,17 @@ client.startPolling();
 console.log("[v2-shm] polling started");
 
 // --- Result builder ---
+// Pre-allocated response buffer — reused across calls (single-threaded).
+// Layout: [tag:1][request_id:4 BE][flag:1][payload...]
+const _resultBuf = new Uint8Array(FRAME_MAX);
+const _resultDv = new DataView(_resultBuf.buffer);
 
 function buildResult(requestId: number, flag: number, data: Uint8Array): Uint8Array {
-  const len = 1 + 4 + 1 + data.length;
-  const buf = new Uint8Array(len);
-  const dv = new DataView(buf.buffer);
-  buf[0] = 0x11; // RESULT tag
-  dv.setUint32(1, requestId, false);
-  buf[5] = flag;
-  if (data.length > 0) buf.set(data, 6);
-  return buf;
+  _resultBuf[0] = 0x11; // RESULT tag
+  _resultDv.setUint32(1, requestId, false);
+  _resultBuf[5] = flag;
+  if (data.length > 0) _resultBuf.set(data, 6);
+  return _resultBuf.subarray(0, 6 + data.length);
 }
 
 // --- Route ---
@@ -515,9 +535,7 @@ function dispatchHandleRender(requestId: number, args: Uint8Array): Uint8Array {
 
   // Decode id (16 bytes LE → hex string, no dashes).
   let id = "";
-  for (let i = 15; i >= 0; i--) {
-    id += args[pos + i].toString(16).padStart(2, "0");
-  }
+  for (let i = 15; i >= 0; i--) id += _hexTable[args[pos + i]];
   pos += 16;
 
   const bodyLen = dv.getUint16(pos, false); pos += 2;
@@ -557,18 +575,16 @@ function dispatchHandleRender(requestId: number, args: Uint8Array): Uint8Array {
 
   const mod = modules[opName];
 
-  // Handle phase.
-  const writes: Array<[string, ...any[]]> = [];
-  const ctx = {
-    operation: opName, id, body, params: {},
-    rows: [], prefetched,
-    write: (decl: [string, ...any[]]) => { writes.push(decl); },
-  };
+  // Handle phase — reuse write array to reduce GC.
+  _writes.length = 0;
+  const ctx = _handleCtx;
+  ctx.operation = opName; ctx.id = id; ctx.body = body;
+  ctx.prefetched = prefetched; ctx.rows = _emptyRows;
 
   let status = "ok";
   let sessionAction = 0;
   if (mod?.handle) {
-    const r = mod.handle(ctx, { execute: (...a: any[]) => ctx.write(a as any) });
+    const r = mod.handle(ctx, _writeDb);
     if (typeof r === "string") status = r || "ok";
     else if (r && typeof r === "object") {
       status = (r as any).status || "ok";
@@ -578,43 +594,46 @@ function dispatchHandleRender(requestId: number, args: Uint8Array): Uint8Array {
     }
   }
 
-  // Render phase.
+  // Render phase — reuse pre-allocated ctx.
   let html = "";
   if (mod?.render) {
-    html = mod.render({
-      operation: opName, id, status, body, params: {},
-      rows: [], prefetched, is_sse: false,
-    }) || "";
+    const rc = _renderCtx;
+    rc.operation = opName; rc.id = id; rc.status = status;
+    rc.body = body; rc.prefetched = prefetched;
+    html = mod.render(rc) || "";
   }
 
-  // Build combined RESULT: [status_len:2 BE][status][session_action:1][write_count:1][writes...][html]
+  // Build RESULT directly into pre-allocated buffer.
+  // Layout: [tag:1][request_id:4 BE][flag:1][status_len:2 BE][status][session:1][write_count:1][writes...][html]
+  _resultBuf[0] = 0x11;
+  _resultDv.setUint32(1, requestId, false);
+  _resultBuf[5] = 0x00; // success flag
+  let rpos = 6; // after RESULT header
+
   const statusBytes = _encoder.encode(status);
-  const htmlBytes = _encoder.encode(html);
-  const buf = new Uint8Array(FRAME_MAX);
-  const bufDv = new DataView(buf.buffer);
-  let rpos = 0;
-  bufDv.setUint16(rpos, statusBytes.length, false); rpos += 2;
-  buf.set(statusBytes, rpos); rpos += statusBytes.length;
-  buf[rpos] = sessionAction; rpos += 1;
-  buf[rpos] = writes.length; rpos += 1;
-  for (const w of writes) {
+  _resultDv.setUint16(rpos, statusBytes.length, false); rpos += 2;
+  _resultBuf.set(statusBytes, rpos); rpos += statusBytes.length;
+  _resultBuf[rpos] = sessionAction; rpos += 1;
+  _resultBuf[rpos] = _writes.length; rpos += 1;
+  for (const w of _writes) {
     const sqlB = _encoder.encode(String(w[0]));
     const wParams = w.slice(1);
-    bufDv.setUint16(rpos, sqlB.length, false); rpos += 2;
-    buf.set(sqlB, rpos); rpos += sqlB.length;
-    buf[rpos] = wParams.length; rpos += 1;
+    _resultDv.setUint16(rpos, sqlB.length, false); rpos += 2;
+    _resultBuf.set(sqlB, rpos); rpos += sqlB.length;
+    _resultBuf[rpos] = wParams.length; rpos += 1;
     for (const p of wParams) {
-      if (p === null || p === undefined) { buf[rpos] = 0x05; rpos += 1; }
-      else if (typeof p === "number") { buf[rpos] = 0x01; rpos += 1; bufDv.setBigInt64(rpos, BigInt(Math.trunc(p)), true); rpos += 8; }
-      else if (typeof p === "boolean") { buf[rpos] = 0x01; rpos += 1; bufDv.setBigInt64(rpos, BigInt(p ? 1 : 0), true); rpos += 8; }
-      else if (typeof p === "string") { buf[rpos] = 0x03; rpos += 1; const s = _encoder.encode(String(p)); bufDv.setUint16(rpos, s.length, false); rpos += 2; buf.set(s, rpos); rpos += s.length; }
-      else if (typeof p === "bigint") { buf[rpos] = 0x01; rpos += 1; bufDv.setBigInt64(rpos, p, true); rpos += 8; }
-      else if (p instanceof Uint8Array) { buf[rpos] = 0x04; rpos += 1; bufDv.setUint16(rpos, p.length, false); rpos += 2; buf.set(p, rpos); rpos += p.length; }
-      else { buf[rpos] = 0x05; rpos += 1; }
+      if (p === null || p === undefined) { _resultBuf[rpos] = 0x05; rpos += 1; }
+      else if (typeof p === "number") { _resultBuf[rpos] = 0x01; rpos += 1; _resultDv.setBigInt64(rpos, BigInt(Math.trunc(p)), true); rpos += 8; }
+      else if (typeof p === "boolean") { _resultBuf[rpos] = 0x01; rpos += 1; _resultDv.setBigInt64(rpos, BigInt(p ? 1 : 0), true); rpos += 8; }
+      else if (typeof p === "string") { _resultBuf[rpos] = 0x03; rpos += 1; const s = _encoder.encode(String(p)); _resultDv.setUint16(rpos, s.length, false); rpos += 2; _resultBuf.set(s, rpos); rpos += s.length; }
+      else if (typeof p === "bigint") { _resultBuf[rpos] = 0x01; rpos += 1; _resultDv.setBigInt64(rpos, p, true); rpos += 8; }
+      else if (p instanceof Uint8Array) { _resultBuf[rpos] = 0x04; rpos += 1; _resultDv.setUint16(rpos, p.length, false); rpos += 2; _resultBuf.set(p, rpos); rpos += p.length; }
+      else { _resultBuf[rpos] = 0x05; rpos += 1; }
     }
   }
-  // HTML as remainder.
-  buf.set(htmlBytes, rpos); rpos += htmlBytes.length;
+  // HTML directly into result buffer — no intermediate encode + copy.
+  const htmlLen = _encoder.encodeInto(html, _resultBuf.subarray(rpos)).written ?? 0;
+  rpos += htmlLen;
 
-  return buildResult(requestId, 0x00, buf.subarray(0, rpos));
+  return _resultBuf.subarray(0, rpos);
 }
