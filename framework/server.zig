@@ -358,20 +358,21 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
                 return;
             };
 
-            // Parse HTTP to get method/path/body for the route CALL.
+            // Parse HTTP to extract method/path/body for dispatch.
             const parsed = switch (http.parse_request(conn.recv_buf[0..conn.recv_pos])) {
                 .complete => |p| p,
                 .incomplete, .invalid => unreachable,
             };
             conn.is_datastar_request = parsed.is_datastar_request;
+            const method = parsed.method;
+            const path = parsed.path;
+            const body = parsed.body;
 
             // 1-RT path: native route + prefetch SQL + combined CALL.
-            if (server.try_dispatch_1rt(entry, conn, parsed.method, parsed.path, parsed.body)) return;
+            if (server.try_dispatch_1rt(entry, conn, method, path, body)) return;
 
             // 2-RT fallback: send route_prefetch CALL to sidecar.
-            // Sidecar runs route() + prefetch(), returns SQL declarations.
-            // Server executes SQL, then sends handle_render CALL.
-            if (!server.dispatch_v2.start_request_2rt(entry, parsed.method, parsed.path, parsed.body, @ptrCast(conn))) {
+            if (!server.dispatch_v2.start_request_2rt(entry, method, path, body, @ptrCast(conn))) {
                 entry.reset();
                 server.suspend_connection(conn);
                 return;
@@ -472,14 +473,13 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
                             param_count += 1;
                         },
                         .body_json_array => {
-                            // Parse body JSON, extract array field, map subfield,
-                            // build JSON array string for json_each(?1).
-                            var json_arr_buf: [4096]u8 = undefined;
-                            const json_val = build_json_array_param(body, p.field, p.subfield, &json_arr_buf) orelse return false;
+                            // Build JSON array string directly into param_buf
+                            // (no intermediate buffer).
                             param_buf[param_pos] = @intFromEnum(@import("../protocol.zig").TypeTag.text);
-                            std.mem.writeInt(u16, param_buf[param_pos + 1 ..][0..2], @intCast(json_val.len), .big);
-                            param_pos += 3;
-                            @memcpy(param_buf[param_pos..][0..json_val.len], json_val);
+                            param_pos += 3; // skip tag + len (backfill after)
+                            const json_val = build_json_array_param(body, p.field, p.subfield, param_buf[param_pos..]) orelse return false;
+                            // Backfill length.
+                            std.mem.writeInt(u16, param_buf[param_pos - 2 ..][0..2], @intCast(json_val.len), .big);
                             param_pos += json_val.len;
                             param_count += 1;
                         },
@@ -538,58 +538,70 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
         ) ?[]const u8 {
             if (body.len == 0) return null;
 
-            // Parse JSON body using std.json with a fixed-buffer allocator.
-            var fba_buf: [8192]u8 = undefined;
-            var fba = std.heap.FixedBufferAllocator.init(&fba_buf);
-            const parsed = std.json.parseFromSlice(std.json.Value, fba.allocator(), body, .{}) catch return null;
+            // Manual JSON scanner — no allocator, no std.json.
+            // Find "field":[...], iterate objects, extract "subfield":"value".
+            // Outputs: ["val1","val2",...] into out_buf.
 
-            // Navigate to the array field.
-            const root = switch (parsed.value) {
-                .object => |obj| obj,
-                else => return null,
+            // Find the array field: "field":[
+            const field_needle = blk: {
+                var buf: [256]u8 = undefined;
+                const prefix = std.fmt.bufPrint(&buf, "\"{s}\":", .{field}) catch return null;
+                break :blk prefix;
             };
-            const array_val = root.get(field) orelse return null;
-            const array = switch (array_val) {
-                .array => |a| a,
-                else => return null,
-            };
+            const field_pos = std.mem.indexOf(u8, body, field_needle) orelse return null;
+            var scan = field_pos + field_needle.len;
+            // Skip whitespace to find [
+            while (scan < body.len and (body[scan] == ' ' or body[scan] == '\t')) scan += 1;
+            if (scan >= body.len or body[scan] != '[') return null;
+            scan += 1;
 
-            // Build JSON array of subfield values: ["val1","val2",...]
+            // Build output array.
             var pos: usize = 0;
             if (pos >= out_buf.len) return null;
             out_buf[pos] = '[';
             pos += 1;
+            var first = true;
 
-            for (array.items, 0..) |item, i| {
-                const obj = switch (item) {
-                    .object => |o| o,
-                    else => continue,
-                };
-                const val = obj.get(subfield) orelse continue;
-                const str = switch (val) {
-                    .string => |s| s,
-                    else => continue,
-                };
+            // Iterate array elements: find each {"subfield":"value"}
+            const sf_needle = blk: {
+                var buf: [256]u8 = undefined;
+                const prefix = std.fmt.bufPrint(&buf, "\"{s}\":", .{subfield}) catch return null;
+                break :blk prefix;
+            };
 
-                if (i > 0) {
+            while (scan < body.len and body[scan] != ']') {
+                // Find next subfield occurrence.
+                const sf_pos = std.mem.indexOfPos(u8, body, scan, sf_needle) orelse break;
+                var vpos = sf_pos + sf_needle.len;
+                while (vpos < body.len and (body[vpos] == ' ' or body[vpos] == '\t')) vpos += 1;
+                if (vpos >= body.len or body[vpos] != '"') { scan = vpos + 1; continue; }
+                vpos += 1; // skip opening "
+                const val_start = vpos;
+                while (vpos < body.len and body[vpos] != '"') : (vpos += 1) {
+                    if (body[vpos] == '\\') vpos += 1;
+                }
+                const val = body[val_start..vpos];
+
+                if (!first) {
                     if (pos >= out_buf.len) return null;
                     out_buf[pos] = ',';
                     pos += 1;
                 }
-                // Write quoted string: "value"
-                if (pos + 2 + str.len > out_buf.len) return null;
+                if (pos + 2 + val.len > out_buf.len) return null;
                 out_buf[pos] = '"';
                 pos += 1;
-                @memcpy(out_buf[pos..][0..str.len], str);
-                pos += str.len;
+                @memcpy(out_buf[pos..][0..val.len], val);
+                pos += val.len;
                 out_buf[pos] = '"';
                 pos += 1;
+                first = false;
+
+                scan = vpos + 1;
             }
 
             if (pos >= out_buf.len) return null;
             out_buf[pos] = ']';
             pos += 1;
-
             return out_buf[0..pos];
         }
 
