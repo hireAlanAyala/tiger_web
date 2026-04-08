@@ -106,12 +106,27 @@ Remove `protocol_v2` and `protocol_v2_shm` from app.zig. Sidecar mode
 
 ## Verification
 
-After each step:
-1. `zig build -Dsidecar=true -Dpipeline-slots=8 -Doptimize=ReleaseSafe` compiles
-2. `zig build scan -- examples/ecommerce-ts/handlers/` passes
-3. `zig build unit-test` passes
-4. Smoke test: curl GET + POST through SHM sidecar
-5. Final: `zig build load` benchmark matches pre-consolidation numbers
+Run the gate script after EVERY deletion step:
+
+```bash
+sh scripts/consolidation-gate.sh quick   # compile + scan + unit tests + smoke (30s)
+sh scripts/consolidation-gate.sh         # full: adds throughput baseline check (90s)
+```
+
+The gate checks:
+1. Compiles with `-Dsidecar=true -Dpipeline-slots=8 -Doptimize=ReleaseSafe`
+2. Annotation scan passes with zero errors
+3. Unit tests pass
+4. Smoke: GET returns HTML, POST creates product, keep-alive works
+5. Throughput: get_product >70K, default_mix >40K (fail = regression)
+
+Run `quick` between each sub-step. Run `full` before each commit.
+If throughput drops below the baseline, the step introduced a
+regression — investigate before proceeding.
+
+**Do not batch deletions.** Delete one file or one stage at a time,
+run the gate, commit. Small commits make bisection trivial if a
+regression is found later.
 
 ## Risk
 
