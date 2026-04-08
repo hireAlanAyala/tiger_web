@@ -197,13 +197,30 @@ Change in `main.zig`: replace `"tiger_web.wal"` with
 `db_path ++ ".wal"`. Load test and perf script cleanup already
 delete the db file — the paired WAL deletes with it.
 
-## Sidecar: shared memory transport — `docs/plans/draft_sidecar-shm-transport.md`
+## SHM transport: replace busy-poll with io_uring unified wait
 
-Replace Unix socket with mmap + futex. Drop RT1 via manifest routing.
-Typed schemas for type safety + perf. Phase 1: 2-RT protocol (17K).
-Phase 2: shm + futex (25K). Phase 3: typed schemas (26K, +type safety).
-From 25% of native to ~49%. Remaining gap is V8 compute — use Zig/Rust
-if you need more.
+Current: busy-poll `shm_poll_all()` with 0ms epoll timeout. Burns
+100% CPU when idle, starves sidecar on 1-core VPS (1.2K req/s).
+Adaptive 1ms sleep fallback helps idle CPU but doesn't fix 1-core.
+
+Target: io_uring `FUTEX_WAIT` on SHM epoch counter, integrated with
+the epoll event loop. One `io_uring_enter` waits for HTTP socket
+events AND SHM responses simultaneously. Zero spinning, zero CPU
+when idle, fair scheduling on 1-core.
+
+Infrastructure already exists: `io.zig` has `IoUring.submit_futex_wait`
+and `drain_completions`. The SHM bus has the epoch counter. Just need
+to wire the futex wait into the main loop instead of busy-polling.
+
+TigerBeetle pattern: all I/O through one io_uring instance. Network,
+disk, futex — single completion queue. Copy `linux.zig` from TB for
+the clean io_uring abstraction.
+
+Prerequisite: Linux 6.7+ (io_uring FUTEX_WAIT). Keep epoll as fallback
+for older kernels and containers that disable io_uring.
+
+Benefit: eliminates the 1-core vs 2-core trade-off entirely. Kernel
+handles scheduling — no threshold tuning needed.
 
 ## Status-to-HTTP-code mapping — handler returns domain status, framework owns the code
 
