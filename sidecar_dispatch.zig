@@ -28,9 +28,11 @@ pub fn SidecarDispatchType(comptime Bus: type) type {
         const Self = @This();
         const max_entries = @import("framework/constants.zig").pipeline_slots_max;
 
-        // Max result sizes per stage (not frame_max — sized to actual need).
-        const route_result_max = 1 + 16 + message.body_max; // operation + id + body (2-RT route_prefetch stores SQL declarations here)
-        const handle_result_max = 2 + 256 + 1 + 1 + protocol.writes_max * (2 + protocol.sql_max + 1 + 256); // status + session + writes
+        // Max result sizes per stage — derived from domain constants, not literals.
+        const route_result_max = 1 + 16 + message.body_max; // operation + id + body (2-RT stores SQL declarations here)
+        const status_max = 64; // longest status string (e.g. "storage_error")
+        const write_params_max = 16 * (1 + 8); // 16 params × (tag + i64) — matches protocol.zig max_param_size
+        const handle_result_max = 2 + status_max + 1 + 1 + protocol.writes_max * (2 + protocol.sql_max + 1 + write_params_max);
 
         // =============================================================
         // Pipeline entry — per-request state, self-contained

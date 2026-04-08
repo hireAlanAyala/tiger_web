@@ -441,6 +441,7 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
 
         /// Execute prefetch SQL queries and serialize row sets into rows_buf.
         /// Pure data — no dispatch, no state mutation.
+        /// Execute prefetch SQL queries and serialize row sets into rows_buf.
         fn execute_prefetch_queries(
             storage: *Storage,
             spec: *const prefetch_specs.PrefetchSpec,
@@ -448,71 +449,28 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
             body: []const u8,
             rows_buf: *[@import("../protocol.zig").frame_max]u8,
         ) struct { rows_len: usize, row_set_count: u8 } {
-            const proto = @import("../protocol.zig");
             var rows_pos: usize = 0;
             const row_set_count: u8 = @intCast(spec.queries.len);
 
             for (spec.queries) |query| {
                 var param_buf: [4096]u8 = undefined;
-                var param_pos: usize = 0;
-                var param_count: u8 = 0;
-
-                for (query.params) |p| {
-                    switch (p.source) {
-                        .id => {
-                            const id_hex = std.fmt.bufPrint(
-                                param_buf[param_pos + 3 ..][0..32],
-                                "{x:0>32}",
-                                .{msg.id},
-                            ) catch break;
-                            param_buf[param_pos] = @intFromEnum(proto.TypeTag.text);
-                            std.mem.writeInt(u16, param_buf[param_pos + 1 ..][0..2], @intCast(id_hex.len), .big);
-                            param_pos += 3 + id_hex.len;
-                            param_count += 1;
-                        },
-                        .body_field => {
-                            const val = json_extract_string(body, p.field) orelse break;
-                            param_buf[param_pos] = @intFromEnum(proto.TypeTag.text);
-                            std.mem.writeInt(u16, param_buf[param_pos + 1 ..][0..2], @intCast(val.len), .big);
-                            param_pos += 3;
-                            @memcpy(param_buf[param_pos..][0..val.len], val);
-                            param_pos += val.len;
-                            param_count += 1;
-                        },
-                        .literal_int => {
-                            param_buf[param_pos] = @intFromEnum(proto.TypeTag.integer);
-                            std.mem.writeInt(i64, param_buf[param_pos + 1 ..][0..8], p.int_val, .little);
-                            param_pos += 9;
-                            param_count += 1;
-                        },
-                        .body_json_array => {
-                            param_buf[param_pos] = @intFromEnum(proto.TypeTag.text);
-                            param_pos += 3;
-                            const json_val = build_json_array_param(body, p.field, p.subfield, param_buf[param_pos..]) orelse break;
-                            std.mem.writeInt(u16, param_buf[param_pos - 2 ..][0..2], @intCast(json_val.len), .big);
-                            param_pos += json_val.len;
-                            param_count += 1;
-                        },
-                        .none => {},
-                    }
-                }
+                const params = assemble_query_params(query.params, msg, body, &param_buf);
 
                 const result = storage.query_raw(
                     query.sql,
-                    param_buf[0..param_pos],
-                    param_count,
+                    param_buf[0..params.len],
+                    params.count,
                     query.mode,
                     rows_buf[rows_pos..],
                 );
 
                 if (result) |rows| {
                     rows_pos += rows.len;
-                } else {
-                    if (rows_pos + 6 <= rows_buf.len) {
-                        std.mem.writeInt(u16, rows_buf[rows_pos..][0..2], 0, .big);
-                        std.mem.writeInt(u32, rows_buf[rows_pos + 2 ..][0..4], 0, .big);
-                        rows_pos += 6;
-                    }
+                } else if (rows_pos + 6 <= rows_buf.len) {
+                    // Empty row set header: col_count=0, row_count=0.
+                    std.mem.writeInt(u16, rows_buf[rows_pos..][0..2], 0, .big);
+                    std.mem.writeInt(u32, rows_buf[rows_pos + 2 ..][0..4], 0, .big);
+                    rows_pos += 6;
                 }
             }
 
@@ -520,62 +478,96 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
             return .{ .rows_len = rows_pos, .row_set_count = row_set_count };
         }
 
+        /// Assemble binary wire-format params for a prefetch query.
+        /// Returns the param count and total byte length in param_buf.
+        fn assemble_query_params(
+            params: []const prefetch_specs.ParamSpec,
+            msg: *const @import("../message.zig").Message,
+            body: []const u8,
+            param_buf: *[4096]u8,
+        ) struct { len: usize, count: u8 } {
+            const proto = @import("../protocol.zig");
+            var pos: usize = 0;
+            var count: u8 = 0;
+
+            for (params) |p| {
+                switch (p.source) {
+                    .id => {
+                        const id_hex = std.fmt.bufPrint(
+                            param_buf[pos + 3 ..][0..32],
+                            "{x:0>32}",
+                            .{msg.id},
+                        ) catch break;
+                        param_buf[pos] = @intFromEnum(proto.TypeTag.text);
+                        std.mem.writeInt(u16, param_buf[pos + 1 ..][0..2], @intCast(id_hex.len), .big);
+                        pos += 3 + id_hex.len;
+                        count += 1;
+                    },
+                    .body_field => {
+                        const val = json_extract_string(body, p.field) orelse break;
+                        param_buf[pos] = @intFromEnum(proto.TypeTag.text);
+                        std.mem.writeInt(u16, param_buf[pos + 1 ..][0..2], @intCast(val.len), .big);
+                        pos += 3;
+                        @memcpy(param_buf[pos..][0..val.len], val);
+                        pos += val.len;
+                        count += 1;
+                    },
+                    .literal_int => {
+                        param_buf[pos] = @intFromEnum(proto.TypeTag.integer);
+                        std.mem.writeInt(i64, param_buf[pos + 1 ..][0..8], p.int_val, .little);
+                        pos += 9;
+                        count += 1;
+                    },
+                    .body_json_array => {
+                        param_buf[pos] = @intFromEnum(proto.TypeTag.text);
+                        pos += 3;
+                        const json_val = build_json_array_param(body, p.field, p.subfield, param_buf[pos..]) orelse break;
+                        std.mem.writeInt(u16, param_buf[pos - 2 ..][0..2], @intCast(json_val.len), .big);
+                        pos += json_val.len;
+                        count += 1;
+                    },
+                    .none => {},
+                }
+            }
+
+            return .{ .len = pos, .count = count };
+        }
+
         /// Build a JSON array string from a body field's array of objects.
         /// Given body=`{"items":[{"product_id":"abc"},{"product_id":"def"}]}`,
         /// field="items", subfield="product_id", returns `["abc","def"]`.
         /// Uses std.json for safe parsing. Returns null on any error.
-        fn build_json_array_param(
-            body: []const u8,
-            field: []const u8,
-            subfield: []const u8,
-            out_buf: []u8,
-        ) ?[]const u8 {
+        /// Build a JSON array from a body field's array of objects.
+        /// E.g. body=`{"items":[{"pid":"a"},{"pid":"b"}]}`,
+        /// field="items", subfield="pid" → `["a","b"]`.
+        fn build_json_array_param(body: []const u8, field: []const u8, subfield: []const u8, out_buf: []u8) ?[]const u8 {
             if (body.len == 0) return null;
 
-            // Manual JSON scanner — no allocator, no std.json.
-            // Find "field":[...], iterate objects, extract "subfield":"value".
-            // Outputs: ["val1","val2",...] into out_buf.
+            // Build needles: "field": and "subfield":
+            var needle_buf: [512]u8 = undefined;
+            const fn_len = std.fmt.bufPrint(&needle_buf, "\"{s}\":", .{field}) catch return null;
+            const sf_start = fn_len.len;
+            const sf_needle = std.fmt.bufPrint(needle_buf[sf_start..], "\"{s}\":", .{subfield}) catch return null;
 
-            // Find the array field: "field":[
-            const field_needle = blk: {
-                var buf: [256]u8 = undefined;
-                const prefix = std.fmt.bufPrint(&buf, "\"{s}\":", .{field}) catch return null;
-                break :blk prefix;
-            };
-            const field_pos = std.mem.indexOf(u8, body, field_needle) orelse return null;
-            var scan = field_pos + field_needle.len;
-            // Skip whitespace to find [
-            while (scan < body.len and (body[scan] == ' ' or body[scan] == '\t')) scan += 1;
+            // Find "field":[ in body.
+            var scan = (std.mem.indexOf(u8, body, fn_len) orelse return null) + fn_len.len;
+            while (scan < body.len and body[scan] == ' ') scan += 1;
             if (scan >= body.len or body[scan] != '[') return null;
             scan += 1;
 
-            // Build output array.
+            // Output: ["val1","val2",...]
             var pos: usize = 0;
-            if (pos >= out_buf.len) return null;
+            if (out_buf.len == 0) return null;
             out_buf[pos] = '[';
             pos += 1;
             var first = true;
 
-            // Iterate array elements: find each {"subfield":"value"}
-            const sf_needle = blk: {
-                var buf: [256]u8 = undefined;
-                const prefix = std.fmt.bufPrint(&buf, "\"{s}\":", .{subfield}) catch return null;
-                break :blk prefix;
-            };
-
             while (scan < body.len and body[scan] != ']') {
-                // Find next subfield occurrence.
                 const sf_pos = std.mem.indexOfPos(u8, body, scan, sf_needle) orelse break;
-                var vpos = sf_pos + sf_needle.len;
-                while (vpos < body.len and (body[vpos] == ' ' or body[vpos] == '\t')) vpos += 1;
-                if (vpos >= body.len or body[vpos] != '"') { scan = vpos + 1; continue; }
-                vpos += 1; // skip opening "
-                const val_start = vpos;
-                while (vpos < body.len and body[vpos] != '"') : (vpos += 1) {
-                    if (body[vpos] == '\\') vpos += 1;
-                }
-                const val = body[val_start..vpos];
-
+                const val = extract_json_string_value(body, sf_pos + sf_needle.len) orelse {
+                    scan = sf_pos + sf_needle.len + 1;
+                    continue;
+                };
                 if (!first) {
                     if (pos >= out_buf.len) return null;
                     out_buf[pos] = ',';
@@ -583,20 +575,30 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
                 }
                 if (pos + 2 + val.len > out_buf.len) return null;
                 out_buf[pos] = '"';
-                pos += 1;
-                @memcpy(out_buf[pos..][0..val.len], val);
-                pos += val.len;
-                out_buf[pos] = '"';
-                pos += 1;
+                @memcpy(out_buf[pos + 1 ..][0..val.len], val);
+                out_buf[pos + 1 + val.len] = '"';
+                pos += 2 + val.len;
                 first = false;
-
-                scan = vpos + 1;
+                scan = sf_pos + sf_needle.len + val.len + 2;
             }
 
             if (pos >= out_buf.len) return null;
             out_buf[pos] = ']';
-            pos += 1;
-            return out_buf[0..pos];
+            return out_buf[0 .. pos + 1];
+        }
+
+        /// Extract a quoted string value starting at a position in JSON.
+        /// Skips whitespace, expects opening ", returns content up to closing ".
+        fn extract_json_string_value(body: []const u8, start: usize) ?[]const u8 {
+            var vpos = start;
+            while (vpos < body.len and body[vpos] == ' ') vpos += 1;
+            if (vpos >= body.len or body[vpos] != '"') return null;
+            vpos += 1;
+            const val_start = vpos;
+            while (vpos < body.len and body[vpos] != '"') : (vpos += 1) {
+                if (body[vpos] == '\\') vpos += 1;
+            }
+            return body[val_start..vpos];
         }
 
         /// 2-RT: execute SQL declarations from route_prefetch result,
