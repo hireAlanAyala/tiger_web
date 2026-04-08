@@ -195,6 +195,7 @@ static int func_name_index(const uint8_t *name, uint16_t len) {
   if (len == 6 && memcmp(name, "handle", 6) == 0) return 2;
   if (len == 6 && memcmp(name, "render", 6) == 0) return 3;
   if (len == 13 && memcmp(name, "handle_render", 13) == 0) return 4;
+  if (len == 14 && memcmp(name, "route_prefetch", 14) == 0) return 5;
   return -1;
 }
 

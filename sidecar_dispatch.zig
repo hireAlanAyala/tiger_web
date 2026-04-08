@@ -56,6 +56,10 @@ pub fn SidecarDispatchType(comptime StorageParam: type, comptime Bus: type) type
             // 1-RT stage — handle+render combined.
             combined_pending,
             combined_complete,
+            // 2-RT stages — route+prefetch combined, then handle+render.
+            route_prefetch_pending,
+            route_prefetch_complete, // SQL declarations received, execute SQL
+            // After SQL execution → combined_pending for handle_render CALL.
         };
 
         pub const Entry = struct {
@@ -101,6 +105,7 @@ pub fn SidecarDispatchType(comptime StorageParam: type, comptime Bus: type) type
             combined_html_offset: usize = 0,
             combined_html_len: usize = 0,
             is_combined: bool = false, // true = 1-RT path, skip render CALL
+            body_len: u16 = 0, // actual body length for 2-RT path
 
             pub fn reset(self: *Entry) void {
                 const stage_default: Stage = .free;
@@ -126,6 +131,7 @@ pub fn SidecarDispatchType(comptime StorageParam: type, comptime Bus: type) type
                 self.combined_html_offset = 0;
                 self.combined_html_len = 0;
                 self.is_combined = false;
+                self.body_len = 0;
             }
         };
 
@@ -209,6 +215,50 @@ pub fn SidecarDispatchType(comptime StorageParam: type, comptime Bus: type) type
             }
 
             entry.stage = .route_pending;
+            entry.request_id = request_id;
+            entry.connection = connection;
+            return true;
+        }
+
+        /// Start a 2-RT request: send route_prefetch CALL.
+        /// Same args format as start_request (method + path + body).
+        /// The sidecar runs route() + prefetch() and returns SQL declarations.
+        pub fn start_request_2rt(
+            self: *Self,
+            entry: *Entry,
+            method: http.Method,
+            path: []const u8,
+            body: []const u8,
+            connection: *anyopaque,
+        ) bool {
+            const b = self.bus orelse return false;
+
+            const request_id = self.next_request_id;
+            self.next_request_id +%= 1;
+
+            // Build route_prefetch CALL args (same as route CALL).
+            const args_max = 1 + 2 + http.max_header_size + 2 + http.body_max;
+            var args_buf: [args_max]u8 = undefined;
+            var pos: usize = 0;
+
+            args_buf[pos] = @intFromEnum(method);
+            pos += 1;
+            std.mem.writeInt(u16, args_buf[pos..][0..2], @intCast(path.len), .big);
+            pos += 2;
+            @memcpy(args_buf[pos..][0..path.len], path);
+            pos += path.len;
+            std.mem.writeInt(u16, args_buf[pos..][0..2], @intCast(body.len), .big);
+            pos += 2;
+            if (body.len > 0) {
+                @memcpy(args_buf[pos..][0..body.len], body);
+                pos += body.len;
+            }
+
+            if (!self.send_call(b, "route_prefetch", args_buf[0..pos], request_id, self.entry_index(entry))) {
+                return false;
+            }
+
+            entry.stage = .route_prefetch_pending;
             entry.request_id = request_id;
             entry.connection = connection;
             return true;
@@ -313,7 +363,8 @@ pub fn SidecarDispatchType(comptime StorageParam: type, comptime Bus: type) type
                         .route_complete, .prefetch_pending, .prefetch_complete,
                         .sql_executing, .sql_complete, .handle_pending,
                         .handle_complete, .write_pending,
-                        .combined_pending, .combined_complete => {
+                        .combined_pending, .combined_complete,
+                        .route_prefetch_pending, .route_prefetch_complete => {
                             assert(self.pending_mutation_count > 0);
                             self.pending_mutation_count -= 1;
                             self.recompute_lowest_pending_mutation();
@@ -354,6 +405,11 @@ pub fn SidecarDispatchType(comptime StorageParam: type, comptime Bus: type) type
                 .combined_pending => {
                     // Combined RESULT: [status_len:2 BE][status][session_action:1][write_count:1][writes...][html...]
                     self.parse_combined_result(entry, result.data);
+                },
+                .route_prefetch_pending => {
+                    // 2-RT: route+prefetch RESULT contains route info + SQL declarations.
+                    // Parse route result, then store SQL declarations for server to execute.
+                    self.parse_route_prefetch_result(entry, result.data);
                 },
                 else => {
                     log.warn("dispatch: RESULT in unexpected stage {s}", .{@tagName(entry.stage)});
@@ -422,6 +478,10 @@ pub fn SidecarDispatchType(comptime StorageParam: type, comptime Bus: type) type
                     .handle_complete, .combined_complete => {
                         entry.stage = .write_pending;
                     },
+                    // route_prefetch_complete is handled by server's
+                    // process_v2_completions which executes the SQL,
+                    // then sends the handle_render CALL.
+                    .route_prefetch_complete => {},
                     .write_complete => {
                         // 1-RT path: HTML stored in handle_buf — copy to
                         // render_buf now that writes are done.
@@ -499,7 +559,7 @@ pub fn SidecarDispatchType(comptime StorageParam: type, comptime Bus: type) type
         pub fn any_pending(self: *const Self) bool {
             for (&self.entries) |*entry| {
                 switch (entry.stage) {
-                    .route_pending, .prefetch_pending, .handle_pending, .render_pending, .combined_pending => return true,
+                    .route_pending, .prefetch_pending, .handle_pending, .render_pending, .combined_pending, .route_prefetch_pending => return true,
                     else => {},
                 }
             }
@@ -536,7 +596,8 @@ pub fn SidecarDispatchType(comptime StorageParam: type, comptime Bus: type) type
                         .route_complete, .prefetch_pending, .prefetch_complete,
                         .sql_executing, .sql_complete, .handle_pending,
                         .handle_complete, .write_pending,
-                        .combined_pending, .combined_complete => {
+                        .combined_pending, .combined_complete,
+                        .route_prefetch_pending, .route_prefetch_complete => {
                             mutations_pending += 1;
                         },
                         else => {},
@@ -551,6 +612,11 @@ pub fn SidecarDispatchType(comptime StorageParam: type, comptime Bus: type) type
         // =============================================================
         // Frame sending — direct to bus, no SidecarClient
         // =============================================================
+
+        /// Public version for server to send CALLs directly (2-RT path).
+        pub fn send_call_direct(self: *Self, b: *Bus, function_name: []const u8, args: []const u8, request_id: u32, entry_idx: u8) bool {
+            return self.send_call(b, function_name, args, request_id, entry_idx);
+        }
 
         fn send_call(self: *Self, b: *Bus, function_name: []const u8, args: []const u8, request_id: u32, entry_idx: u8) bool {
             if (!b.is_connection_ready(self.connection_index)) {
@@ -804,13 +870,74 @@ pub fn SidecarDispatchType(comptime StorageParam: type, comptime Bus: type) type
             entry.stage = .combined_complete;
         }
 
+        /// Parse 2-RT route+prefetch RESULT.
+        /// Format: [operation:1][id:16 LE][body_len:2 BE][body]
+        ///   [query_count:1][queries: [mode:1][sql_len:2 BE][sql][param_count:1][params...]]
+        ///   [key_count:1][keys: [key_len:1][key_bytes][mode:1]]
+        /// Stores the raw result data for the server to parse and execute SQL.
+        fn parse_route_prefetch_result(self: *Self, entry: *Entry, data: []const u8) void {
+            if (data.len < 20) { // operation(1) + id(16) + body_len(2) + query_count(1)
+                entry.reset();
+                return;
+            }
+
+            var pos: usize = 0;
+            const op = std.meta.intToEnum(message.Operation, data[pos]) catch {
+                entry.reset();
+                return;
+            };
+            pos += 1;
+            if (op == .root) {
+                entry.reset();
+                return;
+            }
+
+            entry.operation = op;
+            entry.msg = std.mem.zeroes(message.Message);
+            entry.msg.operation = op;
+            entry.msg.id = std.mem.readInt(u128, data[pos..][0..16], .little);
+            pos += 16;
+
+            const body_len = std.mem.readInt(u16, data[pos..][0..2], .big);
+            pos += 2;
+            if (pos + body_len > data.len) {
+                entry.reset();
+                return;
+            }
+            // Copy body into msg.body.
+            if (body_len > 0 and body_len <= message.body_max) {
+                @memcpy(entry.msg.body[0..body_len], data[pos..][0..body_len]);
+                entry.body_len = @intCast(body_len);
+            }
+            pos += body_len;
+
+            // Store the remaining data (SQL declarations + keys) in route_buf
+            // for the server to parse and execute.
+            const remaining = data[pos..];
+            const copy_len = @min(remaining.len, entry.route_buf.len);
+            @memcpy(entry.route_buf[0..copy_len], remaining[0..copy_len]);
+            entry.route_len = copy_len;
+
+            entry.sequence = self.next_sequence;
+            self.next_sequence +%= 1;
+            entry.is_mutation = op.is_mutation();
+            if (entry.is_mutation) {
+                self.pending_mutation_count += 1;
+                if (entry.sequence < self.lowest_pending_mutation_seq) {
+                    self.lowest_pending_mutation_seq = entry.sequence;
+                }
+            }
+
+            entry.stage = .route_prefetch_complete;
+        }
+
         // =============================================================
         // Internal helpers
         // =============================================================
 
         /// Compute entry index from pointer — entry's position in the
         /// entries array. Used to pin SHM slots 1:1 to dispatch entries.
-        fn entry_index(self: *const Self, entry: *const Entry) u8 {
+        pub fn entry_index(self: *const Self, entry: *const Entry) u8 {
             const base = @intFromPtr(&self.entries);
             const ptr = @intFromPtr(entry);
             assert(ptr >= base);
@@ -837,7 +964,8 @@ pub fn SidecarDispatchType(comptime StorageParam: type, comptime Bus: type) type
                     .route_complete, .prefetch_pending, .prefetch_complete,
                     .sql_executing, .sql_complete, .handle_pending,
                     .handle_complete, .write_pending,
-                    .combined_pending, .combined_complete => {
+                    .combined_pending, .combined_complete,
+                    .route_prefetch_pending, .route_prefetch_complete => {
                         if (entry.sequence < lowest) lowest = entry.sequence;
                     },
                     else => {},

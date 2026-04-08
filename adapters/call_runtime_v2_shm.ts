@@ -92,6 +92,7 @@ client.setDispatchHandler((_slotIndex: number, funcIndex: number, requestId: num
       case 2: return dispatchHandle(requestId, args);
       case 3: return dispatchRender(requestId, args);
       case 4: return dispatchHandleRender(requestId, args);
+      case 5: return dispatchRoutePrefetch(requestId, args);
       default: return buildResult(requestId, 0x01, new Uint8Array(0));
     }
   } catch (e: any) {
@@ -341,6 +342,161 @@ function dispatchRender(requestId: number, _args: Uint8Array): Uint8Array {
 
   requests.delete(requestId);
   return buildResult(requestId, 0x00, _encoder.encode(html));
+}
+
+// --- Combined Route+Prefetch (2-RT, first half) ---
+// Runs route() + prefetch() in one call. Returns route result +
+// all SQL declarations. The server executes the SQL and sends
+// rows back in the handle_render CALL (second half).
+
+function dispatchRoutePrefetch(requestId: number, args: Uint8Array): Uint8Array {
+  // Same args as dispatchRoute: [method:1][path_len:2 BE][path][body_len:2 BE][body]
+  const dv = new DataView(args.buffer, args.byteOffset, args.byteLength);
+  let pos = 0;
+  const method = args[pos]; pos += 1;
+  const pathLen = dv.getUint16(pos, false); pos += 2;
+  const path = _decoder.decode(args.subarray(pos, pos + pathLen)); pos += pathLen;
+  const bodyLen = dv.getUint16(pos, false); pos += 2;
+  const body = _decoder.decode(args.subarray(pos, pos + bodyLen));
+
+  // --- Route phase ---
+  const methods = ["get", "put", "post", "delete"];
+  const methodStr = methods[method] || "get";
+  const queryIdx = path.indexOf("?");
+  const queryString = queryIdx >= 0 ? path.slice(queryIdx + 1) : "";
+  const queryParams = queryString ? new URLSearchParams(queryString) : null;
+
+  let routeResult: any = null;
+  let matchedOp = "";
+  for (const entry of routeTable) {
+    if (entry.method !== methodStr) continue;
+    const params = matchRoute(path, entry.pattern);
+    if (!params) continue;
+    if (queryParams) {
+      for (const qname of entry.query_params) {
+        const qval = queryParams.get(qname);
+        if (qval !== null) params[qname] = qval;
+      }
+    }
+    const routeFn = modules[entry.operation]?.route;
+    if (!routeFn) continue;
+    const req = { method: methodStr, path, body, params };
+    routeResult = routeFn(req);
+    if (routeResult) { matchedOp = entry.operation; break; }
+  }
+
+  if (!routeResult) return buildResult(requestId, 0x01, new Uint8Array(0));
+
+  // --- Prefetch phase (multi-capture) ---
+  const mod = modules[matchedOp];
+  interface CapturedQuery { sql: string; params: unknown[]; mode: "query" | "queryAll"; }
+  const capturedQueries: CapturedQuery[] = [];
+  const SENTINEL = Symbol("capture");
+
+  const captureDb = {
+    query: (sql: string, ...params: unknown[]) => {
+      capturedQueries.push({ sql, params, mode: "query" });
+      return SENTINEL;
+    },
+    queryAll: (sql: string, ...params: unknown[]) => {
+      capturedQueries.push({ sql, params, mode: "queryAll" });
+      return SENTINEL;
+    },
+  };
+
+  // Extract return keys from handler source (same as dispatchPrefetch).
+  const capturedKeys: string[] = [];
+  const parsedBody = body.length > 0 ? JSON.parse(body) : {};
+  const msg = {
+    operation: matchedOp,
+    id: (routeResult.id || "").replace(/-/g, ""),
+    body: routeResult.body || parsedBody,
+    ...(routeResult.params || {}),
+  };
+
+  let queryDecl: any = null;
+  if (mod?.prefetch) {
+    queryDecl = mod.prefetch(msg, captureDb);
+  }
+
+  // Extract key names from return value or source.
+  if (queryDecl && typeof queryDecl === "object" && !(queryDecl instanceof Promise)) {
+    for (const [k, v] of Object.entries(queryDecl)) {
+      if (v === SENTINEL) capturedKeys.push(k);
+    }
+  } else if (queryDecl instanceof Promise && mod?.prefetch) {
+    // Async handler — extract keys from source.
+    const src = mod.prefetch.toString();
+    const m = src.match(/return\s*(?:\{|\(\s*\{)\s*([^}]+)\}/);
+    if (m) {
+      for (const part of m[1].split(",")) {
+        const key = part.split(":")[0].trim();
+        if (key) capturedKeys.push(key);
+      }
+    }
+  }
+
+  // Store request state for the handle_render CALL.
+  requests.set(requestId, {
+    operation: matchedOp,
+    id: msg.id,
+    body: routeResult.body || parsedBody,
+    params: routeResult.params || {},
+    rows: [],
+    status: "",
+    prefetchKey: capturedKeys[0] || "rows",
+    prefetchMode: capturedQueries[0]?.mode || "queryAll",
+  });
+
+  // Build result: [operation:1][id:16 LE][body_len:2 BE][body_json]
+  //   [query_count:1][queries: [mode:1][sql_len:2 BE][sql][param_count:1][params...]]
+  //   [key_count:1][keys: [key_len:1][key_bytes]...[mode:1]]
+  const opValue = (OperationValues as any)[matchedOp];
+  const idHex = (routeResult.id || "0".repeat(32)).replace(/-/g, "").padStart(32, "0");
+  const bodyJson = _encoder.encode(JSON.stringify(routeResult.body || parsedBody));
+
+  const buf = new Uint8Array(FRAME_MAX);
+  const bufDv = new DataView(buf.buffer);
+  let rpos = 0;
+
+  // Operation + id
+  buf[rpos] = opValue; rpos += 1;
+  for (let i = 0; i < 16; i++) {
+    buf[rpos + i] = parseInt(idHex.substr((15 - i) * 2, 2), 16);
+  }
+  rpos += 16;
+
+  // Body JSON
+  bufDv.setUint16(rpos, bodyJson.length, false); rpos += 2;
+  buf.set(bodyJson, rpos); rpos += bodyJson.length;
+
+  // Query declarations
+  buf[rpos] = capturedQueries.length; rpos += 1;
+  for (const q of capturedQueries) {
+    buf[rpos] = q.mode === "query" ? 0x00 : 0x01; rpos += 1;
+    const sqlBytes = _encoder.encode(q.sql);
+    bufDv.setUint16(rpos, sqlBytes.length, false); rpos += 2;
+    buf.set(sqlBytes, rpos); rpos += sqlBytes.length;
+    buf[rpos] = q.params.length; rpos += 1;
+    for (const p of q.params) {
+      if (p === null || p === undefined) { buf[rpos] = 0x05; rpos += 1; }
+      else if (typeof p === "number") { buf[rpos] = 0x01; rpos += 1; bufDv.setBigInt64(rpos, BigInt(Math.trunc(p)), true); rpos += 8; }
+      else if (typeof p === "string") { buf[rpos] = 0x03; rpos += 1; const s = _encoder.encode(p); bufDv.setUint16(rpos, s.length, false); rpos += 2; buf.set(s, rpos); rpos += s.length; }
+      else if (typeof p === "bigint") { buf[rpos] = 0x01; rpos += 1; bufDv.setBigInt64(rpos, p, true); rpos += 8; }
+      else { buf[rpos] = 0x05; rpos += 1; }
+    }
+  }
+
+  // Key names + modes
+  buf[rpos] = capturedKeys.length; rpos += 1;
+  for (let i = 0; i < capturedKeys.length; i++) {
+    const keyBytes = _encoder.encode(capturedKeys[i]);
+    buf[rpos] = keyBytes.length; rpos += 1;
+    buf.set(keyBytes, rpos); rpos += keyBytes.length;
+    buf[rpos] = (capturedQueries[i]?.mode === "query") ? 0x00 : 0x01; rpos += 1;
+  }
+
+  return buildResult(requestId, 0x00, buf.subarray(0, rpos));
 }
 
 // --- Combined Handle+Render (1-RT) ---

@@ -1063,23 +1063,21 @@ pub fn main() !void {
                 }
 
                 // Extract prefetch SQL for 1-RT dispatch.
-                // @dynamic-prefetch handlers skip extraction.
-                // All others must have extractable SQL or it's a build error.
+                // If extraction succeeds → 1-RT (framework executes SQL natively).
+                // If extraction fails → 2-RT fallback (sidecar declares SQL at runtime).
+                // No error, no annotation needed — automatic detection.
                 if (!ann.dynamic_prefetch and found_sql) {
                     if (extract_prefetch_queries(allocator, body, quote, ann.param_hints, ann.param_hint_count)) |pqs| {
-                        // Store on annotation — mutable access via index.
-                        for (annotations.items, 0..) |*a, ai| {
-                            _ = ai;
+                        for (annotations.items) |*a| {
                             if (a.phase == .prefetch and std.mem.eql(u8, a.operation, ann.operation)) {
                                 a.prefetch_queries = pqs;
                                 break;
                             }
                         }
                     } else {
-                        try stderr.print("error: {s}:{d}: [prefetch] .{s} SQL extraction failed — use // @dynamic-prefetch if queries are dynamic\n", .{
+                        try stderr.print("note: {s}:{d}: [prefetch] .{s} uses 2-RT dispatch (SQL not statically extractable)\n", .{
                             ann.file, ann.line, ann.operation,
                         });
-                        errors += 1;
                     }
                 }
             },

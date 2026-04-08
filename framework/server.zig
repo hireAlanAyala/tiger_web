@@ -370,8 +370,10 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
             // 1-RT path: native route + prefetch SQL + combined CALL.
             if (server.try_dispatch_1rt(entry, conn, parsed.method, parsed.path, parsed.body)) return;
 
-            // 4-RT fallback: send route CALL to sidecar.
-            if (!server.dispatch_v2.start_request(entry, parsed.method, parsed.path, parsed.body, @ptrCast(conn))) {
+            // 2-RT fallback: send route_prefetch CALL to sidecar.
+            // Sidecar runs route() + prefetch(), returns SQL declarations.
+            // Server executes SQL, then sends handle_render CALL.
+            if (!server.dispatch_v2.start_request_2rt(entry, parsed.method, parsed.path, parsed.body, @ptrCast(conn))) {
                 entry.reset();
                 server.suspend_connection(conn);
                 return;
@@ -596,6 +598,129 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
             return out_buf[0..pos];
         }
 
+        /// 2-RT: execute SQL declarations from route_prefetch result,
+        /// serialize row sets, send handle_render CALL.
+        fn process_route_prefetch_complete(server: *Server, entry: *DispatchV2.Entry) void {
+            const proto = @import("../protocol.zig");
+            const data = entry.route_buf[0..entry.route_len];
+            if (data.len == 0) {
+                // No SQL declarations — send handle_render with no rows.
+                server.send_handle_render_for_entry(entry, &.{}, 0);
+                return;
+            }
+
+            var pos: usize = 0;
+            if (pos >= data.len) {
+                server.send_handle_render_for_entry(entry, &.{}, 0);
+                return;
+            }
+
+            // Parse: [query_count:1][queries...][key_count:1][keys...]
+            const query_count = data[pos];
+            pos += 1;
+
+            var rows_buf: [proto.frame_max]u8 = undefined;
+            var rows_pos: usize = 0;
+            const sm = server.state_machine;
+
+            for (0..query_count) |_| {
+                if (pos >= data.len) break;
+                const mode_byte = data[pos];
+                pos += 1;
+                if (pos + 2 > data.len) break;
+                const sql_len = std.mem.readInt(u16, data[pos..][0..2], .big);
+                pos += 2;
+                if (pos + sql_len > data.len) break;
+                const sql = data[pos..][0..sql_len];
+                pos += sql_len;
+                if (pos >= data.len) break;
+                const param_count = data[pos];
+                pos += 1;
+
+                // Params are already in wire format (same as storage.bind_raw_params expects).
+                const params_start = pos;
+                // Skip params to find the end.
+                for (0..param_count) |_| {
+                    if (pos >= data.len) break;
+                    const tag = std.meta.intToEnum(proto.TypeTag, data[pos]) catch break;
+                    pos += 1;
+                    switch (tag) {
+                        .integer, .float => pos += 8,
+                        .text, .blob => {
+                            if (pos + 2 > data.len) break;
+                            const vlen = std.mem.readInt(u16, data[pos..][0..2], .big);
+                            pos += 2 + vlen;
+                        },
+                        .null => {},
+                    }
+                }
+                const params_buf = data[params_start..pos];
+
+                const mode: proto.QueryMode = if (mode_byte == 0x00) .query else .query_all;
+                const result = sm.storage.query_raw(sql, params_buf, param_count, mode, rows_buf[rows_pos..]);
+                if (result) |rows| {
+                    rows_pos += rows.len;
+                } else {
+                    // Empty row set.
+                    if (rows_pos + 6 <= rows_buf.len) {
+                        std.mem.writeInt(u16, rows_buf[rows_pos..][0..2], 0, .big);
+                        std.mem.writeInt(u32, rows_buf[rows_pos + 2 ..][0..4], 0, .big);
+                        rows_pos += 6;
+                    }
+                }
+            }
+
+            // Skip key declarations (consumed by TS sidecar's requests map).
+            // Send handle_render CALL with the row sets.
+            server.send_handle_render_for_entry(entry, rows_buf[0..rows_pos], query_count);
+        }
+
+        /// Send handle_render CALL for an entry that completed route+prefetch.
+        /// Does NOT use start_combined_request — mutation tracking is already
+        /// set from parse_route_prefetch_result. Just sends the CALL and
+        /// transitions to combined_pending.
+        fn send_handle_render_for_entry(server: *Server, entry: *DispatchV2.Entry, rows_data: []const u8, row_set_count: u8) void {
+            const body = entry.msg.body[0..entry.body_len];
+
+            // Build combined CALL args inline (same format as start_combined_request).
+            const args_max = 1 + 16 + 2 + @import("../framework/http.zig").body_max + 1 + @import("../protocol.zig").frame_max;
+            var args_buf: [args_max]u8 = undefined;
+            var pos: usize = 0;
+
+            args_buf[pos] = @intFromEnum(entry.operation);
+            pos += 1;
+            std.mem.writeInt(u128, args_buf[pos..][0..16], entry.msg.id, .little);
+            pos += 16;
+            std.mem.writeInt(u16, args_buf[pos..][0..2], @intCast(body.len), .big);
+            pos += 2;
+            if (body.len > 0) {
+                @memcpy(args_buf[pos..][0..body.len], body);
+                pos += body.len;
+            }
+            args_buf[pos] = row_set_count;
+            pos += 1;
+            if (rows_data.len > 0) {
+                @memcpy(args_buf[pos..][0..rows_data.len], rows_data);
+                pos += rows_data.len;
+            }
+
+            const entry_idx = server.dispatch_v2.entry_index(entry);
+            if (!server.dispatch_v2.send_call_direct(
+                server.dispatch_v2.bus orelse {
+                    entry.reset();
+                    return;
+                },
+                "handle_render",
+                args_buf[0..pos],
+                entry.request_id,
+                entry_idx,
+            )) {
+                entry.reset();
+                return;
+            }
+            entry.stage = .combined_pending;
+        }
+
         /// Minimal JSON string field extractor. Finds "field":"value" in body.
         /// No full parser — bounded scan, no allocations.
         fn json_extract_string(body: []const u8, field: []const u8) ?[]const u8 {
@@ -667,6 +792,10 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
                         server.handle_lock = null;
                         server.dispatch_v2.write_committed(entry);
                         server.dispatch_v2.advance(sm.storage);
+                    },
+                    .route_prefetch_complete => {
+                        // 2-RT: execute SQL declarations from sidecar, then send handle_render CALL.
+                        server.process_route_prefetch_complete(entry);
                     },
                     .render_complete => {
                         // Encode response and send to the connection.

@@ -91,14 +91,7 @@ pub const specs = [_]?PrefetchSpec{
             .key = "target",
         },
     } }, // .transfer_inventory
-    .{ .queries = &.{
-        .{
-            .sql = "SELECT id, name, description, price_cents, inventory, version, active FROM products WHERE id IN (SELECT value FROM json_each(?1))",
-            .mode = .query_all,
-            .params = &.{.{ .source = .body_json_array, .field = "items", .subfield = "product_id", .int_val = 0 }},
-            .key = "products",
-        },
-    } }, // .create_order
+    null, // .create_order — no queries
     .{ .queries = &.{
         .{
             .sql = "SELECT id, total_cents, items_len, status, timeout_at, payment_ref FROM orders WHERE id = ?1",
