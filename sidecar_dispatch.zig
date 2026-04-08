@@ -29,10 +29,19 @@ pub fn SidecarDispatchType(comptime Bus: type) type {
         const max_entries = @import("framework/constants.zig").pipeline_slots_max;
 
         // Max result sizes per stage — derived from domain constants, not literals.
-        const route_result_max = 1 + 16 + message.body_max; // operation + id + body (2-RT stores SQL declarations here)
-        const status_max = 64; // longest status string (e.g. "storage_error")
-        const write_params_max = 16 * (1 + 8); // 16 params × (tag + i64) — matches protocol.zig max_param_size
+        const route_result_max = 1 + 16 + message.body_max;
+        const status_max = 64;
+        const write_params_max = 16 * (1 + 8); // 16 params × (tag + i64)
         const handle_result_max = 2 + status_max + 1 + 1 + protocol.writes_max * (2 + protocol.sql_max + 1 + write_params_max);
+
+        comptime {
+            assert(max_entries > 0);
+            assert(route_result_max > 0);
+            assert(handle_result_max > 0);
+            assert(status_max >= "storage_error".len);
+            // 1 + 8 = type_tag + i64, the largest fixed-size param.
+            assert(write_params_max == 16 * (1 + 8));
+        }
 
         // =============================================================
         // Pipeline entry — per-request state, self-contained
@@ -142,7 +151,12 @@ pub fn SidecarDispatchType(comptime Bus: type) type {
 
         pub fn acquire_entry(self: *Self) ?*Entry {
             for (&self.entries) |*entry| {
-                if (entry.stage == .free) return entry;
+                if (entry.stage == .free) {
+                    // Zero buffers to prevent stale data leaks between requests.
+                    @memset(&entry.route_buf, 0);
+                    @memset(&entry.handle_buf, 0);
+                    return entry;
+                }
             }
             return null;
         }
@@ -214,44 +228,9 @@ pub fn SidecarDispatchType(comptime Bus: type) type {
             self.next_request_id +%= 1;
             const entry_idx = self.entry_index(entry);
 
-            // Direct SHM write — build CALL frame directly in the slot's
-            // request buffer. Eliminates the 260KB stack buffer + two memcpy.
             const slot_buf = b.get_slot_request_buf(entry_idx) orelse return false;
-
-            // Build CALL header: [tag:1][request_id:4 BE][name_len:2 BE]["handle_render"]
-            const func_name = "handle_render";
-            var pos: usize = 0;
-            slot_buf[pos] = 0x10; // CALL tag
-            pos += 1;
-            slot_buf[pos] = @intCast((request_id >> 24) & 0xff);
-            slot_buf[pos + 1] = @intCast((request_id >> 16) & 0xff);
-            slot_buf[pos + 2] = @intCast((request_id >> 8) & 0xff);
-            slot_buf[pos + 3] = @intCast(request_id & 0xff);
-            pos += 4;
-            std.mem.writeInt(u16, slot_buf[pos..][0..2], func_name.len, .big);
-            pos += 2;
-            @memcpy(slot_buf[pos..][0..func_name.len], func_name);
-            pos += func_name.len;
-
-            // Args: [operation:1][id:16 LE][body_len:2 BE][body][row_set_count:1][row_sets...]
-            slot_buf[pos] = @intFromEnum(operation);
-            pos += 1;
-            std.mem.writeInt(u128, slot_buf[pos..][0..16], msg.id, .little);
-            pos += 16;
-            std.mem.writeInt(u16, slot_buf[pos..][0..2], @intCast(body.len), .big);
-            pos += 2;
-            if (body.len > 0) {
-                @memcpy(slot_buf[pos..][0..body.len], body);
-                pos += body.len;
-            }
-            slot_buf[pos] = row_set_count;
-            pos += 1;
-            if (rows_data.len > 0) {
-                @memcpy(slot_buf[pos..][0..rows_data.len], rows_data);
-                pos += rows_data.len;
-            }
-
-            b.finalize_slot_send(entry_idx, @intCast(pos));
+            const frame_len = build_handle_render_frame(slot_buf, request_id, operation, msg.id, body, rows_data, row_set_count);
+            b.finalize_slot_send(entry_idx, @intCast(frame_len));
 
             entry.stage = .combined_pending;
             entry.request_id = request_id;
@@ -481,6 +460,14 @@ pub fn SidecarDispatchType(comptime Bus: type) type {
 
             assert(active_count <= max_entries);
             assert(self.pending_mutation_count == mutations_pending);
+
+            // Watermark consistency: if mutations are pending, the lowest
+            // pending seq must be from an actual active mutation entry.
+            if (self.pending_mutation_count > 0) {
+                assert(self.lowest_pending_mutation_seq < std.math.maxInt(u32));
+            }
+            // No active entry can be in a stage that doesn't exist.
+            // (Covered by the exhaustive switch in mutation tracking above.)
         }
 
         // =============================================================
@@ -518,6 +505,52 @@ pub fn SidecarDispatchType(comptime Bus: type) type {
             return true;
         }
 
+        /// Build a handle_render CALL frame directly into the SHM slot buffer.
+        /// Returns the total frame length.
+        fn build_handle_render_frame(
+            buf: []u8,
+            request_id: u32,
+            operation: message.Operation,
+            id: u128,
+            body: []const u8,
+            rows_data: []const u8,
+            row_set_count: u8,
+        ) usize {
+            const func_name = "handle_render";
+            var pos: usize = 0;
+
+            // CALL header: [tag:1][request_id:4 BE][name_len:2 BE][name]
+            buf[pos] = 0x10;
+            pos += 1;
+            std.mem.writeInt(u32, buf[pos..][0..4], request_id, .big);
+            pos += 4;
+            std.mem.writeInt(u16, buf[pos..][0..2], func_name.len, .big);
+            pos += 2;
+            @memcpy(buf[pos..][0..func_name.len], func_name);
+            pos += func_name.len;
+
+            // Args: [operation:1][id:16 LE][body_len:2 BE][body][row_set_count:1][rows...]
+            buf[pos] = @intFromEnum(operation);
+            pos += 1;
+            std.mem.writeInt(u128, buf[pos..][0..16], id, .little);
+            pos += 16;
+            std.mem.writeInt(u16, buf[pos..][0..2], @intCast(body.len), .big);
+            pos += 2;
+            if (body.len > 0) {
+                @memcpy(buf[pos..][0..body.len], body);
+                pos += body.len;
+            }
+            buf[pos] = row_set_count;
+            pos += 1;
+            if (rows_data.len > 0) {
+                @memcpy(buf[pos..][0..rows_data.len], rows_data);
+                pos += rows_data.len;
+            }
+
+            assert(pos <= buf.len);
+            return pos;
+        }
+
         // =============================================================
         // RESULT parsers
         // =============================================================
@@ -525,6 +558,9 @@ pub fn SidecarDispatchType(comptime Bus: type) type {
         /// Parse combined handle+render RESULT.
         /// Format: [status_len:2 BE][status][session_action:1][write_count:1][writes...][html to end]
         fn parse_combined_result(_: *Self, entry: *Entry, data: []const u8) void {
+            // Stage precondition: only called for combined_pending entries.
+            assert(entry.stage == .combined_pending);
+
             if (data.len < 4) {
                 entry.handle_status = .storage_error;
                 entry.stage = .combined_complete;
@@ -539,6 +575,7 @@ pub fn SidecarDispatchType(comptime Bus: type) type {
                 entry.stage = .combined_complete;
                 return;
             }
+            assert(pos + status_len <= data.len);
 
             entry.handle_status = message.Status.from_string(data[pos..][0..status_len]) orelse .storage_error;
             pos += status_len;
@@ -553,6 +590,7 @@ pub fn SidecarDispatchType(comptime Bus: type) type {
 
             entry.handle_write_count = data[pos];
             pos += 1;
+            assert(pos <= data.len);
 
             // Skip past writes to find HTML start.
             if (entry.handle_write_count > 0) {
@@ -572,6 +610,7 @@ pub fn SidecarDispatchType(comptime Bus: type) type {
                     wpos = @import("protocol.zig").skip_params(write_data, wpos, param_count) orelse break;
                 }
                 const writes_len = wpos;
+                assert(writes_len <= write_data.len);
                 const copy_len = @min(writes_len, entry.handle_buf.len);
                 @memcpy(entry.handle_buf[0..copy_len], write_data[0..copy_len]);
                 entry.handle_writes = entry.handle_buf[0..copy_len];
@@ -605,7 +644,10 @@ pub fn SidecarDispatchType(comptime Bus: type) type {
         ///   [key_count:1][keys: [key_len:1][key_bytes][mode:1]]
         /// Stores the raw result data for the server to parse and execute SQL.
         fn parse_route_prefetch_result(self: *Self, entry: *Entry, data: []const u8) void {
-            if (data.len < 20) { // operation(1) + id(16) + body_len(2) + query_count(1)
+            // Stage precondition.
+            assert(entry.stage == .route_prefetch_pending);
+
+            if (data.len < 20) {
                 entry.reset();
                 return;
             }
@@ -626,6 +668,7 @@ pub fn SidecarDispatchType(comptime Bus: type) type {
             entry.msg.operation = op;
             entry.msg.id = std.mem.readInt(u128, data[pos..][0..16], .little);
             pos += 16;
+            assert(pos == 17); // 1 op + 16 id
 
             const body_len = std.mem.readInt(u16, data[pos..][0..2], .big);
             pos += 2;
@@ -633,19 +676,20 @@ pub fn SidecarDispatchType(comptime Bus: type) type {
                 entry.reset();
                 return;
             }
-            // Copy body into msg.body.
+            assert(pos + body_len <= data.len);
+
             if (body_len > 0 and body_len <= message.body_max) {
                 @memcpy(entry.msg.body[0..body_len], data[pos..][0..body_len]);
                 entry.body_len = @intCast(body_len);
             }
             pos += body_len;
 
-            // Store the remaining data (SQL declarations + keys) in route_buf
-            // for the server to parse and execute.
+            // Store remaining (SQL declarations + keys) in route_buf.
             const remaining = data[pos..];
             const copy_len = @min(remaining.len, entry.route_buf.len);
             @memcpy(entry.route_buf[0..copy_len], remaining[0..copy_len]);
             entry.route_len = copy_len;
+            assert(entry.route_len <= entry.route_buf.len);
 
             entry.sequence = self.next_sequence;
             self.next_sequence +%= 1;

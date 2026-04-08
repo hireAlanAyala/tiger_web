@@ -340,6 +340,7 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
 
         fn try_shm_dispatch(server: *Server, conn: *Connection) void {
             if (!App.sidecar_enabled) unreachable;
+            assert(conn.state == .ready);
 
             const entry = server.shm_dispatch.acquire_entry() orelse {
                 server.suspend_connection(conn);
@@ -347,6 +348,7 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
             };
 
             // Parse HTTP to extract method/path/body for dispatch.
+            assert(conn.recv_pos > 0);
             const parsed = switch (http.parse_request(conn.recv_buf[0..conn.recv_pos])) {
                 .complete => |p| p,
                 .incomplete, .invalid => unreachable,
@@ -486,6 +488,7 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
             body: []const u8,
             param_buf: *[4096]u8,
         ) struct { len: usize, count: u8 } {
+            assert(msg.operation != .root);
             const proto = @import("../protocol.zig");
             var pos: usize = 0;
             var count: u8 = 0;
@@ -541,6 +544,9 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
         /// E.g. body=`{"items":[{"pid":"a"},{"pid":"b"}]}`,
         /// field="items", subfield="pid" → `["a","b"]`.
         fn build_json_array_param(body: []const u8, field: []const u8, subfield: []const u8, out_buf: []u8) ?[]const u8 {
+            assert(field.len > 0);
+            assert(subfield.len > 0);
+            assert(out_buf.len > 0);
             if (body.len == 0) return null;
 
             // Build needles: "field": and "subfield":
@@ -780,29 +786,34 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
 
             if (entry.handle_write_count > 0) {
                 var write_view = Storage.WriteView.init(sm.storage);
-                const data = entry.handle_writes;
-                var dpos: usize = 0;
-                for (0..entry.handle_write_count) |_| {
-                    if (dpos + 2 > data.len) break;
-                    const sql_len = std.mem.readInt(u16, data[dpos..][0..2], .big);
-                    dpos += 2;
-                    if (dpos + sql_len > data.len) break;
-                    const sql = data[dpos..][0..sql_len];
-                    dpos += sql_len;
-                    if (dpos >= data.len) break;
-                    const param_count = data[dpos];
-                    dpos += 1;
-                    const params_start = dpos;
-                    dpos = @import("../protocol.zig").skip_params(data, dpos, param_count) orelse break;
-                    const write_ok = write_view.execute_raw(sql, data[params_start..dpos], param_count);
-                    log.debug("shm execute_raw: ok={} sql_len={d} params={d}", .{ write_ok, sql.len, param_count });
-                }
+                execute_parsed_writes(&write_view, entry.handle_writes, entry.handle_write_count);
             }
 
             if (entry.is_mutation) sm.commit_batch();
             server.handle_lock = null;
             server.shm_dispatch.write_committed(entry);
             server.shm_dispatch.advance();
+        }
+
+        /// Execute parsed write statements from sidecar RESULT data.
+        /// Standalone with primitive args for hot-loop extraction (TB pattern).
+        fn execute_parsed_writes(write_view: *Storage.WriteView, data: []const u8, write_count: u8) void {
+            const proto = @import("../protocol.zig");
+            var dpos: usize = 0;
+            for (0..write_count) |_| {
+                if (dpos + 2 > data.len) break;
+                const sql_len = std.mem.readInt(u16, data[dpos..][0..2], .big);
+                dpos += 2;
+                if (dpos + sql_len > data.len) break;
+                const sql = data[dpos..][0..sql_len];
+                dpos += sql_len;
+                if (dpos >= data.len) break;
+                const param_count = data[dpos];
+                dpos += 1;
+                const params_start = dpos;
+                dpos = proto.skip_params(data, dpos, param_count) orelse break;
+                _ = write_view.execute_raw(sql, data[params_start..dpos], param_count);
+            }
         }
 
         /// Encode SHM response and send to connection. Called for
