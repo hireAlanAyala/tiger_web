@@ -38,7 +38,8 @@ pub const IO = struct {
 
     // Callback for shared memory polling — set by the server when
     // shm transport is active. Called every run_for_ns iteration.
-    shm_poll_fn: ?*const fn () void = null,
+    shm_poll_fn: ?*const fn () bool = null, // returns true if work was found
+    empty_polls: u32 = 0,
 
     pub fn init() !IO {
         const epoll_fd = try posix.epoll_create1(linux.EPOLL.CLOEXEC);
@@ -221,15 +222,27 @@ pub const IO = struct {
     /// only when migrating to io_uring.
     pub fn run_for_ns(self: *IO, ns: u64) void {
         // Poll shm responses (non-blocking).
-        if (self.shm_poll_fn) |poll| poll();
+        if (self.shm_poll_fn) |poll| {
+            const found_work = poll();
+            if (found_work) {
+                self.empty_polls = 0;
+            } else {
+                self.empty_polls +|= 1; // saturating add
+            }
+        }
 
-        // When shm is active, use 0 timeout to busy-poll. Otherwise
-        // use the requested timeout. Shm responses need sub-ms latency
-        // that the 10ms tick can't provide.
-        const timeout_ms: i32 = if (self.shm_poll_fn != null)
-            0
-        else
-            @intCast(@min(ns / std.time.ns_per_ms, std.math.maxInt(u31)));
+        // Adaptive epoll timeout: busy-poll when active, 1ms sleep
+        // when idle. On 2-core, the sidecar responds within ~128 polls
+        // (~3µs) so empty_polls never reaches the threshold. On 1-core
+        // the sidecar is starved — empty_polls grows quickly and the
+        // 1ms sleep gives it CPU time to batch-process requests.
+        const timeout_ms: i32 = if (self.shm_poll_fn != null) blk: {
+            // Busy-poll with idle sleep. When no SHM frames arrive for
+            // 10K empty polls, sleep 1ms in epoll_wait. This only triggers
+            // when truly idle (no load) or severely contended (1-core VPS).
+            // Under normal 2-core load, frames arrive within ~200 polls.
+            break :blk if (self.empty_polls > 10000) @as(i32, 1) else 0;
+        } else @intCast(@min(ns / std.time.ns_per_ms, std.math.maxInt(u31)));
 
         var events: [64]std.os.linux.epoll_event = undefined;
         const ready = posix.epoll_wait(self.epoll_fd, &events, timeout_ms);

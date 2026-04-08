@@ -841,17 +841,22 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
         // Set during wire_sidecar. Only used when protocol_v2_shm is active.
         var shm_poll_server: ?*Server = null;
 
-        fn shm_poll_all() void {
-            const server = shm_poll_server orelse return;
-            if (!App.sidecar_enabled or !App.protocol_v2_shm) return;
+        var shm_frames_received: u32 = 0;
+
+        fn shm_poll_all() bool {
+            const server = shm_poll_server orelse return false;
+            if (!App.sidecar_enabled or !App.protocol_v2_shm) return false;
+            const before = shm_frames_received;
             for (0..DispatchV2Bus.slot_count) |i| {
                 server.shm_bus.check_response(@intCast(i));
             }
             server.process_v2_completions();
+            return shm_frames_received != before;
         }
 
         /// Shared memory frame callback — routes frames to v2 dispatch.
         fn shm_on_frame(ctx: *anyopaque, _: u8, frame: []const u8) void {
+            shm_frames_received += 1;
             const server: *Server = @ptrCast(@alignCast(ctx));
             if (!App.sidecar_enabled or !App.protocol_v2) return;
             server.dispatch_v2.on_frame(frame, server.state_machine.storage);
