@@ -521,6 +521,101 @@ function dispatchRoutePrefetch(requestId: number, args: Uint8Array): Uint8Array 
 
 // --- Combined Handle+Render (1-RT) ---
 
+// Note: C-side pre-parsing of args was tested but N-API overhead for
+// creating 4 extra JS values (napi_create_string_utf8 etc.) exceeded
+// the JS-side parsing cost it replaced. Kept as single-buffer path.
+
+function _unused_dispatchHandleRenderFast(requestId: number, opValue: number, idHex: string, bodyStr: string, rowsBuf: Buffer): Uint8Array {
+  const opName = reverseOpMap[opValue];
+  if (!opName) return buildResult(requestId, 0x01, new Uint8Array(0));
+
+  const body = bodyStr.length > 0 ? JSON.parse(bodyStr) : {};
+
+  // Row set count is first byte of rowsBuf.
+  const rowSetCount = rowsBuf.length > 0 ? rowsBuf[0] : 0;
+  let pos = 1;
+
+  const keyInfos = prefetchKeyMap[opName] || [];
+  const prefetched: Record<string, any> = {};
+  for (let i = 0; i < rowSetCount; i++) {
+    try {
+      const rsDv = new DataView(rowsBuf.buffer, rowsBuf.byteOffset + pos, rowsBuf.byteLength - pos);
+      const rsResult = readRowSet(rsDv, 0);
+      const rows = rsResult.result?.rows || [];
+      pos += rsResult.offset;
+      if (i < keyInfos.length) {
+        const info = keyInfos[i];
+        prefetched[info.key] = info.mode === "query"
+          ? (rows.length > 0 ? rows[0] : null) : rows;
+      }
+    } catch {
+      break;
+    }
+  }
+
+  const mod = modules[opName];
+
+  // Handle phase.
+  _writes.length = 0;
+  const ctx = _handleCtx;
+  ctx.operation = opName; ctx.id = idHex; ctx.body = body;
+  ctx.prefetched = prefetched; ctx.rows = _emptyRows;
+
+  let status = "ok";
+  let sessionAction = 0;
+  if (mod?.handle) {
+    const r = mod.handle(ctx, _writeDb);
+    if (typeof r === "string") status = r || "ok";
+    else if (r && typeof r === "object") {
+      status = (r as any).status || "ok";
+      const sa = (r as any).sessionAction;
+      if (sa === "set_authenticated") sessionAction = 1;
+      else if (sa === "clear") sessionAction = 2;
+    }
+  }
+
+  // Render phase.
+  let html = "";
+  if (mod?.render) {
+    const rc = _renderCtx;
+    rc.operation = opName; rc.id = idHex; rc.status = status;
+    rc.body = body; rc.prefetched = prefetched;
+    html = mod.render(rc) || "";
+  }
+
+  // Build RESULT directly into pre-allocated buffer.
+  _resultBuf[0] = 0x11;
+  _resultDv.setUint32(1, requestId, false);
+  _resultBuf[5] = 0x00;
+  let rpos = 6;
+
+  const statusBytes = _encoder.encode(status);
+  _resultDv.setUint16(rpos, statusBytes.length, false); rpos += 2;
+  _resultBuf.set(statusBytes, rpos); rpos += statusBytes.length;
+  _resultBuf[rpos] = sessionAction; rpos += 1;
+  _resultBuf[rpos] = _writes.length; rpos += 1;
+  for (const w of _writes) {
+    const sqlB = _encoder.encode(String(w[0]));
+    const wParams = w.slice(1);
+    _resultDv.setUint16(rpos, sqlB.length, false); rpos += 2;
+    _resultBuf.set(sqlB, rpos); rpos += sqlB.length;
+    _resultBuf[rpos] = wParams.length; rpos += 1;
+    for (const p of wParams) {
+      if (p === null || p === undefined) { _resultBuf[rpos] = 0x05; rpos += 1; }
+      else if (typeof p === "number") { _resultBuf[rpos] = 0x01; rpos += 1; _resultDv.setBigInt64(rpos, BigInt(Math.trunc(p)), true); rpos += 8; }
+      else if (typeof p === "boolean") { _resultBuf[rpos] = 0x01; rpos += 1; _resultDv.setBigInt64(rpos, BigInt(p ? 1 : 0), true); rpos += 8; }
+      else if (typeof p === "string") { _resultBuf[rpos] = 0x03; rpos += 1; const s = _encoder.encode(String(p)); _resultDv.setUint16(rpos, s.length, false); rpos += 2; _resultBuf.set(s, rpos); rpos += s.length; }
+      else if (typeof p === "bigint") { _resultBuf[rpos] = 0x01; rpos += 1; _resultDv.setBigInt64(rpos, p, true); rpos += 8; }
+      else if (p instanceof Uint8Array) { _resultBuf[rpos] = 0x04; rpos += 1; _resultDv.setUint16(rpos, p.length, false); rpos += 2; _resultBuf.set(p, rpos); rpos += p.length; }
+      else { _resultBuf[rpos] = 0x05; rpos += 1; }
+    }
+  }
+  const htmlLen = _encoder.encodeInto(html, _resultBuf.subarray(rpos)).written ?? 0;
+  rpos += htmlLen;
+
+  return _resultBuf.subarray(0, rpos);
+}
+
 function dispatchHandleRender(requestId: number, args: Uint8Array): Uint8Array {
   const dv = new DataView(args.buffer, args.byteOffset, args.byteLength);
   let pos = 0;
