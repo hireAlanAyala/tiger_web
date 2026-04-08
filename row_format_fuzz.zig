@@ -29,6 +29,7 @@ pub fn main(allocator: std.mem.Allocator, args: FuzzArgs) !void {
             .single_value = 4,
             .max_columns = 1,
             .corrupt_read = 3,
+            .skip_params = 3,
         });
 
         switch (event) {
@@ -37,6 +38,7 @@ pub fn main(allocator: std.mem.Allocator, args: FuzzArgs) !void {
             .single_value => fuzz_single_value(&prng, &stats),
             .max_columns => fuzz_max_columns(&prng, &stats),
             .corrupt_read => fuzz_corrupt_read(&prng, &stats),
+            .skip_params => fuzz_skip_params(&prng, &stats),
         }
     }
 
@@ -45,6 +47,7 @@ pub fn main(allocator: std.mem.Allocator, args: FuzzArgs) !void {
         \\  events={}
         \\  valid_row_sets={} empty={} single_values={}
         \\  max_columns={} corrupt_reads={} corrupt_rejected={}
+        \\  skip_params_valid={} skip_params_rejected={}
     , .{
         events_max,
         stats.valid_row_sets,
@@ -53,12 +56,16 @@ pub fn main(allocator: std.mem.Allocator, args: FuzzArgs) !void {
         stats.max_columns,
         stats.corrupt_reads,
         stats.corrupt_rejected,
+        stats.skip_params_valid,
+        stats.skip_params_rejected,
     });
 
     // Sanity: we exercised all paths.
     assert(stats.valid_row_sets > 0);
     assert(stats.single_values > 0);
     assert(stats.corrupt_reads > 0);
+    assert(stats.skip_params_valid > 0);
+    assert(stats.skip_params_rejected > 0);
 }
 
 const Stats = struct {
@@ -68,6 +75,8 @@ const Stats = struct {
     max_columns: u64 = 0,
     corrupt_reads: u64 = 0,
     corrupt_rejected: u64 = 0,
+    skip_params_valid: u64 = 0,
+    skip_params_rejected: u64 = 0,
 };
 
 // =====================================================================
@@ -313,5 +322,84 @@ fn assert_value_equal(expected: protocol.Value, actual: protocol.Value) void {
         .text => |v| assert(std.mem.eql(u8, actual.text, v)),
         .blob => |v| assert(std.mem.eql(u8, actual.blob, v)),
         .null => {},
+    }
+}
+
+/// Fuzz skip_params: generate random param sequences (valid and corrupt),
+/// assert it either returns a valid position or null — never crashes.
+fn fuzz_skip_params(prng: *PRNG, stats: *Stats) void {
+    var buf: [512]u8 = undefined;
+    const TypeTag = protocol.TypeTag;
+
+    // Decide: valid params or random garbage.
+    if (prng.boolean()) {
+        // Build valid params.
+        var pos: usize = 0;
+        const count = prng.range_inclusive(u8, 0, 8);
+        for (0..count) |_| {
+            if (pos >= buf.len - 11) break; // room for tag + max value
+            const tag_choice = prng.range_inclusive(u8, 0, 4);
+            switch (tag_choice) {
+                0 => { // integer
+                    buf[pos] = @intFromEnum(TypeTag.integer);
+                    pos += 1;
+                    std.mem.writeInt(u64, buf[pos..][0..8], prng.int(u64), .little);
+                    pos += 8;
+                },
+                1 => { // float
+                    buf[pos] = @intFromEnum(TypeTag.float);
+                    pos += 1;
+                    std.mem.writeInt(u64, buf[pos..][0..8], prng.int(u64), .little);
+                    pos += 8;
+                },
+                2 => { // text
+                    const tlen = prng.range_inclusive(u16, 0, 32);
+                    buf[pos] = @intFromEnum(TypeTag.text);
+                    pos += 1;
+                    if (pos + 2 + tlen > buf.len) break;
+                    std.mem.writeInt(u16, buf[pos..][0..2], tlen, .big);
+                    pos += 2;
+                    for (0..tlen) |j| {
+                        buf[pos + j] = prng.range_inclusive(u8, 0x20, 0x7e);
+                    }
+                    pos += tlen;
+                },
+                3 => { // blob
+                    const blen = prng.range_inclusive(u16, 0, 32);
+                    buf[pos] = @intFromEnum(TypeTag.blob);
+                    pos += 1;
+                    if (pos + 2 + blen > buf.len) break;
+                    std.mem.writeInt(u16, buf[pos..][0..2], blen, .big);
+                    pos += 2;
+                    pos += blen;
+                },
+                else => { // null
+                    buf[pos] = @intFromEnum(TypeTag.null);
+                    pos += 1;
+                },
+            }
+        }
+        const result = protocol.skip_params(&buf, 0, count);
+        if (result) |end_pos| {
+            assert(end_pos <= pos);
+            stats.skip_params_valid += 1;
+        } else {
+            stats.skip_params_rejected += 1;
+        }
+    } else {
+        // Random garbage bytes.
+        const len = prng.range_inclusive(usize, 0, buf.len);
+        for (0..len) |i| buf[i] = prng.int(u8);
+        const count = prng.int(u8);
+        const start = prng.range_inclusive(usize, 0, len);
+        // Must not crash — either returns valid position or null.
+        const result = protocol.skip_params(buf[0..len], start, count);
+        if (result) |end_pos| {
+            assert(end_pos >= start);
+            assert(end_pos <= len);
+            stats.skip_params_valid += 1;
+        } else {
+            stats.skip_params_rejected += 1;
+        }
     }
 }

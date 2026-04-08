@@ -369,6 +369,8 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
 
         /// 1-RT dispatch: route natively, execute prefetch SQL, send
         /// combined handle_render CALL. Returns true if dispatched.
+        /// 1-RT dispatch: route natively, execute prefetch SQL, send
+        /// combined handle_render CALL. Returns true if dispatched.
         fn try_dispatch_1rt(
             server: *Server,
             entry: *ShmDispatch.Entry,
@@ -377,55 +379,80 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
             path: []const u8,
             body: []const u8,
         ) bool {
-            // Match HTTP method + path → operation using the compiled
-            // route table. Doesn't run the handler's route() function —
-            // just pattern matching. The TS sidecar handles body parsing.
+            assert(path.len > 0);
+            assert(entry.stage == .free);
+
+            const message = @import("../message.zig");
+            const route_result = native_route(method, path) orelse return false;
+
+            // Build Message with operation + id + body.
+            var msg = std.mem.zeroes(message.Message);
+            msg.operation = route_result.operation;
+            msg.id = route_result.id;
+            if (body.len > 0 and body.len <= message.body_max) {
+                @memcpy(msg.body[0..body.len], body);
+            }
+
+            // Look up prefetch spec. null = 2-RT fallback.
+            const op_idx = @intFromEnum(msg.operation);
+            if (op_idx >= prefetch_specs.specs.len) return false;
+            const spec = prefetch_specs.specs[op_idx] orelse return false;
+
+            // Execute prefetch SQL → serialized row sets.
+            var rows_buf: [@import("../protocol.zig").frame_max]u8 = undefined;
+            const prefetch_result = execute_prefetch_queries(server.state_machine.storage, spec, &msg, body, &rows_buf);
+
+            // Send combined CALL.
+            return server.shm_dispatch.start_combined_request(
+                entry,
+                msg.operation,
+                msg,
+                body,
+                rows_buf[0..prefetch_result.rows_len],
+                prefetch_result.row_set_count,
+                @ptrCast(conn),
+            );
+        }
+
+        /// Match HTTP method + path → operation using the compiled route
+        /// table. Pure pattern matching — no handler logic.
+        fn native_route(method: http.Method, path: []const u8) ?struct { operation: @import("../message.zig").Operation, id: u128 } {
             const parse = @import("parse.zig");
             const gen = @import("../generated/routes.generated.zig");
-            const message = @import("../message.zig");
 
             const query_sep = std.mem.indexOfScalar(u8, path, '?');
             const clean_path = if (query_sep) |q| path[0..q] else path;
 
-            var operation: ?message.Operation = null;
-            var matched_id: u128 = 0;
             inline for (gen.routes) |route| {
                 if (method == route.method) {
                     if (parse.match_route(clean_path, route.pattern)) |path_params| {
-                        operation = route.operation;
-                        // Extract :id param if present for the Message.
+                        var matched_id: u128 = 0;
                         for (path_params.keys[0..path_params.len], path_params.values[0..path_params.len]) |k, v| {
                             if (std.mem.eql(u8, k, "id")) {
                                 matched_id = stdx.parse_uuid(v) orelse 0;
                             }
                         }
-                        break;
+                        return .{ .operation = route.operation, .id = matched_id };
                     }
                 }
             }
-            const op = operation orelse return false;
+            return null;
+        }
 
-            // Build a minimal Message with operation + id.
-            var msg = std.mem.zeroes(message.Message);
-            msg.operation = op;
-            msg.id = matched_id;
-            // Copy body into msg.body for the sidecar.
-            if (body.len > 0 and body.len <= message.body_max) {
-                @memcpy(msg.body[0..body.len], body);
-            }
-
-            // Look up prefetch spec. null = 2-RT fallback or no prefetch.
-            const op_idx = @intFromEnum(msg.operation);
-            if (op_idx >= prefetch_specs.specs.len) return false;
-            const spec = prefetch_specs.specs[op_idx] orelse return false;
-
-            // Execute prefetch SQL and serialize row sets.
-            var rows_buf: [@import("../protocol.zig").frame_max]u8 = undefined;
+        /// Execute prefetch SQL queries and serialize row sets into rows_buf.
+        /// Pure data — no dispatch, no state mutation.
+        fn execute_prefetch_queries(
+            storage: *Storage,
+            spec: *const prefetch_specs.PrefetchSpec,
+            msg: *const @import("../message.zig").Message,
+            body: []const u8,
+            rows_buf: *[@import("../protocol.zig").frame_max]u8,
+        ) struct { rows_len: usize, row_set_count: u8 } {
+            const proto = @import("../protocol.zig");
             var rows_pos: usize = 0;
             const row_set_count: u8 = @intCast(spec.queries.len);
 
             for (spec.queries) |query| {
-                // Assemble params in binary wire format.
                 var param_buf: [4096]u8 = undefined;
                 var param_pos: usize = 0;
                 var param_count: u8 = 0;
@@ -433,21 +460,19 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
                 for (query.params) |p| {
                     switch (p.source) {
                         .id => {
-                            // msg.id as text param (hex UUID).
                             const id_hex = std.fmt.bufPrint(
                                 param_buf[param_pos + 3 ..][0..32],
                                 "{x:0>32}",
                                 .{msg.id},
-                            ) catch return false;
-                            param_buf[param_pos] = @intFromEnum(@import("../protocol.zig").TypeTag.text);
+                            ) catch break;
+                            param_buf[param_pos] = @intFromEnum(proto.TypeTag.text);
                             std.mem.writeInt(u16, param_buf[param_pos + 1 ..][0..2], @intCast(id_hex.len), .big);
                             param_pos += 3 + id_hex.len;
                             param_count += 1;
                         },
                         .body_field => {
-                            // Extract JSON field value from body.
-                            const val = json_extract_string(body, p.field) orelse return false;
-                            param_buf[param_pos] = @intFromEnum(@import("../protocol.zig").TypeTag.text);
+                            const val = json_extract_string(body, p.field) orelse break;
+                            param_buf[param_pos] = @intFromEnum(proto.TypeTag.text);
                             std.mem.writeInt(u16, param_buf[param_pos + 1 ..][0..2], @intCast(val.len), .big);
                             param_pos += 3;
                             @memcpy(param_buf[param_pos..][0..val.len], val);
@@ -455,18 +480,15 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
                             param_count += 1;
                         },
                         .literal_int => {
-                            param_buf[param_pos] = @intFromEnum(@import("../protocol.zig").TypeTag.integer);
+                            param_buf[param_pos] = @intFromEnum(proto.TypeTag.integer);
                             std.mem.writeInt(i64, param_buf[param_pos + 1 ..][0..8], p.int_val, .little);
                             param_pos += 9;
                             param_count += 1;
                         },
                         .body_json_array => {
-                            // Build JSON array string directly into param_buf
-                            // (no intermediate buffer).
-                            param_buf[param_pos] = @intFromEnum(@import("../protocol.zig").TypeTag.text);
-                            param_pos += 3; // skip tag + len (backfill after)
-                            const json_val = build_json_array_param(body, p.field, p.subfield, param_buf[param_pos..]) orelse return false;
-                            // Backfill length.
+                            param_buf[param_pos] = @intFromEnum(proto.TypeTag.text);
+                            param_pos += 3;
+                            const json_val = build_json_array_param(body, p.field, p.subfield, param_buf[param_pos..]) orelse break;
                             std.mem.writeInt(u16, param_buf[param_pos - 2 ..][0..2], @intCast(json_val.len), .big);
                             param_pos += json_val.len;
                             param_count += 1;
@@ -475,9 +497,7 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
                     }
                 }
 
-                // Execute SQL.
-                const sm = server.state_machine;
-                const result = sm.storage.query_raw(
+                const result = storage.query_raw(
                     query.sql,
                     param_buf[0..param_pos],
                     param_count,
@@ -488,10 +508,7 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
                 if (result) |rows| {
                     rows_pos += rows.len;
                 } else {
-                    // SQL execution failed — empty row set.
-                    // Write a minimal empty row set header.
                     if (rows_pos + 6 <= rows_buf.len) {
-                        // col_count=0, row_count=0
                         std.mem.writeInt(u16, rows_buf[rows_pos..][0..2], 0, .big);
                         std.mem.writeInt(u32, rows_buf[rows_pos + 2 ..][0..4], 0, .big);
                         rows_pos += 6;
@@ -499,19 +516,8 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
                 }
             }
 
-            // Send combined CALL.
-            if (!server.shm_dispatch.start_combined_request(
-                entry,
-                msg.operation,
-                msg,
-                body,
-                rows_buf[0..rows_pos],
-                row_set_count,
-                @ptrCast(conn),
-            )) {
-                return false;
-            }
-            return true;
+            assert(rows_pos <= rows_buf.len);
+            return .{ .rows_len = rows_pos, .row_set_count = row_set_count };
         }
 
         /// Build a JSON array string from a body field's array of objects.
@@ -749,85 +755,88 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
 
             for (&server.shm_dispatch.entries) |*entry| {
                 switch (entry.stage) {
-                    .write_pending => {
-                        // Execute writes under handle_lock.
-                        if (server.handle_lock != null) continue;
-
-                        const entry_idx = (@intFromPtr(entry) - @intFromPtr(&server.shm_dispatch.entries)) / @sizeOf(ShmDispatch.Entry);
-                        server.handle_lock = @intCast(entry_idx);
-
-                        const sm = server.state_machine;
-                        log.debug("shm write: mutation={} write_count={d} writes_len={d}", .{ entry.is_mutation, entry.handle_write_count, entry.handle_writes.len });
-                        if (entry.is_mutation) sm.begin_batch();
-
-                        // Execute writes through WriteView.
-                        if (entry.handle_write_count > 0) {
-                            var write_view = Storage.WriteView.init(sm.storage);
-                            const data = entry.handle_writes;
-                            var dpos: usize = 0;
-                            for (0..entry.handle_write_count) |_| {
-                                if (dpos + 2 > data.len) break;
-                                const sql_len = std.mem.readInt(u16, data[dpos..][0..2], .big);
-                                dpos += 2;
-                                if (dpos + sql_len > data.len) break;
-                                const sql = data[dpos..][0..sql_len];
-                                dpos += sql_len;
-                                if (dpos >= data.len) break;
-                                const param_count = data[dpos];
-                                dpos += 1;
-                                const params_start = dpos;
-                                dpos = @import("../protocol.zig").skip_params(data, dpos, param_count) orelse break;
-                                const write_ok = write_view.execute_raw(sql, data[params_start..dpos], param_count);
-                                log.debug("shm execute_raw: ok={} sql_len={d} params={d}", .{ write_ok, sql.len, param_count });
-                            }
-                        }
-
-                        if (entry.is_mutation) sm.commit_batch();
-
-                        server.handle_lock = null;
-                        server.shm_dispatch.write_committed(entry);
-                        server.shm_dispatch.advance();
-                    },
-                    .route_prefetch_complete => {
-                        // 2-RT: execute SQL declarations from sidecar, then send handle_render CALL.
-                        server.process_route_prefetch_complete(entry);
-                    },
-                    .render_complete => {
-                        // Encode response and send to the connection.
-                        const conn: *Connection = @ptrCast(@alignCast(entry.connection orelse {
-                            server.shm_dispatch.release_entry(entry);
-                            continue;
-                        }));
-
-                        const sm = server.state_machine;
-                        const commit_result = App.encode_response(
-                            entry.handle_status,
-                            entry.html,
-                            &conn.send_buf,
-                            conn.is_datastar_request,
-                            entry.handle_session_action,
-                            entry.msg.user_id,
-                            false, // is_authenticated — sidecar doesn't resolve identity yet
-                            false, // is_new_visitor — requires cookie check before dispatch
-                            sm.secret_key,
-                        );
-
-                        conn.keep_alive = commit_result.response.keep_alive;
-                        conn.set_response(commit_result.response.offset, commit_result.response.len);
-
-                        server.shm_dispatch.release_entry(entry);
-
-                        // Resume a suspended connection into the freed entry.
-                        if (server.suspended_head) |susp| {
-                            server.suspended_head = susp.active_next;
-                            if (server.suspended_head == null) server.suspended_tail = null;
-                            susp.active_next = null;
-                            if (susp.state == .ready) {
-                                server.try_dispatch(susp);
-                            }
-                        }
-                    },
+                    .write_pending => server.execute_shm_writes(entry),
+                    .route_prefetch_complete => server.process_route_prefetch_complete(entry),
+                    .render_complete => server.encode_shm_response(entry),
                     else => {},
+                }
+            }
+        }
+
+        /// Execute sidecar writes under handle_lock. Called for
+        /// entries in .write_pending stage.
+        fn execute_shm_writes(server: *Server, entry: *ShmDispatch.Entry) void {
+            assert(entry.stage == .write_pending);
+            if (server.handle_lock != null) return;
+
+            const entry_idx = (@intFromPtr(entry) - @intFromPtr(&server.shm_dispatch.entries)) / @sizeOf(ShmDispatch.Entry);
+            server.handle_lock = @intCast(entry_idx);
+
+            const sm = server.state_machine;
+            log.debug("shm write: mutation={} write_count={d} writes_len={d}", .{ entry.is_mutation, entry.handle_write_count, entry.handle_writes.len });
+            if (entry.is_mutation) sm.begin_batch();
+
+            if (entry.handle_write_count > 0) {
+                var write_view = Storage.WriteView.init(sm.storage);
+                const data = entry.handle_writes;
+                var dpos: usize = 0;
+                for (0..entry.handle_write_count) |_| {
+                    if (dpos + 2 > data.len) break;
+                    const sql_len = std.mem.readInt(u16, data[dpos..][0..2], .big);
+                    dpos += 2;
+                    if (dpos + sql_len > data.len) break;
+                    const sql = data[dpos..][0..sql_len];
+                    dpos += sql_len;
+                    if (dpos >= data.len) break;
+                    const param_count = data[dpos];
+                    dpos += 1;
+                    const params_start = dpos;
+                    dpos = @import("../protocol.zig").skip_params(data, dpos, param_count) orelse break;
+                    const write_ok = write_view.execute_raw(sql, data[params_start..dpos], param_count);
+                    log.debug("shm execute_raw: ok={} sql_len={d} params={d}", .{ write_ok, sql.len, param_count });
+                }
+            }
+
+            if (entry.is_mutation) sm.commit_batch();
+            server.handle_lock = null;
+            server.shm_dispatch.write_committed(entry);
+            server.shm_dispatch.advance();
+        }
+
+        /// Encode SHM response and send to connection. Called for
+        /// entries in .render_complete stage.
+        fn encode_shm_response(server: *Server, entry: *ShmDispatch.Entry) void {
+            assert(entry.stage == .render_complete);
+
+            const conn: *Connection = @ptrCast(@alignCast(entry.connection orelse {
+                server.shm_dispatch.release_entry(entry);
+                return;
+            }));
+
+            const sm = server.state_machine;
+            const commit_result = App.encode_response(
+                entry.handle_status,
+                entry.html,
+                &conn.send_buf,
+                conn.is_datastar_request,
+                entry.handle_session_action,
+                entry.msg.user_id,
+                false,
+                false,
+                sm.secret_key,
+            );
+
+            conn.keep_alive = commit_result.response.keep_alive;
+            conn.set_response(commit_result.response.offset, commit_result.response.len);
+            server.shm_dispatch.release_entry(entry);
+
+            // Resume a suspended connection into the freed entry.
+            if (server.suspended_head) |susp| {
+                server.suspended_head = susp.active_next;
+                if (server.suspended_head == null) server.suspended_tail = null;
+                susp.active_next = null;
+                if (susp.state == .ready) {
+                    server.try_dispatch(susp);
                 }
             }
         }

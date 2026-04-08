@@ -156,6 +156,8 @@ pub fn SidecarDispatchType(comptime Bus: type) type {
             body: []const u8,
             connection: *anyopaque,
         ) bool {
+            assert(entry.stage == .free);
+            assert(path.len > 0);
             const b = self.bus orelse return false;
 
             const request_id = self.next_request_id;
@@ -202,6 +204,8 @@ pub fn SidecarDispatchType(comptime Bus: type) type {
             row_set_count: u8,
             connection: *anyopaque,
         ) bool {
+            assert(entry.stage == .free);
+            assert(operation != .root);
             const b = self.bus orelse return false;
 
             const request_id = self.next_request_id;
@@ -367,6 +371,10 @@ pub fn SidecarDispatchType(comptime Bus: type) type {
                         if (entry.html_len > 0) {
                             const hl = entry.html_len;
                             const ho = entry.html_offset;
+                            // Pair assertion: parse_combined_result wrote
+                            // these offsets, verify they're in bounds.
+                            assert(ho + hl <= entry.handle_buf.len);
+                            assert(hl <= self.render_buf.len);
                             @memcpy(self.render_buf[0..hl], entry.handle_buf[ho..][0..hl]);
                             entry.html = self.render_buf[0..hl];
                         } else {
@@ -452,6 +460,10 @@ pub fn SidecarDispatchType(comptime Bus: type) type {
                 // sidecar responds with the actual operation.
                 assert(entry.operation != .root or entry.stage == .route_prefetch_pending);
 
+                // Buffer bounds: html offsets within handle_buf.
+                assert(entry.html_offset + entry.html_len <= entry.handle_buf.len);
+                assert(entry.route_len <= entry.route_buf.len);
+
                 // Mutation tracking consistency.
                 if (entry.is_mutation) {
                     switch (entry.stage) {
@@ -474,6 +486,8 @@ pub fn SidecarDispatchType(comptime Bus: type) type {
         // =============================================================
 
         pub fn send_call(self: *Self, b: *Bus, function_name: []const u8, args: []const u8, request_id: u32, entry_idx: u8) bool {
+            assert(function_name.len > 0);
+            assert(entry_idx < max_entries);
             if (!b.is_connection_ready(self.connection_index)) {
                 log.warn("send_call: connection {d} not ready for {s}", .{ self.connection_index, function_name });
                 return false;
@@ -575,6 +589,10 @@ pub fn SidecarDispatchType(comptime Bus: type) type {
             }
             entry.html_offset = html_start;
             entry.html_len = html_len;
+
+            // Pair assertion: advance will read html_offset + html_len
+            // to copy HTML to render_buf. Verify bounds now at write time.
+            assert(html_start + html_len <= entry.handle_buf.len);
 
             entry.stage = .combined_complete;
         }

@@ -1103,6 +1103,9 @@ test "parse_sidecar_frame rejects garbage" {
 /// truncated or contains an invalid type tag. Used by write execution to
 /// skip past parameter bytes without copying.
 pub fn skip_params(data: []const u8, start: usize, param_count: u8) ?usize {
+    // Precondition: start must be within data (or at end for 0 params).
+    assert(start <= data.len);
+
     var pos = start;
     for (0..param_count) |_| {
         if (pos >= data.len) return null;
@@ -1123,6 +1126,10 @@ pub fn skip_params(data: []const u8, start: usize, param_count: u8) ?usize {
             .null => {},
         }
     }
+
+    // Postcondition: position advanced past all params, still in bounds.
+    assert(pos >= start);
+    assert(pos <= data.len);
     return pos;
 }
 
@@ -1141,6 +1148,42 @@ test "parse_query_payload rejects truncated" {
     std.mem.writeInt(u16, short[0..2], 0, .big); // query_id
     std.mem.writeInt(u16, short[2..4], 100, .big); // sql_len = 100 (way past end)
     try std.testing.expect(parse_query_payload(&short) == null);
+}
+
+test "skip_params valid round-trip" {
+    // Build valid params: [integer: 42][text: "hi"][null]
+    var buf: [32]u8 = undefined;
+    buf[0] = @intFromEnum(TypeTag.integer); // tag
+    std.mem.writeInt(i64, buf[1..9], 42, .little); // 8-byte value
+    buf[9] = @intFromEnum(TypeTag.text); // tag
+    std.mem.writeInt(u16, buf[10..12], 2, .big); // len=2
+    buf[12] = 'h';
+    buf[13] = 'i';
+    buf[14] = @intFromEnum(TypeTag.null); // tag
+
+    // 3 params starting at offset 0 → should land at 15.
+    try std.testing.expectEqual(skip_params(&buf, 0, 3), 15);
+    // 0 params → stays at start.
+    try std.testing.expectEqual(skip_params(&buf, 0, 0), 0);
+    // 1 param at offset 9 (text "hi") → 15.
+    try std.testing.expectEqual(skip_params(&buf, 9, 1), 14);
+}
+
+test "skip_params rejects truncated and invalid" {
+    // Empty data, any params → null.
+    try std.testing.expect(skip_params("", 0, 1) == null);
+    // Invalid tag byte.
+    var bad = [_]u8{0xFF};
+    try std.testing.expect(skip_params(&bad, 0, 1) == null);
+    // Integer tag but truncated (only 4 bytes, need 8).
+    var short: [5]u8 = undefined;
+    short[0] = @intFromEnum(TypeTag.integer);
+    try std.testing.expect(skip_params(&short, 0, 1) == null);
+    // Text tag with length exceeding buffer.
+    var text_trunc: [4]u8 = undefined;
+    text_trunc[0] = @intFromEnum(TypeTag.text);
+    std.mem.writeInt(u16, text_trunc[1..3], 100, .big); // claims 100 bytes
+    try std.testing.expect(skip_params(&text_trunc, 0, 1) == null);
 }
 
 fn test_socketpair() [2]std.posix.fd_t {
