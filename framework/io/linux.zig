@@ -12,8 +12,8 @@ const constants = @import("../constants.zig");
 const stdx = @import("stdx");
 const common = @import("./common.zig");
 const QueueType = @import("../queue.zig").QueueType;
-const buffer_limit = @import("../io.zig").buffer_limit;
-const DirectIO = @import("../io.zig").DirectIO;
+const buffer_limit = @import("../io_defs.zig").buffer_limit;
+const DirectIO = @import("../io_defs.zig").DirectIO;
 const DoublyLinkedListType = @import("../list.zig").DoublyLinkedListType;
 const parse_dirty_semver = stdx.parse_dirty_semver;
 const maybe = stdx.maybe;
@@ -1712,35 +1712,8 @@ pub const IO = struct {
                     );
                 }
 
-                if (purpose == .format) {
-                    // Check that the first superblock_zone_size bytes are 0.
-                    // - It'll ensure that the block device is not directly TigerBeetle.
-                    // - It'll be very likely to catch any cases where there's an existing
-                    //   other filesystem.
-                    // - In the case of there being a partition table (eg, two partitions,
-                    //   one starting at 0MiB, one at 1024MiB) and the operator tries to format
-                    //   the raw disk (/dev/sda) while a partition later is
-                    //   TigerBeetle (/dev/sda2) it'll be blocked by the MBR/GPT existing.
-                    const superblock_zone_size =
-                        @import("../vsr/superblock.zig").superblock_zone_size;
-                    var read_buf: [superblock_zone_size]u8 align(constants.sector_size) = undefined;
-
-                    // We can do this without worrying about retrying partial reads because on
-                    // linux, read(2) on block devices can not be interrupted by signals.
-                    // See signal(7).
-                    assert(superblock_zone_size == try posix.read(fd, &read_buf));
-                    if (!std.mem.allEqual(u8, &read_buf, 0)) {
-                        std.debug.panic(
-                            "Superblock on block device not empty. " ++
-                                "If this is the correct block device to use, " ++
-                                "please zero the first {} using a tool like dd.",
-                            .{std.fmt.fmtIntSizeBin(superblock_zone_size)},
-                        );
-                    }
-                    // Reset position in the block device to compensate for read(2).
-                    try posix.lseek_CUR(fd, -superblock_zone_size);
-                    assert(try posix.lseek_CUR_get(fd) == 0);
-                }
+                // TB: superblock zone check removed — not applicable to tiger_web.
+                // The open_file function is kept for potential Direct I/O use.
             },
         }
 

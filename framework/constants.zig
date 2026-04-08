@@ -21,6 +21,9 @@ const assert = std.debug.assert;
 
 const build_options = @import("build_options");
 
+/// Extra runtime checks (TB pattern). Enabled in Debug/ReleaseSafe.
+pub const verify = std.debug.runtime_safety;
+
 pub const sidecar_enabled: bool = build_options.sidecar_enabled;
 pub const sidecar_count: u8 = build_options.sidecar_count;
 
@@ -106,6 +109,9 @@ pub const auth_key_length: u32 = 32;
 /// Server tick interval in milliseconds (for documentation — the actual
 /// interval is controlled by IO.run_for_ns at the call site).
 pub const tick_ms: u32 = 10;
+
+/// Disk sector size for Direct I/O alignment (TB pattern).
+pub const sector_size: u32 = 4096;
 
 /// Sidecar response deadline in ticks. If the pipeline has been pending
 /// for this many ticks, terminate the sidecar connection.
