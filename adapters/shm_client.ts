@@ -42,19 +42,9 @@ export class ShmClient {
     this.onDispatch = handler;
   }
 
-  // Legacy: raw frame handler for compat. Wraps as dispatch handler.
-  setFrameHandler(handler: (slotIndex: number, data: Buffer) => void) {
-    // Can't use pollDispatch with raw frame handler — fall back to JS poll.
-    this.onDispatch = null;
-    (this as any)._legacyHandler = handler;
-  }
-
   // Native poll+dispatch+respond — all in C. JS only runs the handler.
   poll(): number {
-    if (!this.onDispatch) {
-      // Legacy path for raw frame handlers.
-      return this._legacyPoll();
-    }
+    if (!this.onDispatch) return 0;
     return shmAddon.pollDispatch(
       this.buf,
       this.slotCount,
@@ -66,28 +56,8 @@ export class ShmClient {
     );
   }
 
-  // JS-side poll fallback for legacy frame handlers.
-  private _legacyPoll(): number {
-    const handler = (this as any)._legacyHandler;
-    if (!handler) return 0;
-    let found = 0;
-    for (let i = 0; i < this.slotCount; i++) {
-      const hdr = REGION_HEADER_SIZE + i * this.slotPairSize;
-      const serverSeq = this.buf.readUInt32LE(hdr);
-      if (serverSeq > this.lastSeenSeqs[i]) {
-        this.lastSeenSeqs[i] = serverSeq;
-        const requestLen = this.buf.readUInt32LE(hdr + 8);
-        if (requestLen > this.slotDataSize) continue;
-        const payload = this.buf.subarray(hdr + SLOT_HEADER_SIZE, hdr + SLOT_HEADER_SIZE + requestLen);
-        handler(i, payload);
-        found++;
-      }
-    }
-    return found;
-  }
-
-  // No longer needed — writeResponse is done in C by pollDispatch.
-  // Kept for legacy compat only.
+  // Write response to SHM slot. Used by 2-RT path where the server
+  // (not the C addon) triggers the response write.
   writeResponse(slot: number, data: Uint8Array): void {
     const hdr = REGION_HEADER_SIZE + slot * this.slotPairSize;
     const respOffset = hdr + SLOT_HEADER_SIZE + this.slotDataSize;

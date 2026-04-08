@@ -1,10 +1,14 @@
-// Sidecar runtime v2 + shared memory transport.
+// SHM sidecar runtime — 1-RT and 2-RT dispatch over shared memory.
 //
-// Same dispatch logic as call_runtime_v2.ts but uses shared memory
-// (mmap + futex) instead of unix socket. The ShmClient polls for
-// requests, dispatches to handler functions, writes responses back.
+// 1-RT (20/22 ops): server routes + executes prefetch SQL natively,
+// sends one handle_render CALL. Sidecar runs handle + render.
+// 2-RT (2 ops): server sends route_prefetch CALL, sidecar declares
+// SQL, server executes, then sends handle_render CALL.
 //
-// Usage: npx tsx adapters/call_runtime_v2_shm.ts <shm-name>
+// Uses mmap + setImmediate polling. C addon (pollDispatch) handles
+// SHM I/O, CRC, frame header parsing. JS only runs handler logic.
+//
+// Usage: npx tsx adapters/call_runtime_v2_shm.ts <shm-name> [slot-count]
 
 import { ShmClient } from "./shm_client.ts";
 import { modules, routeTable } from "../generated/handlers.generated.ts";
@@ -283,7 +287,7 @@ function dispatchHandle(requestId: number, args: Uint8Array): Uint8Array {
       const rowsDv = new DataView(args.buffer, args.byteOffset, args.byteLength);
       const { result } = readRowSet(rowsDv, 0);
       req.rows = result?.rows || [];
-    } catch { req.rows = []; }
+    } catch (e: any) { console.error(`[v2-shm] readRowSet error in handle:`, e.message); req.rows = []; }
   }
 
   const mod = modules[req.operation];
@@ -570,8 +574,9 @@ function dispatchHandleRender(requestId: number, args: Uint8Array): Uint8Array {
         prefetched[info.key] = info.mode === "query"
           ? (rows.length > 0 ? rows[0] : null) : rows;
       }
-    } catch {
-      pos = args.byteLength; // skip remaining on error
+    } catch (e: any) {
+      console.error(`[v2-shm] readRowSet error in handle_render:`, e.message);
+      pos = args.byteLength;
     }
   }
 
