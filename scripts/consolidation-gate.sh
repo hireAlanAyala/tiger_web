@@ -65,17 +65,14 @@ echo ""
 echo "=== Smoke test ==="
 rm -f /tmp/gate_test.db /dev/shm/tiger-* tiger_web.wal
 
-# Enable flags for smoke test
-sed -i 's/protocol_v2: bool = false/protocol_v2: bool = true/' app.zig
-sed -i 's/protocol_v2_shm: bool = false/protocol_v2_shm: bool = true/' app.zig
-rm -rf .zig-cache/ zig-out/
+# Build sidecar binary (SHM is now the sole protocol — no flag overrides needed).
 ./zig/zig build -Dsidecar=true -Dsidecar-count=1 -Dpipeline-slots=8 -Doptimize=ReleaseSafe 2>&1 || fail "Rebuild failed"
 
 zig-out/bin/tiger-web start --port=9899 --db=/tmp/gate_test.db > /dev/null 2>&1 &
 SERVER_PID=$!
 sleep 2
 
-cd examples/ecommerce-ts && npx tsx ../../adapters/call_runtime_v2_shm.ts "tiger-${SERVER_PID}" 8 2>/dev/null &
+cd examples/ecommerce-ts && npx tsx ../../adapters/call_runtime_shm.ts "tiger-${SERVER_PID}" 8 2>/dev/null &
 SIDECAR_PID=$!
 sleep 3
 cd "$PROJ"
@@ -95,7 +92,7 @@ pass "POST creates product, GET sees it"
 
 # Test keep-alive (2 requests on same connection)
 result=$(curl -s --max-time 3 http://localhost:9899/products http://localhost:9899/products)
-count=$(echo "$result" | grep -c "Gate Test" || true)
+count=$(echo "$result" | grep -o "Gate Test" | wc -l)
 [ "$count" -ge 2 ] || fail "Keep-alive failed: expected 2 results, got $count"
 pass "Keep-alive works"
 
@@ -105,7 +102,6 @@ wait $SERVER_PID $SIDECAR_PID 2>/dev/null || true
 sleep 1
 
 if [ "$MODE" = "quick" ]; then
-    git checkout app.zig
     echo ""
     printf "${GREEN}=== QUICK GATE PASSED ===${NC}\n"
     exit 0
@@ -119,7 +115,7 @@ rm -f /tmp/gate_bench.db /dev/shm/tiger-* tiger_web.wal
 zig-out/bin/tiger-web start --port=9899 --db=/tmp/gate_bench.db > /dev/null 2>&1 &
 SERVER_PID=$!
 sleep 2
-cd examples/ecommerce-ts && npx tsx ../../adapters/call_runtime_v2_shm.ts "tiger-${SERVER_PID}" 8 2>/dev/null &
+cd examples/ecommerce-ts && npx tsx ../../adapters/call_runtime_shm.ts "tiger-${SERVER_PID}" 8 2>/dev/null &
 SIDECAR_PID=$!
 sleep 3
 cd "$PROJ"
@@ -146,7 +142,6 @@ pass "default_mix throughput OK (>40K)"
 # Cleanup
 kill $SERVER_PID $SIDECAR_PID 2>/dev/null
 wait $SERVER_PID $SIDECAR_PID 2>/dev/null || true
-git checkout app.zig
 
 echo ""
 printf "${GREEN}=== FULL GATE PASSED ===${NC}\n"

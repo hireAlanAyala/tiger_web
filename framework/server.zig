@@ -48,22 +48,26 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
     const Handlers = App.HandlersFor(Storage, IO);
     const Wal = App.Wal;
 
-    // Sidecar types — resolved from Handlers at comptime.
-    // Bus and Client are embedded in the Server struct (TB pattern:
-    // Replica embeds MessageBus). Callbacks recover Server via
-    // the context pointer set during init.
-    const SidecarBus = if (App.sidecar_enabled) Handlers.BusType else void;
-    const SidecarClient = if (App.sidecar_enabled) Handlers.ClientType else void;
+    // Socket bus — control plane for sidecar READY handshake and
+    // lifecycle detection. No data frames — all traffic is SHM.
+    const SidecarBus = if (App.sidecar_enabled) blk: {
+        const mbus = @import("../framework/message_bus.zig");
+        const proto = @import("../protocol.zig");
+        const slots_per_conn: u16 = (@as(u16, constants.pipeline_slots_max) + App.sidecar_count - 1) / App.sidecar_count;
+        const raw_queue: u16 = slots_per_conn * (1 + proto.queries_max);
+        break :blk mbus.MessageBusType(IO, .{
+            .send_queue_max = if (raw_queue > 255) 255 else @intCast(raw_queue),
+            .frame_max = proto.frame_max,
+            .connections_max = App.sidecar_count,
+        });
+    } else void;
 
-    // V2 dispatch — 1-RT and 2-RT protocol over SHM. Selected at
-    // compile time via App.protocol_v2. No runtime negotiation —
-    // server and sidecar are deployed together.
-    const ShmBus = if (App.sidecar_enabled and App.protocol_v2_shm)
+    // SHM dispatch — 1-RT and 2-RT protocol over shared memory.
+    const ShmBus = if (App.sidecar_enabled)
         @import("shm_bus.zig").SharedMemoryBusType(.{ .slot_count = @import("constants.zig").pipeline_slots_max })
     else
         void;
-    const DispatchV2Bus = if (App.sidecar_enabled and App.protocol_v2_shm) ShmBus else SidecarBus;
-    const DispatchV2 = if (App.sidecar_enabled) @import("../sidecar_dispatch.zig").SidecarDispatchType(Storage, DispatchV2Bus) else void;
+    const ShmDispatch = if (App.sidecar_enabled) @import("../sidecar_dispatch.zig").SidecarDispatchType(ShmBus) else void;
 
     // Pipeline slot count — derived from bus connections.
     const slots_max: u8 = if (App.sidecar_enabled) SidecarBus.connections_max else 1;
@@ -199,24 +203,12 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
         /// are permanently wired — no swap, no bug.
         handlers: [pipeline_slots_max]Handlers = .{@as(Handlers, .{})} ** pipeline_slots_max,
 
-        // Sidecar Bus and Client — embedded in the Server (TB pattern:
-        // Replica embeds MessageBus). Callbacks use the context pointer
-        // set during init to recover the Server. Comptime-eliminated
-        // when sidecar_enabled = false (void fields, zero bytes).
-        //
-        // Three parallel arrays, all sized to pipeline_slots_max:
-        //   pipeline_slots[i] — per-request state for slot i
-        //   handlers[i]       — domain dispatch for slot i
-        //   sidecar_clients[i] — protocol state machine for slot i
-        dispatch_v2: if (App.sidecar_enabled) DispatchV2 else void = if (App.sidecar_enabled) .{} else {},
-        shm_bus: if (App.sidecar_enabled and App.protocol_v2_shm) ShmBus else void = if (App.sidecar_enabled and App.protocol_v2_shm) .{} else {},
+        // Sidecar infrastructure — embedded in the Server (TB pattern:
+        // Replica embeds MessageBus). Comptime-eliminated when
+        // sidecar_enabled = false (void fields, zero bytes).
+        shm_dispatch: if (App.sidecar_enabled) ShmDispatch else void = if (App.sidecar_enabled) .{} else {},
+        shm_bus: if (App.sidecar_enabled) ShmBus else void = if (App.sidecar_enabled) .{} else {},
         sidecar_bus: SidecarBus = if (App.sidecar_enabled) undefined else {},
-        sidecar_clients: if (App.sidecar_enabled)
-            [pipeline_slots_max]SidecarClient
-        else
-            void = if (App.sidecar_enabled)
-            undefined
-        else {},
 
         /// Per-connection READY state. Each connection validates its
         /// own READY handshake independently. find_free_slot checks
@@ -235,11 +227,7 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
         pub fn sidecar_any_ready(server: *const Server) bool {
             if (!App.sidecar_enabled) return false;
             // Shared memory transport is ready immediately — no handshake.
-            if (App.protocol_v2_shm) return server.shm_bus.ready;
-            for (server.sidecar_connections_ready) |ready| {
-                if (ready) return true;
-            }
-            return false;
+            return server.shm_bus.ready;
         }
 
         /// Initialize the server. Allocates the connection pool on the heap.
@@ -326,13 +314,13 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
             // Already dispatched to a slot — don't double-dispatch.
             if (server.connection_dispatched(conn)) return;
 
-            // V2 dispatch path — pipelined stateless protocol.
-            if (App.sidecar_enabled and App.protocol_v2) {
-                server.try_dispatch_v2(conn);
+            // SHM dispatch — 1-RT/2-RT pipelined protocol.
+            if (App.sidecar_enabled) {
+                server.try_shm_dispatch(conn);
                 return;
             }
 
-            // V1 path — sequential slot-based dispatch.
+            // Native path — sequential slot-based dispatch.
             const slot = server.find_free_slot() orelse {
                 server.suspend_connection(conn);
                 return;
@@ -345,15 +333,15 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
         }
 
         // =============================================================
-        // V2 dispatch — pipelined stateless protocol
+        // SHM dispatch — 1-RT/2-RT pipelined protocol
         // =============================================================
 
         const prefetch_specs = @import("../generated/prefetch.generated.zig");
 
-        fn try_dispatch_v2(server: *Server, conn: *Connection) void {
-            if (!App.sidecar_enabled or !App.protocol_v2) unreachable;
+        fn try_shm_dispatch(server: *Server, conn: *Connection) void {
+            if (!App.sidecar_enabled) unreachable;
 
-            const entry = server.dispatch_v2.acquire_entry() orelse {
+            const entry = server.shm_dispatch.acquire_entry() orelse {
                 server.suspend_connection(conn);
                 return;
             };
@@ -372,7 +360,7 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
             if (server.try_dispatch_1rt(entry, conn, method, path, body)) return;
 
             // 2-RT fallback: send route_prefetch CALL to sidecar.
-            if (!server.dispatch_v2.start_request_2rt(entry, method, path, body, @ptrCast(conn))) {
+            if (!server.shm_dispatch.start_request_2rt(entry, method, path, body, @ptrCast(conn))) {
                 entry.reset();
                 server.suspend_connection(conn);
                 return;
@@ -383,7 +371,7 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
         /// combined handle_render CALL. Returns true if dispatched.
         fn try_dispatch_1rt(
             server: *Server,
-            entry: *DispatchV2.Entry,
+            entry: *ShmDispatch.Entry,
             conn: *Connection,
             method: http.Method,
             path: []const u8,
@@ -426,7 +414,7 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
                 @memcpy(msg.body[0..body.len], body);
             }
 
-            // Look up prefetch spec. null = @dynamic-prefetch or no-prefetch-with-null-spec.
+            // Look up prefetch spec. null = 2-RT fallback or no prefetch.
             const op_idx = @intFromEnum(msg.operation);
             if (op_idx >= prefetch_specs.specs.len) return false;
             const spec = prefetch_specs.specs[op_idx] orelse return false;
@@ -512,7 +500,7 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
             }
 
             // Send combined CALL.
-            if (!server.dispatch_v2.start_combined_request(
+            if (!server.shm_dispatch.start_combined_request(
                 entry,
                 msg.operation,
                 msg,
@@ -607,7 +595,7 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
 
         /// 2-RT: execute SQL declarations from route_prefetch result,
         /// serialize row sets, send handle_render CALL.
-        fn process_route_prefetch_complete(server: *Server, entry: *DispatchV2.Entry) void {
+        fn process_route_prefetch_complete(server: *Server, entry: *ShmDispatch.Entry) void {
             const proto = @import("../protocol.zig");
             const data = entry.route_buf[0..entry.route_len];
             if (data.len == 0) {
@@ -686,7 +674,7 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
         /// Does NOT use start_combined_request — mutation tracking is already
         /// set from parse_route_prefetch_result. Just sends the CALL and
         /// transitions to combined_pending.
-        fn send_handle_render_for_entry(server: *Server, entry: *DispatchV2.Entry, rows_data: []const u8, row_set_count: u8) void {
+        fn send_handle_render_for_entry(server: *Server, entry: *ShmDispatch.Entry, rows_data: []const u8, row_set_count: u8) void {
             const body = entry.msg.body[0..entry.body_len];
 
             // Build combined CALL args inline (same format as start_combined_request).
@@ -711,9 +699,9 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
                 pos += rows_data.len;
             }
 
-            const entry_idx = server.dispatch_v2.entry_index(entry);
-            if (!server.dispatch_v2.send_call_direct(
-                server.dispatch_v2.bus orelse {
+            const entry_idx = server.shm_dispatch.entry_index(entry);
+            if (!server.shm_dispatch.send_call(
+                server.shm_dispatch.bus orelse {
                     entry.reset();
                     return;
                 },
@@ -755,24 +743,24 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
             return null;
         }
 
-        /// V2: process completed entries — encode response and send.
-        fn process_v2_completions(server: *Server) void {
-            if (!App.sidecar_enabled or !App.protocol_v2) return;
+        /// SHM: process completed entries — encode response and send.
+        fn process_shm_completions(server: *Server) void {
+            if (!App.sidecar_enabled) return;
 
-            for (&server.dispatch_v2.entries) |*entry| {
+            for (&server.shm_dispatch.entries) |*entry| {
                 switch (entry.stage) {
                     .write_pending => {
                         // Execute writes under handle_lock.
                         if (server.handle_lock != null) continue;
 
-                        const entry_idx = (@intFromPtr(entry) - @intFromPtr(&server.dispatch_v2.entries)) / @sizeOf(DispatchV2.Entry);
+                        const entry_idx = (@intFromPtr(entry) - @intFromPtr(&server.shm_dispatch.entries)) / @sizeOf(ShmDispatch.Entry);
                         server.handle_lock = @intCast(entry_idx);
 
                         const sm = server.state_machine;
-                        log.debug("v2 write: mutation={} write_count={d} writes_len={d}", .{ entry.is_mutation, entry.handle_write_count, entry.handle_writes.len });
+                        log.debug("shm write: mutation={} write_count={d} writes_len={d}", .{ entry.is_mutation, entry.handle_write_count, entry.handle_writes.len });
                         if (entry.is_mutation) sm.begin_batch();
 
-                        // Execute writes through WriteView (same as v1 path).
+                        // Execute writes through WriteView.
                         if (entry.handle_write_count > 0) {
                             var write_view = Storage.WriteView.init(sm.storage);
                             const data = entry.handle_writes;
@@ -788,17 +776,17 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
                                 const param_count = data[dpos];
                                 dpos += 1;
                                 const params_start = dpos;
-                                dpos = @import("../sidecar.zig").SidecarClientType(SidecarBus).skip_params(data, dpos, param_count) orelse break;
+                                dpos = @import("../protocol.zig").skip_params(data, dpos, param_count) orelse break;
                                 const write_ok = write_view.execute_raw(sql, data[params_start..dpos], param_count);
-                                log.debug("v2 execute_raw: ok={} sql_len={d} params={d}", .{ write_ok, sql.len, param_count });
+                                log.debug("shm execute_raw: ok={} sql_len={d} params={d}", .{ write_ok, sql.len, param_count });
                             }
                         }
 
                         if (entry.is_mutation) sm.commit_batch();
 
                         server.handle_lock = null;
-                        server.dispatch_v2.write_committed(entry);
-                        server.dispatch_v2.advance(sm.storage);
+                        server.shm_dispatch.write_committed(entry);
+                        server.shm_dispatch.advance();
                     },
                     .route_prefetch_complete => {
                         // 2-RT: execute SQL declarations from sidecar, then send handle_render CALL.
@@ -807,7 +795,7 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
                     .render_complete => {
                         // Encode response and send to the connection.
                         const conn: *Connection = @ptrCast(@alignCast(entry.connection orelse {
-                            server.dispatch_v2.release_entry(entry);
+                            server.shm_dispatch.release_entry(entry);
                             continue;
                         }));
 
@@ -827,7 +815,7 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
                         conn.keep_alive = commit_result.response.keep_alive;
                         conn.set_response(commit_result.response.offset, commit_result.response.len);
 
-                        server.dispatch_v2.release_entry(entry);
+                        server.shm_dispatch.release_entry(entry);
 
                         // Resume a suspended connection into the freed entry.
                         if (server.suspended_head) |susp| {
@@ -845,29 +833,29 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
         }
 
         // Global server pointer for shm_poll_all callback.
-        // Set during wire_sidecar. Only used when protocol_v2_shm is active.
+        // Set during wire_sidecar. Only used when sidecar is enabled.
         var shm_poll_server: ?*Server = null;
 
         var shm_frames_received: u32 = 0;
 
         fn shm_poll_all() bool {
             const server = shm_poll_server orelse return false;
-            if (!App.sidecar_enabled or !App.protocol_v2_shm) return false;
+            if (!App.sidecar_enabled) return false;
             const before = shm_frames_received;
-            for (0..DispatchV2Bus.slot_count) |i| {
+            for (0..ShmBus.slot_count) |i| {
                 server.shm_bus.check_response(@intCast(i));
             }
-            server.process_v2_completions();
+            server.process_shm_completions();
             return shm_frames_received != before;
         }
 
-        /// Shared memory frame callback — routes frames to v2 dispatch.
+        /// Shared memory frame callback — routes frames to SHM dispatch.
         fn shm_on_frame(ctx: *anyopaque, _: u8, frame: []const u8) void {
             shm_frames_received += 1;
             const server: *Server = @ptrCast(@alignCast(ctx));
-            if (!App.sidecar_enabled or !App.protocol_v2) return;
-            server.dispatch_v2.on_frame(frame, server.state_machine.storage);
-            server.process_v2_completions();
+            if (!App.sidecar_enabled) return;
+            server.shm_dispatch.on_frame(frame);
+            server.process_shm_completions();
         }
 
         fn suspend_connection(server: *Server, conn: *Connection) void {
@@ -933,29 +921,22 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
         ///   Null: no listener (sim — test sets listen_fd directly after).
         pub fn wire_sidecar(server: *Server, allocator: std.mem.Allocator, sidecar_path: ?[]const u8) !void {
             if (!App.sidecar_enabled) return;
-            for (&server.sidecar_clients, &server.handlers, 0..) |*client, *handler, i| {
-                client.* = SidecarClient.init();
-                handler.sidecar_client = client;
-                handler.sidecar_bus = &server.sidecar_bus;
+            for (&server.handlers, 0..) |*handler, i| {
                 handler.connection_index = @intCast(i % App.sidecar_count);
             }
-            // Wire v2 dispatch module.
-            if (App.protocol_v2_shm) {
-                try server.io.init_uring();
-                const pid = @as(u32, @intCast(std.os.linux.getpid()));
-                var shm_name_buf: [64]u8 = undefined;
-                const shm_name = std.fmt.bufPrint(&shm_name_buf, "tiger-{d}", .{pid}) catch "tiger-shm";
-                try server.shm_bus.create(shm_name, &server.io.uring.?, shm_on_frame, @ptrCast(server));
-                server.dispatch_v2.bus = &server.shm_bus;
-                server.shm_bus.set_ready();
-                // Register shm poll in run_for_ns — responses need sub-ms polling.
-                shm_poll_server = server;
-                server.io.shm_poll_fn = &shm_poll_all;
-                log.info("shm transport: /dev/shm/{s}", .{shm_name});
-            } else {
-                server.dispatch_v2.bus = &server.sidecar_bus;
-            }
-            server.dispatch_v2.connection_index = 0;
+            // Wire SHM dispatch — shared memory is the sole transport.
+            try server.io.init_uring();
+            const pid = @as(u32, @intCast(std.os.linux.getpid()));
+            var shm_name_buf: [64]u8 = undefined;
+            const shm_name = std.fmt.bufPrint(&shm_name_buf, "tiger-{d}", .{pid}) catch "tiger-shm";
+            try server.shm_bus.create(shm_name, &server.io.uring.?, shm_on_frame, @ptrCast(server));
+            server.shm_dispatch.bus = &server.shm_bus;
+            server.shm_bus.set_ready();
+            // Register shm poll in run_for_ns — responses need sub-ms polling.
+            shm_poll_server = server;
+            server.io.shm_poll_fn = &shm_poll_all;
+            log.info("shm transport: /dev/shm/{s}", .{shm_name});
+            server.shm_dispatch.connection_index = 0;
             try server.sidecar_bus.init_pool(
                 allocator,
                 server.io,
@@ -998,13 +979,14 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
             if (App.sidecar_enabled) server.sidecar_bus.tick_accept();
             server.maybe_accept();
             server.update_time();
-            // Don't call resume_suspended() here — with 0ms tick and
-            // many suspended connections, it burns O(N) per loop iteration.
-            // Suspended connections are resumed from render_complete when
-            // a pipeline slot frees up (demand-driven, not polling).
+            // Resume suspended connections when slots are free. Busy faults
+            // suspend connections after pipeline_reset, so they need a tick-
+            // driven retry. Cost is O(pipeline_slots_max) per tick, not O(N
+            // connections) — bounded by the slot array scan in try_dispatch.
+            if (server.suspended_head != null) server.resume_suspended();
             server.wake_handle_waiters();
             if (App.sidecar_enabled) server.timeout_sidecar_response();
-            server.process_v2_completions();
+            server.process_shm_completions();
             server.log_metrics();
         }
 
@@ -1181,7 +1163,9 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
 
                         if (handler.is_handler_pending()) return; // async IO in-flight
 
-                        // Busy — suspend for retry on next tick.
+                        // Busy — reset slot and suspend connection for
+                        // retry. resume_suspended (called from tick)
+                        // will re-dispatch when a slot is free.
                         server.tracer.cancel_slot(idx);
                         const busy_conn = slot.connection;
                         server.pipeline_reset(slot);
@@ -1416,7 +1400,7 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
                     server.sidecar_bus.terminate_connection(connection_index);
                     return;
                 };
-                const accepted_version = if (App.protocol_v2) 2 else protocol.protocol_version;
+                const accepted_version: u8 = 2;
                 if (ready.version != accepted_version) {
                     log.warn("sidecar: version mismatch: expected {d}, got {d}", .{
                         accepted_version, ready.version,
@@ -1429,42 +1413,14 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
                 return;
             }
 
-            // V2 dispatch — route frame to dispatch module.
-            if (App.protocol_v2) {
-                server.dispatch_v2.on_frame(frame, server.state_machine.storage);
-                server.process_v2_completions();
-                return;
-            }
-
-            // V1: route frame to the correct handler/slot.
-            const slot_idx: u8 = if (pipeline_slots_max == App.sidecar_count)
-                connection_index
-            else
-                server.find_slot_by_frame(frame) orelse {
-                    log.warn("sidecar: frame with unknown request_id on connection {d}", .{connection_index});
-                    return;
-                };
-
-            const handler = &server.handlers[slot_idx];
-            handler.process_sidecar_frame(frame, server.state_machine.storage);
-
-            // Protocol violation → terminate the bus connection.
-            if (server.sidecar_clients[slot_idx].protocol_violation) {
-                log.warn("sidecar: protocol violation on slot {d}, terminating connection {d}", .{ slot_idx, connection_index });
-                server.terminate_sidecar_connection(connection_index);
-                return;
-            }
-
-            // Resume pipeline on the matched slot.
-            const slot = &server.pipeline_slots[slot_idx];
-            if (slot.stage != .idle and !handler.is_handler_pending()) {
-                server.commit_dispatch(slot);
-            }
+            // SHM dispatch — route frame to dispatch module.
+            server.shm_dispatch.on_frame(frame);
+            server.process_shm_completions();
         }
 
         /// Called when the sidecar bus connection closes. Resets all
         /// pipeline slots that were using this connection.
-        pub fn sidecar_on_close(ctx: *anyopaque, connection_index: u8, reason: Handlers.BusType.Connection.CloseReason) void {
+        pub fn sidecar_on_close(ctx: *anyopaque, connection_index: u8, reason: SidecarBus.Connection.CloseReason) void {
             if (!App.sidecar_enabled) unreachable;
             const server: *Server = @ptrCast(@alignCast(ctx));
             log.info("sidecar: connection {d} disconnected (reason={s})", .{ connection_index, @tagName(reason) });
@@ -1485,22 +1441,6 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
                     handler.reset_handler_state();
                 }
             }
-        }
-
-        /// Find which pipeline slot a sidecar frame belongs to by
-        /// matching the request_id in the frame against each slot's
-        /// expected_request_id. Returns null if no match (stale frame).
-        fn find_slot_by_frame(server: *Server, frame: []const u8) ?u8 {
-            if (!App.sidecar_enabled) unreachable;
-            // request_id is at bytes 1..5 (after tag byte), big-endian.
-            if (frame.len < 5) return null;
-            const request_id = std.mem.readInt(u32, frame[1..5], .big);
-            for (&server.sidecar_clients, 0..) |*client, i| {
-                if (client.call_state == .receiving and client.expected_request_id == request_id) {
-                    return @intCast(i);
-                }
-            }
-            return null;
         }
 
         /// Terminate a specific sidecar bus connection. on_close will
@@ -1665,7 +1605,7 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
             // held after tick, a slot entered .handle but didn't complete.
             assert(server.handle_lock == null);
 
-            // Handler invariants — cross-checks prefetch_phase vs call_state.
+            // Handler invariants — per-slot structural checks.
             // Each handler checked independently — no shared state.
             for (&server.handlers) |*handler| {
                 handler.invariants();

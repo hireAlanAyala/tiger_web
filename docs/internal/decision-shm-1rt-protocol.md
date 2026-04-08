@@ -130,5 +130,5 @@ Fastify's 38K (+52%).
 | `framework/io.zig` | Adaptive epoll timeout, shm_poll_fn returns bool |
 | `storage.zig` | raw_cache_get/put (prepared statement cache) |
 | `addons/shm/shm.c` | pollDispatch (C-side SHM I/O + CRC + frame parse), futexWait/spinWait |
-| `adapters/call_runtime_v2_shm.ts` | dispatchHandleRender, pre-allocated buffers, prefetchKeyMap |
+| `adapters/call_runtime_shm.ts` | dispatchHandleRender, pre-allocated buffers, prefetchKeyMap |
 | `adapters/shm_client.ts` | ShmClient with region header, startWaiting/startPolling |

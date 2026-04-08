@@ -2,8 +2,8 @@
 //
 // Prefetch SQL specs for 1-RT sidecar dispatch. The framework
 // executes these queries natively instead of calling the sidecar
-// for the prefetch phase. Operations with `null` use 4-RT fallback
-// (@dynamic-prefetch handlers or operations without prefetch).
+// for the prefetch phase. Operations with `null` use 2-RT fallback
+// (SQL not statically extractable, or operations without prefetch).
 
 const protocol = @import("../protocol.zig");
 

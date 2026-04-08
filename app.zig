@@ -13,8 +13,6 @@ const http = @import("framework/http.zig");
 const auth = @import("framework/auth.zig");
 const marks = @import("framework/marks.zig");
 const PRNG = @import("stdx").PRNG;
-pub const SidecarClientType = @import("sidecar.zig").SidecarClientType;
-const message_bus = @import("framework/message_bus.zig");
 
 const log = marks.wrap_log(std.log.scoped(.app));
 
@@ -225,41 +223,52 @@ pub fn StateMachineWith(comptime StorageParam: type) type {
 /// sidecar mode explicitly.
 pub const sidecar_enabled = @import("build_options").sidecar_enabled;
 pub const sidecar_count: u8 = @import("build_options").sidecar_count;
-/// V2 pipelined protocol — experimental. When true, the server uses
-/// SidecarDispatchType instead of SidecarHandlersType for sidecar
-/// requests. Enable for benchmarking the 4-RT pipelined dispatch.
-pub const protocol_v2: bool = false; // Experimental — set true to test v2 dispatch
-pub const protocol_v2_shm: bool = false; // Experimental — shared memory transport for v2
-
 /// Resolve the Handlers type based on sidecar_enabled.
-/// Native path ignores IO. Sidecar path resolves Bus from IO
-/// here — the composition root — then passes Bus to handlers.
-/// Matches TB: Replica resolves MessageBus, passes it to Client.
+/// Native path: full handler dispatch (route/prefetch/execute/render).
+/// Sidecar path: no-op stub — all dispatch goes through ShmDispatch.
 pub fn HandlersFor(comptime StorageParam: type, comptime IOParam: type) type {
-    if (sidecar_enabled) {
-        // Bus options — sized for worst-case per connection. With multiplexing,
-        // multiple pipeline slots share one connection. Each slot can have
-        // 1 CALL + 1 QUERY_RESULT in the send queue simultaneously.
-        // slots_per_conn = ceil(pipeline_slots_max / sidecar_count).
-        const constants = @import("framework/constants.zig");
-        const slots_per_conn: u16 = (@as(u16, constants.pipeline_slots_max) + sidecar_count - 1) / sidecar_count;
-        // Socket bus send queue — sized for multiplexed v1 protocol.
-        // Cap at u8 max; SHM transport doesn't use the send queue.
-        const raw_queue: u16 = slots_per_conn * (1 + protocol.queries_max);
-        const bus_options: message_bus.Options = .{
-            .send_queue_max = if (raw_queue > 255) 255 else @intCast(raw_queue),
-            .frame_max = protocol.frame_max,
-            .connections_max = sidecar_count,
-        };
-        const Bus = message_bus.MessageBusType(IOParam, bus_options);
-        const H = @import("sidecar_handlers.zig").SidecarHandlersType(StorageParam, Bus);
-        validateHandlersInterface(H);
-        return H;
-    }
+    _ = IOParam;
+    if (sidecar_enabled) return SidecarHandlersStub;
     const H = HandlersType(StorageParam);
     validateHandlersInterface(H);
     return H;
 }
+
+/// No-op handler stub for sidecar mode. All actual dispatch goes
+/// through ShmDispatch over shared memory. This stub exists so the
+/// server's handlers array compiles — commit_dispatch references
+/// handler methods even though the SHM path never calls them.
+const SidecarHandlersStub = struct {
+    pub const Cache = void;
+    pub const FwCtx = @import("framework/handler.zig").FrameworkCtx(message.PrefetchIdentity);
+
+    connection_index: u8 = 0,
+
+    pub fn on_sidecar_close(_: *@This()) void {}
+    pub fn reset_handler_state(_: *@This()) void {}
+    pub fn invariants(_: *const @This()) void {}
+    pub fn is_handler_pending(_: *const @This()) bool {
+        return false;
+    }
+
+    // Dead dispatch methods — never called (SHM dispatch bypasses
+    // commit_dispatch), but the compiler type-checks them.
+    pub fn handler_route(_: *@This(), _: http.Method, _: []const u8, _: []const u8) ?Message {
+        unreachable;
+    }
+    pub fn handler_prefetch(_: *@This(), _: anytype, _: *const Message) ?Cache {
+        unreachable;
+    }
+    pub fn handler_execute(_: *@This(), _: Cache, _: Message, _: FwCtx, _: anytype) state_machine.HandleResult {
+        unreachable;
+    }
+    pub fn handler_render(_: *@This(), _: Cache, _: Operation, _: message.Status, _: FwCtx, _: []u8, _: anytype) ?[]const u8 {
+        unreachable;
+    }
+    pub fn query_dispatch_fn(_: *anyopaque, _: []const u8, _: []const u8, _: u8, _: protocol.QueryMode, _: []u8) ?[]const u8 {
+        unreachable;
+    }
+};
 
 /// Comptime assertion that a Handlers type exposes the required interface.
 /// Both native and sidecar handlers must have identical public declarations.

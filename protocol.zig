@@ -1098,6 +1098,34 @@ test "parse_sidecar_frame rejects garbage" {
     try std.testing.expect(parse_sidecar_frame(&call_tag) == null);
 }
 
+/// Advance past `param_count` type-tagged parameters in a binary payload.
+/// Returns the position after the last parameter, or null if the data is
+/// truncated or contains an invalid type tag. Used by write execution to
+/// skip past parameter bytes without copying.
+pub fn skip_params(data: []const u8, start: usize, param_count: u8) ?usize {
+    var pos = start;
+    for (0..param_count) |_| {
+        if (pos >= data.len) return null;
+        const tag = std.meta.intToEnum(TypeTag, data[pos]) catch return null;
+        pos += 1;
+        switch (tag) {
+            .integer, .float => {
+                if (pos + 8 > data.len) return null;
+                pos += 8;
+            },
+            .text, .blob => {
+                if (pos + 2 > data.len) return null;
+                const vlen = std.mem.readInt(u16, data[pos..][0..2], .big);
+                pos += 2;
+                if (pos + vlen > data.len) return null;
+                pos += vlen;
+            },
+            .null => {},
+        }
+    }
+    return pos;
+}
+
 test "parse_result_payload rejects garbage" {
     try std.testing.expect(parse_result_payload("") == null);
     // Invalid flag byte

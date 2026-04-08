@@ -132,7 +132,6 @@ const Annotation = struct {
     line: u32,
     has_body: bool,
     route_match: ?RouteMatch = null,
-    dynamic_prefetch: bool = false, // @dynamic-prefetch opt-in
     extraction_failed: bool = false, // SQL extraction attempted but failed
     prefetch_queries: []const PrefetchQuery = &.{},
     param_hints: [max_annotation_param_hints]?ParamHint = .{null} ** max_annotation_param_hints,
@@ -357,17 +356,6 @@ fn parse_param_directive(line: []const u8, prefix: []const u8) ?struct { field: 
         .field = spec[0..dot],
         .subfield = spec[dot + 1 ..],
     };
-}
-
-/// Parse `// @dynamic-prefetch` directive. Returns true if found.
-/// Marks a prefetch handler as requiring 4-RT dispatch (dynamic SQL
-/// that can't be extracted at build time).
-fn parse_dynamic_prefetch_directive(line: []const u8, prefix: []const u8) bool {
-    const trimmed = std.mem.trimLeft(u8, line, " \t");
-    if (!std.mem.startsWith(u8, trimmed, prefix)) return false;
-    const after_prefix = std.mem.trimLeft(u8, trimmed[prefix.len..], " \t");
-    const after_trimmed = std.mem.trimRight(u8, after_prefix, " \t\r");
-    return std.mem.eql(u8, after_trimmed, "@dynamic-prefetch");
 }
 
 fn user_phase_name(phase: Phase) []const u8 {
@@ -653,7 +641,6 @@ fn scan_file_content(
     var lines = std.mem.splitScalar(u8, content, '\n');
     var prev_annotation: ?struct { phase: Phase, operation: []const u8, line: u32 } = null;
     var pending_match: ?RouteMatch = null;
-    var pending_dynamic_prefetch: bool = false;
     var pending_params: [max_annotation_param_hints]?ParamHint = .{null} ** max_annotation_param_hints;
     var pending_param_count: u8 = 0;
 
@@ -699,14 +686,7 @@ fn scan_file_content(
                         }
                     }
 
-                    // `// @dynamic-prefetch` — opt into 4-RT dispatch.
-                    // Only valid after [prefetch]. Tells the scanner not
-                    // to extract SQL (the handler has dynamic queries).
                     if (ann.phase == .prefetch and next_ann == null) {
-                        if (parse_dynamic_prefetch_directive(line, prefix)) {
-                            pending_dynamic_prefetch = true;
-                            continue;
-                        }
                         // `// @param json_array field.subfield` — declares a
                         // body_json_array param for the next query.
                         if (parse_param_directive(line, prefix)) |pd| {
@@ -718,17 +698,6 @@ fn scan_file_content(
                                 };
                                 pending_param_count += 1;
                             }
-                            continue;
-                        }
-                    }
-
-                    // `// @dynamic-prefetch` on non-prefetch phases is an error.
-                    if (ann.phase != .prefetch and next_ann == null) {
-                        if (parse_dynamic_prefetch_directive(line, prefix)) {
-                            try stderr.print("error: {s}:{d}: @dynamic-prefetch only valid after [prefetch], not [{s}]\n", .{ path, line_num, user_phase_name(ann.phase) });
-                            errors += 1;
-                            prev_annotation = null;
-                            pending_dynamic_prefetch = false;
                             continue;
                         }
                     }
@@ -787,14 +756,12 @@ fn scan_file_content(
                             .line = ann.line,
                             .has_body = true,
                             .route_match = pending_match,
-                            .dynamic_prefetch = pending_dynamic_prefetch,
                             .param_hints = pending_params,
                             .param_hint_count = pending_param_count,
                         });
                     }
                     prev_annotation = null;
                     pending_match = null;
-                    pending_dynamic_prefetch = false;
                     pending_param_count = 0;
                     pending_params = .{null} ** 4;
                     continue;
@@ -1067,7 +1034,7 @@ pub fn main() !void {
                 // If extraction succeeds → 1-RT (framework executes SQL natively).
                 // If extraction fails → 2-RT fallback (sidecar declares SQL at runtime).
                 // No error, no annotation needed — automatic detection.
-                if (!ann.dynamic_prefetch and found_sql) {
+                if (found_sql) {
                     if (extract_prefetch_queries(allocator, body, quote, ann.param_hints, ann.param_hint_count)) |pqs| {
                         for (annotations.items) |*a| {
                             if (a.phase == .prefetch and std.mem.eql(u8, a.operation, ann.operation)) {
@@ -2075,8 +2042,8 @@ fn emit_prefetch_zig(
         \\//
         \\// Prefetch SQL specs for 1-RT sidecar dispatch. The framework
         \\// executes these queries natively instead of calling the sidecar
-        \\// for the prefetch phase. Operations with `null` use 4-RT fallback
-        \\// (@dynamic-prefetch handlers or operations without prefetch).
+        \\// for the prefetch phase. Operations with `null` use 2-RT fallback
+        \\// (SQL not statically extractable, or operations without prefetch).
         \\
         \\const protocol = @import("../protocol.zig");
         \\
@@ -2143,8 +2110,8 @@ fn emit_prefetch_zig(
         } else null;
 
         if (prefetch_ann) |ann| {
-            if (ann.dynamic_prefetch or ann.extraction_failed) {
-                // Dynamic prefetch or extraction failed — use 2-RT.
+            if (ann.extraction_failed) {
+                // Extraction failed — use 2-RT.
                 try w.print("    null, // .{s} — 2-RT\n", .{name});
                 continue;
             }

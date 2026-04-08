@@ -43,7 +43,6 @@ const Fuzzers = .{
     .state_machine = @import("fuzz.zig"),
     .replay = @import("replay_fuzz.zig"),
     .message_bus = @import("message_bus_fuzz.zig"),
-    .sidecar = @import("sidecar_fuzz.zig"),
     .row_format = @import("row_format_fuzz.zig"),
     // A fuzzer that intentionally fails, to test fuzzing infrastructure itself
     .canary = {},
@@ -93,7 +92,6 @@ fn main_smoke(gpa: std.mem.Allocator) !void {
             .state_machine => 10_000,
             .replay => 5_000,
             .message_bus => 10_000,
-            .sidecar => 10_000,
             .row_format => 10_000,
         };
 

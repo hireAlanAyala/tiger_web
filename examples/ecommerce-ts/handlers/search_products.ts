@@ -12,7 +12,6 @@ export function route(req: RouteRequest): RouteResult | null {
 }
 
 // [prefetch] .search_products
-// @dynamic-prefetch
 export async function prefetch(msg: PrefetchMessage, db: PrefetchDb) {
   const q = String(msg.body.query || "");
   const results = await db.queryAll("SELECT id, name, description, price_cents, inventory, version, active FROM products WHERE active = 1 AND name LIKE ?1 ORDER BY id LIMIT 50", `%${q}%`);
