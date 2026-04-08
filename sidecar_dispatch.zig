@@ -588,7 +588,9 @@ pub fn SidecarDispatchType(comptime StorageParam: type, comptime Bus: type) type
                 seen_count += 1;
 
                 // Valid operation for non-free entries.
-                assert(entry.operation != .root or entry.stage == .route_pending);
+                // route_pending and route_prefetch_pending have operation=.root
+                // until the sidecar responds with the actual operation.
+                assert(entry.operation != .root or entry.stage == .route_pending or entry.stage == .route_prefetch_pending);
 
                 // Mutation tracking consistency.
                 if (entry.is_mutation) {
