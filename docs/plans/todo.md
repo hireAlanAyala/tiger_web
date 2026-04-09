@@ -12,11 +12,6 @@
    See `docs/internal/decision-worker-architecture.md`.
 
    **Remaining items:**
-   - TS worker SHM client: wire `db` parameter (QUERY frame exchange).
-     Zig side handles QUERY in poll_completions. TS side needs
-     `db.query()` → QUERY frame → wait for QUERY_RESULT → resolve Promise.
-   - TS `worker.xxx(id, body)` dispatch: update from positional args
-     to `(id, body_object)` wrapping into `ctx = { id, body }`.
    - Fire-and-forget workers: `[worker]` without `[handle]`/`[render]`.
      Framework auto-generates no-op completion (resolve pending, done).
    - TIGER_STYLE naming pass: `slot_idx` → `slot_index`, `shm_fd` →
@@ -26,13 +21,19 @@
      verify_root + scan_entries. Pre-existing — not worker-specific.
    - `wal.init` heap allocation (page_allocator.alignedAlloc). TB wants
      static allocation. Pre-existing.
-   - Worker fuzz main is 164 lines — decompose into action functions.
-   - Parallel arrays in fuzzer (`dispatched_ops` / `dispatched_request_ids`)
-     — replace with struct array.
-   - Three copies of RESULT-frame builder across test files — consolidate.
+   - Consolidate RESULT-frame builder across test files (3 copies).
    - Sidecar sim test for full worker lifecycle (handler dispatches worker
      → sidecar processes → completion fires). Currently only unit/integration
      tests exercise the worker path.
+
+   **Completed:**
+   - TS worker SHM client wired: `(ctx, db)`, QUERY frame exchange.
+   - `worker.xxx(id, body)` dispatch format.
+   - Fuzzer decomposed to 10 action functions, struct array.
+   - Protocol spec: `docs/guide/sidecar-protocol.md`.
+   - SHM discovery: slot_count + frame_max in RegionHeader.
+   - prefetchKeyMap codegen (no runtime fn.toString() hack).
+   - Decision doc: `docs/internal/decision-worker-query-transport.md`.
 
 3. **Session as writes** — DEFERRED
    Remove session_action from HandleResult. Session changes via
