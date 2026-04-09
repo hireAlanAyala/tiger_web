@@ -1,5 +1,7 @@
 const std = @import("std");
 const t = @import("../prelude.zig");
+const fuzz_lib = @import("../fuzz_lib.zig");
+const PRNG = @import("stdx").PRNG;
 
 pub const Status = enum { ok, not_found, order_not_pending };
 
@@ -8,7 +10,17 @@ pub const Prefetch = struct {
     items: ?t.BoundedList(t.OrderItemRow, t.order_items_max),
 };
 
-pub const Context = t.HandlerContext(Prefetch, t.Operation.EventType(.cancel_order), t.Identity, Status);
+pub const Context = t.HandlerContext(Prefetch, t.EventType(.cancel_order), t.Identity, Status);
+
+pub fn gen_fuzz_message(prng: *PRNG, pools: fuzz_lib.IdPools) ?t.Message {
+    const fuzz = @import("../fuzz.zig");
+    return t.Message.init(.cancel_order, fuzz.pick_or_random_id(prng, pools.order_ids), prng.int(u128) | 1, {});
+}
+
+pub fn input_valid(msg: t.Message) bool {
+    if (msg.id == 0) return false;
+    return true;
+}
 
 // [route] .cancel_order
 // match POST /orders/:id/cancel

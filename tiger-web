@@ -9,7 +9,7 @@ SOCK="/tmp/tiger-web.sock"
 case "$1" in
   build)
     cd "$FRAMEWORK_ROOT"
-    ./zig/zig build scan -- "$EXAMPLE_REL/handlers/" --manifest=generated/manifest.json
+    ./zig/zig build scan -- "$EXAMPLE_REL/handlers/" --manifest=generated/manifest.json --registry=generated/operations.json --operations-zig=generated/operations.generated.zig
     PATH="$EXAMPLE_DIR/node_modules/.bin:$PATH" tsx adapters/typescript.ts generated/manifest.json generated/handlers.generated.ts
     ;;
   dev)

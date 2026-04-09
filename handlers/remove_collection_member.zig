@@ -1,11 +1,18 @@
 const std = @import("std");
 const t = @import("../prelude.zig");
+const fuzz_lib = @import("../fuzz_lib.zig");
+const PRNG = @import("stdx").PRNG;
 
 pub const Status = enum { ok, not_found };
 
 pub const Prefetch = struct { collection_id: u128, product_id: u128, collection: ?t.CollectionRow };
 
-pub const Context = t.HandlerContext(Prefetch, t.Operation.EventType(.remove_collection_member), t.Identity, Status);
+pub const Context = t.HandlerContext(Prefetch, t.EventType(.remove_collection_member), t.Identity, Status);
+
+pub fn gen_fuzz_message(prng: *PRNG, pools: fuzz_lib.IdPools) ?t.Message {
+    if (pools.collection_ids.len == 0 or pools.product_ids.len == 0) return null;
+    return t.Message.init(.remove_collection_member, pools.collection_ids[prng.int_inclusive(usize, pools.collection_ids.len - 1)], prng.int(u128) | 1, pools.product_ids[prng.int_inclusive(usize, pools.product_ids.len - 1)]);
+}
 
 // [route] .remove_collection_member
 // match DELETE /collections/:id/products/:sub_id

@@ -32,7 +32,14 @@ pub fn SidecarDispatchType(comptime Bus: type) type {
         const route_result_max = 1 + 16 + message.body_max;
         const status_max = 64;
         const write_params_max = 16 * (1 + 8); // 16 params × (tag + i64)
-        const handle_result_max = 2 + status_max + 1 + 1 + protocol.writes_max * (2 + protocol.sql_max + 1 + write_params_max);
+        // Wire format: [status_len:2][status][session:1][write_count:1][writes...][dispatch_count:1][dispatches...][html]
+        const cs = @import("framework/constants.zig");
+        const status_section = 2 + status_max; // [status_len:2 BE][status]
+        const write_entry_max = 2 + protocol.sql_max + 1 + write_params_max;
+        const write_section = 1 + protocol.writes_max * write_entry_max; // [write_count:1][writes...]
+        const dispatch_entry_max: usize = 1 + @as(usize, cs.worker_name_max) + 2 + @as(usize, cs.worker_args_max);
+        const dispatch_section = 1 + @as(usize, cs.dispatches_per_handle_max) * dispatch_entry_max; // [dispatch_count:1][dispatches...]
+        const handle_result_max = status_section + 1 + write_section + dispatch_section; // +1 for session_action
 
         comptime {
             assert(max_entries > 0);
@@ -86,6 +93,14 @@ pub fn SidecarDispatchType(comptime Bus: type) type {
             handle_session_action: message.SessionAction = .none,
             handle_write_count: u8 = 0,
             handle_writes: []const u8 = "",
+            handle_dispatch_count: u8 = 0,
+            handle_dispatches: []const u8 = "",
+
+            /// Worker completion: WAL op of the dispatch this entry completes.
+            /// 0 = normal HTTP request (not a worker completion).
+            /// Non-zero = worker completion. execute_shm_writes records a WAL
+            /// completion entry with this op and resolves the pending index.
+            worker_completes_op: u64 = 0,
 
             // Render result — stored in shared render_buf, not per-entry.
             html: []const u8 = "",
@@ -109,6 +124,9 @@ pub fn SidecarDispatchType(comptime Bus: type) type {
                 self.handle_session_action = .none;
                 self.handle_write_count = 0;
                 self.handle_writes = "";
+                self.handle_dispatch_count = 0;
+                self.handle_dispatches = "";
+                self.worker_completes_op = 0;
                 self.html = "";
                 self.html_offset = 0;
                 self.html_len = 0;
@@ -221,7 +239,7 @@ pub fn SidecarDispatchType(comptime Bus: type) type {
             body: []const u8,
             rows_data: []const u8,
             row_set_count: u8,
-            connection: *anyopaque,
+            connection: ?*anyopaque,
         ) bool {
             assert(entry.stage == .free);
             assert(operation != .root);
@@ -559,12 +577,12 @@ pub fn SidecarDispatchType(comptime Bus: type) type {
         // =============================================================
 
         /// Parse combined handle+render RESULT.
-        /// Format: [status_len:2 BE][status][session_action:1][write_count:1][writes...][html to end]
+        /// Format: [status_len:2 BE][status][session_action:1][write_count:1][writes...][dispatch_count:1][dispatches...][html to end]
         fn parse_combined_result(_: *Self, entry: *Entry, data: []const u8) void {
             // Stage precondition: only called for combined_pending entries.
             assert(entry.stage == .combined_pending);
 
-            if (data.len < 4) {
+            if (data.len < protocol.handle_result_min_size) {
                 entry.handle_status = .storage_error;
                 entry.stage = .combined_complete;
                 return;
@@ -573,7 +591,7 @@ pub fn SidecarDispatchType(comptime Bus: type) type {
             var pos: usize = 0;
             const status_len = std.mem.readInt(u16, data[pos..][0..2], .big);
             pos += 2;
-            if (pos + status_len + 2 > data.len) {
+            if (pos + status_len + 3 > data.len) { // +3 for session_action + write_count + dispatch_count
                 entry.handle_status = .storage_error;
                 entry.stage = .combined_complete;
                 return;
@@ -595,11 +613,10 @@ pub fn SidecarDispatchType(comptime Bus: type) type {
             pos += 1;
             assert(pos <= data.len);
 
-            // Skip past writes to find HTML start.
+            // Skip past writes.
+            var buf_pos: usize = 0;
             if (entry.handle_write_count > 0) {
-                // Copy writes into handle_buf for later execution.
-                const writes_start = pos;
-                const write_data = data[writes_start..];
+                const write_data = data[pos..];
                 var wpos: usize = 0;
                 for (0..entry.handle_write_count) |_| {
                     if (wpos + 2 > write_data.len) break;
@@ -617,17 +634,42 @@ pub fn SidecarDispatchType(comptime Bus: type) type {
                 const copy_len = @min(writes_len, entry.handle_buf.len);
                 @memcpy(entry.handle_buf[0..copy_len], write_data[0..copy_len]);
                 entry.handle_writes = entry.handle_buf[0..copy_len];
+                buf_pos = copy_len;
                 pos += writes_len;
             } else {
                 entry.handle_writes = "";
             }
 
-            // HTML is the remainder. Store in handle_buf after the writes
-            // data — we can't use shared render_buf yet because writes
-            // haven't executed. Copy to render_buf later in process_shm_completions.
+            // Parse dispatch section: [dispatch_count:1][dispatches...]
+            if (pos < data.len) {
+                entry.handle_dispatch_count = data[pos];
+                pos += 1;
+
+                if (entry.handle_dispatch_count > 0) {
+                    const pd = @import("framework/pending_dispatch.zig");
+                    const dispatch_data = data[pos..];
+                    var dpos: usize = 0;
+                    for (0..entry.handle_dispatch_count) |_| {
+                        _ = pd.parse_one_dispatch(dispatch_data, &dpos) orelse break;
+                    }
+                    const dispatches_len = dpos;
+                    const dcopy_len = @min(dispatches_len, entry.handle_buf.len - buf_pos);
+                    @memcpy(entry.handle_buf[buf_pos..][0..dcopy_len], dispatch_data[0..dcopy_len]);
+                    entry.handle_dispatches = entry.handle_buf[buf_pos..][0..dcopy_len];
+                    buf_pos += dcopy_len;
+                    pos += dispatches_len;
+                } else {
+                    entry.handle_dispatches = "";
+                }
+            } else {
+                entry.handle_dispatch_count = 0;
+                entry.handle_dispatches = "";
+            }
+
+            // HTML is the remainder. Store in handle_buf after writes + dispatches.
             const html_data = data[pos..];
-            const html_len = @min(html_data.len, entry.handle_buf.len - @min(entry.handle_writes.len, entry.handle_buf.len));
-            const html_start = if (entry.handle_write_count > 0) entry.handle_writes.len else 0;
+            const html_len = @min(html_data.len, entry.handle_buf.len - @min(buf_pos, entry.handle_buf.len));
+            const html_start = buf_pos;
             if (html_start + html_len <= entry.handle_buf.len) {
                 @memcpy(entry.handle_buf[html_start..][0..html_len], html_data[0..html_len]);
             }

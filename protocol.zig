@@ -1001,10 +1001,10 @@ comptime {
 // Each write: [sql_len: u16 BE][sql][param_count: u8][params...]
 // Pin with comptime: offsets are fixed relative to start of result data.
 pub const handle_result_status_offset = 0; // u16 BE status_len at byte 0
-pub const handle_result_min_size = 2 + 1 + 1; // status_len(2) + session_action(1) + write_count(1) minimum (empty status)
+pub const handle_result_min_size = 2 + 1 + 1 + 1; // status_len(2) + session_action(1) + write_count(1) + dispatch_count(1) minimum (empty status)
 
 comptime {
-    assert(handle_result_min_size == 4);
+    assert(handle_result_min_size == 5);
 }
 
 // =====================================================================

@@ -1,6 +1,8 @@
 const std = @import("std");
 const t = @import("../prelude.zig");
 const get_product = @import("get_product.zig");
+const fuzz_lib = @import("../fuzz_lib.zig");
+const PRNG = @import("stdx").PRNG;
 
 pub const Status = enum { ok };
 
@@ -10,7 +12,11 @@ pub const Prefetch = struct {
     orders: ?t.BoundedList(t.OrderRow, t.list_max),
 };
 
-pub const Context = t.HandlerContext(Prefetch, t.Operation.EventType(.page_load_dashboard), t.Identity, Status);
+pub const Context = t.HandlerContext(Prefetch, t.EventType(.page_load_dashboard), t.Identity, Status);
+
+pub fn gen_fuzz_message(prng: *PRNG, _: fuzz_lib.IdPools) ?t.Message {
+    return t.Message.init(.page_load_dashboard, 0, prng.int(u128) | 1, {});
+}
 
 // [route] .page_load_dashboard
 // match GET /

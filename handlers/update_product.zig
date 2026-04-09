@@ -1,5 +1,7 @@
 const std = @import("std");
 const t = @import("../prelude.zig");
+const fuzz_lib = @import("../fuzz_lib.zig");
+const PRNG = @import("stdx").PRNG;
 
 pub const Status = enum { ok, not_found, version_conflict };
 
@@ -7,7 +9,24 @@ pub const Prefetch = struct {
     existing: ?t.ProductRow,
 };
 
-pub const Context = t.HandlerContext(Prefetch, t.Operation.EventType(.update_product), t.Identity, Status);
+pub const Context = t.HandlerContext(Prefetch, t.EventType(.update_product), t.Identity, Status);
+
+pub fn gen_fuzz_message(prng: *PRNG, pools: fuzz_lib.IdPools) ?t.Message {
+    const fuzz = @import("../fuzz.zig");
+    const id = fuzz.pick_or_random_id(prng, pools.product_ids);
+    return t.Message.init(.update_product, id, prng.int(u128) | 1, fuzz.gen_product_with_id(prng, id));
+}
+
+pub fn input_valid(msg: t.Message) bool {
+    if (msg.id == 0) return false;
+    const p = msg.body_as(t.Product);
+    if (p.name_len == 0 or p.name_len > t.product_name_max) return false;
+    if (p.description_len > t.product_description_max) return false;
+    if (p.flags.padding != 0) return false;
+    if (!@import("std").unicode.utf8ValidateSlice(p.name[0..p.name_len])) return false;
+    if (!@import("std").unicode.utf8ValidateSlice(p.description[0..p.description_len])) return false;
+    return true;
+}
 
 // [route] .update_product
 // match PUT /products/:id

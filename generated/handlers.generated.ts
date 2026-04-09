@@ -6,6 +6,7 @@
 
 import * as addCollectionMember from '../examples/ecommerce-ts/handlers/add_collection_member.ts';
 import * as cancelOrder from '../examples/ecommerce-ts/handlers/cancel_order.ts';
+import * as chargePayment from '../examples/ecommerce-ts/handlers/charge_payment.ts';
 import * as completeOrder from '../examples/ecommerce-ts/handlers/complete_order.ts';
 import * as createCollection from '../examples/ecommerce-ts/handlers/create_collection.ts';
 import * as createOrder from '../examples/ecommerce-ts/handlers/create_order.ts';
@@ -22,9 +23,11 @@ import * as listProducts from '../examples/ecommerce-ts/handlers/list_products.t
 import * as logout from '../examples/ecommerce-ts/handlers/logout.ts';
 import * as pageLoadDashboard from '../examples/ecommerce-ts/handlers/page_load_dashboard.ts';
 import * as pageLoadLogin from '../examples/ecommerce-ts/handlers/page_load_login.ts';
+import * as processImage from '../examples/ecommerce-ts/handlers/process_image.ts';
 import * as removeCollectionMember from '../examples/ecommerce-ts/handlers/remove_collection_member.ts';
 import * as requestLoginCode from '../examples/ecommerce-ts/handlers/request_login_code.ts';
 import * as searchProducts from '../examples/ecommerce-ts/handlers/search_products.ts';
+import * as sendOrderEmail from '../examples/ecommerce-ts/handlers/send_order_email.ts';
 import * as transferInventory from '../examples/ecommerce-ts/handlers/transfer_inventory.ts';
 import * as updateProduct from '../examples/ecommerce-ts/handlers/update_product.ts';
 import * as verifyLoginCode from '../examples/ecommerce-ts/handlers/verify_login_code.ts';
@@ -39,6 +42,7 @@ export interface HandlerModule {
 export const modules: Record<string, HandlerModule> = {
   add_collection_member: addCollectionMember,
   cancel_order: cancelOrder,
+  charge_payment: chargePayment,
   complete_order: completeOrder,
   create_collection: createCollection,
   create_order: createOrder,
@@ -55,9 +59,11 @@ export const modules: Record<string, HandlerModule> = {
   logout: logout,
   page_load_dashboard: pageLoadDashboard,
   page_load_login: pageLoadLogin,
+  process_image: processImage,
   remove_collection_member: removeCollectionMember,
   request_login_code: requestLoginCode,
   search_products: searchProducts,
+  send_order_email: sendOrderEmail,
   transfer_inventory: transferInventory,
   update_product: updateProduct,
   verify_login_code: verifyLoginCode,
@@ -96,3 +102,14 @@ export const routeTable: RouteTableEntry[] = [
   { operation: 'logout', method: 'post', pattern: '/logout', query_params: [] },
   { operation: 'update_product', method: 'put', pattern: '/products/:id', query_params: [] },
 ];
+
+export interface WorkerFunction {
+  fn: (...args: any[]) => Promise<any>;
+  returns: string;
+}
+
+export const workerFunctions: Record<string, WorkerFunction> = {
+  charge_payment: { fn: chargePayment.charge_payment, returns: '' },
+  process_image: { fn: processImage.process_image, returns: '' },
+  send_order_email: { fn: sendOrderEmail.send_order_email, returns: '' },
+};

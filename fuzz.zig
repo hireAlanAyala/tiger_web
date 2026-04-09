@@ -107,6 +107,15 @@ pub fn main(_: std.mem.Allocator, args: FuzzArgs) !void {
     var op_weights = fuzz_lib.random_enum_weights(&prng, message.Operation);
     op_weights.root = 0; // .root is a WAL sentinel, not an application operation.
 
+    // Exclude sidecar-only operations — void bodies, no native handler.
+    const handlers = @import("generated/handlers.generated.zig");
+    inline for (@typeInfo(message.Operation).@"enum".fields) |f| {
+        const op: message.Operation = @enumFromInt(f.value);
+        if (comptime handlers.is_sidecar_operation(op)) {
+            @field(op_weights, f.name) = 0;
+        }
+    }
+
     // Dependency guarantees: if an operation has non-zero weight, its
     // prerequisites must too. Otherwise the operation always returns null
     // (no entities to reference) and coverage assertion fires.
@@ -399,15 +408,13 @@ pub const FeatureCoverage = struct {
     }
 };
 
-pub const IdPools = struct {
-    product_ids: []const u128,
-    collection_ids: []const u128,
-    order_ids: []const u128,
-};
+pub const IdPools = fuzz_lib.IdPools;
 
 /// Generate a Message for the given operation, or null if prerequisites
 /// aren't met (e.g., transfer_inventory needs 2 products).
 /// Sometimes generates intentionally invalid messages to exercise input_valid.
+/// Dispatches to handler's gen_fuzz_message if exported, otherwise generates
+/// a default message with void body and random ID.
 pub fn gen_message(prng: *PRNG, operation: message.Operation, pools: IdPools) ?message.Message {
     // ~10% chance: generate a random message with correct operation tag but
     // random fields — exercises the input_valid boundary.
@@ -415,66 +422,23 @@ pub fn gen_message(prng: *PRNG, operation: message.Operation, pools: IdPools) ?m
         return gen_random_message(prng, operation);
     }
 
-    const user_id = prng.int(u128) | 1;
-    const M = message.Message;
+    const handlers = @import("generated/handlers.generated.zig");
     return switch (operation) {
         .root => unreachable,
-        .create_product => M.init(.create_product, 0, user_id, gen_product(prng)),
-        .get_product, .get_product_inventory => M.init(operation, pick_or_random_id(prng, pools.product_ids), user_id, {}),
-        .list_products => M.init(.list_products, 0, user_id, gen_list_params(prng)),
-        .update_product => blk: {
-            const id = pick_or_random_id(prng, pools.product_ids);
-            break :blk M.init(.update_product, id, user_id, gen_product_with_id(prng, id));
-        },
-        .delete_product => M.init(.delete_product, pick_or_random_id(prng, pools.product_ids), user_id, {}),
-        .transfer_inventory => blk: {
-            if (pools.product_ids.len < 2) return null;
-            const src_idx = prng.int_inclusive(usize, pools.product_ids.len - 1);
-            var dst_idx = prng.int_inclusive(usize, pools.product_ids.len - 1);
-            if (dst_idx == src_idx) dst_idx = (src_idx + 1) % pools.product_ids.len;
-            break :blk M.init(.transfer_inventory, pools.product_ids[src_idx], user_id, message.InventoryTransfer{
-                .target_id = pools.product_ids[dst_idx],
-                .quantity = prng.range_inclusive(u32, 1, 1000),
-                .reserved = .{0} ** 12,
-            });
-        },
-        .create_order => blk: {
-            if (pools.product_ids.len == 0) return null;
-            break :blk M.init(.create_order, 0, user_id, gen_order(prng, pools.product_ids));
-        },
-        .complete_order => blk: {
-            if (pools.order_ids.len == 0) return null;
-            const result: message.OrderCompletion.OrderCompletionResult = if (prng.boolean()) .confirmed else .failed;
-            var completion = std.mem.zeroes(message.OrderCompletion);
-            completion.result = result;
-            if (result == .confirmed and prng.boolean()) {
-                completion.payment_ref_len = prng.range_inclusive(u8, 1, message.payment_ref_max);
-                for (completion.payment_ref[0..completion.payment_ref_len]) |*byte| {
-                    byte.* = 'a' + @as(u8, @intCast(prng.int_inclusive(u8, 25)));
-                }
+        inline else => |comptime_op| {
+            const H = comptime handlers.HandlerModule(comptime_op);
+            if (H == void) {
+                // Sidecar-only — void body, random ID.
+                const user_id = prng.int(u128) | 1;
+                return message.Message.init(operation, prng.int(u128) | 1, user_id, {});
             }
-            break :blk M.init(.complete_order, pick_or_random_id(prng, pools.order_ids), user_id, completion);
+            if (@hasDecl(H, "gen_fuzz_message")) {
+                return H.gen_fuzz_message(prng, pools);
+            }
+            // No custom generation — default with void body.
+            const user_id = prng.int(u128) | 1;
+            return message.Message.init(operation, prng.int(u128) | 1, user_id, {});
         },
-        .cancel_order => M.init(.cancel_order, pick_or_random_id(prng, pools.order_ids), user_id, {}),
-        .search_products => M.init(.search_products, 0, user_id, gen_search_query(prng)),
-        .get_order => M.init(.get_order, pick_or_random_id(prng, pools.order_ids), user_id, {}),
-        .list_orders => M.init(.list_orders, 0, user_id, gen_list_params(prng)),
-        .create_collection => M.init(.create_collection, 0, user_id, gen_collection(prng)),
-        .get_collection => M.init(.get_collection, pick_or_random_id(prng, pools.collection_ids), user_id, {}),
-        .list_collections => M.init(.list_collections, 0, user_id, gen_list_params(prng)),
-        .delete_collection => M.init(.delete_collection, pick_or_random_id(prng, pools.collection_ids), user_id, {}),
-        .add_collection_member => blk: {
-            if (pools.collection_ids.len == 0 or pools.product_ids.len == 0) return null;
-            break :blk M.init(.add_collection_member, pools.collection_ids[prng.int_inclusive(usize, pools.collection_ids.len - 1)], user_id, pools.product_ids[prng.int_inclusive(usize, pools.product_ids.len - 1)]);
-        },
-        .remove_collection_member => blk: {
-            if (pools.collection_ids.len == 0 or pools.product_ids.len == 0) return null;
-            break :blk M.init(.remove_collection_member, pools.collection_ids[prng.int_inclusive(usize, pools.collection_ids.len - 1)], user_id, pools.product_ids[prng.int_inclusive(usize, pools.product_ids.len - 1)]);
-        },
-        .page_load_dashboard => M.init(.page_load_dashboard, 0, user_id, {}),
-        .page_load_login, .logout => M.init(operation, 0, user_id, {}),
-        .request_login_code => M.init(.request_login_code, 0, user_id, gen_login_code_request(prng)),
-        .verify_login_code => M.init(.verify_login_code, 0, user_id, gen_login_verification(prng)),
     };
 }
 
@@ -556,7 +520,7 @@ pub fn gen_random_message(prng: *PRNG, operation: message.Operation) message.Mes
     const id = prng.int(u128);
     const user_id = prng.int(u128) | 1;
     const M = message.Message;
-    return switch (operation.event_tag()) {
+    return switch (message.event_tag(operation)) {
         .product => M.init(operation, id, user_id, blk: {
             var p = std.mem.zeroes(message.Product);
             p.id = prng.int(u128);
@@ -626,7 +590,7 @@ pub fn gen_random_message(prng: *PRNG, operation: message.Operation) message.Mes
     };
 }
 
-fn gen_login_code_request(prng: *PRNG) message.LoginCodeRequest {
+pub fn gen_login_code_request(prng: *PRNG) message.LoginCodeRequest {
     var ev = std.mem.zeroes(message.LoginCodeRequest);
     const email_len = prng.range_inclusive(u8, 5, 32);
     ev.email_len = email_len;
@@ -637,7 +601,7 @@ fn gen_login_code_request(prng: *PRNG) message.LoginCodeRequest {
     return ev;
 }
 
-fn gen_login_verification(prng: *PRNG) message.LoginVerification {
+pub fn gen_login_verification(prng: *PRNG) message.LoginVerification {
     var ev = std.mem.zeroes(message.LoginVerification);
     const email_len = prng.range_inclusive(u8, 5, 32);
     ev.email_len = email_len;

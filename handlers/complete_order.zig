@@ -1,6 +1,8 @@
 const std = @import("std");
 const t = @import("../prelude.zig");
 const message = @import("../message.zig");
+const fuzz_lib = @import("../fuzz_lib.zig");
+const PRNG = @import("stdx").PRNG;
 
 pub const Status = enum { ok, not_found, order_not_pending, order_expired };
 
@@ -9,7 +11,30 @@ pub const Prefetch = struct {
     items: ?t.BoundedList(t.OrderItemRow, t.order_items_max),
 };
 
-pub const Context = t.HandlerContext(Prefetch, t.Operation.EventType(.complete_order), t.Identity, Status);
+pub const Context = t.HandlerContext(Prefetch, t.EventType(.complete_order), t.Identity, Status);
+
+pub fn gen_fuzz_message(prng: *PRNG, pools: fuzz_lib.IdPools) ?t.Message {
+    if (pools.order_ids.len == 0) return null;
+    const fuzz = @import("../fuzz.zig");
+    const result: message.OrderCompletion.OrderCompletionResult = if (prng.boolean()) .confirmed else .failed;
+    var completion = @import("std").mem.zeroes(message.OrderCompletion);
+    completion.result = result;
+    if (result == .confirmed and prng.boolean()) {
+        completion.payment_ref_len = prng.range_inclusive(u8, 1, message.payment_ref_max);
+        for (completion.payment_ref[0..completion.payment_ref_len]) |*byte| {
+            byte.* = 'a' + @as(u8, @intCast(prng.int_inclusive(u8, 25)));
+        }
+    }
+    return t.Message.init(.complete_order, fuzz.pick_or_random_id(prng, pools.order_ids), prng.int(u128) | 1, completion);
+}
+
+pub fn input_valid(msg: t.Message) bool {
+    const comp = msg.body_as(message.OrderCompletion);
+    if (msg.id == 0) return false;
+    _ = @import("std").meta.intToEnum(message.OrderCompletion.OrderCompletionResult, @intFromEnum(comp.result)) catch return false;
+    if (comp.payment_ref_len > t.payment_ref_max) return false;
+    return true;
+}
 
 // [route] .complete_order
 // match POST /orders/:id/complete

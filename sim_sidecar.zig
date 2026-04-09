@@ -245,6 +245,8 @@ const SimSidecar = struct {
         pos += 1;
         buf[pos] = 0; // write_count = 0
         pos += 1;
+        buf[pos] = 0; // dispatch_count = 0
+        pos += 1;
         return pos;
     }
 
@@ -370,7 +372,7 @@ const TestHarness = struct {
         var time_sim = TimeSim{};
         h.sm = StateMachine.init(&h.storage, 0, test_key);
         h.tracer = try Trace.Tracer.init(h.allocator, time_sim.time(), .{});
-        h.server = try Server.init(h.allocator, &h.io, &h.sm, &h.tracer, http_listen_fd, time_sim.time(), null);
+        h.server = try Server.init(h.allocator, &h.io, &h.sm, &h.tracer, http_listen_fd, time_sim.time(), null, .{});
         h.server.wire_connections();
         try h.server.wire_sidecar(h.allocator, null);
         h.server.sidecar_bus.listen_fd = sidecar_listen_fd;

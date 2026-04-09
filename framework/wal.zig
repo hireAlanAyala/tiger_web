@@ -1,18 +1,25 @@
-//! Write-ahead log — SQL-write WAL.
+//! Write-ahead log — SQL-write WAL with worker dispatch support.
 //!
-//! Records committed SQL writes (not handler inputs). Each entry contains
-//! operation, id, timestamp, and the SQL statements that were executed.
-//! Replay re-executes the SQL — no handlers, no sidecar needed.
+//! Records committed SQL writes and worker dispatch entries. Each entry
+//! contains operation, timestamp, SQL writes, and optional worker
+//! dispatches. Replay re-executes the SQL — no handlers, no sidecar needed.
+//! Worker dispatches rebuild the in-memory pending index on recovery.
 //!
-//! Entry format: variable-size, length-prefixed.
-//!   [u32 entry_len]     total bytes including this header
-//!   [u128 checksum]     Aegis128L over everything after checksum
-//!   [u128 parent]       previous entry's checksum (hash chain)
-//!   [u64 op]            sequential counter
-//!   [i64 timestamp]     wall clock from set_time()
-//!   [u8 operation]      Operation enum value
-//!   [u8 write_count]    number of SQL write statements
-//!   [writes...]         write_count × { u16 sql_len, sql, u8 param_count, params }
+//! Entry header: 64 bytes (extern struct, no padding).
+//!   [u128 checksum]       Aegis128L over everything after checksum
+//!   [u128 parent]         previous entry's checksum (hash chain)
+//!   [u64 op]              sequential counter
+//!   [i64 timestamp]       wall clock from set_time()
+//!   [u64 completes_op]    dispatch op this entry resolves (0 = none)
+//!   [u32 entry_len]       total bytes including this header
+//!   [u8 operation]        Operation enum value
+//!   [u8 write_count]      number of SQL write statements
+//!   [u8 dispatch_count]   number of worker dispatch entries
+//!   [u8 entry_flags]      0=normal, 1=completion, 2=dead_dispatch
+//!
+//! Body: variable-size, two sections in order.
+//!   [writes...]           write_count × { u16 sql_len, sql, u8 param_count, params }
+//!   [dispatches...]       dispatch_count × { u8 name_len, name, u16 args_len, args }
 //!
 //! Design decisions:
 //!
@@ -22,25 +29,31 @@
 //! serde back into the protocol. SQL-write WAL eliminates the body
 //! format question: replay re-executes SQL, no handlers needed.
 //!
+//! **Dual role: diagnostic log + worker dispatch queue.** The WAL
+//! records SQL writes for investigation/replay (diagnostic) AND tracks
+//! worker dispatch/completion/dead entries (operational). SQLite is the
+//! authority for data; the WAL is the authority for dispatch lifecycle.
+//!
+//! **No fsync — dispatch is best-effort.** The kernel flushes on its
+//! own schedule. If the process crashes after SQLite commits but before
+//! the WAL entry reaches disk, the dispatch is lost. The SQL writes
+//! survive (SQLite fsyncs), but no worker runs. The application
+//! recovers orphans via schema-level checks (e.g., orders stuck in
+//! "processing"). See docs/internal/decision-wal-dispatch-crash.md.
+//!
 //! **Why not input replay?** TigerBeetle stores inputs because replay
 //! IS the replication protocol. We don't replicate. SQLite handles
-//! crash recovery. Our WAL is a diagnostic tool. The fuzzer verifies
-//! determinism (same input → same output), not WAL replay.
-//!
-//! **Debug flow:** WAL investigates (what SQL ran?), seed reproduces
-//! (fuzz test with the bug's seed), simulation verifies (auditor
-//! checks outcomes after fix). Each tool has a role.
+//! crash recovery. Our WAL is for diagnostics and dispatch tracking.
 //!
 //! **Append ordering:** DB first, then WAL. A missing entry is obvious
 //! and safe (detectable gap). A phantom entry is silent and dangerous
-//! (WAL lies). Option B is strictly better.
-//!
-//! No fsync — the kernel flushes on its own schedule. SQLite is the
-//! authority; the WAL is a diagnostic notebook.
+//! (WAL lies).
 
 const std = @import("std");
 const assert = std.debug.assert;
 const cs = @import("checksum.zig");
+const pd = @import("pending_dispatch.zig");
+const constants = @import("constants.zig");
 
 const log = std.log.scoped(.wal);
 
@@ -51,19 +64,29 @@ const log = std.log.scoped(.wal);
 /// and the server asserts it's sufficient at comptime.
 pub const entry_max = 256 * 1024;
 
+/// Entry flags — distinguishes normal mutations from completion/dead-dispatch entries.
+pub const EntryFlags = enum(u8) {
+    normal = 0, // regular mutation (writes only, or writes + dispatches)
+    completion = 1, // completion entry (references dispatch via completes_op)
+    dead_dispatch = 2, // deadline expiry (references dispatch via completes_op)
+};
+
 /// WAL entry header. Extern struct, largest-alignment-first to avoid padding.
+/// 64 bytes: all fields packed, no tail padding.
 pub const EntryHeader = extern struct {
-    checksum: u128,     // 16 bytes, align 16
-    parent: u128,       // 16 bytes
-    op: u64,            // 8 bytes
-    timestamp: i64,     // 8 bytes
-    entry_len: u32,     // 4 bytes
-    operation: u8,      // 1 byte
-    write_count: u8,    // 1 byte
-    reserved: [2]u8 = .{ 0, 0 }, // 2 bytes
+    checksum: u128, // 16 bytes, @0, align 16
+    parent: u128, // 16 bytes, @16
+    op: u64, // 8 bytes, @32
+    timestamp: i64, // 8 bytes, @40
+    completes_op: u64, // 8 bytes, @48 — dispatch op this entry resolves (0 = none)
+    entry_len: u32, // 4 bytes, @56
+    operation: u8, // 1 byte, @60
+    write_count: u8, // 1 byte, @61
+    dispatch_count: u8 = 0, // 1 byte, @62 — number of worker dispatch entries
+    entry_flags: EntryFlags = .normal, // 1 byte, @63
 
     comptime {
-        // Fields: 16+16+8+8+4+1+1+2 = 56 bytes + 8 tail padding (u128 align) = 64.
+        // Fields: 16+16+8+8+8+4+1+1+1+1 = 64 bytes, no tail padding.
         assert(@sizeOf(EntryHeader) == 64);
     }
 
@@ -94,6 +117,7 @@ pub fn WalType(comptime Operation: type) type {
                 .parent = 0,
                 .op = 0,
                 .timestamp = 0,
+                .completes_op = 0,
                 .operation = @intFromEnum(@as(Operation, .root)),
                 .write_count = 0,
             };
@@ -103,7 +127,11 @@ pub fn WalType(comptime Operation: type) type {
             return hdr;
         }
 
-        pub fn init(path: [:0]const u8) Wal {
+        pub const PendingIndex = pd.PendingIndexType(constants.max_in_flight_workers);
+
+        /// Initialize a WAL from the given path. If `pending` is non-null,
+        /// the recovery scan populates the pending dispatch index.
+        pub fn init(path: [:0]const u8, pending: ?*PendingIndex) Wal {
             const fd = std.posix.open(
                 path,
                 .{ .ACCMODE = .WRONLY, .CREAT = true, .APPEND = true },
@@ -141,7 +169,7 @@ pub fn WalType(comptime Operation: type) type {
                     log.warn("stale WAL — too small for root, deleting", .{});
                     std.posix.close(fd);
                     std.fs.cwd().deleteFile(path) catch {};
-                    return init(path);
+                    return init(path, pending);
                 }
 
                 const root_hdr: *const EntryHeader = @ptrCast(@alignCast(&root_buf));
@@ -150,7 +178,7 @@ pub fn WalType(comptime Operation: type) type {
                     log.warn("stale WAL — root mismatch, deleting", .{});
                     std.posix.close(fd);
                     std.fs.cwd().deleteFile(path) catch {};
-                    return init(path);
+                    return init(path, pending);
                 }
 
                 // Scan forward to find the last valid entry.
@@ -189,6 +217,11 @@ pub fn WalType(comptime Operation: type) type {
                     const computed = cs.checksum(entry_buf[checksum_offset..hdr.entry_len]);
                     if (computed != hdr.checksum) break;
 
+                    // Rebuild pending dispatch index during recovery.
+                    if (pending) |idx| {
+                        recover_dispatches(idx, hdr, entry_buf[0..hdr.entry_len]);
+                    }
+
                     last_valid_checksum = hdr.checksum;
                     last_valid_op = hdr.op;
                     entries_read += 1;
@@ -226,48 +259,207 @@ pub fn WalType(comptime Operation: type) type {
             return wal;
         }
 
+        /// Parse dispatch/completion/dead entries and update the pending index.
+        /// Called during init() recovery scan for each valid entry.
+        fn recover_dispatches(
+            idx: *PendingIndex,
+            hdr: *const EntryHeader,
+            entry_data: []const u8,
+        ) void {
+            // Switch on raw u8 — entry_flags is read from disk (untrusted).
+            // Exhaustive enum switch would be UB on corrupt values outside 0/1/2.
+            switch (@intFromEnum(hdr.entry_flags)) {
+                @intFromEnum(EntryFlags.normal) => {
+                    if (hdr.dispatch_count == 0) return;
+                    // Skip past the writes section to reach dispatches.
+                    const body = entry_data[@sizeOf(EntryHeader)..hdr.entry_len];
+                    const dispatch_start = skip_writes_section(body, hdr.write_count) orelse return;
+                    // Parse each dispatch entry and add to the index.
+                    var pos = dispatch_start;
+                    for (0..hdr.dispatch_count) |_| {
+                        const parsed = pd.parse_one_dispatch(body, &pos) orelse break;
+                        var dispatch = pd.PendingDispatch{
+                            .op = hdr.op,
+                            .operation = hdr.operation,
+                            .name = undefined,
+                            .name_len = @intCast(parsed.name.len),
+                            .args = undefined,
+                            .args_len = @intCast(parsed.args.len),
+                            .dispatched_at = hdr.timestamp,
+                            .state = .pending,
+                        };
+                        @memcpy(dispatch.name[0..parsed.name.len], parsed.name);
+                        @memcpy(dispatch.args[0..parsed.args.len], parsed.args);
+                        if (!idx.add(dispatch)) {
+                            log.warn("recovery: skipping dispatch op={d} (full or duplicate)", .{hdr.op});
+                            break;
+                        }
+                    }
+                },
+                @intFromEnum(EntryFlags.completion) => {
+                    // Validate — recovery reads from disk (untrusted).
+                    if (hdr.completes_op == 0) {
+                        log.warn("corrupt completion entry at op={d}: completes_op=0, skipping", .{hdr.op});
+                        return;
+                    }
+                    idx.resolve(hdr.completes_op, .completed);
+                },
+                @intFromEnum(EntryFlags.dead_dispatch) => {
+                    if (hdr.completes_op == 0) {
+                        log.warn("corrupt dead_dispatch entry at op={d}: completes_op=0, skipping", .{hdr.op});
+                        return;
+                    }
+                    idx.resolve(hdr.completes_op, .dead);
+                },
+                else => {
+                    log.warn("unknown entry_flags={d} at op={d}, skipping", .{ @intFromEnum(hdr.entry_flags), hdr.op });
+                    return;
+                },
+            }
+        }
+
+        /// Skip past write_count SQL write entries in the body, returning the
+        /// offset where the dispatch section begins. Returns null on malformed data.
+        pub fn skip_writes_section(body: []const u8, write_count: u8) ?usize {
+            var pos: usize = 0;
+            for (0..write_count) |_| {
+                // sql: [u16 BE sql_len][sql_bytes]
+                if (pos + 2 > body.len) return null;
+                const sql_len = std.mem.readInt(u16, body[pos..][0..2], .big);
+                pos += 2 + sql_len;
+                if (pos >= body.len) return null;
+
+                // params: [u8 param_count][params...]
+                const param_count = body[pos];
+                pos += 1;
+                for (0..param_count) |_| {
+                    if (pos >= body.len) return null;
+                    const tag = body[pos];
+                    pos += 1;
+                    switch (tag) {
+                        0x01, 0x02 => pos += 8, // integer, float
+                        0x03, 0x04 => { // text, blob
+                            if (pos + 2 > body.len) return null;
+                            const vlen = std.mem.readInt(u16, body[pos..][0..2], .big);
+                            pos += 2 + vlen;
+                        },
+                        0x05 => {}, // null
+                        else => return null,
+                    }
+                }
+            }
+            return pos;
+        }
+
         pub fn deinit(wal: *Wal) void {
             std.posix.close(wal.fd);
             wal.* = undefined;
         }
 
-        /// Append a SQL-write entry to the WAL.
-        /// `operation`: the Operation enum value.
-        /// `timestamp`: wall clock from set_time().
-        /// `writes`: raw binary SQL writes (same format as sidecar protocol).
-        ///   Empty for read-only operations (which shouldn't be in the WAL).
-        /// `buf`: scratch buffer for assembling the entry. Must be >= entry size.
+        /// Append a mutation entry to the WAL (writes + optional dispatches).
         pub fn append_writes(
             wal: *Wal,
             operation: Operation,
             timestamp: i64,
             writes_data: []const u8,
             write_count: u8,
+            dispatches_data: []const u8,
+            dispatch_count: u8,
             buf: []u8,
         ) void {
-            assert(wal.op > 0);
-            assert(!wal.disabled);
             assert(operation.is_mutation());
-            defer wal.invariants();
-
-            const entry_len: u32 = @intCast(@sizeOf(EntryHeader) + writes_data.len);
-            assert(entry_len <= buf.len);
-
-            // Build header.
             var hdr = EntryHeader{
-                .entry_len = entry_len,
+                .entry_len = undefined, // set by append_entry
                 .checksum = 0,
                 .parent = wal.parent,
                 .op = wal.op,
                 .timestamp = timestamp,
+                .completes_op = 0,
                 .operation = @intFromEnum(operation),
                 .write_count = write_count,
+                .dispatch_count = dispatch_count,
+                .entry_flags = .normal,
             };
+            wal.append_entry(&hdr, writes_data, dispatches_data, buf);
+        }
 
-            // Assemble entry in buf: header + writes.
-            @memcpy(buf[0..@sizeOf(EntryHeader)], std.mem.asBytes(&hdr));
-            if (writes_data.len > 0) {
-                @memcpy(buf[@sizeOf(EntryHeader)..][0..writes_data.len], writes_data);
+        /// Append a completion entry — resolves a dispatch op with handler writes.
+        pub fn append_completion(
+            wal: *Wal,
+            operation: Operation,
+            timestamp: i64,
+            writes_data: []const u8,
+            write_count: u8,
+            completes_op: u64,
+            buf: []u8,
+        ) void {
+            assert(operation.is_mutation());
+            assert(completes_op > 0);
+            assert(completes_op < wal.op);
+            var hdr = EntryHeader{
+                .entry_len = undefined,
+                .checksum = 0,
+                .parent = wal.parent,
+                .op = wal.op,
+                .timestamp = timestamp,
+                .completes_op = completes_op,
+                .operation = @intFromEnum(operation),
+                .write_count = write_count,
+                .dispatch_count = 0,
+                .entry_flags = .completion,
+            };
+            wal.append_entry(&hdr, writes_data, "", buf);
+        }
+
+        /// Append a dead-dispatch entry — marks a dispatch resolved-dead (deadline).
+        pub fn append_dead_dispatch(
+            wal: *Wal,
+            operation: Operation,
+            timestamp: i64,
+            completes_op: u64,
+            buf: []u8,
+        ) void {
+            assert(completes_op > 0);
+            assert(completes_op < wal.op);
+            var hdr = EntryHeader{
+                .entry_len = undefined,
+                .checksum = 0,
+                .parent = wal.parent,
+                .op = wal.op,
+                .timestamp = timestamp,
+                .completes_op = completes_op,
+                .operation = @intFromEnum(operation),
+                .write_count = 0,
+                .dispatch_count = 0,
+                .entry_flags = .dead_dispatch,
+            };
+            wal.append_entry(&hdr, "", "", buf);
+        }
+
+        /// Shared entry assembly: header + body sections → checksum → write.
+        fn append_entry(
+            wal: *Wal,
+            hdr: *EntryHeader,
+            section_a: []const u8,
+            section_b: []const u8,
+            buf: []u8,
+        ) void {
+            assert(wal.op > 0);
+            assert(!wal.disabled);
+            defer wal.invariants();
+
+            const body_len = section_a.len + section_b.len;
+            const entry_len: u32 = @intCast(@sizeOf(EntryHeader) + body_len);
+            assert(entry_len <= buf.len);
+            hdr.entry_len = entry_len;
+
+            // Assemble entry in buf: header + sections.
+            @memcpy(buf[0..@sizeOf(EntryHeader)], std.mem.asBytes(hdr));
+            if (section_a.len > 0) {
+                @memcpy(buf[@sizeOf(EntryHeader)..][0..section_a.len], section_a);
+            }
+            if (section_b.len > 0) {
+                @memcpy(buf[@sizeOf(EntryHeader) + section_a.len ..][0..section_b.len], section_b);
             }
 
             // Compute checksum over everything after the checksum field.

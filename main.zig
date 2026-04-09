@@ -82,7 +82,8 @@ fn cmd_start(cli: StartArgs, args: *std.process.ArgIterator) void {
     };
     const actual_port = resolve_port(listen_fd, cli.port);
 
-    var wal = App.Wal.init("tiger_web.wal");
+    var pending_index = App.Wal.PendingIndex{};
+    var wal = App.Wal.init("tiger_web.wal", &pending_index);
     defer wal.deinit();
 
     var time_real = TimeReal{};
@@ -118,7 +119,7 @@ fn cmd_start(cli: StartArgs, args: *std.process.ArgIterator) void {
         });
     }
 
-    var server = Server.init(allocator, &io, &sm, &tracer, listen_fd, time_real.time(), &wal) catch |err| {
+    var server = Server.init(allocator, &io, &sm, &tracer, listen_fd, time_real.time(), &wal, pending_index) catch |err| {
         log.err("server init failed: {}", .{err});
         std.process.exit(1);
     };

@@ -10,6 +10,25 @@ pub const FuzzArgs = struct {
     events_max: ?usize,
 };
 
+/// ID pools for fuzz message generation. Handlers that reference
+/// existing entities (get_product, transfer_inventory, etc.) pick
+/// IDs from these pools.
+pub const IdPools = struct {
+    product_ids: []const u128,
+    collection_ids: []const u128,
+    order_ids: []const u128,
+};
+
+/// Dummy storage for tests and fuzzers that don't exercise QUERY frames.
+/// QUERY frames are never generated in unit tests — DummyStorage panics
+/// if query_raw is called (indicating a test bug).
+pub const DummyStorage = struct {
+    pub const QueryMode = enum { query, query_all };
+    pub fn query_raw(_: *const DummyStorage, _: []const u8, _: []const u8, _: u8, _: QueryMode, _: []u8) ?[]const u8 {
+        @panic("DummyStorage.query_raw called — test should not generate QUERY frames");
+    }
+};
+
 const GiB = 1024 * 1024 * 1024;
 
 /// Cap virtual address space so a leaking fuzzer OOMs fast instead of

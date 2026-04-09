@@ -1,12 +1,29 @@
 const std = @import("std");
 const t = @import("../prelude.zig");
 const message = @import("../message.zig");
+const fuzz_lib = @import("../fuzz_lib.zig");
+const PRNG = @import("stdx").PRNG;
 
 pub const Status = enum { ok };
 
 pub const Prefetch = struct {};
 
-pub const Context = t.HandlerContext(Prefetch, t.Operation.EventType(.verify_login_code), t.Identity, Status);
+pub const Context = t.HandlerContext(Prefetch, t.EventType(.verify_login_code), t.Identity, Status);
+
+pub fn gen_fuzz_message(prng: *PRNG, _: fuzz_lib.IdPools) ?t.Message {
+    const fuzz = @import("../fuzz.zig");
+    return t.Message.init(.verify_login_code, 0, prng.int(u128) | 1, fuzz.gen_login_verification(prng));
+}
+
+pub fn input_valid(msg: t.Message) bool {
+    const ev = msg.body_as(message.LoginVerification);
+    if (ev.email_len == 0 or ev.email_len > message.email_max) return false;
+    if (!@import("std").unicode.utf8ValidateSlice(ev.email[0..ev.email_len])) return false;
+    for (ev.code[0..message.code_length]) |c| {
+        if (c < '0' or c > '9') return false;
+    }
+    return true;
+}
 
 // [route] .verify_login_code
 // match POST /login/verify

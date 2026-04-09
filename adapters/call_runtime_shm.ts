@@ -35,6 +35,18 @@ const _handleCtx: any = {
   write: (decl: [string, ...any[]]) => { _writes.push(decl); },
 };
 const _writeDb = { execute: (...a: any[]) => { _writes.push(a as any); } };
+const _workerDispatches: Array<{name: string, args: any[]}> = [];
+
+// Worker proxy — handlers call worker.charge_payment(id, amount) etc.
+// Each call appends to _workerDispatches, serialized into the RESULT dispatch section.
+export const worker: Record<string, (...args: any[]) => void> = new Proxy({} as any, {
+  get(_target: any, prop: string) {
+    return (...args: any[]) => {
+      _workerDispatches.push({ name: prop, args });
+    };
+  }
+});
+
 const _renderCtx: any = {
   operation: "", id: "", status: "", body: {}, params: _emptyParams,
   rows: _emptyRows, prefetched: {}, is_sse: false,
@@ -328,8 +340,9 @@ function dispatchHandleRender(requestId: number, args: Uint8Array): Uint8Array {
 
   const mod = modules[opName];
 
-  // Handle phase — reuse write array to reduce GC.
+  // Handle phase — reuse write array and dispatch list.
   _writes.length = 0;
+  _workerDispatches.length = 0;
   const ctx = _handleCtx;
   ctx.operation = opName; ctx.id = id; ctx.body = body;
   ctx.prefetched = prefetched; ctx.rows = _emptyRows;
@@ -357,7 +370,7 @@ function dispatchHandleRender(requestId: number, args: Uint8Array): Uint8Array {
   }
 
   // Build RESULT directly into pre-allocated buffer.
-  // Layout: [tag:1][request_id:4 BE][flag:1][status_len:2 BE][status][session:1][write_count:1][writes...][html]
+  // Layout: [tag:1][request_id:4 BE][flag:1][status_len:2 BE][status][session:1][write_count:1][writes...][dispatch_count:1][dispatches...][html]
   _resultBuf[0] = 0x11;
   _resultDv.setUint32(1, requestId, false);
   _resultBuf[5] = 0x00; // success flag
@@ -384,9 +397,203 @@ function dispatchHandleRender(requestId: number, args: Uint8Array): Uint8Array {
       else { _resultBuf[rpos] = 0x05; rpos += 1; }
     }
   }
+  // Dispatch section: [dispatch_count:1][dispatches...]
+  // Each dispatch: [name_len:1][name][args_len:2 BE][args]
+  // Args are serialized as type-tagged values (same as write params).
+  _resultBuf[rpos] = _workerDispatches.length; rpos += 1;
+  for (const d of _workerDispatches) {
+    const nameBytes = _encoder.encode(d.name);
+    _resultBuf[rpos] = nameBytes.length; rpos += 1;
+    _resultBuf.set(nameBytes, rpos); rpos += nameBytes.length;
+    // Serialize args as type-tagged params.
+    const argsStart = rpos;
+    rpos += 2; // reserve space for args_len
+    for (const a of d.args) {
+      if (a === null || a === undefined) { _resultBuf[rpos] = 0x05; rpos += 1; }
+      else if (typeof a === "number") { _resultBuf[rpos] = 0x01; rpos += 1; _resultDv.setBigInt64(rpos, BigInt(Math.trunc(a)), true); rpos += 8; }
+      else if (typeof a === "string") { _resultBuf[rpos] = 0x03; rpos += 1; const s = _encoder.encode(a); _resultDv.setUint16(rpos, s.length, false); rpos += 2; _resultBuf.set(s, rpos); rpos += s.length; }
+      else if (typeof a === "bigint") { _resultBuf[rpos] = 0x01; rpos += 1; _resultDv.setBigInt64(rpos, a, true); rpos += 8; }
+      else { _resultBuf[rpos] = 0x05; rpos += 1; }
+    }
+    const argsLen = rpos - argsStart - 2;
+    _resultDv.setUint16(argsStart, argsLen, false);
+  }
   // HTML directly into result buffer — no intermediate encode + copy.
   const htmlLen = _encoder.encodeInto(html, _resultBuf.subarray(rpos)).written ?? 0;
   rpos += htmlLen;
 
   return _resultBuf.subarray(0, rpos);
+}
+
+// =====================================================================
+// Worker SHM client — async CALL handling over second SHM region.
+//
+// Polls the worker SHM region (`{shmName}-workers`) for CALL frames.
+// Each CALL starts an async worker function. When the Promise resolves,
+// the RESULT is written back to the SHM slot.
+//
+// JS-level polling (not C addon) — worker names are dynamic.
+// =====================================================================
+
+const shmAddon = require("../addons/shm/shm.node");
+const _zlib = require("zlib");
+let workerFns: Record<string, { fn: (...args: any[]) => Promise<any>; returns: string }> | null = null;
+try {
+  const gen = require("../generated/handlers.generated.ts");
+  if (gen.workerFunctions) workerFns = gen.workerFunctions;
+} catch { /* no workers defined */ }
+
+if (workerFns && Object.keys(workerFns).length > 0) {
+  const workerShmName = shmName + "-workers";
+  const workerSlotCount = 16; // Must match constants.max_in_flight_workers.
+
+  let workerBuf: Buffer;
+  try {
+    const shmPath = "/" + workerShmName;
+    const regionSize = 64 + workerSlotCount * (64 + FRAME_MAX * 2);
+    workerBuf = shmAddon.mmapShm(shmPath, regionSize);
+    console.log(`[shm] worker transport: ${workerShmName} (${workerSlotCount} slots)`);
+  } catch (e: any) {
+    console.error(`[shm] worker SHM not available: ${e.message}`);
+    workerFns = null;
+    workerBuf = Buffer.alloc(0);
+  }
+
+  if (workerFns) {
+    const WHDR = 64; // region header
+    const WSLOT_HDR = 64; // slot header
+    const WSLOT_PAIR = WSLOT_HDR + FRAME_MAX * 2;
+    const wLastSeqs = new Uint32Array(workerSlotCount);
+    const wResultBuf = new Uint8Array(FRAME_MAX);
+    const wResultDv = new DataView(wResultBuf.buffer);
+    const wFns = workerFns; // capture for closure
+
+    function pollWorkerShm() {
+      for (let i = 0; i < workerSlotCount; i++) {
+        const hdr = WHDR + i * WSLOT_PAIR;
+        const serverSeq = workerBuf.readUInt32LE(hdr); // server_seq
+        if (serverSeq <= wLastSeqs[i]) continue;
+        wLastSeqs[i] = serverSeq;
+
+        // Read request.
+        const reqLen = workerBuf.readUInt32LE(hdr + 8); // request_len
+        if (reqLen === 0 || reqLen > FRAME_MAX) continue;
+        const reqOffset = hdr + WSLOT_HDR;
+        const reqData = workerBuf.subarray(reqOffset, reqOffset + reqLen);
+
+        // Parse CALL: [tag:1][request_id:4 BE][name_len:2 BE][name][args]
+        if (reqData.length < 7) continue;
+        if (reqData[0] !== 0x10) continue; // not a CALL tag
+        const requestId = reqData.readUInt32BE(1);
+        const nameLen = reqData.readUInt16BE(5);
+        if (7 + nameLen > reqData.length) continue;
+        const name = _decoder.decode(reqData.subarray(7, 7 + nameLen));
+        const argsRaw = reqData.subarray(7 + nameLen);
+
+        // Look up worker function.
+        const wf = wFns[name];
+        if (!wf) {
+          console.error(`[shm] unknown worker: ${name}`);
+          writeWorkerResult(workerBuf, i, WHDR, WSLOT_PAIR, requestId, 0x01, new Uint8Array(0));
+          continue;
+        }
+
+        // Run async worker function. Fire and forget — result written when done.
+        const slot = i;
+        const rid = requestId;
+        (async () => {
+          try {
+            // Deserialize args from type-tagged format.
+            const args = deserializeArgs(argsRaw);
+            const result = await wf.fn(...args);
+            // Serialize result as JSON text.
+            const resultJson = _encoder.encode(JSON.stringify(result ?? {}));
+            writeWorkerResult(workerBuf, slot, WHDR, WSLOT_PAIR, rid, 0x00, resultJson);
+          } catch (e: any) {
+            console.error(`[shm] worker ${name} error:`, e.message);
+            const errMsg = _encoder.encode(e.message || "worker error");
+            writeWorkerResult(workerBuf, slot, WHDR, WSLOT_PAIR, rid, 0x01, errMsg);
+          }
+        })();
+      }
+      setImmediate(pollWorkerShm);
+    }
+
+    setImmediate(pollWorkerShm);
+    console.log(`[shm] worker polling started (${Object.keys(wFns).length} workers)`);
+  }
+}
+
+function writeWorkerResult(buf: Buffer, slot: number, regionHdr: number, slotPairSize: number,
+  requestId: number, flag: number, data: Uint8Array) {
+  const hdr = regionHdr + slot * slotPairSize;
+  const respOffset = hdr + 64 + FRAME_MAX; // slot header + request area
+
+  // Build RESULT: [tag:0x11][request_id:4 BE][flag:1][data]
+  let pos = 0;
+  buf[respOffset + pos] = 0x11; pos += 1;
+  buf.writeUInt32BE(requestId, respOffset + pos); pos += 4;
+  buf[respOffset + pos] = flag; pos += 1;
+  if (data.length > 0) {
+    buf.set(data, respOffset + pos);
+    pos += data.length;
+  }
+
+  // Set response_len.
+  buf.writeUInt32LE(pos, hdr + 12);
+
+  // CRC: len_bytes ++ payload_bytes (matches Zig convention).
+  const lenBuf = Buffer.alloc(4);
+  lenBuf.writeUInt32LE(pos);
+  // Simple CRC32 using Node.js zlib.
+  const { crc32 } = _zlib;
+  const crcVal = crc32(Buffer.concat([lenBuf, buf.subarray(respOffset, respOffset + pos)]));
+  buf.writeUInt32LE(crcVal, hdr + 20); // response_crc
+
+  // Bump sidecar_seq + futex wake.
+  const curSeq = buf.readUInt32LE(hdr + 4);
+  buf.writeUInt32LE(curSeq + 1, hdr + 4);
+  shmAddon.futexWake(buf, hdr + 4);
+}
+
+function deserializeArgs(data: Uint8Array): any[] {
+  const args: any[] = [];
+  let pos = 0;
+  while (pos < data.length) {
+    const tag = data[pos]; pos += 1;
+    switch (tag) {
+      case 0x01: { // integer
+        const dv = new DataView(data.buffer, data.byteOffset + pos, 8);
+        args.push(Number(dv.getBigInt64(0, true)));
+        pos += 8;
+        break;
+      }
+      case 0x02: { // float
+        const dv = new DataView(data.buffer, data.byteOffset + pos, 8);
+        args.push(dv.getFloat64(0, true));
+        pos += 8;
+        break;
+      }
+      case 0x03: { // text
+        const len = new DataView(data.buffer, data.byteOffset + pos, 2).getUint16(0, false);
+        pos += 2;
+        args.push(_decoder.decode(data.subarray(pos, pos + len)));
+        pos += len;
+        break;
+      }
+      case 0x04: { // blob
+        const len = new DataView(data.buffer, data.byteOffset + pos, 2).getUint16(0, false);
+        pos += 2;
+        args.push(data.slice(pos, pos + len));
+        pos += len;
+        break;
+      }
+      case 0x05: // null
+        args.push(null);
+        break;
+      default:
+        return args; // unknown tag — stop
+    }
+  }
+  return args;
 }

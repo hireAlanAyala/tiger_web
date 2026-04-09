@@ -1,11 +1,30 @@
 const std = @import("std");
 const t = @import("../prelude.zig");
+const fuzz_lib = @import("../fuzz_lib.zig");
+const PRNG = @import("stdx").PRNG;
 
 pub const Status = enum { ok, version_conflict };
 
 pub const Prefetch = struct { existing: ?t.CollectionRow };
 
-pub const Context = t.HandlerContext(Prefetch, t.Operation.EventType(.create_collection), t.Identity, Status);
+pub const Context = t.HandlerContext(Prefetch, t.EventType(.create_collection), t.Identity, Status);
+
+pub fn gen_fuzz_message(prng: *PRNG, _: fuzz_lib.IdPools) ?t.Message {
+    const fuzz = @import("../fuzz.zig");
+    return t.Message.init(.create_collection, 0, prng.int(u128) | 1, fuzz.gen_collection(prng));
+}
+
+pub fn input_valid(msg: t.Message) bool {
+    const stdx = @import("stdx");
+    const col = msg.body_as(t.ProductCollection);
+    if (col.id == 0) return false;
+    if (msg.id != 0 and msg.id != col.id) return false;
+    if (col.name_len == 0 or col.name_len > t.collection_name_max) return false;
+    if (col.flags.padding != 0) return false;
+    if (!stdx.zeroed(&col.reserved)) return false;
+    if (!@import("std").unicode.utf8ValidateSlice(col.name[0..col.name_len])) return false;
+    return true;
+}
 
 // [route] .create_collection
 // match POST /collections

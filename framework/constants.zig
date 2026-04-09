@@ -84,16 +84,6 @@ comptime {
 // for recv_buf_max, send_buf_max, max_header_size, body_max. Not duplicated
 // here because http.zig is imported by everything that needs buffer sizes.
 
-// ---------------------------------------------------------------------------
-// WAL — write-ahead log.
-// ---------------------------------------------------------------------------
-
-/// Maximum WAL entry size (header + recorded writes).
-pub const wal_entry_max: u32 = 64 * 1024; // 64 KB
-
-comptime {
-    assert(wal_entry_max >= 1024);
-}
 
 // ---------------------------------------------------------------------------
 // Auth — cookie signing.
@@ -127,4 +117,37 @@ pub const metrics_interval_ticks: u32 = 10_000; // ~100 seconds at 10ms/tick
 comptime {
     assert(sidecar_response_timeout_ticks >= 1);
     assert(metrics_interval_ticks >= 100);
+}
+
+// ---------------------------------------------------------------------------
+// Workers — background dispatch.
+// ---------------------------------------------------------------------------
+
+/// Maximum concurrent in-flight worker dispatches.
+pub const max_in_flight_workers: u8 = 16;
+
+/// Maximum worker name length (ASCII, validated by scanner).
+pub const worker_name_max: u8 = 64;
+
+/// Maximum serialized args size per dispatch.
+pub const worker_args_max: u16 = 4096;
+
+/// Maximum worker result data size.
+pub const worker_result_max: u16 = 4096;
+
+/// Maximum worker dispatches per handler invocation.
+pub const dispatches_per_handle_max: u8 = 4;
+
+/// Worker deadline in ticks. If a dispatch has been pending for this
+/// many ticks, it is resolved dead.
+pub const worker_deadline_ticks: u32 = 3000; // 30 seconds at 10ms/tick
+
+comptime {
+    assert(max_in_flight_workers >= 1);
+    assert(max_in_flight_workers <= 64); // bounded — static allocation
+    assert(worker_name_max >= 1);
+    assert(worker_name_max <= 128);
+    assert(worker_args_max >= 1);
+    assert(worker_args_max <= 8192);
+    assert(worker_deadline_ticks >= 100); // at least 1 second
 }

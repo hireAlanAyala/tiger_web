@@ -1,11 +1,17 @@
 const std = @import("std");
 const t = @import("../prelude.zig");
+const fuzz_lib = @import("../fuzz_lib.zig");
+const PRNG = @import("stdx").PRNG;
 
 pub const Status = enum { ok };
 
 pub const Prefetch = struct {};
 
-pub const Context = t.HandlerContext(Prefetch, t.Operation.EventType(.logout), t.Identity, Status);
+pub const Context = t.HandlerContext(Prefetch, t.EventType(.logout), t.Identity, Status);
+
+pub fn gen_fuzz_message(prng: *PRNG, _: fuzz_lib.IdPools) ?t.Message {
+    return t.Message.init(.logout, 0, prng.int(u128) | 1, {});
+}
 
 // [route] .logout
 // match POST /logout

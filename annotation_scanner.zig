@@ -59,6 +59,7 @@ const Phase = enum {
     prefetch,
     execute,
     render,
+    worker,
 };
 
 /// Parsed route match directive — `// match GET /products/:id`.
@@ -136,6 +137,7 @@ const Annotation = struct {
     prefetch_queries: []const PrefetchQuery = &.{},
     param_hints: [max_annotation_param_hints]?ParamHint = .{null} ** max_annotation_param_hints,
     param_hint_count: u8 = 0,
+    id_field: ?[]const u8 = null, // [worker] only: field name in worker result for entity id
 };
 
 const max_annotation_param_hints = 4;
@@ -202,6 +204,8 @@ fn parse_annotation(line: []const u8, prefix: []const u8) ?struct { phase: Phase
         .execute
     else if (std.mem.eql(u8, phase_str, "render"))
         .render
+    else if (std.mem.eql(u8, phase_str, "worker"))
+        .worker
     else
         return null;
 
@@ -358,12 +362,34 @@ fn parse_param_directive(line: []const u8, prefix: []const u8) ?struct { field: 
     };
 }
 
+/// Parse a `// id field_name` directive for workers.
+/// Declares which field of the worker result contains the entity id.
+fn parse_id_directive(line: []const u8, prefix: []const u8) ?[]const u8 {
+    var trimmed = line;
+    while (trimmed.len > 0 and (trimmed[0] == ' ' or trimmed[0] == '\t')) {
+        trimmed = trimmed[1..];
+    }
+    if (!std.mem.startsWith(u8, trimmed, prefix)) return null;
+    var rest = trimmed[prefix.len..];
+    while (rest.len > 0 and rest[0] == ' ') rest = rest[1..];
+    if (!std.mem.startsWith(u8, rest, "id ")) return null;
+    rest = rest[3..];
+    while (rest.len > 0 and rest[0] == ' ') rest = rest[1..];
+    var end: usize = 0;
+    while (end < rest.len and (std.ascii.isAlphanumeric(rest[end]) or rest[end] == '_')) {
+        end += 1;
+    }
+    if (end == 0) return null;
+    return rest[0..end];
+}
+
 fn user_phase_name(phase: Phase) []const u8 {
     return switch (phase) {
         .translate => "route",
         .prefetch => "prefetch",
         .execute => "handle",
         .render => "render",
+        .worker => "worker",
     };
 }
 
@@ -641,6 +667,7 @@ fn scan_file_content(
     var lines = std.mem.splitScalar(u8, content, '\n');
     var prev_annotation: ?struct { phase: Phase, operation: []const u8, line: u32 } = null;
     var pending_match: ?RouteMatch = null;
+    var pending_id_field: ?[]const u8 = null; // [worker] // id field_name
     var pending_params: [max_annotation_param_hints]?ParamHint = .{null} ** max_annotation_param_hints;
     var pending_param_count: u8 = 0;
 
@@ -702,8 +729,21 @@ fn scan_file_content(
                         }
                     }
 
+                    // `// id field_name` — worker entity id field.
+                    if (ann.phase == .worker and next_ann == null) {
+                        if (parse_id_directive(line, prefix)) |id_field| {
+                            if (pending_id_field != null) {
+                                try stderr.print("error: {s}:{d}: duplicate id directive for [worker] .{s}\n", .{ path, line_num, ann.operation });
+                                errors += 1;
+                            } else {
+                                pending_id_field = try allocator.dupe(u8, id_field);
+                            }
+                            continue;
+                        }
+                    }
+
                     // `// match` on non-route phases is an error.
-                    if (ann.phase != .translate and next_ann == null) {
+                    if (ann.phase != .translate and ann.phase != .worker and next_ann == null) {
                         if (parse_match_directive(line, prefix) != null) {
                             try stderr.print("error: {s}:{d}: match directive only valid after [route], not [{s}]\n", .{ path, line_num, user_phase_name(ann.phase) });
                             errors += 1;
@@ -739,16 +779,16 @@ fn scan_file_content(
                     prev_annotation = null;
                     if (pending_match) |rm| rm.deinit(allocator);
                     pending_match = null;
+                    pending_id_field = null;
 
                     if (next_ann) |na| {
                         prev_annotation = .{ .phase = na.phase, .operation = na.operation, .line = line_num };
                     }
                 } else {
                     // Non-empty, non-comment, non-annotation = code. Register.
-                    if (!is_valid_operation(ann.operation)) {
-                        try stderr.print("error: {s}:{d}: unknown operation '.{s}'\n", .{ path, ann.line, ann.operation });
-                        errors += 1;
-                    } else {
+                    // All annotated operations are valid — the scanner discovers
+                    // the operation set, not validates against a pre-existing enum.
+                    {
                         try annotations.append(.{
                             .phase = ann.phase,
                             .operation = try allocator.dupe(u8, ann.operation),
@@ -758,10 +798,12 @@ fn scan_file_content(
                             .route_match = pending_match,
                             .param_hints = pending_params,
                             .param_hint_count = pending_param_count,
+                            .id_field = pending_id_field,
                         });
                     }
                     prev_annotation = null;
                     pending_match = null;
+                    pending_id_field = null;
                     pending_param_count = 0;
                     pending_params = .{null} ** 4;
                     continue;
@@ -820,6 +862,8 @@ pub fn main() !void {
     var routes_zig_path: ?[]const u8 = null;
     var handlers_zig_path: ?[]const u8 = null;
     var prefetch_zig_path: ?[]const u8 = null;
+    var operations_zig_path: ?[]const u8 = null;
+    var registry_path: ?[]const u8 = null;
     while (args.next()) |arg| {
         if (std.mem.startsWith(u8, arg, "--manifest=")) {
             manifest_path = arg[11..];
@@ -829,6 +873,10 @@ pub fn main() !void {
             handlers_zig_path = arg[15..];
         } else if (std.mem.startsWith(u8, arg, "--prefetch-zig=")) {
             prefetch_zig_path = arg[15..];
+        } else if (std.mem.startsWith(u8, arg, "--operations-zig=")) {
+            operations_zig_path = arg[17..];
+        } else if (std.mem.startsWith(u8, arg, "--registry=")) {
+            registry_path = arg[11..];
         }
     }
 
@@ -844,39 +892,40 @@ pub fn main() !void {
     const stderr = std.io.getStdErr().writer();
 
     // Scan all files recursively.
-    var dir = std.fs.cwd().openDir(scan_dir, .{ .iterate = true }) catch |err| {
-        try stderr.print("error: cannot open directory '{s}': {}\n", .{ scan_dir, err });
-        std.process.exit(1);
-    };
-    defer dir.close();
-
-    // Strip trailing slash from scan_dir to avoid double-slash in paths.
-    const dir_name = if (scan_dir.len > 0 and scan_dir[scan_dir.len - 1] == '/')
-        scan_dir[0 .. scan_dir.len - 1]
-    else
-        scan_dir;
-
-    var walker = try dir.walk(allocator);
-    defer walker.deinit();
-
-    while (try walker.next()) |entry| {
-        if (entry.kind != .file) continue;
-
-        const prefix = comment_prefix(entry.basename) orelse continue;
-
-        const path = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ dir_name, entry.path });
-
-        const content = dir.readFileAlloc(allocator, entry.path, 1024 * 1024) catch |err| {
-            try stderr.print("error: cannot read '{s}': {}\n", .{ path, err });
-            errors += 1;
-            continue;
+    {
+        var dir = std.fs.cwd().openDir(scan_dir, .{ .iterate = true }) catch |err| {
+            try stderr.print("error: cannot open directory '{s}': {}\n", .{ scan_dir, err });
+            std.process.exit(1);
         };
-        // Content lives in the arena — no free needed, kept for status extraction.
+        defer dir.close();
 
-        try files.append(.{ .path = path, .content = content });
+        // Strip trailing slash from scan_dir to avoid double-slash in paths.
+        const dir_name = if (scan_dir.len > 0 and scan_dir[scan_dir.len - 1] == '/')
+            scan_dir[0 .. scan_dir.len - 1]
+        else
+            scan_dir;
 
-        const scan_errors = try scan_file_content(allocator, content, prefix, path, &annotations);
-        errors += scan_errors;
+        var walker = try dir.walk(allocator);
+        defer walker.deinit();
+
+        while (try walker.next()) |entry| {
+            if (entry.kind != .file) continue;
+
+            const prefix = comment_prefix(entry.basename) orelse continue;
+
+            const path = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ dir_name, entry.path });
+
+            const content = dir.readFileAlloc(allocator, entry.path, 1024 * 1024) catch |err| {
+                try stderr.print("error: cannot read '{s}': {}\n", .{ path, err });
+                errors += 1;
+                continue;
+            };
+
+            try files.append(.{ .path = path, .content = content });
+
+            const scan_errors = try scan_file_content(allocator, content, prefix, path, &annotations);
+            errors += scan_errors;
+        }
     }
 
     // Check for duplicates.
@@ -910,22 +959,62 @@ pub fn main() !void {
         }
     }
 
-    // Check exhaustiveness — every non-root operation needs a handler for each phase.
-    const phases = [_]Phase{ .translate, .prefetch, .execute, .render };
-    for (phases) |phase| {
-        for (valid_operations) |op| {
-            if (std.mem.eql(u8, op, "root")) continue;
+    // Check exhaustiveness — two handler patterns:
+    // HTTP operations: [route] + [prefetch] + [handle] + [render]
+    // Worker operations: [worker] + [handle] + [render] (no route, no prefetch)
+    //
+    // An operation is a worker if it has a [worker] annotation.
+    // The exhaustiveness check is per-operation, not per-enum-variant,
+    // because the scanner discovers operations from annotations.
 
-            var found = false;
-            for (annotations.items) |ann| {
-                if (ann.phase == phase and std.mem.eql(u8, ann.operation, op)) {
-                    found = true;
-                    break;
+    // Collect all unique operation names from annotations.
+    var all_ops = std.StringHashMap(bool).init(allocator); // value = is_worker
+    defer all_ops.deinit();
+    for (annotations.items) |ann| {
+        if (ann.phase == .worker) {
+            try all_ops.put(ann.operation, true);
+        } else {
+            const existing = all_ops.get(ann.operation);
+            if (existing == null) try all_ops.put(ann.operation, false);
+        }
+    }
+
+    var op_iter = all_ops.iterator();
+    while (op_iter.next()) |entry| {
+        const op = entry.key_ptr.*;
+        const is_worker = entry.value_ptr.*;
+
+        if (is_worker) {
+            // Worker: needs [worker] + [handle] + [render].
+            const required = [_]Phase{ .worker, .execute, .render };
+            for (required) |phase| {
+                var found = false;
+                for (annotations.items) |ann| {
+                    if (ann.phase == phase and std.mem.eql(u8, ann.operation, op)) {
+                        found = true;
+                        break;
+                    }
+                }
+                if (!found) {
+                    try stderr.print("error: worker .{s} missing [{s}] phase\n", .{ op, user_phase_name(phase) });
+                    errors += 1;
                 }
             }
-            if (!found) {
-                try stderr.print("error: missing handler for [{s}] .{s}\n", .{ user_phase_name(phase), op });
-                errors += 1;
+        } else {
+            // HTTP: needs [route] + [prefetch] + [handle] + [render].
+            const required = [_]Phase{ .translate, .prefetch, .execute, .render };
+            for (required) |phase| {
+                var found = false;
+                for (annotations.items) |ann| {
+                    if (ann.phase == phase and std.mem.eql(u8, ann.operation, op)) {
+                        found = true;
+                        break;
+                    }
+                }
+                if (!found) {
+                    try stderr.print("error: missing handler for [{s}] .{s}\n", .{ user_phase_name(phase), op });
+                    errors += 1;
+                }
             }
         }
     }
@@ -989,6 +1078,34 @@ pub fn main() !void {
                 });
                 errors += 1;
             }
+        }
+    }
+
+    // --- Worker handler validation ---
+    //
+    // Worker operations have three phases: [worker] + [handle] + [render].
+    // The [handle] must check ctx.worker_failed (best-effort substring match).
+    for (annotations.items) |ann| {
+        if (ann.phase != .worker) continue;
+
+        // Find the [handle] annotation for this worker operation.
+        const handle_ann = for (annotations.items) |h| {
+            if (h.phase == .execute and std.mem.eql(u8, h.operation, ann.operation)) break h;
+        } else continue;
+
+        if (!handle_ann.has_body) continue;
+
+        const handle_content = for (files.items) |f| {
+            if (std.mem.eql(u8, f.path, handle_ann.file)) break f.content;
+        } else continue;
+
+        // Best-effort: check that the handle body references worker_failed.
+        const body = SqlStringIterator.init(handle_content, handle_ann.line, '`').body;
+        if (std.mem.indexOf(u8, body, "worker_failed") == null) {
+            try stderr.print("error: {s}:{d}: [handle] .{s} must check ctx.worker_failed\n", .{
+                handle_ann.file, handle_ann.line, ann.operation,
+            });
+            errors += 1;
         }
     }
 
@@ -1092,7 +1209,7 @@ pub fn main() !void {
                     });
                 }
             },
-            .translate => {}, // Route has no SQL.
+            .translate, .worker => {}, // Route/worker have no SQL.
         }
     }
 
@@ -1104,6 +1221,11 @@ pub fn main() !void {
     }
 
     try stdout.print("OK: {d} annotations in {s}/\n", .{ annotations.items.len, scan_dir });
+
+    // Generate operations enum from registry + discovered annotations.
+    if (operations_zig_path != null or registry_path != null) {
+        try generate_operations(allocator, annotations.items, registry_path, operations_zig_path, stdout);
+    }
 
     // Write manifest if requested.
     if (manifest_path) |out_path| {
@@ -1258,7 +1380,7 @@ fn body_references_sql(body: []const u8, phase: Phase) bool {
         .render => std.mem.indexOf(u8, body, "sql:") != null or
             std.mem.indexOf(u8, body, "query(") != null or
             std.mem.indexOf(u8, body, "query_raw(") != null,
-        .translate => false,
+        .translate, .worker => false,
     };
 }
 
@@ -1525,6 +1647,163 @@ fn has_name(ss: *const StatusSet, name: []const u8) bool {
     return false;
 }
 
+// =====================================================================
+// Operations generation — registry + enum file
+// =====================================================================
+
+/// Registry entry: operation name → u8 value.
+const RegistryEntry = struct {
+    name: []const u8,
+    value: u8,
+};
+
+/// Generate operations.generated.zig from the registry + discovered annotations.
+/// 1. Read operations.json (if exists) for stable u8 values.
+/// 2. Collect unique operation names from annotations.
+/// 3. Assign u8 values to new operations (next available).
+/// 4. Write operations.generated.zig (the enum).
+/// 5. Write updated operations.json.
+fn generate_operations(
+    allocator: std.mem.Allocator,
+    annotations: []const Annotation,
+    registry_path: ?[]const u8,
+    operations_zig_path: ?[]const u8,
+    stdout: anytype,
+) !void {
+    // Collect unique operation names from annotations (excluding worker phase — those are worker function names, not operations).
+    var op_set = std.StringHashMap(void).init(allocator);
+    defer op_set.deinit();
+    for (annotations) |ann| {
+        if (ann.phase == .worker) {
+            // Worker operations are discovered from [handle]/[render]
+            // annotations on the same operation name. The [worker] phase
+            // itself uses the same operation name.
+            try op_set.put(ann.operation, {});
+            continue;
+        }
+        try op_set.put(ann.operation, {});
+    }
+
+    // Load existing registry.
+    var registry = std.ArrayList(RegistryEntry).init(allocator);
+    defer registry.deinit();
+    var next_value: u8 = 1; // 0 is reserved for root
+
+    if (registry_path) |path| {
+        const reg_content = std.fs.cwd().readFileAlloc(allocator, path, 64 * 1024) catch "";
+        if (reg_content.len > 0) {
+            var parsed = try std.json.parseFromSlice(std.json.Value, allocator, reg_content, .{});
+            defer parsed.deinit();
+            if (parsed.value == .object) {
+                var it = parsed.value.object.iterator();
+                while (it.next()) |entry| {
+                    const val: u8 = @intCast(entry.value_ptr.integer);
+                    try registry.append(.{ .name = try allocator.dupe(u8, entry.key_ptr.*), .value = val });
+                    if (val >= next_value) next_value = val + 1;
+                }
+            }
+        }
+    }
+
+    // Ensure root is in registry.
+    var has_root = false;
+    for (registry.items) |r| {
+        if (std.mem.eql(u8, r.name, "root")) { has_root = true; break; }
+    }
+    if (!has_root) {
+        try registry.append(.{ .name = "root", .value = 0 });
+    }
+
+    // Add new operations from annotations that aren't in the registry.
+    var op_iter = op_set.iterator();
+    while (op_iter.next()) |entry| {
+        const name = entry.key_ptr.*;
+        var found = false;
+        for (registry.items) |r| {
+            if (std.mem.eql(u8, r.name, name)) { found = true; break; }
+        }
+        if (!found) {
+            try registry.append(.{ .name = try allocator.dupe(u8, name), .value = next_value });
+            try stdout.print("note: new operation '.{s}' assigned value {d}\n", .{ name, next_value });
+            next_value += 1;
+        }
+    }
+
+    // Sort registry by value for deterministic output.
+    std.mem.sort(RegistryEntry, registry.items, {}, struct {
+        fn less(_: void, a: RegistryEntry, b: RegistryEntry) bool {
+            return a.value < b.value;
+        }
+    }.less);
+
+    // Write operations.generated.zig.
+    if (operations_zig_path) |path| {
+        var buf = std.ArrayList(u8).init(allocator);
+        const w = buf.writer();
+
+        try w.writeAll(
+            \\// Auto-generated from operations.json by annotation scanner — do not edit.
+            \\//
+            \\// The Operation enum is the single set of domain operations. Values are
+            \\// stable across builds (WAL compatibility). New operations are assigned
+            \\// the next available value by the scanner.
+            \\
+            \\const std = @import("std");
+            \\
+            \\pub const Operation = enum(u8) {
+            \\
+        );
+        for (registry.items) |r| {
+            try w.print("    {s} = {d},\n", .{ r.name, r.value });
+        }
+        try w.writeAll(
+            \\
+            \\    pub fn is_mutation(op: Operation) bool {
+            \\        return switch (op) {
+            \\            .root,
+            \\            .page_load_dashboard, .page_load_login,
+            \\            .logout,
+            \\            .list_products, .list_collections, .list_orders,
+            \\            .get_product, .get_collection, .get_order,
+            \\            .get_product_inventory, .search_products,
+            \\            => false,
+            \\            else => true,
+            \\        };
+            \\    }
+            \\
+            \\    pub fn from_string(name: []const u8) ?Operation {
+            \\        inline for (@typeInfo(Operation).@"enum".fields) |f| {
+            \\            if (std.mem.eql(u8, f.name, name)) return @enumFromInt(f.value);
+            \\        }
+            \\        return null;
+            \\    }
+            \\};
+            \\
+        );
+
+        const file = try std.fs.cwd().createFile(path, .{});
+        defer file.close();
+        try file.writeAll(buf.items);
+        try stdout.print("Operations: {s}\n", .{path});
+    }
+
+    // Write updated registry.
+    if (registry_path) |path| {
+        var buf = std.ArrayList(u8).init(allocator);
+        const w = buf.writer();
+        try w.writeAll("{\n");
+        for (registry.items, 0..) |r, i| {
+            if (i > 0) try w.writeAll(",\n");
+            try w.print("  \"{s}\": {d}", .{ r.name, r.value });
+        }
+        try w.writeAll("\n}\n");
+
+        const file = try std.fs.cwd().createFile(path, .{});
+        defer file.close();
+        try file.writeAll(buf.items);
+    }
+}
+
 /// Write the annotation manifest as JSON.
 /// This is the contract between the scanner and language adapters.
 /// Annotations are sorted by file + line for deterministic output
@@ -1569,6 +1848,11 @@ fn emit_manifest(
                 try w.writeAll("]");
             }
             try w.writeAll(" }");
+        }
+
+        // Include id field for worker phase annotations.
+        if (ann.id_field) |id_field| {
+            try w.print(", \"id_field\": \"{s}\"", .{id_field});
         }
 
         // Include statuses for execute (handle) phase annotations.
@@ -1703,6 +1987,9 @@ fn emit_routes_zig(
         \\        // a real operation and has no handler. If more sentinels are added,
         \\        // they must be listed here.
         \\        if (op == .root) continue;
+        \\        // Worker completion operations have [route] but no // match —
+        \\        // they are triggered by worker completion, not HTTP requests.
+        \\        if (is_completion_operation(op)) continue;
         \\        var found = false;
         \\        for (routes) |r| {
         \\            if (r.operation == op) { found = true; break; }
@@ -1738,6 +2025,10 @@ fn emit_routes_zig(
         \\// a collection by query param is the same endpoint, not a sub-resource.
         \\
     );
+
+    // Worker operations have no `// match` — they are triggered by worker
+    // completion, not HTTP requests. The routes.zig comptime check uses
+    // handlers.generated.zig:is_sidecar_operation to skip them automatically.
 
     const file = try std.fs.cwd().createFile(out_path, .{});
     defer file.close();

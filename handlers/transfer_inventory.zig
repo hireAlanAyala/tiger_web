@@ -1,5 +1,7 @@
 const std = @import("std");
 const t = @import("../prelude.zig");
+const fuzz_lib = @import("../fuzz_lib.zig");
+const PRNG = @import("stdx").PRNG;
 
 pub const Status = enum { ok, not_found, insufficient_inventory };
 
@@ -8,7 +10,28 @@ pub const Prefetch = struct {
     target: ?t.ProductRow,
 };
 
-pub const Context = t.HandlerContext(Prefetch, t.Operation.EventType(.transfer_inventory), t.Identity, Status);
+pub const Context = t.HandlerContext(Prefetch, t.EventType(.transfer_inventory), t.Identity, Status);
+
+pub fn gen_fuzz_message(prng: *PRNG, pools: fuzz_lib.IdPools) ?t.Message {
+    if (pools.product_ids.len < 2) return null;
+    const src_idx = prng.int_inclusive(usize, pools.product_ids.len - 1);
+    var dst_idx = prng.int_inclusive(usize, pools.product_ids.len - 1);
+    if (dst_idx == src_idx) dst_idx = (src_idx + 1) % pools.product_ids.len;
+    const message = @import("../message.zig");
+    return t.Message.init(.transfer_inventory, pools.product_ids[src_idx], prng.int(u128) | 1, message.InventoryTransfer{
+        .target_id = pools.product_ids[dst_idx],
+        .quantity = prng.range_inclusive(u32, 1, 1000),
+        .reserved = .{0} ** 12,
+    });
+}
+
+pub fn input_valid(msg: t.Message) bool {
+    const transfer = msg.body_as(t.InventoryTransfer);
+    if (msg.id == 0) return false;
+    if (transfer.target_id == 0) return false;
+    if (msg.id == transfer.target_id) return false;
+    return true;
+}
 
 // [route] .transfer_inventory
 // match POST /products/:id/transfer-inventory/:sub_id

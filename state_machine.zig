@@ -31,117 +31,20 @@ pub const HandleResult = struct {
     session_action: message.SessionAction = .none,
 };
 
+/// Validate a message's body for a given operation. Dispatches to the
+/// handler's `input_valid` function if it exports one, otherwise returns true.
 /// Used by the fuzzer to filter random messages before calling prefetch/commit.
 pub fn input_valid(msg: message.Message) bool {
-    switch (msg.operation) {
-        .root => return false,
-        .create_product => {
-            const p = msg.body_as(message.Product);
-            if (p.id == 0) return false;
-            // msg.id must agree with body ID or be 0.
-            // Route sets msg.id = body.id. Tests may set msg.id = 0.
-            // Disagreement (msg.id = X, body.id = Y, X != Y) is invalid.
-            if (msg.id != 0 and msg.id != p.id) return false;
-            if (p.name_len == 0 or p.name_len > message.product_name_max) return false;
-            if (p.description_len > message.product_description_max) return false;
-            if (p.flags.padding != 0) return false;
-            if (!std.unicode.utf8ValidateSlice(p.name[0..p.name_len])) return false;
-            if (!std.unicode.utf8ValidateSlice(p.description[0..p.description_len])) return false;
+    const handlers = @import("generated/handlers.generated.zig");
+    return switch (msg.operation) {
+        .root => false,
+        inline else => |comptime_op| {
+            const H = comptime handlers.HandlerModule(comptime_op);
+            if (H == void) return true; // sidecar-only — no native validation
+            if (@hasDecl(H, "input_valid")) return H.input_valid(msg);
+            return true; // no custom validation
         },
-        .update_product => {
-            if (msg.id == 0) return false;
-            const p = msg.body_as(message.Product);
-            if (p.name_len == 0 or p.name_len > message.product_name_max) return false;
-            if (p.description_len > message.product_description_max) return false;
-            if (p.flags.padding != 0) return false;
-            if (!std.unicode.utf8ValidateSlice(p.name[0..p.name_len])) return false;
-            if (!std.unicode.utf8ValidateSlice(p.description[0..p.description_len])) return false;
-        },
-        .create_collection => {
-            const col = msg.body_as(message.ProductCollection);
-            if (col.id == 0) return false;
-            if (msg.id != 0 and msg.id != col.id) return false;
-            if (col.name_len == 0 or col.name_len > message.collection_name_max) return false;
-            if (col.flags.padding != 0) return false;
-            if (!stdx.zeroed(&col.reserved)) return false;
-            if (!std.unicode.utf8ValidateSlice(col.name[0..col.name_len])) return false;
-        },
-        .transfer_inventory => {
-            const transfer = msg.body_as(message.InventoryTransfer);
-            if (msg.id == 0) return false;
-            if (transfer.target_id == 0) return false;
-            if (msg.id == transfer.target_id) return false;
-        },
-        .create_order => {
-            const order = msg.body_as(message.OrderRequest);
-            if (order.id == 0) return false;
-            if (msg.id != 0 and msg.id != order.id) return false;
-            if (order.items_len == 0) return false;
-            if (order.items_len > message.order_items_max) return false;
-            for (order.items_slice()) |item| {
-                if (item.product_id == 0) return false;
-                if (item.quantity == 0) return false;
-            }
-        },
-        .complete_order => {
-            const comp = msg.body_as(message.OrderCompletion);
-            if (msg.id == 0) return false;
-            _ = std.meta.intToEnum(message.OrderCompletion.OrderCompletionResult, @intFromEnum(comp.result)) catch return false;
-            if (comp.payment_ref_len > message.payment_ref_max) return false;
-        },
-        .cancel_order => {
-            if (msg.id == 0) return false;
-        },
-        .search_products => {
-            const sq = msg.body_as(message.SearchQuery);
-            if (sq.query_len == 0 or sq.query_len > message.search_query_max) return false;
-            if (!std.unicode.utf8ValidateSlice(sq.query[0..sq.query_len])) return false;
-            for (sq.query[0..sq.query_len]) |b| {
-                if (b == 0) return false;
-            }
-        },
-        .get_product,
-        .get_product_inventory,
-        .delete_product,
-        .get_collection,
-        .delete_collection,
-        .get_order,
-        .page_load_dashboard,
-        .page_load_login,
-        .logout,
-        => {},
-        .add_collection_member,
-        .remove_collection_member,
-        => {},
-        .request_login_code => {
-            const ev = msg.body_as(message.LoginCodeRequest);
-            if (ev.email_len == 0 or ev.email_len > message.email_max) return false;
-            if (!std.unicode.utf8ValidateSlice(ev.email[0..ev.email_len])) return false;
-        },
-        .verify_login_code => {
-            const ev = msg.body_as(message.LoginVerification);
-            if (ev.email_len == 0 or ev.email_len > message.email_max) return false;
-            if (!std.unicode.utf8ValidateSlice(ev.email[0..ev.email_len])) return false;
-            for (ev.code[0..message.code_length]) |c| {
-                if (c < '0' or c > '9') return false;
-            }
-        },
-        .list_products,
-        .list_collections,
-        .list_orders,
-        => {
-            const lp = msg.body_as(message.ListParams);
-            if (lp.name_prefix_len > message.product_name_max) return false;
-            const prefix = lp.name_prefix[0..lp.name_prefix_len];
-            // NUL bytes in the prefix would be treated as string
-            // terminators by SQLite, silently matching everything.
-            for (prefix) |b| {
-                if (b == 0) return false;
-            }
-            if (!std.unicode.utf8ValidateSlice(prefix)) return false;
-        },
-    }
-    return true;
+    };
 }
 
 /// State machine — framework services for the request pipeline.

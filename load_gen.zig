@@ -46,10 +46,11 @@ const load_op_count = @typeInfo(LoadOp).@"enum".fields.len;
 
 const message = @import("message.zig");
 
+const handlers = @import("generated/handlers.generated.zig");
+
 comptime {
-    // Every Operation must either have a LoadOp or be explicitly excluded.
-    // If you add a new operation to message.zig, the build breaks here —
-    // you must decide whether the load test exercises it.
+    // Every native Operation must either have a LoadOp or be explicitly excluded.
+    // Sidecar-only operations are auto-excluded (no native handler to load-test).
     const excluded = .{
         message.Operation.root,
         message.Operation.page_load_dashboard,
@@ -71,6 +72,10 @@ comptime {
 
     for (@typeInfo(message.Operation).@"enum".fields) |field| {
         const op: message.Operation = @enumFromInt(field.value);
+
+        // Sidecar-only operations auto-excluded — no native handler to load-test.
+        if (handlers.is_sidecar_operation(op)) continue;
+
         var is_excluded = false;
         for (excluded) |ex| {
             if (op == ex) {

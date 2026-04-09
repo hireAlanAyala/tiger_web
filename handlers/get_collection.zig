@@ -1,11 +1,18 @@
 const std = @import("std");
 const t = @import("../prelude.zig");
+const fuzz_lib = @import("../fuzz_lib.zig");
+const PRNG = @import("stdx").PRNG;
 
 pub const Status = enum { ok, not_found };
 
 pub const Prefetch = struct { collection: ?t.CollectionRow };
 
-pub const Context = t.HandlerContext(Prefetch, t.Operation.EventType(.get_collection), t.Identity, Status);
+pub const Context = t.HandlerContext(Prefetch, t.EventType(.get_collection), t.Identity, Status);
+
+pub fn gen_fuzz_message(prng: *PRNG, pools: fuzz_lib.IdPools) ?t.Message {
+    const fuzz = @import("../fuzz.zig");
+    return t.Message.init(.get_collection, fuzz.pick_or_random_id(prng, pools.collection_ids), prng.int(u128) | 1, {});
+}
 
 // [route] .get_collection
 // match GET /collections/:id

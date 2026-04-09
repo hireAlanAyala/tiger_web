@@ -69,6 +69,12 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
         void;
     const ShmDispatch = if (App.sidecar_enabled) @import("../sidecar_dispatch.zig").SidecarDispatchType(ShmBus) else void;
 
+    // Worker dispatch — concurrent CALL/RESULT over a separate SHM region.
+    const WorkerDispatch = if (App.sidecar_enabled)
+        @import("worker_dispatch.zig").WorkerDispatchType(@import("constants.zig").max_in_flight_workers)
+    else
+        void;
+
     // Pipeline slot count — derived from bus connections.
     const slots_max: u8 = if (App.sidecar_enabled) SidecarBus.connections_max else 1;
     const StateMachine = App.StateMachineWith(Storage);
@@ -146,8 +152,6 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
         /// Log metrics every 10,000 ticks (~100s at 10ms/tick).
         const metrics_interval_ticks = 10_000;
 
-        /// 30 seconds at 10ms/tick.
-
         /// Sidecar response deadline: 5 seconds at 10ms/tick.
         /// If the pipeline has been pending (waiting for sidecar
         /// RESULT) for this many ticks, terminate the connection.
@@ -181,6 +185,10 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
         /// Separate from wal_scratch to avoid aliasing in append_writes.
         wal_record_scratch: [@import("wal.zig").entry_max]u8 = undefined,
 
+        /// Worker pending dispatch index — tracks unresolved worker dispatches.
+        /// Rebuilt from WAL on startup, updated on dispatch/completion/dead.
+        pending_index: Wal.PendingIndex = .{},
+
         tick_count: u32,
         pipeline_slots: [pipeline_slots_max]PipelineSlot = .{@as(PipelineSlot, .{})} ** pipeline_slots_max,
         /// Which slot holds the exclusive write lock (null = free).
@@ -208,6 +216,7 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
         // sidecar_enabled = false (void fields, zero bytes).
         shm_dispatch: if (App.sidecar_enabled) ShmDispatch else void = if (App.sidecar_enabled) .{} else {},
         shm_bus: if (App.sidecar_enabled) ShmBus else void = if (App.sidecar_enabled) .{} else {},
+        worker_dispatch: if (App.sidecar_enabled) WorkerDispatch else void = if (App.sidecar_enabled) .{} else {},
         sidecar_bus: SidecarBus = if (App.sidecar_enabled) undefined else {},
 
         /// Per-connection READY state. Each connection validates its
@@ -243,6 +252,7 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
             listen_fd: IO.fd_t,
             time: Time,
             wal: ?*Wal,
+            pending_index: Wal.PendingIndex,
         ) !Server {
             const connections = try allocator.alloc(Connection, max_connections);
             errdefer allocator.free(connections);
@@ -270,6 +280,7 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
                 .connections = connections,
                 .connections_used = 0,
                 .wal = wal,
+                .pending_index = pending_index,
                 .tick_count = 0,
             };
         }
@@ -780,15 +791,94 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
             server.handle_lock = @intCast(entry_idx);
 
             const sm = server.state_machine;
-            log.debug("shm write: mutation={} write_count={d} writes_len={d}", .{ entry.is_mutation, entry.handle_write_count, entry.handle_writes.len });
+            log.debug("shm write: mutation={} write_count={d} writes_len={d} dispatches={d}", .{
+                entry.is_mutation, entry.handle_write_count, entry.handle_writes.len, entry.handle_dispatch_count,
+            });
             if (entry.is_mutation) sm.begin_batch();
 
+            // Use recording write view when WAL is enabled — captures raw
+            // SQL writes for the WAL entry (writes + dispatches atomic).
+            const use_recording = entry.is_mutation and server.wal != null;
+            // Capture WAL op before appending — used by add_dispatches_to_pending.
+            const wal_op_before = if (server.wal) |wal| wal.op else 0;
             if (entry.handle_write_count > 0) {
-                var write_view = Storage.WriteView.init(sm.storage);
+                var write_view = if (use_recording)
+                    Storage.WriteView.init_recording(sm.storage, &server.wal_record_scratch)
+                else
+                    Storage.WriteView.init(sm.storage);
                 execute_parsed_writes(&write_view, entry.handle_writes, entry.handle_write_count);
+
+                // WAL: record writes (+ dispatches if present).
+                if (use_recording) {
+                    if (server.wal) |wal| {
+                        if (!wal.disabled) {
+                            if (entry.worker_completes_op != 0) {
+                                // Worker completion: WAL completion entry links
+                                // back to the dispatch op for recovery.
+                                wal.append_completion(
+                                    entry.operation,
+                                    sm.now,
+                                    if (write_view.record_buf) |buf| buf[0..write_view.record_pos] else "",
+                                    write_view.record_count,
+                                    entry.worker_completes_op,
+                                    &server.wal_scratch,
+                                );
+                            } else {
+                                wal.append_writes(
+                                    entry.operation,
+                                    sm.now,
+                                    if (write_view.record_buf) |buf| buf[0..write_view.record_pos] else "",
+                                    write_view.record_count,
+                                    entry.handle_dispatches,
+                                    entry.handle_dispatch_count,
+                                    &server.wal_scratch,
+                                );
+                            }
+                        }
+                    }
+                }
+            } else if (entry.worker_completes_op != 0 and entry.is_mutation) {
+                // Worker completion with no handler writes — still need WAL entry.
+                if (server.wal) |wal| {
+                    if (!wal.disabled) {
+                        wal.append_completion(
+                            entry.operation,
+                            sm.now,
+                            "",
+                            0,
+                            entry.worker_completes_op,
+                            &server.wal_scratch,
+                        );
+                    }
+                }
+            } else if (entry.handle_dispatch_count > 0 and entry.is_mutation) {
+                // No writes but has dispatches — still need a WAL entry.
+                if (server.wal) |wal| {
+                    if (!wal.disabled) {
+                        wal.append_writes(
+                            entry.operation,
+                            sm.now,
+                            "",
+                            0,
+                            entry.handle_dispatches,
+                            entry.handle_dispatch_count,
+                            &server.wal_scratch,
+                        );
+                    }
+                }
             }
 
             if (entry.is_mutation) sm.commit_batch();
+
+            // Update pending index AFTER commit — derived state must not
+            // advance before the transaction is durable. If commit_batch
+            // rolls back, the pending index stays consistent.
+            if (entry.handle_dispatch_count > 0 and wal_op_before > 0) {
+                server.add_dispatches_to_pending(entry, wal_op_before);
+            }
+            if (entry.worker_completes_op != 0) {
+                server.pending_index.resolve(entry.worker_completes_op, .completed);
+            }
             server.handle_lock = null;
             server.shm_dispatch.write_committed(entry);
             server.shm_dispatch.advance();
@@ -867,6 +957,8 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
                 server.shm_bus.check_response(@intCast(i));
             }
             server.process_shm_completions();
+            // Poll worker SHM for completed workers.
+            server.worker_dispatch.poll_completions(server.state_machine.storage);
             return shm_frames_received != before;
         }
 
@@ -957,6 +1049,11 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
             shm_poll_server = server;
             server.io.shm_poll_fn = &shm_poll_all;
             log.info("shm transport: /dev/shm/{s}", .{shm_name});
+            // Worker SHM — separate region for background dispatch.
+            var worker_shm_buf: [64]u8 = undefined;
+            const worker_shm_name = std.fmt.bufPrint(&worker_shm_buf, "tiger-{d}-workers", .{pid}) catch "tiger-shm-workers";
+            try server.worker_dispatch.create(worker_shm_name);
+            log.info("worker shm transport: /dev/shm/{s}", .{worker_shm_name});
             server.shm_dispatch.connection_index = 0;
             try server.sidecar_bus.init_pool(
                 allocator,
@@ -972,6 +1069,7 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
 
         pub fn deinit(server: *Server, allocator: std.mem.Allocator) void {
             if (App.sidecar_enabled) {
+                server.worker_dispatch.deinit();
                 server.sidecar_bus.deinit(allocator);
             }
             for (server.connections) |*conn| {
@@ -1008,6 +1106,11 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
             server.wake_handle_waiters();
             if (App.sidecar_enabled) server.timeout_sidecar_response();
             server.process_shm_completions();
+            if (App.sidecar_enabled) {
+                server.dispatch_pending_workers();
+                server.process_worker_completions();
+                server.check_worker_deadlines();
+            }
             server.log_metrics();
         }
 
@@ -1249,6 +1352,8 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
                                         sm.now,
                                         if (write_view.record_buf) |buf| buf[0..write_view.record_pos] else "",
                                         write_view.record_count,
+                                        "", // no worker dispatches (native pipeline)
+                                        0,
                                         &server.wal_scratch,
                                     );
                                 }
@@ -1526,6 +1631,156 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
             // Minimal response: operation succeeded, render degraded.
             const fallback_html = "<html><body>Operation completed. Refresh for full page.</body></html>";
             server.encode_and_respond(slot, conn, msg, pipeline_resp, fallback_html);
+        }
+
+        // =============================================================
+        // Worker dispatch — tick-loop operations
+        // =============================================================
+
+        /// Parse dispatch entries from a SHM RESULT and add to pending index.
+        /// `wal_op` is the op of the WAL entry that recorded these dispatches
+        /// (captured at append time, not derived from wal.op).
+        fn add_dispatches_to_pending(server: *Server, entry: *const ShmDispatch.Entry, wal_op: u64) void {
+            const pd = @import("pending_dispatch.zig");
+            var dpos: usize = 0;
+            for (0..entry.handle_dispatch_count) |_| {
+                const parsed = pd.parse_one_dispatch(entry.handle_dispatches, &dpos) orelse break;
+                // The worker name IS the operation name in the new model.
+                // Look up the operation enum value from the worker name.
+                const worker_op = @import("../message.zig").Operation.from_string(parsed.name) orelse {
+                    log.warn("unknown worker operation '{s}', dropping dispatch", .{parsed.name});
+                    continue;
+                };
+                var dispatch = pd.PendingDispatch{
+                    .op = wal_op,
+                    .operation = @intFromEnum(worker_op),
+                    .name = undefined,
+                    .name_len = @intCast(parsed.name.len),
+                    .args = undefined,
+                    .args_len = @intCast(parsed.args.len),
+                    .dispatched_at = server.state_machine.now,
+                    .state = .pending,
+                };
+                @memcpy(dispatch.name[0..parsed.name.len], parsed.name);
+                @memcpy(dispatch.args[0..parsed.args.len], parsed.args);
+                if (!server.pending_index.add(dispatch)) {
+                    log.warn("pending index full or duplicate, dropping dispatch op={d}", .{wal_op});
+                    break;
+                }
+            }
+        }
+
+        /// Scan pending index for unresolved dispatches and send CALLs.
+        /// Stops when no more pending entries or all SHM slots are full (backpressure).
+        fn dispatch_pending_workers(server: *Server) void {
+            const idx = &server.pending_index;
+            for (idx.entries[0..idx.len]) |*pd_entry| {
+                if (pd_entry.state != .pending) continue;
+
+                const slot = server.worker_dispatch.acquire_slot() orelse return; // backpressure
+                if (!server.worker_dispatch.dispatch(
+                    slot,
+                    pd_entry.name[0..pd_entry.name_len],
+                    pd_entry.args[0..pd_entry.args_len],
+                    pd_entry.op,
+                    server.tick_count,
+                )) {
+                    log.warn("worker dispatch failed (frame too large) for op={d}", .{pd_entry.op});
+                    continue; // skip this dispatch, try others
+                }
+                pd_entry.state = .in_flight;
+            }
+        }
+
+        /// Drain completed worker results: route through sidecar pipeline.
+        ///
+        /// Two-phase completion:
+        ///   Phase 1 (here): inject into sidecar pipeline. Set worker_completes_op
+        ///     on the ShmDispatch entry. Release the WorkerDispatch slot. Do NOT
+        ///     resolve the pending index or record the WAL entry yet.
+        ///   Phase 2 (execute_shm_writes): when the sidecar RESULT comes back,
+        ///     record a WAL completion entry (entry_flags=.completion, completes_op
+        ///     set) and resolve the pending index. This ensures the WAL completion
+        ///     is atomic with the completion handler's SQL writes.
+        fn process_worker_completions(server: *Server) void {
+            if (!App.sidecar_enabled) return;
+
+            while (server.worker_dispatch.take_completed()) |w_entry| {
+                const dispatch_op = w_entry.dispatch_op;
+                const is_failure = w_entry.result_flag != .success;
+
+                // Look up the completion operation from the pending index.
+                const pd_entry = server.pending_index.find_by_op(dispatch_op);
+                if (pd_entry == null) {
+                    server.worker_dispatch.release(w_entry);
+                    continue;
+                }
+                const msg_mod = @import("../message.zig");
+                const completion_op: msg_mod.Operation = @enumFromInt(pd_entry.?.operation);
+
+                log.debug("worker completed: op={d} flag={s} → routing .{s}", .{
+                    dispatch_op,
+                    if (is_failure) @as([]const u8, "failure") else "success",
+                    @tagName(completion_op),
+                });
+
+                // Acquire a sidecar pipeline slot.
+                const shm_entry = server.shm_dispatch.acquire_entry() orelse {
+                    log.warn("worker completion: no free sidecar slot for .{s}, retry next tick", .{@tagName(completion_op)});
+                    return; // Leave in completed state, retry next tick.
+                };
+
+                // Tag the ShmDispatch entry so execute_shm_writes records a
+                // WAL completion entry (not a normal mutation) and resolves
+                // the pending index.
+                shm_entry.worker_completes_op = dispatch_op;
+
+                // Build a synthetic message with the worker result as body.
+                var msg = std.mem.zeroes(msg_mod.Message);
+                msg.operation = completion_op;
+                const result_len = @min(w_entry.result_len, msg_mod.body_max);
+                @memcpy(msg.body[0..result_len], w_entry.result_data[0..result_len]);
+
+                // Release the worker dispatch slot (data copied to shm_entry).
+                server.worker_dispatch.release(w_entry);
+
+                _ = server.shm_dispatch.start_combined_request(
+                    shm_entry,
+                    completion_op,
+                    msg,
+                    msg.body[0..result_len],
+                    "",
+                    0,
+                    null, // no HTTP connection — response discarded
+                );
+            }
+        }
+
+        /// Check for in-flight workers past their deadline. Resolve as dead.
+        fn check_worker_deadlines(server: *Server) void {
+            const deadline = @import("constants.zig").worker_deadline_ticks;
+            while (server.worker_dispatch.check_deadlines(server.tick_count, deadline)) |entry| {
+                const dispatch_op = entry.dispatch_op;
+
+                // WAL: record dead-dispatch entry.
+                if (server.wal) |wal| {
+                    if (!wal.disabled) {
+                        if (server.pending_index.find_by_op(dispatch_op)) |pd_entry| {
+                            const sm = server.state_machine;
+                            wal.append_dead_dispatch(
+                                @enumFromInt(pd_entry.operation),
+                                sm.now,
+                                dispatch_op,
+                                &server.wal_scratch,
+                            );
+                        }
+                    }
+                }
+
+                server.pending_index.resolve(dispatch_op, .dead);
+                server.worker_dispatch.release(entry);
+                log.warn("worker deadline: op={d}", .{dispatch_op});
+            }
         }
 
         fn log_metrics(server: *Server) void {

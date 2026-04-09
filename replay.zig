@@ -14,11 +14,13 @@ const assert = std.debug.assert;
 const stdx = @import("stdx");
 const wal_mod = @import("framework/wal.zig");
 const cs = @import("framework/checksum.zig");
+const pd = @import("framework/pending_dispatch.zig");
 const message = @import("message.zig");
 const protocol = @import("protocol.zig");
 const Storage = @import("storage.zig").SqliteStorage;
 
 const EntryHeader = wal_mod.EntryHeader;
+const EntryFlags = wal_mod.EntryFlags;
 const Wal = wal_mod.WalType(message.Operation);
 
 const log = std.log.scoped(.replay);
@@ -69,6 +71,7 @@ const InspectArgs = struct {
     after: ?u64 = null,
     before: ?u64 = null,
     verbose: bool = false,
+    workers: bool = false,
     @"--": void,
     path: []const u8,
 };
@@ -229,19 +232,62 @@ fn inspect(args: InspectArgs) void {
             }
         }
 
-        stdout.print("op={d} {s} writes={d} ts={d} len={d}\n", .{
-            hdr.op, op_name, hdr.write_count, hdr.timestamp, hdr.entry_len,
-        }) catch {};
+        // Summary line — always show flags/dispatch info when present.
+        if (hdr.entry_flags == .completion) {
+            stdout.print("op={d} {s} [completion completes_op={d}] writes={d} ts={d} len={d}\n", .{
+                hdr.op, op_name, hdr.completes_op, hdr.write_count, hdr.timestamp, hdr.entry_len,
+            }) catch {};
+        } else if (hdr.entry_flags == .dead_dispatch) {
+            stdout.print("op={d} {s} [dead_dispatch completes_op={d}] ts={d} len={d}\n", .{
+                hdr.op, op_name, hdr.completes_op, hdr.timestamp, hdr.entry_len,
+            }) catch {};
+        } else if (hdr.dispatch_count > 0) {
+            stdout.print("op={d} {s} writes={d} dispatches={d} ts={d} len={d}\n", .{
+                hdr.op, op_name, hdr.write_count, hdr.dispatch_count, hdr.timestamp, hdr.entry_len,
+            }) catch {};
+        } else {
+            stdout.print("op={d} {s} writes={d} ts={d} len={d}\n", .{
+                hdr.op, op_name, hdr.write_count, hdr.timestamp, hdr.entry_len,
+            }) catch {};
+        }
 
         if (args.verbose and hdr.entry_len > @sizeOf(EntryHeader)) {
-            // Read full entry and print SQL writes.
+            // Read full entry and print SQL writes + dispatches.
             const n = std.posix.pread(fd, buf[0..hdr.entry_len], offset) catch break;
             if (n == hdr.entry_len) {
-                print_writes(stdout, buf[@sizeOf(EntryHeader)..hdr.entry_len], hdr.write_count);
+                const body = buf[@sizeOf(EntryHeader)..hdr.entry_len];
+                print_writes(stdout, body, hdr.write_count);
+                if (hdr.dispatch_count > 0) {
+                    // Skip writes to reach dispatch section.
+                    if (wal_mod.WalType(message.Operation).skip_writes_section(body, hdr.write_count)) |dstart| {
+                        print_dispatches(stdout, body[dstart..], hdr.dispatch_count);
+                    }
+                }
             }
         }
 
         offset += hdr.entry_len;
+    }
+
+    // Worker summary — rebuild pending index from the WAL and display.
+    if (args.workers) {
+        var pending = Wal.PendingIndex{};
+        var wal = Wal.init(to_sentinel(args.path), &pending);
+        wal.deinit();
+
+        stdout.print("\n--- Worker dispatches ---\n", .{}) catch {};
+        if (pending.pending_count() == 0) {
+            stdout.print("No pending dispatches.\n", .{}) catch {};
+        } else {
+            stdout.print("{d} pending dispatch(es):\n", .{pending.pending_count()}) catch {};
+            for (pending.entries[0..pending.len]) |*entry| {
+                stdout.print("  op={d} worker={s} state={s}\n", .{
+                    entry.op,
+                    entry.name[0..entry.name_len],
+                    @tagName(entry.state),
+                }) catch {};
+            }
+        }
     }
 }
 
@@ -482,6 +528,16 @@ fn print_writes(writer: anytype, data: []const u8, write_count: u8) void {
                 .null => {},
             }
         }
+    }
+}
+
+fn print_dispatches(writer: anytype, data: []const u8, dispatch_count: u8) void {
+    var pos: usize = 0;
+    for (0..dispatch_count) |i| {
+        const parsed = pd.parse_one_dispatch(data, &pos) orelse break;
+        writer.print("  [dispatch {d}] worker={s} args_len={d}\n", .{
+            i, parsed.name, parsed.args.len,
+        }) catch {};
     }
 }
 

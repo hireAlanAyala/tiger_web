@@ -40,21 +40,6 @@ pub fn build(b: *std.Build) void {
     const run_step = b.step("run", "Run the server");
     run_step.dependOn(&run_cmd.step);
 
-    // --- Worker executable ---
-    const worker_exe = b.addExecutable(.{
-        .name = "tiger-worker",
-        .root_source_file = b.path("worker.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-    worker_exe.root_module.addImport("stdx", stdx_module);
-    b.installArtifact(worker_exe);
-
-    const worker_cmd = b.addRunArtifact(worker_exe);
-    worker_cmd.step.dependOn(b.getInstallStep());
-    if (b.args) |args| worker_cmd.addArgs(args);
-    const worker_step = b.step("run-worker", "Run the worker process");
-    worker_step.dependOn(&worker_cmd.step);
 
     // --- Load test ---
     // Own build_options — decoupled from server so `zig build load`
@@ -92,6 +77,7 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
     replay_exe.root_module.addImport("stdx", stdx_module);
+    replay_exe.root_module.addOptions("build_options", build_options);
     replay_exe.linkSystemLibrary("sqlite3");
     replay_exe.linkLibC();
     b.installArtifact(replay_exe);
@@ -225,7 +211,7 @@ pub fn build(b: *std.Build) void {
     }
 
     // Modules that need libc (socketpair for tests) but not sqlite.
-    for ([_][]const u8{ "framework/message_bus.zig", "framework/io/linux.zig" }) |mod| {
+    for ([_][]const u8{ "framework/message_bus.zig", "framework/io/linux.zig", "framework/worker_dispatch.zig", "worker_integration_test.zig" }) |mod| {
         const unit_test = b.addTest(.{
             .root_source_file = b.path(mod),
             .target = target,

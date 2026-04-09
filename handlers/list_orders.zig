@@ -1,11 +1,27 @@
 const std = @import("std");
 const t = @import("../prelude.zig");
+const fuzz_lib = @import("../fuzz_lib.zig");
+const PRNG = @import("stdx").PRNG;
 
 pub const Status = enum { ok };
 
 pub const Prefetch = struct { orders: ?t.BoundedList(t.OrderRow, t.list_max) };
 
-pub const Context = t.HandlerContext(Prefetch, t.Operation.EventType(.list_orders), t.Identity, Status);
+pub const Context = t.HandlerContext(Prefetch, t.EventType(.list_orders), t.Identity, Status);
+
+pub fn gen_fuzz_message(prng: *PRNG, _: fuzz_lib.IdPools) ?t.Message {
+    const fuzz = @import("../fuzz.zig");
+    return t.Message.init(.list_orders, 0, prng.int(u128) | 1, fuzz.gen_list_params(prng));
+}
+
+pub fn input_valid(msg: t.Message) bool {
+    const lp = msg.body_as(t.ListParams);
+    if (lp.name_prefix_len > t.product_name_max) return false;
+    const prefix = lp.name_prefix[0..lp.name_prefix_len];
+    for (prefix) |b| { if (b == 0) return false; }
+    if (!@import("std").unicode.utf8ValidateSlice(prefix)) return false;
+    return true;
+}
 
 // [route] .list_orders
 // match GET /orders

@@ -7,7 +7,27 @@ pub const Prefetch = struct {
     existing: ?t.ProductRow,
 };
 
-pub const Context = t.HandlerContext(Prefetch, t.Operation.EventType(.create_product), t.Identity, Status);
+pub const Context = t.HandlerContext(Prefetch, t.EventType(.create_product), t.Identity, Status);
+
+const fuzz_lib = @import("../fuzz_lib.zig");
+const PRNG = @import("stdx").PRNG;
+
+pub fn gen_fuzz_message(prng: *PRNG, _: fuzz_lib.IdPools) ?t.Message {
+    const fuzz = @import("../fuzz.zig");
+    return t.Message.init(.create_product, 0, prng.int(u128) | 1, fuzz.gen_product(prng));
+}
+
+pub fn input_valid(msg: t.Message) bool {
+    const p = msg.body_as(t.Product);
+    if (p.id == 0) return false;
+    if (msg.id != 0 and msg.id != p.id) return false;
+    if (p.name_len == 0 or p.name_len > t.product_name_max) return false;
+    if (p.description_len > t.product_description_max) return false;
+    if (p.flags.padding != 0) return false;
+    if (!std.unicode.utf8ValidateSlice(p.name[0..p.name_len])) return false;
+    if (!std.unicode.utf8ValidateSlice(p.description[0..p.description_len])) return false;
+    return true;
+}
 
 // [route] .create_product
 // match POST /products

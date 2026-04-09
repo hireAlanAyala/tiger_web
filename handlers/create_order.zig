@@ -2,6 +2,8 @@ const std = @import("std");
 const assert = std.debug.assert;
 const t = @import("../prelude.zig");
 const message = @import("../message.zig");
+const fuzz_lib = @import("../fuzz_lib.zig");
+const PRNG = @import("stdx").PRNG;
 
 pub const Status = enum { ok, not_found, insufficient_inventory };
 
@@ -10,7 +12,26 @@ pub const Prefetch = struct {
     order_id: u128,
 };
 
-pub const Context = t.HandlerContext(Prefetch, t.Operation.EventType(.create_order), t.Identity, Status);
+pub const Context = t.HandlerContext(Prefetch, t.EventType(.create_order), t.Identity, Status);
+
+pub fn gen_fuzz_message(prng: *PRNG, pools: fuzz_lib.IdPools) ?t.Message {
+    if (pools.product_ids.len == 0) return null;
+    const fuzz = @import("../fuzz.zig");
+    return t.Message.init(.create_order, 0, prng.int(u128) | 1, fuzz.gen_order(prng, pools.product_ids));
+}
+
+pub fn input_valid(msg: t.Message) bool {
+    const order = msg.body_as(t.OrderRequest);
+    if (order.id == 0) return false;
+    if (msg.id != 0 and msg.id != order.id) return false;
+    if (order.items_len == 0) return false;
+    if (order.items_len > t.order_items_max) return false;
+    for (order.items_slice()) |item| {
+        if (item.product_id == 0) return false;
+        if (item.quantity == 0) return false;
+    }
+    return true;
+}
 
 // [route] .create_order
 // match POST /orders

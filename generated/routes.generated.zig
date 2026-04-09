@@ -53,6 +53,8 @@ comptime {
         // a real operation and has no handler. If more sentinels are added,
         // they must be listed here.
         if (op == .root) continue;
+        // Sidecar-only operations have no HTTP route — auto-derived from handler_imports.
+        if (@import("handlers.generated.zig").is_sidecar_operation(op)) continue;
         var found = false;
         for (routes) |r| {
             if (r.operation == op) { found = true; break; }

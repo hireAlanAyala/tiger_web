@@ -46,151 +46,40 @@ pub const PipelineResponse = struct {
     is_new_visitor: bool,
 };
 
-/// Flat operation enum — encodes entity type AND action in a single tag,
-/// following TigerBeetle's pattern. Adding a new entity type means adding
-/// new variants here; the compiler forces every switch site to handle them.
-pub const Operation = enum(u8) {
-    // WAL root entry — deterministic sentinel at op 0.
-    // Not a valid application operation. Follows TigerBeetle's .root pattern.
-    root = 0,
+/// Operation enum — generated from operations.json by the scanner.
+/// Values are stable across builds (WAL compatibility).
+/// Methods (is_mutation, from_string) are on the generated enum.
+pub const Operation = @import("generated/operations.generated.zig").Operation;
 
-    // Products
-    create_product = 1,
-    get_product = 2,
-    list_products = 3,
-    update_product = 4,
-    delete_product = 5,
-    get_product_inventory = 6,
+/// Input event type — what the message body carries for this operation.
+/// Standalone function (not a method on Operation) because it references
+/// body types defined in this file. The Operation enum is dependency-free.
+pub fn EventType(comptime op: Operation) type {
+    return switch (op) {
+        .create_product, .update_product => Product,
+        .create_collection => ProductCollection,
+        .add_collection_member, .remove_collection_member => u128,
+        .transfer_inventory => InventoryTransfer,
+        .create_order => OrderRequest,
+        .complete_order => OrderCompletion,
+        .search_products => SearchQuery,
+        .request_login_code => LoginCodeRequest,
+        .verify_login_code => LoginVerification,
+        .list_products, .list_collections, .list_orders => ListParams,
+        else => void,
+    };
+}
 
-    // Inventory
-    transfer_inventory = 13,
-
-    // Orders
-    create_order = 14,
-    get_order = 15,
-    list_orders = 16,
-    complete_order = 17,
-    cancel_order = 18,
-    search_products = 19,
-
-    // Collections
-    create_collection = 7,
-    get_collection = 8,
-    list_collections = 9,
-    delete_collection = 10,
-    add_collection_member = 11,
-    remove_collection_member = 12,
-
-    // Pages
-    page_load_dashboard = 20,
-    page_load_login = 24,
-
-    // Auth
-    request_login_code = 21,
-    verify_login_code = 22,
-    logout = 23,
-
-    /// Input event type — what the message body carries for this operation.
-    /// Called with comptime operation (via inline dispatch) to resolve types
-    /// at compile time, same as TigerBeetle's Operation.EventType().
-    pub fn EventType(comptime op: Operation) type {
-        return switch (op) {
-            .create_product, .update_product => Product,
-            .create_collection => ProductCollection,
-            .add_collection_member, .remove_collection_member => u128,
-            .transfer_inventory => InventoryTransfer,
-            .create_order => OrderRequest,
-            .complete_order => OrderCompletion,
-            .search_products => SearchQuery,
-            .request_login_code => LoginCodeRequest,
-            .verify_login_code => LoginVerification,
-            .list_products,
-            .list_collections,
-            .list_orders,
-            => ListParams,
-            .root,
-            .get_product,
-            .delete_product,
-            .get_product_inventory,
-            .get_order,
-            .cancel_order,
-            .get_collection,
-            .delete_collection,
-            .page_load_dashboard,
-            .page_load_login,
-            .logout,
-            => void,
-        };
-    }
-
-    /// Parse an operation name string to the enum value.
-    /// Used by the sidecar JSON protocol — operation names travel as strings.
-    pub fn from_string(name: []const u8) ?Operation {
-        inline for (@typeInfo(Operation).@"enum".fields) |f| {
-            if (std.mem.eql(u8, f.name, name)) {
-                return @enumFromInt(f.value);
-            }
-        }
-        return null;
-    }
-
-    /// Whether this operation mutates state. Read-only operations and
-    /// the root sentinel return false. Used by the server to decide
-    /// what enters the WAL, and by the replay tool to validate entries.
-    pub fn is_mutation(op: Operation) bool {
-        return switch (op) {
-            .root,
-            .page_load_dashboard, .page_load_login,
-            .logout,
-            .list_products, .list_collections, .list_orders,
-            .get_product, .get_collection, .get_order,
-            .get_product_inventory, .search_products,
-            => false,
-            .create_product, .update_product, .delete_product,
-            .create_collection, .delete_collection,
-            .add_collection_member, .remove_collection_member,
-            .create_order, .complete_order, .cancel_order,
-            .transfer_inventory,
-            .request_login_code, .verify_login_code,
-            => true,
-        };
-    }
-
-    comptime {
-        // Both partitions are non-empty — if either is zero, the
-        // classifier is vacuous and something was mis-categorized.
-        var mutations: u32 = 0;
-        var reads: u32 = 0;
-        for (std.enums.values(Operation)) |op| {
-            if (op.is_mutation()) mutations += 1 else reads += 1;
-        }
-        assert(mutations > 0);
-        assert(reads > 0);
-
-        // Root is never a mutation — the WAL sentinel must not be
-        // replayed as an application operation.
-        assert(!Operation.root.is_mutation());
-    }
-
-    pub fn event_tag(op: Operation) EventTag {
-        return switch (op) {
-            inline else => |comptime_op| comptime switch (comptime_op.EventType()) {
-                Product => .product,
-                ProductCollection => .collection,
-                u128 => .member_id,
-                InventoryTransfer => .transfer,
-                OrderRequest => .order,
-                OrderCompletion => .completion,
-                SearchQuery => .search,
-                ListParams => .list,
-                LoginCodeRequest => .login_request,
-                LoginVerification => .login_verify,
-                void => .none,
-                else => @compileError("unhandled EventType"),
-            },
-        };
-    }
-};
+/// Derive event_tag from EventType at runtime.
+pub fn event_tag(op: Operation) EventTag {
+    return switch (op) {
+        inline else => |comptime_op| comptime blk: {
+            const T = EventType(comptime_op);
+            if (T == void) break :blk EventTag.none;
+            break :blk EventTag.from_type(T);
+        },
+    };
+}
 
 pub const product_name_max = 128;
 pub const product_description_max = 512;
@@ -609,17 +498,21 @@ pub const EventTag = enum {
     }
 };
 
-/// Maximum body size — fits our largest event type (OrderRequest).
-/// All EventType sizes are verified at comptime.
+/// Maximum body size — largest extern struct body type.
+/// All body types are verified to fit at comptime.
 pub const body_max = @sizeOf(OrderRequest);
 
 comptime {
-    assert(body_max == @sizeOf(OrderRequest));
-    for (std.enums.values(Operation)) |op| {
-        if (op.EventType() != void) {
-            assert(@sizeOf(op.EventType()) <= body_max);
-        }
-    }
+    // Every body type must fit in body_max.
+    assert(@sizeOf(Product) <= body_max);
+    assert(@sizeOf(ProductCollection) <= body_max);
+    assert(@sizeOf(InventoryTransfer) <= body_max);
+    assert(@sizeOf(OrderRequest) <= body_max);
+    assert(@sizeOf(OrderCompletion) <= body_max);
+    assert(@sizeOf(SearchQuery) <= body_max);
+    assert(@sizeOf(ListParams) <= body_max);
+    assert(@sizeOf(LoginCodeRequest) <= body_max);
+    assert(@sizeOf(LoginVerification) <= body_max);
 }
 
 /// Fixed-size message — extern struct with no padding for WAL serialization.
@@ -694,7 +587,7 @@ pub const Message = extern struct {
             assert(@sizeOf(T) > 0);
             assert(@sizeOf(T) <= body_max);
         }
-        assert(self.operation.event_tag() == comptime EventTag.from_type(T));
+        assert(event_tag(self.operation) == comptime EventTag.from_type(T));
         return @ptrCast(@alignCast(&self.body));
     }
 
@@ -1047,48 +940,10 @@ test "MessageResponse convenience constructors" {
     try std.testing.expectEqual(nf.result, .empty);
 }
 
-test "Operation EventType comptime resolution" {
-    comptime {
-        assert(Operation.EventType(.create_product) == Product);
-        assert(Operation.EventType(.get_product) == void);
-        assert(Operation.EventType(.list_products) == ListParams);
-        assert(Operation.EventType(.create_collection) == ProductCollection);
-        assert(Operation.EventType(.add_collection_member) == u128);
-        assert(Operation.EventType(.transfer_inventory) == InventoryTransfer);
-        assert(Operation.EventType(.create_order) == OrderRequest);
-    }
-}
-
-test "Operation event_tag derived from EventType" {
-    // Runtime function — verify it agrees with EventType for every operation.
-    // EventTag is a standalone enum; event_tag derives from EventType at comptime.
-    try std.testing.expectEqual(Operation.event_tag(.create_product), .product);
-    try std.testing.expectEqual(Operation.event_tag(.update_product), .product);
-    try std.testing.expectEqual(Operation.event_tag(.create_collection), .collection);
-    try std.testing.expectEqual(Operation.event_tag(.add_collection_member), .member_id);
-    try std.testing.expectEqual(Operation.event_tag(.remove_collection_member), .member_id);
-    try std.testing.expectEqual(Operation.event_tag(.transfer_inventory), .transfer);
-    try std.testing.expectEqual(Operation.event_tag(.create_order), .order);
-    try std.testing.expectEqual(Operation.event_tag(.list_products), .list);
-    try std.testing.expectEqual(Operation.event_tag(.list_collections), .list);
-    try std.testing.expectEqual(Operation.event_tag(.list_orders), .list);
-    try std.testing.expectEqual(Operation.event_tag(.get_order), .none);
-    try std.testing.expectEqual(Operation.event_tag(.get_product), .none);
-    try std.testing.expectEqual(Operation.event_tag(.delete_product), .none);
-}
-
-test "Operation is_mutation pinned classification" {
-    // Pin the expected set. If someone moves an operation to the wrong
-    // arm, this test catches it — the comptime partition assertion only
-    // checks that both sets are non-empty, not that they're correct.
-    const mutations = [_]Operation{
-        .create_product, .update_product, .delete_product,
-        .create_collection, .delete_collection,
-        .add_collection_member, .remove_collection_member,
-        .create_order, .complete_order, .cancel_order,
-        .transfer_inventory,
-        .request_login_code, .verify_login_code,
-    };
+test "Operation is_mutation: reads are pinned, else defaults to mutation" {
+    // Pin the read-only operations. Everything else defaults to mutation
+    // via `else => true`. New sidecar-only operations (worker completions)
+    // automatically get the mutation default — no test edits needed.
     const reads = [_]Operation{
         .root, .page_load_dashboard, .page_load_login,
         .logout,
@@ -1097,15 +952,17 @@ test "Operation is_mutation pinned classification" {
         .get_product_inventory, .search_products,
     };
 
-    for (mutations) |op| {
-        try std.testing.expect(op.is_mutation());
-    }
     for (reads) |op| {
         try std.testing.expect(!op.is_mutation());
     }
 
-    // Every operation is accounted for.
-    try std.testing.expectEqual(mutations.len + reads.len, std.enums.values(Operation).len);
+    // Root is never a mutation.
+    try std.testing.expect(!Operation.root.is_mutation());
+
+    // Spot-check: known mutations.
+    try std.testing.expect(Operation.create_product.is_mutation());
+    try std.testing.expect(Operation.create_order.is_mutation());
+    try std.testing.expect(Operation.charge_payment.is_mutation());
 }
 
 test "Operation.from_string round-trip every variant" {

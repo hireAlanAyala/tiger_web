@@ -1,11 +1,26 @@
 const std = @import("std");
 const t = @import("../prelude.zig");
+const fuzz_lib = @import("../fuzz_lib.zig");
+const PRNG = @import("stdx").PRNG;
 
 pub const Status = enum { ok };
 
 pub const Prefetch = struct {};
 
-pub const Context = t.HandlerContext(Prefetch, t.Operation.EventType(.request_login_code), t.Identity, Status);
+pub const Context = t.HandlerContext(Prefetch, t.EventType(.request_login_code), t.Identity, Status);
+
+pub fn gen_fuzz_message(prng: *PRNG, _: fuzz_lib.IdPools) ?t.Message {
+    const fuzz = @import("../fuzz.zig");
+    return t.Message.init(.request_login_code, 0, prng.int(u128) | 1, fuzz.gen_login_code_request(prng));
+}
+
+pub fn input_valid(msg: t.Message) bool {
+    const msg_mod = @import("../message.zig");
+    const ev = msg.body_as(msg_mod.LoginCodeRequest);
+    if (ev.email_len == 0 or ev.email_len > msg_mod.email_max) return false;
+    if (!@import("std").unicode.utf8ValidateSlice(ev.email[0..ev.email_len])) return false;
+    return true;
+}
 
 // [route] .request_login_code
 // match POST /login/code

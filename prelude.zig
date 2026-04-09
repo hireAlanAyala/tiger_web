@@ -24,6 +24,7 @@ pub const HandlerContext = fw_handler.HandlerContext;
 pub const Message = message.Message;
 pub const MessageResponse = message.MessageResponse;
 pub const Operation = message.Operation;
+pub const EventType = message.EventType;
 pub const Status = message.Status;
 pub const Identity = message.PrefetchIdentity;
 pub const Product = message.Product;

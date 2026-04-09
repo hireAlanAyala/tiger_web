@@ -51,6 +51,9 @@ export type Operation =
   | "request_login_code"
   | "verify_login_code"
   | "logout"
+  | "charge_payment"
+  | "process_image"
+  | "send_order_email"
   ;
 
 export type Status =
@@ -80,6 +83,7 @@ export const OperationValues: Record<string, number> = {
   complete_order: 17, cancel_order: 18, search_products: 19,
   page_load_dashboard: 20, request_login_code: 21, verify_login_code: 22,
   logout: 23, page_load_login: 24,
+  charge_payment: 25, process_image: 26, send_order_email: 27,
 };
 
 export const StatusValues: Record<string, number> = {
@@ -145,6 +149,9 @@ export interface HandleContext<P = any> {
   id: string;
   prefetched: P;
   body: Record<string, any>;
+  /** True when a worker dispatch failed or timed out. Only set for
+   *  completion handler operations (worker `returns` targets). */
+  worker_failed?: boolean;
 }
 
 /** Write-only database — handle calls db.execute() to queue SQL writes. */

@@ -141,7 +141,7 @@ test "deterministic replay — same seed same result" {
         var time_sim = TimeSim{};
         var tracer = try Trace.Tracer.init(std.testing.allocator, time_sim.time(), .{});
         defer tracer.deinit(std.testing.allocator);
-        var server = try Server.init(std.testing.allocator, &io, &sm, &tracer, 1, time_sim.time(), null);
+        var server = try Server.init(std.testing.allocator, &io, &sm, &tracer, 1, time_sim.time(), null, .{});
         server.wire_connections();
         defer server.deinit(std.testing.allocator);
 
@@ -173,7 +173,7 @@ test "pipelining — back-to-back requests on one connection" {
     var time_sim = TimeSim{};
     var tracer = try Trace.Tracer.init(std.testing.allocator, time_sim.time(), .{});
     defer tracer.deinit(std.testing.allocator);
-    var server = try Server.init(std.testing.allocator, &io, &sm, &tracer, 1, time_sim.time(), null);
+    var server = try Server.init(std.testing.allocator, &io, &sm, &tracer, 1, time_sim.time(), null, .{});
         server.wire_connections();
     defer server.deinit(std.testing.allocator);
 
@@ -206,7 +206,7 @@ test "connection drops and reconnects — state machine survives" {
     var time_sim = TimeSim{};
     var tracer = try Trace.Tracer.init(std.testing.allocator, time_sim.time(), .{});
     defer tracer.deinit(std.testing.allocator);
-    var server = try Server.init(std.testing.allocator, &io, &sm, &tracer, 1, time_sim.time(), null);
+    var server = try Server.init(std.testing.allocator, &io, &sm, &tracer, 1, time_sim.time(), null, .{});
         server.wire_connections();
     defer server.deinit(std.testing.allocator);
 
@@ -247,7 +247,7 @@ test "timeout — partial request triggers close" {
     var time_sim = TimeSim{};
     var tracer = try Trace.Tracer.init(std.testing.allocator, time_sim.time(), .{});
     defer tracer.deinit(std.testing.allocator);
-    var server = try Server.init(std.testing.allocator, &io, &sm, &tracer, 1, time_sim.time(), null);
+    var server = try Server.init(std.testing.allocator, &io, &sm, &tracer, 1, time_sim.time(), null, .{});
         server.wire_connections();
     defer server.deinit(std.testing.allocator);
 
@@ -298,7 +298,7 @@ test "mark: disconnect triggers recv peer closed" {
     var time_sim = TimeSim{};
     var tracer = try Trace.Tracer.init(std.testing.allocator, time_sim.time(), .{});
     defer tracer.deinit(std.testing.allocator);
-    var server = try Server.init(std.testing.allocator, &io, &sm, &tracer, 1, time_sim.time(), null);
+    var server = try Server.init(std.testing.allocator, &io, &sm, &tracer, 1, time_sim.time(), null, .{});
         server.wire_connections();
     defer server.deinit(std.testing.allocator);
 
@@ -320,7 +320,7 @@ test "mark: send fault triggers send error" {
     var time_sim = TimeSim{};
     var tracer = try Trace.Tracer.init(std.testing.allocator, time_sim.time(), .{});
     defer tracer.deinit(std.testing.allocator);
-    var server = try Server.init(std.testing.allocator, &io, &sm, &tracer, 1, time_sim.time(), null);
+    var server = try Server.init(std.testing.allocator, &io, &sm, &tracer, 1, time_sim.time(), null, .{});
         server.wire_connections();
     defer server.deinit(std.testing.allocator);
 
@@ -352,7 +352,7 @@ test "mark: disconnected client triggers recv close" {
     var time_sim = TimeSim{};
     var tracer = try Trace.Tracer.init(std.testing.allocator, time_sim.time(), .{});
     defer tracer.deinit(std.testing.allocator);
-    var server = try Server.init(std.testing.allocator, &io, &sm, &tracer, 1, time_sim.time(), null);
+    var server = try Server.init(std.testing.allocator, &io, &sm, &tracer, 1, time_sim.time(), null, .{});
         server.wire_connections();
     defer server.deinit(std.testing.allocator);
 
@@ -380,7 +380,7 @@ test "mark: garbage bytes trigger invalid HTTP" {
     var time_sim = TimeSim{};
     var tracer = try Trace.Tracer.init(std.testing.allocator, time_sim.time(), .{});
     defer tracer.deinit(std.testing.allocator);
-    var server = try Server.init(std.testing.allocator, &io, &sm, &tracer, 1, time_sim.time(), null);
+    var server = try Server.init(std.testing.allocator, &io, &sm, &tracer, 1, time_sim.time(), null, .{});
         server.wire_connections();
     defer server.deinit(std.testing.allocator);
 
@@ -402,7 +402,7 @@ test "mark: unknown route triggers unmapped request" {
     var time_sim = TimeSim{};
     var tracer = try Trace.Tracer.init(std.testing.allocator, time_sim.time(), .{});
     defer tracer.deinit(std.testing.allocator);
-    var server = try Server.init(std.testing.allocator, &io, &sm, &tracer, 1, time_sim.time(), null);
+    var server = try Server.init(std.testing.allocator, &io, &sm, &tracer, 1, time_sim.time(), null, .{});
         server.wire_connections();
     defer server.deinit(std.testing.allocator);
 
@@ -434,7 +434,7 @@ test "first request without cookie gets identity + Set-Cookie" {
     var time_sim = TimeSim{};
     var tracer = try Trace.Tracer.init(std.testing.allocator, time_sim.time(), .{});
     defer tracer.deinit(std.testing.allocator);
-    var server = try Server.init(std.testing.allocator, &io, &sm, &tracer, 1, time_sim.time(), null);
+    var server = try Server.init(std.testing.allocator, &io, &sm, &tracer, 1, time_sim.time(), null, .{});
         server.wire_connections();
     defer server.deinit(std.testing.allocator);
 
@@ -461,7 +461,7 @@ test "request with valid cookie — no Set-Cookie header" {
     var time_sim = TimeSim{};
     var tracer = try Trace.Tracer.init(std.testing.allocator, time_sim.time(), .{});
     defer tracer.deinit(std.testing.allocator);
-    var server = try Server.init(std.testing.allocator, &io, &sm, &tracer, 1, time_sim.time(), null);
+    var server = try Server.init(std.testing.allocator, &io, &sm, &tracer, 1, time_sim.time(), null, .{});
         server.wire_connections();
     defer server.deinit(std.testing.allocator);
 
@@ -486,7 +486,7 @@ test "mark: accept failure logs warning" {
     var time_sim = TimeSim{};
     var tracer = try Trace.Tracer.init(std.testing.allocator, time_sim.time(), .{});
     defer tracer.deinit(std.testing.allocator);
-    var server = try Server.init(std.testing.allocator, &io, &sm, &tracer, 1, time_sim.time(), null);
+    var server = try Server.init(std.testing.allocator, &io, &sm, &tracer, 1, time_sim.time(), null, .{});
         server.wire_connections();
     defer server.deinit(std.testing.allocator);
 
@@ -516,7 +516,7 @@ test "storage busy fault — prefetch retries next tick then succeeds" {
     var time_sim = TimeSim{};
     var tracer = try Trace.Tracer.init(std.testing.allocator, time_sim.time(), .{});
     defer tracer.deinit(std.testing.allocator);
-    var server = try Server.init(std.testing.allocator, &io, &sm, &tracer, 1, time_sim.time(), null);
+    var server = try Server.init(std.testing.allocator, &io, &sm, &tracer, 1, time_sim.time(), null, .{});
         server.wire_connections();
     defer server.deinit(std.testing.allocator);
 
@@ -562,7 +562,7 @@ test "storage err fault — renders dashboard page" {
     var time_sim = TimeSim{};
     var tracer = try Trace.Tracer.init(std.testing.allocator, time_sim.time(), .{});
     defer tracer.deinit(std.testing.allocator);
-    var server = try Server.init(std.testing.allocator, &io, &sm, &tracer, 1, time_sim.time(), null);
+    var server = try Server.init(std.testing.allocator, &io, &sm, &tracer, 1, time_sim.time(), null, .{});
         server.wire_connections();
     defer server.deinit(std.testing.allocator);
 
@@ -598,7 +598,7 @@ test "concurrent connections — busy client deferred, ready client served" {
     var time_sim = TimeSim{};
     var tracer = try Trace.Tracer.init(std.testing.allocator, time_sim.time(), .{});
     defer tracer.deinit(std.testing.allocator);
-    var server = try Server.init(std.testing.allocator, &io, &sm, &tracer, 2, time_sim.time(), null);
+    var server = try Server.init(std.testing.allocator, &io, &sm, &tracer, 2, time_sim.time(), null, .{});
         server.wire_connections();
     defer server.deinit(std.testing.allocator);
 
@@ -647,7 +647,7 @@ test "interleaved writes — update and delete same entity across connections" {
     var time_sim = TimeSim{};
     var tracer = try Trace.Tracer.init(std.testing.allocator, time_sim.time(), .{});
     defer tracer.deinit(std.testing.allocator);
-    var server = try Server.init(std.testing.allocator, &io, &sm, &tracer, 2, time_sim.time(), null);
+    var server = try Server.init(std.testing.allocator, &io, &sm, &tracer, 2, time_sim.time(), null, .{});
         server.wire_connections();
     defer server.deinit(std.testing.allocator);
 
@@ -713,7 +713,7 @@ test "two-phase order — create on client 0, complete on client 1" {
     var time_sim = TimeSim{};
     var tracer = try Trace.Tracer.init(std.testing.allocator, time_sim.time(), .{});
     defer tracer.deinit(std.testing.allocator);
-    var server = try Server.init(std.testing.allocator, &io, &sm, &tracer, 2, time_sim.time(), null);
+    var server = try Server.init(std.testing.allocator, &io, &sm, &tracer, 2, time_sim.time(), null, .{});
         server.wire_connections();
     defer server.deinit(std.testing.allocator);
 
@@ -762,7 +762,7 @@ test "two-phase order — failed completion restores inventory" {
     var time_sim = TimeSim{};
     var tracer = try Trace.Tracer.init(std.testing.allocator, time_sim.time(), .{});
     defer tracer.deinit(std.testing.allocator);
-    var server = try Server.init(std.testing.allocator, &io, &sm, &tracer, 2, time_sim.time(), null);
+    var server = try Server.init(std.testing.allocator, &io, &sm, &tracer, 2, time_sim.time(), null, .{});
         server.wire_connections();
     defer server.deinit(std.testing.allocator);
 
@@ -806,7 +806,7 @@ test "two-phase order — completion after timeout expires" {
     var time_sim = TimeSim{};
     var tracer = try Trace.Tracer.init(std.testing.allocator, time_sim.time(), .{});
     defer tracer.deinit(std.testing.allocator);
-    var server = try Server.init(std.testing.allocator, &io, &sm, &tracer, 2, time_sim.time(), null);
+    var server = try Server.init(std.testing.allocator, &io, &sm, &tracer, 2, time_sim.time(), null, .{});
         server.wire_connections();
     defer server.deinit(std.testing.allocator);
 
@@ -853,7 +853,7 @@ test "two-phase order — idempotent same-result retry" {
     var time_sim = TimeSim{};
     var tracer = try Trace.Tracer.init(std.testing.allocator, time_sim.time(), .{});
     defer tracer.deinit(std.testing.allocator);
-    var server = try Server.init(std.testing.allocator, &io, &sm, &tracer, 2, time_sim.time(), null);
+    var server = try Server.init(std.testing.allocator, &io, &sm, &tracer, 2, time_sim.time(), null, .{});
         server.wire_connections();
     defer server.deinit(std.testing.allocator);
 
@@ -904,7 +904,7 @@ test "two-phase order — poll pending then complete (worker pattern)" {
     var time_sim = TimeSim{};
     var tracer = try Trace.Tracer.init(std.testing.allocator, time_sim.time(), .{});
     defer tracer.deinit(std.testing.allocator);
-    var server = try Server.init(std.testing.allocator, &io, &sm, &tracer, 2, time_sim.time(), null);
+    var server = try Server.init(std.testing.allocator, &io, &sm, &tracer, 2, time_sim.time(), null, .{});
         server.wire_connections();
     defer server.deinit(std.testing.allocator);
 
@@ -959,7 +959,7 @@ test "cancel order — client cancels, worker completion rejected" {
     var time_sim = TimeSim{};
     var tracer = try Trace.Tracer.init(std.testing.allocator, time_sim.time(), .{});
     defer tracer.deinit(std.testing.allocator);
-    var server = try Server.init(std.testing.allocator, &io, &sm, &tracer, 2, time_sim.time(), null);
+    var server = try Server.init(std.testing.allocator, &io, &sm, &tracer, 2, time_sim.time(), null, .{});
         server.wire_connections();
     defer server.deinit(std.testing.allocator);
 
@@ -1011,7 +1011,7 @@ test "cancel order — cancel already confirmed is rejected" {
     var time_sim = TimeSim{};
     var tracer = try Trace.Tracer.init(std.testing.allocator, time_sim.time(), .{});
     defer tracer.deinit(std.testing.allocator);
-    var server = try Server.init(std.testing.allocator, &io, &sm, &tracer, 2, time_sim.time(), null);
+    var server = try Server.init(std.testing.allocator, &io, &sm, &tracer, 2, time_sim.time(), null, .{});
         server.wire_connections();
     defer server.deinit(std.testing.allocator);
 
@@ -1797,7 +1797,7 @@ fn run_fuzz(seed: u64) !void {
         var time_sim = TimeSim{};
         var tracer = try Trace.Tracer.init(std.testing.allocator, time_sim.time(), .{});
         defer tracer.deinit(std.testing.allocator);
-        var server = try Server.init(std.testing.allocator, &io, &sm, &tracer, 1, time_sim.time(), null);
+        var server = try Server.init(std.testing.allocator, &io, &sm, &tracer, 1, time_sim.time(), null, .{});
         server.wire_connections();
         defer server.deinit(std.testing.allocator);
 

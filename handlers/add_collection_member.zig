@@ -1,5 +1,7 @@
 const std = @import("std");
 const t = @import("../prelude.zig");
+const fuzz_lib = @import("../fuzz_lib.zig");
+const PRNG = @import("stdx").PRNG;
 
 pub const Status = enum { ok, not_found };
 
@@ -10,7 +12,12 @@ pub const Prefetch = struct {
     product: ?t.ProductRow,
 };
 
-pub const Context = t.HandlerContext(Prefetch, t.Operation.EventType(.add_collection_member), t.Identity, Status);
+pub const Context = t.HandlerContext(Prefetch, t.EventType(.add_collection_member), t.Identity, Status);
+
+pub fn gen_fuzz_message(prng: *PRNG, pools: fuzz_lib.IdPools) ?t.Message {
+    if (pools.collection_ids.len == 0 or pools.product_ids.len == 0) return null;
+    return t.Message.init(.add_collection_member, pools.collection_ids[prng.int_inclusive(usize, pools.collection_ids.len - 1)], prng.int(u128) | 1, pools.product_ids[prng.int_inclusive(usize, pools.product_ids.len - 1)]);
+}
 
 // [route] .add_collection_member
 // match POST /collections/:id/products/:sub_id

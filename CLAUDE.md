@@ -136,7 +136,8 @@ Native commit handles storage, auth, WAL. Sidecar provides HTML.
 | `annotation_scanner.zig` | Scans annotations, validates status exhaustiveness + SQL read/write |
 | `sidecar.zig` | Unix socket client — 3-RT binary protocol exchange |
 | `protocol.zig` | Self-describing binary row format, frame IO, type tags |
-| `adapters/typescript.ts` | Reads manifest, generates binary dispatch |
+| `adapters/typescript.ts` | Reads manifest, generates handler dispatch + workerFunctions |
+| `adapters/call_runtime_shm.ts` | SHM sidecar runtime — 1-RT/2-RT dispatch, worker proxy, worker SHM client |
 | `generated/types.generated.ts` | Hand-written TS SDK (handler types + enum mappings) |
 | `generated/serde.ts` | Hand-written TS binary row reader + param writer |
 | `examples/ecommerce-ts/handlers/*.ts` | Developer's annotated handler functions |
@@ -151,7 +152,10 @@ No framework file imports from the app root except via comptime generics (e.g. `
 | `framework/connection.zig` | `ConnectionType(IO, FollowupState)` — per-connection state machine (accepting → receiving → ready → sending) |
 | `framework/http.zig` | HTTP/1.0+1.1 request parser (pure parser, no response encoding — see decisions/always-200.md) |
 | `framework/io.zig` | epoll IO layer (real syscalls), `try_accept` for synchronous non-blocking accept |
-| `framework/wal.zig` | `WalType(Message, root_fn)` — append-only replay log, writes Message entries after commit(), no fsync |
+| `framework/wal.zig` | `WalType(Operation)` — SQL-write WAL + worker dispatch queue, completion/dead entries, pending index recovery |
+| `framework/wire.zig` | CALL/RESULT binary frame primitives — shared between ShmBus and WorkerDispatch |
+| `framework/worker_dispatch.zig` | `WorkerDispatchType(max_entries)` — concurrent CALL/RESULT over separate SHM region for workers |
+| `framework/pending_dispatch.zig` | `PendingIndexType(max)` — in-memory pending dispatch index, rebuilt from WAL on recovery |
 | `framework/message_bus.zig` | `MessageBusType(IO, options)` — sidecar Unix socket transport, connection pool, direct `accept()` per tick |
 | `framework/auth.zig` | Cookie signing/verification (HMAC-SHA256), session management |
 | `framework/marks.zig` | Coverage marks — links log sites to test assertions |
@@ -188,7 +192,9 @@ No framework file imports from the app root except via comptime generics (e.g. `
 | `replay.zig` | WAL replay tool — verify, inspect, query, replay operations |
 | `replay_fuzz.zig` | Replay round-trip fuzzer — WAL serialization boundary verification |
 | `state_machine_benchmark.zig` | State machine benchmark — per-operation prefetch/commit throughput, regression detector |
-| `worker.zig` | Worker process — polls server for pending orders, simulates external API calls |
+| `worker_dispatch_fuzz.zig` | Worker dispatch boundary fuzzer — malformed RESULTs, bad CRC, wrong request_ids |
+| `sidecar_dispatch.zig` | `SidecarDispatchType(Bus)` — SHM 1-RT/2-RT pipeline, parse RESULT, stage machine |
+| `sim_sidecar.zig` | Sidecar simulation — builds CALL/RESULT frames in Zig for sim tests |
 | `wal_test.zig` | WAL integration tests — instantiates WalType with domain types |
 
 ## Conventions

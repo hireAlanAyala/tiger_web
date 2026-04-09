@@ -18,11 +18,12 @@ if (!manifestPath || !outputPath) {
 }
 
 interface ManifestAnnotation {
-  phase: "translate" | "prefetch" | "execute" | "render";
+  phase: "translate" | "prefetch" | "execute" | "render" | "worker";
   operation: string;
   file: string;
   line: number;
   route_match?: { method: string; pattern: string; query_params?: string[] };
+  returns?: string;
 }
 
 // Read manifest.
@@ -123,6 +124,42 @@ for (const r of routeTable) {
   out += `  { operation: '${r.operation}', method: '${r.method}', pattern: '${r.pattern}', query_params: ${qp} },\n`;
 }
 out += `];\n`;
+
+// Worker functions — one entry per [worker] annotation.
+const workerAnnotations = manifest.annotations.filter(a => a.phase === "worker");
+if (workerAnnotations.length > 0) {
+  // Ensure worker modules are imported.
+  for (const ann of workerAnnotations) {
+    if (!operationModules.has(ann.operation)) {
+      operationModules.set(ann.operation, {
+        file: ann.file,
+        namespace: toCamelCase(ann.operation),
+      });
+      const relative = "../" + ann.file;
+      // Import already emitted above if the file has other phases.
+      // Check if we need to add it.
+      if (!out.includes(`import * as ${toCamelCase(ann.operation)}`)) {
+        // Prepend import (insert after the first newline in the generated section).
+        const importLine = `import * as ${toCamelCase(ann.operation)} from '${relative}';\n`;
+        const insertPos = out.indexOf('\n') + 1;
+        out = out.slice(0, insertPos) + importLine + out.slice(insertPos);
+      }
+    }
+  }
+
+  out += `
+export interface WorkerFunction {
+  fn: (...args: any[]) => Promise<any>;
+  returns: string;
+}
+
+export const workerFunctions: Record<string, WorkerFunction> = {\n`;
+  for (const ann of workerAnnotations) {
+    const ns = toCamelCase(ann.operation);
+    out += `  ${ann.operation}: { fn: ${ns}.${ann.operation}, returns: '${ann.returns || ''}' },\n`;
+  }
+  out += `};\n`;
+}
 
 writeFileSync(outputPath, out);
 console.log(`Generated: ${outputPath}`);
