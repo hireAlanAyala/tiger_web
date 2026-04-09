@@ -6,9 +6,33 @@
    Phase 1: bolt onto fuzz.zig (Zig-native). Phase 2: scanner.
    Phase 3: TS sidecar sim.
 
-2. **Worker integration** — `docs/plans/worker.md` — DEFERRED
-   worker.fetch in prefetch (framework resolves across ticks).
-   Worker polls for post-commit work (no after_commit callbacks).
+2. **Worker system** — DONE
+   Full worker implementation: WAL dispatch, SHM transport, tick loop,
+   scanner [worker]+[handle]+[render] chain, QUERY sub-protocol.
+   See `docs/internal/decision-worker-architecture.md`.
+
+   **Remaining items:**
+   - TS worker SHM client: wire `db` parameter (QUERY frame exchange).
+     Zig side handles QUERY in poll_completions. TS side needs
+     `db.query()` → QUERY frame → wait for QUERY_RESULT → resolve Promise.
+   - TS `worker.xxx(id, body)` dispatch: update from positional args
+     to `(id, body_object)` wrapping into `ctx = { id, body }`.
+   - Fire-and-forget workers: `[worker]` without `[handle]`/`[render]`.
+     Framework auto-generates no-op completion (resolve pending, done).
+   - TIGER_STYLE naming pass: `slot_idx` → `slot_index`, `shm_fd` →
+     `shm_file_descriptor`, `buf` → `buffer`, `len` → `length` throughout
+     worker files. Comment punctuation (capital, period).
+   - `wal.init` is 127 lines (TB limit: 70). Split into init + recover +
+     verify_root + scan_entries. Pre-existing — not worker-specific.
+   - `wal.init` heap allocation (page_allocator.alignedAlloc). TB wants
+     static allocation. Pre-existing.
+   - Worker fuzz main is 164 lines — decompose into action functions.
+   - Parallel arrays in fuzzer (`dispatched_ops` / `dispatched_request_ids`)
+     — replace with struct array.
+   - Three copies of RESULT-frame builder across test files — consolidate.
+   - Sidecar sim test for full worker lifecycle (handler dispatches worker
+     → sidecar processes → completion fires). Currently only unit/integration
+     tests exercise the worker path.
 
 3. **Session as writes** — DEFERRED
    Remove session_action from HandleResult. Session changes via
