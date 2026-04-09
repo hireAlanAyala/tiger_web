@@ -31,10 +31,13 @@ pub const PendingDispatch = struct {
     };
 
     pub fn name_slice(self: *const PendingDispatch) []const u8 {
+        assert(self.name_len > 0);
+        assert(self.name_len <= constants.worker_name_max);
         return self.name[0..self.name_len];
     }
 
     pub fn args_slice(self: *const PendingDispatch) []const u8 {
+        assert(self.args_len <= constants.worker_args_max);
         return self.args[0..self.args_len];
     }
 };
@@ -51,6 +54,7 @@ pub fn PendingIndexType(comptime max_in_flight: u8) type {
         pub fn add(self: *Self, dispatch: PendingDispatch) bool {
             assert(dispatch.op > 0);
             assert(dispatch.state == .pending);
+            assert(dispatch.name_len > 0); // A dispatch without a name is invalid.
             if (self.len >= max_in_flight) return false;
 
             // Reject duplicate ops (corrupt WAL recovery or server bug).
@@ -68,6 +72,8 @@ pub fn PendingIndexType(comptime max_in_flight: u8) type {
         pub fn resolve(self: *Self, op: u64, state: PendingDispatch.State) void {
             assert(op > 0);
             assert(state == .completed or state == .failed or state == .dead);
+            // Note: self.len may be 0 during WAL recovery (resolve for
+            // a dispatch that was already resolved in a prior entry).
 
             for (self.entries[0..self.len], 0..) |*e, i| {
                 if (e.op == op) {
@@ -87,6 +93,8 @@ pub fn PendingIndexType(comptime max_in_flight: u8) type {
 
         /// Find a dispatch by WAL op. Returns null if not found.
         pub fn find_by_op(self: *const Self, op: u64) ?*const PendingDispatch {
+            assert(op > 0);
+            assert(self.len <= max_in_flight);
             for (self.entries[0..self.len]) |*e| {
                 if (e.op == op) return e;
             }
@@ -95,6 +103,8 @@ pub fn PendingIndexType(comptime max_in_flight: u8) type {
 
         /// Find a mutable dispatch by WAL op.
         pub fn find_by_op_mut(self: *Self, op: u64) ?*PendingDispatch {
+            assert(op > 0);
+            assert(self.len <= max_in_flight);
             for (self.entries[0..self.len]) |*e| {
                 if (e.op == op) return e;
             }
@@ -103,6 +113,7 @@ pub fn PendingIndexType(comptime max_in_flight: u8) type {
 
         /// Number of dispatches in the given state.
         pub fn count_by_state(self: *const Self, state: PendingDispatch.State) u8 {
+            assert(self.len <= max_in_flight);
             var n: u8 = 0;
             for (self.entries[0..self.len]) |*e| {
                 if (e.state == state) n += 1;
@@ -112,11 +123,13 @@ pub fn PendingIndexType(comptime max_in_flight: u8) type {
 
         /// Number of active (unresolved) dispatches.
         pub fn pending_count(self: *const Self) u8 {
+            assert(self.len <= max_in_flight);
             return self.len;
         }
 
         /// Whether the index is at capacity.
         pub fn is_full(self: *const Self) bool {
+            assert(self.len <= max_in_flight);
             return self.len >= max_in_flight;
         }
 

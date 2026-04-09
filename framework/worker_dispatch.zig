@@ -187,6 +187,7 @@ pub fn WorkerDispatchType(comptime max_entries: u8) type {
 
         /// Find the first free slot. Returns null if all slots occupied.
         pub fn acquire_slot(self: *const Self) ?u8 {
+            assert(self.region != null);
             for (&self.entries, 0..) |*entry, i| {
                 if (entry.state == .free) return @intCast(i);
             }
@@ -207,6 +208,7 @@ pub fn WorkerDispatchType(comptime max_entries: u8) type {
             assert(slot_idx < max_entries);
             assert(self.region != null);
             assert(self.entries[slot_idx].state == .free);
+            assert(self.entries[slot_idx].dispatch_op == 0); // Pair: free state implies no active dispatch.
             assert(name.len > 0);
             assert(dispatch_op > 0);
 
@@ -400,6 +402,7 @@ pub fn WorkerDispatchType(comptime max_entries: u8) type {
         /// `current_tick` is the server's monotonic tick count.
         /// `deadline_ticks` is the max ticks before a dispatch is dead.
         pub fn check_deadlines(self: *Self, current_tick: u32, deadline_ticks: u32) ?*Entry {
+            assert(deadline_ticks > 0);
             for (&self.entries) |*entry| {
                 if (entry.state != .in_flight) continue;
                 if (current_tick -% entry.dispatched_tick >= deadline_ticks) return entry;
@@ -409,10 +412,13 @@ pub fn WorkerDispatchType(comptime max_entries: u8) type {
 
         /// Release an entry back to free.
         pub fn release(self: *Self, entry: *Entry) void {
+            assert(entry.state != .free); // Negative space: releasing a free entry is a bug.
             assert(entry.state == .completed or entry.state == .in_flight);
+            assert(entry.dispatch_op > 0); // Pair: active entries always have a dispatch op.
             const idx = self.entry_index(entry);
             assert(idx < max_entries);
             self.entries[idx] = .{};
+            assert(self.entries[idx].state == .free); // Post-condition: entry is now free.
         }
 
         /// Get the entry index from a pointer (pointer arithmetic).
