@@ -198,10 +198,45 @@ request SHM. Differences:
 - **CALL**: server sends worker function name + args.
 - **QUERY sub-protocol**: during worker execution, the sidecar may
   send QUERY frames (0x12) and wait for QUERY_RESULT (0x13). The
-  slot alternates between sidecar-writes (QUERY) and server-writes
-  (QUERY_RESULT). Each exchange bumps the respective seq counter.
+  slot alternates between sidecar-writes and server-writes. Each
+  exchange bumps the respective seq counter. See diagram below.
 - **RESULT**: terminates the worker execution. Tag 0x11 marks completion.
 - **Maximum QUERY round-trips**: 64 per worker execution (`queries_max`).
+
+### Worker QUERY sequence diagram
+
+```
+Server                          Sidecar (worker slot N)
+  │                                │
+  ├─── CALL ──────────────────────►│  server writes slot.request, bumps server_seq
+  │                                │  sidecar detects server_seq > last_seen
+  │                                │  sidecar starts async worker function
+  │                                │
+  │                                │  worker calls db.query(sql, params)
+  │◄── QUERY ─────────────────────┤  sidecar writes slot.response (tag 0x12), bumps sidecar_seq
+  │                                │
+  │    server detects sidecar_seq  │
+  │    server executes SQL         │
+  │                                │
+  ├─── QUERY_RESULT ──────────────►│  server writes slot.request (tag 0x13), bumps server_seq
+  │                                │  sidecar detects server_seq, reads rows
+  │                                │  worker resumes with query result
+  │                                │
+  │                                │  (repeat for more db.query calls)
+  │                                │
+  │                                │  worker function returns
+  │◄── RESULT ────────────────────┤  sidecar writes slot.response (tag 0x11), bumps sidecar_seq
+  │                                │
+  │    server detects RESULT       │
+  │    worker dispatch completed   │
+```
+
+**Turn tracking**: the seq counters determine whose turn it is.
+After the server bumps `server_seq` (CALL or QUERY_RESULT), the
+sidecar's next write to `response` is expected. After the sidecar
+bumps `sidecar_seq` (QUERY or RESULT), the server's next read from
+`response` is expected. The adapter polls `server_seq` changes to
+detect QUERY_RESULT arrivals.
 
 ### Worker CALL args
 
