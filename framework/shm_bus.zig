@@ -20,7 +20,7 @@ const posix = std.posix;
 const linux = std.os.linux;
 const protocol = @import("../protocol.zig");
 const Crc32 = std.hash.crc.Crc32;
-const IO = @import("io.zig").IO;
+const IoUring = @import("io.zig").IoUring;
 
 const log = std.log.scoped(.shm_bus);
 
@@ -99,8 +99,7 @@ pub fn SharedMemoryBusType(comptime options: Options) type {
 
         region: ?*Region = null,
         shm_fd: posix.fd_t = -1,
-        io: ?*IO = null,
-        futex_completion: IO.Completion = .{},
+        uring: ?*IoUring = null,
 
         server_seqs: [slot_count]u32 = [_]u32{0} ** slot_count,
         slot_delivered: [slot_count]bool = [_]bool{false} ** slot_count,
@@ -124,13 +123,13 @@ pub fn SharedMemoryBusType(comptime options: Options) type {
         pub fn create(
             self: *Self,
             name: []const u8,
-            io: *IO,
+            uring: *IoUring,
             on_frame_fn: *const fn (*anyopaque, u8, []const u8) void,
             context: *anyopaque,
         ) !void {
             self.on_frame_fn = on_frame_fn;
             self.context = context;
-            self.io = io;
+            self.uring = uring;
 
             // Allocate message pool on the heap (16 × 256KB = 4MB).
             const pool_count = slot_count * 2;
@@ -258,7 +257,7 @@ pub fn SharedMemoryBusType(comptime options: Options) type {
 
             const epoch_ptr: *u32 = &region.header.epoch;
             _ = @atomicRmw(u32, epoch_ptr, .Add, 1, .release);
-            _ = linux.futex_wake(@ptrCast(@constCast(epoch_ptr)), linux.FUTEX.WAKE, 1);
+            IoUring.futex_wake(@ptrCast(epoch_ptr));
         }
 
         /// Write a CALL payload to shared memory for the given slot.
@@ -298,7 +297,7 @@ pub fn SharedMemoryBusType(comptime options: Options) type {
             _ = @atomicRmw(u32, epoch_ptr, .Add, 1, .release);
 
             // Wake sidecar via futex on epoch.
-            _ = linux.futex_wake(@ptrCast(@constCast(epoch_ptr)), linux.FUTEX.WAKE, 1);
+            IoUring.futex_wake(@ptrCast(epoch_ptr));
         }
 
         /// Check for responses. Called from the io_uring futex_wait
@@ -343,33 +342,35 @@ pub fn SharedMemoryBusType(comptime options: Options) type {
             if (self.on_frame_fn) |cb| {
                 cb(self.context.?, slot_idx, slot.response[0..response_len]);
             }
+
+            // Re-submit futex wait for next response.
+            self.submit_futex_wait(slot_idx);
         }
 
-        /// Submit a futex wait on the epoch counter through io_uring.
-        /// Completes when the sidecar bumps the epoch (any slot response).
-        pub fn submit_epoch_wait(self: *Self) void {
+        /// Submit a futex wait on sidecar_seq for the given slot.
+        /// The io_uring completion fires when sidecar_seq changes.
+        pub fn submit_futex_wait(self: *Self, slot_idx: u8) void {
             const region = self.region orelse return;
-            const epoch_ptr: *volatile u32 = &region.header.epoch;
-            const current_epoch = @atomicLoad(u32, epoch_ptr, .acquire);
-            const io = self.io orelse return;
+            const slot = &region.slots[slot_idx];
+            const current_seq = @as(*volatile u32, @ptrCast(&slot.header.sidecar_seq)).*;
 
-            io.futex_wait(
-                epoch_ptr,
-                current_epoch,
-                &self.futex_completion,
-                @ptrCast(self),
-                shm_futex_callback,
-            );
+            if (self.uring) |ring| {
+                _ = ring.submit_futex_wait(
+                    @ptrCast(&slot.header.sidecar_seq),
+                    current_seq,
+                    @ptrCast(self),
+                    shm_futex_callback,
+                );
+            }
         }
 
-        fn shm_futex_callback(ctx: *anyopaque, _: i32) void {
+        fn shm_futex_callback(ctx: *anyopaque, result: i32) void {
+            _ = result;
             const self: *Self = @ptrCast(@alignCast(ctx));
-            // Epoch changed — check all slots for new responses.
+            // Check all slots — the futex could have fired for any.
             for (0..slot_count) |i| {
                 self.check_response(@intCast(i));
             }
-            // Re-submit the wait for the next epoch change.
-            self.submit_epoch_wait();
         }
 
         /// Submit initial futex waits for all slots. Call after sidecar

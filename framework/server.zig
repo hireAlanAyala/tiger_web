@@ -853,9 +853,26 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
             }
         }
 
+        // Global server pointer for shm_poll_all callback.
+        // Set during wire_sidecar. Only used when sidecar is enabled.
+        var shm_poll_server: ?*Server = null;
+
+        var shm_frames_received: u32 = 0;
+
+        fn shm_poll_all() bool {
+            const server = shm_poll_server orelse return false;
+            if (!App.sidecar_enabled) return false;
+            const before = shm_frames_received;
+            for (0..ShmBus.slot_count) |i| {
+                server.shm_bus.check_response(@intCast(i));
+            }
+            server.process_shm_completions();
+            return shm_frames_received != before;
+        }
+
         /// Shared memory frame callback — routes frames to SHM dispatch.
-        /// Called by shm_bus when a slot response passes CRC validation.
         fn shm_on_frame(ctx: *anyopaque, _: u8, frame: []const u8) void {
+            shm_frames_received += 1;
             const server: *Server = @ptrCast(@alignCast(ctx));
             if (!App.sidecar_enabled) return;
             server.shm_dispatch.on_frame(frame);
@@ -929,15 +946,16 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
                 handler.connection_index = @intCast(i % App.sidecar_count);
             }
             // Wire SHM dispatch — shared memory is the sole transport.
+            try server.io.init_uring();
             const pid = @as(u32, @intCast(std.os.linux.getpid()));
             var shm_name_buf: [64]u8 = undefined;
             const shm_name = std.fmt.bufPrint(&shm_name_buf, "tiger-{d}", .{pid}) catch "tiger-shm";
-            try server.shm_bus.create(shm_name, server.io, shm_on_frame, @ptrCast(server));
+            try server.shm_bus.create(shm_name, &server.io.uring.?, shm_on_frame, @ptrCast(server));
             server.shm_dispatch.bus = &server.shm_bus;
             server.shm_bus.set_ready();
-            // Submit initial epoch wait — io_uring will wake us when
-            // the sidecar writes a response. No busy-polling.
-            server.shm_bus.submit_epoch_wait();
+            // Register shm poll in run_for_ns — responses need sub-ms polling.
+            shm_poll_server = server;
+            server.io.shm_poll_fn = &shm_poll_all;
             log.info("shm transport: /dev/shm/{s}", .{shm_name});
             server.shm_dispatch.connection_index = 0;
             try server.sidecar_bus.init_pool(

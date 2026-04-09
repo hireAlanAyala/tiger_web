@@ -471,14 +471,6 @@ pub const IO = struct {
                         op.offset,
                     );
                 },
-                .futex_wait => |op| {
-                    // io_uring FUTEX_WAIT: block until *addr != expected.
-                    sqe.* = std.mem.zeroes(io_uring_sqe);
-                    sqe.opcode = .FUTEX_WAIT;
-                    sqe.addr = @intFromPtr(op.addr);
-                    sqe.len = 1;
-                    sqe.fd = @bitCast(op.expected);
-                },
             }
             sqe.user_data = @intFromPtr(completion);
         }
@@ -816,55 +808,9 @@ pub const IO = struct {
                     };
                     completion.callback(completion.context, completion, &result);
                 },
-                .futex_wait => {
-                    // Futex completes with 0 on wakeup or -EAGAIN if value changed.
-                    // Both are success — the caller should re-check and re-submit.
-                    const result: FutexWaitError!void = blk: {
-                        if (completion.result < 0) {
-                            const err = switch (@as(posix.E, @enumFromInt(-completion.result))) {
-                                .AGAIN => break :blk {}, // Value already changed — success.
-                                .INTR => {
-                                    completion.io.enqueue(completion);
-                                    return;
-                                },
-                                .CANCELED => error.Canceled,
-                                else => |errno| stdx.unexpected_errno("futex_wait", errno),
-                            };
-                            break :blk err;
-                        }
-                    };
-                    completion.callback(completion.context, completion, &result);
-                },
             }
         }
     };
-
-    pub const FutexWaitError = error{
-        Canceled,
-    } || posix.UnexpectedError;
-
-    /// Submit a FUTEX_WAIT through the ring. Completes when *addr != expected.
-    pub fn futex_wait(
-        self: *IO,
-        comptime Context: type,
-        context: Context,
-        comptime callback: fn (
-            context: Context,
-            completion: *Completion,
-            result: FutexWaitError!void,
-        ) void,
-        completion: *Completion,
-        addr: *volatile u32,
-        expected: u32,
-    ) void {
-        completion.* = .{
-            .io = self,
-            .context = context,
-            .callback = erase_types(Context, FutexWaitError!void, callback),
-            .operation = .{ .futex_wait = .{ .addr = addr, .expected = expected } },
-        };
-        self.enqueue(completion);
-    }
 
     /// This union encodes the set of operations supported as well as their arguments.
     const Operation = union(enum) {
@@ -920,10 +866,6 @@ pub const IO = struct {
             fd: fd_t,
             buffer: []const u8,
             offset: u64,
-        },
-        futex_wait: struct {
-            addr: *volatile u32,
-            expected: u32,
         },
     };
 
