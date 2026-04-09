@@ -22,6 +22,7 @@ interface ManifestAnnotation {
   operation: string;
   file: string;
   line: number;
+  has_body?: boolean;
   route_match?: { method: string; pattern: string; query_params?: string[] };
   returns?: string;
 }
@@ -124,6 +125,39 @@ for (const r of routeTable) {
   out += `  { operation: '${r.operation}', method: '${r.method}', pattern: '${r.pattern}', query_params: ${qp} },\n`;
 }
 out += `];\n`;
+
+// Prefetch key map — extracted from handler source at build time.
+// Replaces the runtime fn.toString() hack in call_runtime_shm.ts.
+interface PrefetchKeyInfo { key: string; mode: "query" | "queryAll"; }
+const prefetchKeyMapData: Record<string, PrefetchKeyInfo[]> = {};
+for (const ann of manifest.annotations) {
+  if (ann.phase !== "prefetch" || !ann.has_body) continue;
+  try {
+    const src = readFileSync(ann.file, "utf-8");
+    const lines = src.split("\n");
+    // Find the function body starting from the annotation line.
+    const bodyLines = lines.slice(ann.line - 1).join("\n");
+    const infos: PrefetchKeyInfo[] = [];
+    const callRe = /db\.(query|queryAll)\s*\(/g;
+    let cm;
+    while ((cm = callRe.exec(bodyLines)) !== null) {
+      infos.push({ key: "", mode: cm[1] === "query" ? "query" : "queryAll" });
+    }
+    const m = bodyLines.match(/return\s*(?:\{|\(\s*\{)\s*([^}]+)\}/);
+    if (m) {
+      const parts = m[1].split(",").map((p: string) => p.split(":")[0].trim()).filter(Boolean);
+      for (let i = 0; i < Math.min(parts.length, infos.length); i++) {
+        infos[i].key = parts[i];
+      }
+    }
+    if (infos.length > 0 && infos[0].key) prefetchKeyMapData[ann.operation] = infos;
+  } catch { /* Skip files that can't be read. */ }
+}
+
+out += `
+export interface PrefetchKeyInfo { key: string; mode: "query" | "queryAll"; }
+export const prefetchKeyMap: Record<string, PrefetchKeyInfo[]> = ${JSON.stringify(prefetchKeyMapData)};
+`;
 
 // Worker functions — one entry per [worker] annotation.
 const workerAnnotations = manifest.annotations.filter(a => a.phase === "worker");

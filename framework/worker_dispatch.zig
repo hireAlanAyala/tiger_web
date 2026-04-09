@@ -58,7 +58,10 @@ pub fn WorkerDispatchType(comptime max_entries: u8) type {
 
         pub const RegionHeader = extern struct {
             epoch: u32 = 0,
-            _pad: [60]u8 = [_]u8{0} ** 60,
+            slot_count: u16 = max_entries,
+            _reserved: u16 = 0,
+            frame_max: u32 = slot_data_size,
+            _pad: [52]u8 = [_]u8{0} ** 52,
 
             comptime {
                 assert(@sizeOf(RegionHeader) == 64);

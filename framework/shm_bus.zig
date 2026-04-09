@@ -62,7 +62,15 @@ pub fn SharedMemoryBusType(comptime options: Options) type {
             /// Sidecar futex-waits on this address. One futex for
             /// all slots instead of per-slot futex.
             epoch: u32 = 0,
-            _pad: [60]u8 = [_]u8{0} ** 60,
+            /// Number of slot pairs in this region. Sidecar reads this
+            /// instead of hardcoding the slot count.
+            slot_count: u16 = slot_count,
+            /// Reserved for alignment.
+            _reserved: u16 = 0,
+            /// Maximum frame payload size (bytes). Sidecar reads this
+            /// instead of hardcoding FRAME_MAX.
+            frame_max: u32 = slot_data_size,
+            _pad: [52]u8 = [_]u8{0} ** 52,
 
             comptime {
                 assert(@sizeOf(RegionHeader) == 64);

@@ -11,7 +11,7 @@
 // Usage: npx tsx adapters/call_runtime_shm.ts <shm-name> [slot-count]
 
 import { ShmClient } from "./shm_client.ts";
-import { modules, routeTable } from "../generated/handlers.generated.ts";
+import { modules, routeTable, prefetchKeyMap } from "../generated/handlers.generated.ts";
 import { OperationValues } from "../generated/types.generated.ts";
 import { matchRoute } from "../generated/routing.ts";
 import { readRowSet } from "../generated/serde.ts";
@@ -37,12 +37,13 @@ const _handleCtx: any = {
 const _writeDb = { execute: (...a: any[]) => { _writes.push(a as any); } };
 const _workerDispatches: Array<{name: string, args: any[]}> = [];
 
-// Worker proxy — handlers call worker.charge_payment(id, amount) etc.
-// Each call appends to _workerDispatches, serialized into the RESULT dispatch section.
-export const worker: Record<string, (...args: any[]) => void> = new Proxy({} as any, {
+// Worker proxy — handlers call worker.charge_payment(id, { amount }) etc.
+// The first arg is the entity id. The second (optional) is the body object.
+// These are serialized into the RESULT dispatch section as type-tagged values.
+export const worker: Record<string, (id: string, body?: any) => void> = new Proxy({} as any, {
   get(_target: any, prop: string) {
-    return (...args: any[]) => {
-      _workerDispatches.push({ name: prop, args });
+    return (id: string, body?: any) => {
+      _workerDispatches.push({ name: prop, args: [id, body ?? {}] });
     };
   }
 });
@@ -58,44 +59,19 @@ for (const [name, val] of Object.entries(OperationValues)) {
   reverseOpMap[val as number] = name;
 }
 
-// Prefetch key + mode map: operation name → [{key, mode}] in query order.
-// Extracted from handler source. mode determines single-row vs array.
-interface PrefetchKeyInfo { key: string; mode: "query" | "queryAll"; }
-const prefetchKeyMap: Record<string, PrefetchKeyInfo[]> = {};
-for (const [opName, mod] of Object.entries(modules)) {
-  if (!mod?.prefetch) continue;
-  const src = mod.prefetch.toString();
-  const infos: PrefetchKeyInfo[] = [];
-  // Find all db.query / db.queryAll calls in order.
-  const callRe = /db\.(query|queryAll)\s*\(/g;
-  let cm;
-  while ((cm = callRe.exec(src)) !== null) {
-    infos.push({ key: "", mode: cm[1] === "query" ? "query" : "queryAll" });
-  }
-  // Extract keys from return statement.
-  const m = src.match(/return\s*(?:\{|\(\s*\{)\s*([^}]+)\}/);
-  if (m) {
-    const parts = m[1].split(",").map(p => p.split(":")[0].trim()).filter(Boolean);
-    for (let i = 0; i < Math.min(parts.length, infos.length); i++) {
-      infos[i].key = parts[i];
-    }
-  }
-  if (infos.length > 0 && infos[0].key) prefetchKeyMap[opName] = infos;
-}
+// Prefetch key map imported from generated code — extracted at build time
+// by adapters/typescript.ts. No runtime fn.toString() parsing.
 
 // --- SHM setup ---
 
 const shmName = process.argv[2];
-const slotCount = parseInt(process.argv[3] || "8", 10); // Must match pipeline_slots_max.
 if (!shmName) {
-  console.error("Usage: npx tsx adapters/call_runtime_shm.ts <shm-name> [slot-count]");
+  console.error("Usage: npx tsx adapters/call_runtime_shm.ts <shm-name>");
   process.exit(1);
 }
-const client = new ShmClient({
-  shmName,
-  slotCount,
-  slotDataSize: FRAME_MAX,
-});
+// Read slot_count and frame_max from the SHM region header.
+// No hardcoded constants — the server writes these at init.
+const client = ShmClient.open(shmName);
 
 console.log(`[shm] connected to ${shmName}`);
 
@@ -445,14 +421,20 @@ try {
 
 if (workerFns && Object.keys(workerFns).length > 0) {
   const workerShmName = shmName + "-workers";
-  const workerSlotCount = 16; // Must match constants.max_in_flight_workers.
+  // Read slot_count and frame_max from the worker SHM region header.
+  const WORKER_REGION_HEADER_SIZE = 64;
 
   let workerBuf: Buffer;
+  let workerSlotCount = 0;
+  let workerFrameMax = 0;
   try {
     const shmPath = "/" + workerShmName;
-    const regionSize = 64 + workerSlotCount * (64 + FRAME_MAX * 2);
+    const headerBuf: Buffer = shmAddon.mmapShm(shmPath, WORKER_REGION_HEADER_SIZE);
+    workerSlotCount = headerBuf.readUInt16LE(4);
+    workerFrameMax = headerBuf.readUInt32LE(8);
+    const regionSize = 64 + workerSlotCount * (64 + workerFrameMax * 2);
     workerBuf = shmAddon.mmapShm(shmPath, regionSize);
-    console.log(`[shm] worker transport: ${workerShmName} (${workerSlotCount} slots)`);
+    console.log(`[shm] worker transport: ${workerShmName} (${workerSlotCount} slots, frame_max=${workerFrameMax})`);
   } catch (e: any) {
     console.error(`[shm] worker SHM not available: ${e.message}`);
     workerFns = null;
@@ -460,9 +442,9 @@ if (workerFns && Object.keys(workerFns).length > 0) {
   }
 
   if (workerFns) {
-    const WHDR = 64; // region header
-    const WSLOT_HDR = 64; // slot header
-    const WSLOT_PAIR = WSLOT_HDR + FRAME_MAX * 2;
+    const WHDR = 64; // region header.
+    const WSLOT_HDR = 64; // slot header.
+    const WSLOT_PAIR = WSLOT_HDR + workerFrameMax * 2;
     const wLastSeqs = new Uint32Array(workerSlotCount);
     const wResultBuf = new Uint8Array(FRAME_MAX);
     const wResultDv = new DataView(wResultBuf.buffer);
@@ -494,25 +476,36 @@ if (workerFns && Object.keys(workerFns).length > 0) {
         const wf = wFns[name];
         if (!wf) {
           console.error(`[shm] unknown worker: ${name}`);
-          writeWorkerResult(workerBuf, i, WHDR, WSLOT_PAIR, requestId, 0x01, new Uint8Array(0));
+          writeWorkerResult(workerBuf, i, WHDR, WSLOT_PAIR, workerFrameMax, requestId, 0x01, new Uint8Array(0));
           continue;
         }
 
-        // Run async worker function. Fire and forget — result written when done.
+        // Build ctx and db for the worker function.
+        // ctx = { id, body } — id from first arg, body from second.
+        const args = deserializeArgs(argsRaw);
+        const workerCtx = { id: args[0] ?? "", body: args[1] ?? {} };
+
+        // db provides query/queryAll over the QUERY sub-protocol.
+        // Each call writes a QUERY frame to the slot's response area
+        // and polls for the server's QUERY_RESULT in the request area.
         const slot = i;
         const rid = requestId;
+        let queryCounter = 0;
+        const workerDb = {
+          query: (sql: string, ...params: any[]) => workerQuery(workerBuf, slot, WHDR, WSLOT_PAIR, workerFrameMax, rid, queryCounter++, sql, params, "query"),
+          queryAll: (sql: string, ...params: any[]) => workerQuery(workerBuf, slot, WHDR, WSLOT_PAIR, workerFrameMax, rid, queryCounter++, sql, params, "queryAll"),
+        };
+
+        // Run async worker function with (ctx, db).
         (async () => {
           try {
-            // Deserialize args from type-tagged format.
-            const args = deserializeArgs(argsRaw);
-            const result = await wf.fn(...args);
-            // Serialize result as JSON text.
+            const result = await wf.fn(workerCtx, workerDb);
             const resultJson = _encoder.encode(JSON.stringify(result ?? {}));
-            writeWorkerResult(workerBuf, slot, WHDR, WSLOT_PAIR, rid, 0x00, resultJson);
+            writeWorkerResult(workerBuf, slot, WHDR, WSLOT_PAIR, workerFrameMax, rid, 0x00, resultJson);
           } catch (e: any) {
             console.error(`[shm] worker ${name} error:`, e.message);
             const errMsg = _encoder.encode(e.message || "worker error");
-            writeWorkerResult(workerBuf, slot, WHDR, WSLOT_PAIR, rid, 0x01, errMsg);
+            writeWorkerResult(workerBuf, slot, WHDR, WSLOT_PAIR, workerFrameMax, rid, 0x01, errMsg);
           }
         })();
       }
@@ -525,9 +518,9 @@ if (workerFns && Object.keys(workerFns).length > 0) {
 }
 
 function writeWorkerResult(buf: Buffer, slot: number, regionHdr: number, slotPairSize: number,
-  requestId: number, flag: number, data: Uint8Array) {
+  frameMax: number, requestId: number, flag: number, data: Uint8Array) {
   const hdr = regionHdr + slot * slotPairSize;
-  const respOffset = hdr + 64 + FRAME_MAX; // slot header + request area
+  const respOffset = hdr + 64 + frameMax; // slot header + request area.
 
   // Build RESULT: [tag:0x11][request_id:4 BE][flag:1][data]
   let pos = 0;
@@ -554,6 +547,75 @@ function writeWorkerResult(buf: Buffer, slot: number, regionHdr: number, slotPai
   const curSeq = buf.readUInt32LE(hdr + 4);
   buf.writeUInt32LE(curSeq + 1, hdr + 4);
   shmAddon.futexWake(buf, hdr + 4);
+}
+
+/// Send a QUERY frame over the worker SHM and poll for QUERY_RESULT.
+/// Returns a Promise that resolves with the first result row (query mode)
+/// or all rows (queryAll mode).
+async function workerQuery(
+  buf: Buffer, slot: number, regionHdr: number, slotPairSize: number,
+  frameMax: number, requestId: number, queryId: number,
+  sql: string, params: any[], mode: "query" | "queryAll"
+): Promise<any> {
+  const hdr = regionHdr + slot * slotPairSize;
+  const respOffset = hdr + 64 + frameMax; // response area.
+
+  // Build QUERY frame: [tag:0x12][request_id:4 BE][query_id:2 BE][sql_len:2 BE][sql][mode:1][param_count:1][params...]
+  let pos = 0;
+  buf[respOffset + pos] = 0x12; pos += 1;
+  buf.writeUInt32BE(requestId, respOffset + pos); pos += 4;
+  buf.writeUInt16BE(queryId, respOffset + pos); pos += 2;
+  const sqlBytes = _encoder.encode(sql);
+  buf.writeUInt16BE(sqlBytes.length, respOffset + pos); pos += 2;
+  buf.set(sqlBytes, respOffset + pos); pos += sqlBytes.length;
+  buf[respOffset + pos] = mode === "queryAll" ? 0x01 : 0x00; pos += 1;
+  buf[respOffset + pos] = params.length; pos += 1;
+  for (const p of params) {
+    if (p === null || p === undefined) { buf[respOffset + pos] = 0x05; pos += 1; }
+    else if (typeof p === "number") { buf[respOffset + pos] = 0x01; pos += 1; buf.writeBigInt64LE(BigInt(Math.trunc(p)), respOffset + pos); pos += 8; }
+    else if (typeof p === "string") { buf[respOffset + pos] = 0x03; pos += 1; const s = _encoder.encode(p); buf.writeUInt16BE(s.length, respOffset + pos); pos += 2; buf.set(s, respOffset + pos); pos += s.length; }
+    else { buf[respOffset + pos] = 0x05; pos += 1; }
+  }
+
+  // Set response_len + CRC + bump sidecar_seq.
+  const queryLen = pos;
+  buf.writeUInt32LE(queryLen, hdr + 12); // response_len.
+  const lenBuf = Buffer.alloc(4);
+  lenBuf.writeUInt32LE(queryLen);
+  const { crc32 } = _zlib;
+  const crcVal = crc32(Buffer.concat([lenBuf, buf.subarray(respOffset, respOffset + queryLen)]));
+  buf.writeUInt32LE(crcVal, hdr + 20); // response_crc.
+  const curSeq = buf.readUInt32LE(hdr + 4);
+  buf.writeUInt32LE(curSeq + 1, hdr + 4);
+  shmAddon.futexWake(buf, hdr + 4);
+
+  // Poll for QUERY_RESULT in the request area.
+  const reqOffset = hdr + 64; // request area starts after slot header.
+  const expectedServerSeq = buf.readUInt32LE(hdr) + 1; // server will bump server_seq.
+  return new Promise<any>((resolve) => {
+    const poll = () => {
+      const serverSeq = buf.readUInt32LE(hdr); // server_seq.
+      if (serverSeq < expectedServerSeq) {
+        setImmediate(poll);
+        return;
+      }
+      // Read QUERY_RESULT: [tag:0x13][request_id:4 BE][query_id:2 BE][row_set...]
+      const reqLen = buf.readUInt32LE(hdr + 8); // request_len.
+      if (reqLen < 7) { resolve(mode === "queryAll" ? [] : null); return; }
+      const rowSetData = buf.subarray(reqOffset + 7, reqOffset + reqLen);
+      // Parse row set using the same readRowSet as prefetch.
+      try {
+        const { readRowSet } = require("../generated/serde.ts");
+        const dv = new DataView(rowSetData.buffer, rowSetData.byteOffset, rowSetData.byteLength);
+        const rsResult = readRowSet(dv, 0);
+        const rows = rsResult.result?.rows || [];
+        resolve(mode === "queryAll" ? rows : (rows.length > 0 ? rows[0] : null));
+      } catch {
+        resolve(mode === "queryAll" ? [] : null);
+      }
+    };
+    setImmediate(poll);
+  });
 }
 
 function deserializeArgs(data: Uint8Array): any[] {

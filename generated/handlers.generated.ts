@@ -103,6 +103,9 @@ export const routeTable: RouteTableEntry[] = [
   { operation: 'update_product', method: 'put', pattern: '/products/:id', query_params: [] },
 ];
 
+export interface PrefetchKeyInfo { key: string; mode: "query" | "queryAll"; }
+export const prefetchKeyMap: Record<string, PrefetchKeyInfo[]> = {"add_collection_member":[{"key":"collection","mode":"query"}],"cancel_order":[{"key":"order","mode":"query"}],"complete_order":[{"key":"order","mode":"query"}],"create_collection":[{"key":"existing","mode":"query"}],"create_product":[{"key":"existing","mode":"query"}],"delete_collection":[{"key":"collection","mode":"query"}],"delete_product":[{"key":"product","mode":"query"}],"get_collection":[{"key":"collection","mode":"query"}],"get_order":[{"key":"order","mode":"query"}],"get_product":[{"key":"product","mode":"query"}],"get_product_inventory":[{"key":"product","mode":"query"}],"list_collections":[{"key":"collections","mode":"queryAll"}],"list_orders":[{"key":"orders","mode":"queryAll"}],"list_products":[{"key":"products","mode":"queryAll"}],"page_load_dashboard":[{"key":"products","mode":"queryAll"},{"key":"collections","mode":"queryAll"},{"key":"orders","mode":"queryAll"}],"remove_collection_member":[{"key":"collection","mode":"query"}],"search_products":[{"key":"results","mode":"queryAll"}],"transfer_inventory":[{"key":"source","mode":"query"},{"key":"target","mode":"query"}],"update_product":[{"key":"product","mode":"query"}],"verify_login_code":[{"key":"login_code","mode":"query"}]};
+
 export interface WorkerFunction {
   fn: (...args: any[]) => Promise<any>;
   returns: string;

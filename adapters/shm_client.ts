@@ -38,6 +38,19 @@ export class ShmClient {
     console.log(`[shm] mapped ${opts.shmName}: ${regionSize} bytes, ${this.slotCount} slots`);
   }
 
+  /// Open an SHM region and read slot_count + frame_max from the header.
+  /// No hardcoded constants needed — the server writes these at init.
+  static open(shmName: string): ShmClient {
+    // First map just the header to read slot_count and frame_max.
+    const shmPath = shmName.startsWith("/") ? shmName : "/" + shmName;
+    const headerBuf: Buffer = shmAddon.mmapShm(shmPath, REGION_HEADER_SIZE);
+    const slotCount = headerBuf.readUInt16LE(4);   // RegionHeader.slot_count @ offset 4.
+    const frameMax = headerBuf.readUInt32LE(8);     // RegionHeader.frame_max @ offset 8.
+    // Unmap the header-only mapping — we'll remap the full region.
+    // (Node Buffer from mmap stays valid; we just need the values.)
+    return new ShmClient({ shmName, slotCount, slotDataSize: frameMax });
+  }
+
   setDispatchHandler(handler: (slotIndex: number, funcIndex: number, requestId: number, args: Buffer) => Uint8Array) {
     this.onDispatch = handler;
   }
