@@ -197,30 +197,31 @@ Change in `main.zig`: replace `"tiger_web.wal"` with
 `db_path ++ ".wal"`. Load test and perf script cleanup already
 delete the db file — the paired WAL deletes with it.
 
-## SHM transport: replace busy-poll with io_uring unified wait
+## SHM transport: unified wait (explore, not urgent)
 
-Current: busy-poll `shm_poll_all()` with 0ms epoll timeout. Burns
-100% CPU when idle, starves sidecar on 1-core VPS (1.2K req/s).
-Adaptive 1ms sleep fallback helps idle CPU but doesn't fix 1-core.
+HTTP recv/send now uses io_uring (TB's linux.zig). SHM signaling
+still uses busy-poll with adaptive sleep. This is correct — the
+SHM check is a single atomic load in userspace, no syscall. io_uring
+can't make a memory read faster. Under load the poll always finds
+work; when idle the adaptive threshold sleeps.
 
-Target: io_uring `FUTEX_WAIT` on SHM epoch counter, integrated with
-the epoll event loop. One `io_uring_enter` waits for HTTP socket
-events AND SHM responses simultaneously. Zero spinning, zero CPU
-when idle, fair scheduling on 1-core.
+Explored approaches and findings:
+- IORING_OP_FUTEX_WAIT: not supported on all kernels (probe shows
+  flags=0x0). futex2 syscalls (454-456) also return EINVAL.
+- eventfd via io_uring READ: works intra-process, but eventfd is
+  per-process — can't write to it from the sidecar without fd passing.
+- SCM_RIGHTS fd passing: correct but adds protocol complexity to the
+  READY handshake for marginal gain (SHM poll is already ~3µs).
+- Tick-based polling (1ms): 6K req/s vs 87K busy-poll. Too slow.
 
-Infrastructure already exists: `io.zig` has `IoUring.submit_futex_wait`
-and `drain_completions`. The SHM bus has the epoch counter. Just need
-to wire the futex wait into the main loop instead of busy-polling.
+Conclusion: busy-poll is the right primitive for cross-process SHM
+signaling at our scale. The only real issue is 100% idle CPU, which
+the adaptive threshold already mitigates. If 1-core starvation
+becomes a production issue, lower the threshold or use cgroups.
 
-TigerBeetle pattern: all I/O through one io_uring instance. Network,
-disk, futex — single completion queue. Copy `linux.zig` from TB for
-the clean io_uring abstraction.
-
-Prerequisite: Linux 6.7+ (io_uring FUTEX_WAIT). Keep epoll as fallback
-for older kernels and containers that disable io_uring.
-
-Benefit: eliminates the 1-core vs 2-core trade-off entirely. Kernel
-handles scheduling — no threshold tuning needed.
+Future: if IORING_OP_FUTEX_WAIT becomes universally available, it
+would be the clean solution (one ring waits for everything). Monitor
+kernel support.
 
 ## Status-to-HTTP-code mapping — handler returns domain status, framework owns the code
 
