@@ -1,8 +1,11 @@
 {
   "private": true,
+  "type": "module",
   "engines": { "node": ">=22" },
+  "dependencies": {
+    "focus": "file:../../packages/ts"
+  },
   "devDependencies": {
-    "tsx": "^4",
     "typescript": "^5"
   }
 }

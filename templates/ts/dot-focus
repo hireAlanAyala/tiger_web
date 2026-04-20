@@ -1,2 +1,5 @@
-build = npx tsx focus/codegen.ts focus/manifest.json focus/handlers.generated.ts focus/operations.json focus/operations.ts
-start = npx tsx focus/sidecar.ts $SHM $SOCK
+# Focus project hooks.
+# build — runs after scanner generates manifest + operations.
+# start — launches the sidecar. $SHM = shared memory region name, $SOCK = unix socket path.
+build = npx focus-codegen focus/manifest.json focus/handlers.generated.ts focus/operations.json focus/operations.ts
+start = npx focus-sidecar $SHM $SOCK

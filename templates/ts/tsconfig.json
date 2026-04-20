@@ -2,11 +2,9 @@
   "compilerOptions": {
     "strict": true,
     "noUnusedParameters": false,
-    "target": "es2020",
+    "target": "es2022",
     "module": "nodenext",
-    "moduleResolution": "nodenext",
-    "paths": { "tiger-web": ["focus/types.ts"] },
-    "baseUrl": "."
+    "moduleResolution": "nodenext"
   },
   "include": ["src/**/*.ts"]
 }
