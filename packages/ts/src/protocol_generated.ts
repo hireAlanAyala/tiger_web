@@ -68,10 +68,14 @@ export const SlotHeader = {
 
 // === Frame Builders ===
 
+// Pre-allocated encoder — never allocate in the hot path.
+const _encoder = new TextEncoder();
+
 /** Build a CALL frame: [tag:0x10][request_id: u32 BE][name_len: u16 BE][name][args] */
 export function buildCallFrame(buf: Uint8Array, requestId: number, name: string, args: Uint8Array): number {
-  const encoder = new TextEncoder();
-  const nameBytes = encoder.encode(name);
+  const nameBytes = _encoder.encode(name);
+  const needed = 7 + nameBytes.length + args.length;
+  if (needed > buf.length) throw new RangeError(`CALL frame (${needed}B) exceeds buffer (${buf.length}B)`);
   const dv = new DataView(buf.buffer, buf.byteOffset, buf.byteLength);
   let pos = 0;
   buf[pos] = CallTag.call; pos += 1;
@@ -84,6 +88,8 @@ export function buildCallFrame(buf: Uint8Array, requestId: number, name: string,
 
 /** Build a RESULT frame: [tag:0x11][request_id: u32 BE][flag: u8][payload] */
 export function buildResultFrame(buf: Uint8Array, requestId: number, flag: number, payload: Uint8Array): number {
+  const needed = 6 + payload.length;
+  if (needed > buf.length) throw new RangeError(`RESULT frame (${needed}B) exceeds buffer (${buf.length}B)`);
   const dv = new DataView(buf.buffer, buf.byteOffset, buf.byteLength);
   let pos = 0;
   buf[pos] = CallTag.result; pos += 1;
@@ -95,6 +101,7 @@ export function buildResultFrame(buf: Uint8Array, requestId: number, flag: numbe
 
 /** Build a READY frame: [tag:0x20][version: u16 BE] */
 export function buildReadyFrame(buf: Uint8Array, version: number): number {
+  if (buf.length < 3) throw new RangeError("READY frame requires at least 3 bytes");
   const dv = new DataView(buf.buffer, buf.byteOffset, buf.byteLength);
   let pos = 0;
   buf[pos] = CallTag.ready; pos += 1;

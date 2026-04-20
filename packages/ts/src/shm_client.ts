@@ -91,6 +91,10 @@ export class ShmClient {
   startPolling(): void {
     // Signal the server: we're actively polling, no futex_wake needed.
     // Offset 12 in region header = sidecar_polling flag.
+    // NOTE: once set, never transitions back to 0. The sidecar polls
+    // for the entire process lifetime. If adaptive idle/active transitions
+    // are needed in the future, add a tick counter that clears the flag
+    // after N idle ticks and calls startWaiting().
     this.buf.writeUInt32LE(1, SIDECAR_POLLING_OFFSET);
     const tick = () => { this.poll(); setImmediate(tick); };
     setImmediate(tick);

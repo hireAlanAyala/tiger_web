@@ -177,6 +177,7 @@ static napi_value spin_wait(napi_env env, napi_callback_info info) {
 #define SHM_RESPONSE_LEN 12
 #define SHM_REQUEST_CRC  16
 #define SHM_RESPONSE_CRC 20
+#define SHM_SLOT_STATE   24   // SlotState: 0=free, 1=call_written, 2=result_written
 #define SHM_SLOT_HEADER  64
 
 // CRC32 over len_bytes ++ payload_bytes (TB convention).
@@ -311,11 +312,12 @@ static napi_value poll_dispatch(napi_env env, napi_callback_info info) {
       memcpy(resp_area, result_data, result_len);
     }
 
-    // Write response header: length, CRC, then seq.
+    // Write response header: length, CRC, state, then seq.
     uint32_t resp_len32 = (uint32_t)result_len;
     memcpy(hdr + SHM_RESPONSE_LEN, &resp_len32, 4);
     uint32_t resp_crc = compute_crc(resp_area, resp_len32);
     memcpy(hdr + SHM_RESPONSE_CRC, &resp_crc, 4);
+    hdr[SHM_SLOT_STATE] = 2; // result_written
 
     // Bump sidecar_seq.
     uint32_t cur_seq;
