@@ -297,33 +297,27 @@ fn cmd_dev(gpa: std.mem.Allocator, args: DevArgs) !void {
     , .{path});
 
     // Step 5: Watch + reload loop.
-    // TODO: inotify/kqueue. For now, poll with stat (same as shell version).
-    var last_mtime: i128 = 0;
+    // Linux: inotify (kernel events, instant detection).
+    // macOS: stat polling (kqueue needs per-file fds — impractical for dirs).
+    var watcher = try FileWatcher.init(path);
     while (true) {
-        std.time.sleep(1 * std.time.ns_per_s);
+        watcher.wait(); // blocks until a source file changes
 
-        // Check if any file in path changed.
-        const new_mtime = get_dir_mtime(path) catch continue;
-        if (last_mtime != 0 and new_mtime != last_mtime) {
-            try stdout.print("[watch]   change detected, rebuilding...\n", .{});
+        try stdout.print("[watch]   change detected, rebuilding...\n", .{});
 
-            // Rebuild.
-            cmd_build(gpa, .{ .path = path, .@"--" = {} }) catch {
-                try stdout.print("[watch]   build failed — sidecar not restarted\n", .{});
-                last_mtime = new_mtime;
-                continue;
-            };
+        // Rebuild.
+        cmd_build(gpa, .{ .path = path, .@"--" = {} }) catch {
+            try stdout.print("[watch]   build failed — sidecar not restarted\n", .{});
+            continue;
+        };
 
-            // Restart sidecar.
-            _ = sidecar.kill() catch {};
-            _ = sidecar.wait() catch {};
-            std.time.sleep(500 * std.time.ns_per_ms); // bus deadline
-            sidecar = try spawn_cmd(gpa, &.{ "sh", "-c", start_hook }, &env);
-            try stdout.print("[watch]   sidecar restarted\n", .{});
-        }
-        last_mtime = new_mtime;
+        // Restart sidecar.
+        _ = sidecar.kill() catch {};
+        _ = sidecar.wait() catch {};
+        std.time.sleep(500 * std.time.ns_per_ms); // bus deadline
+        sidecar = try spawn_cmd(gpa, &.{ "sh", "-c", start_hook }, &env);
+        try stdout.print("[watch]   sidecar restarted\n", .{});
     }
-
 }
 
 /// Run the server in a background thread.
@@ -348,7 +342,55 @@ fn apply_schema(_: []const u8, _: [:0]const u8) void {
     });
 }
 
-/// Get the most recent mtime of any .ts file in a directory.
+// =============================================================
+// File watcher — inotify (Linux) or stat polling (macOS)
+// =============================================================
+
+const builtin = @import("builtin");
+
+const FileWatcher = struct {
+    inotify_fd: if (builtin.os.tag == .linux) i32 else void,
+    path: []const u8,
+    last_mtime: i128,
+
+    fn init(path: []const u8) !FileWatcher {
+        if (builtin.os.tag == .linux) {
+            const fd = try std.posix.inotify_init1(0); // blocking
+            // Watch the directory for modifications, creates, and deletes.
+            _ = try std.posix.inotify_add_watch(
+                fd,
+                std.fs.cwd().realpathAlloc(std.heap.page_allocator, path) catch path,
+                std.os.linux.IN.MODIFY | std.os.linux.IN.CREATE | std.os.linux.IN.DELETE,
+            );
+            return .{ .inotify_fd = fd, .path = path, .last_mtime = 0 };
+        } else {
+            // macOS: no inotify. Use stat polling.
+            return .{ .inotify_fd = {}, .path = path, .last_mtime = get_dir_mtime(path) catch 0 };
+        }
+    }
+
+    fn wait(self: *FileWatcher) void {
+        if (builtin.os.tag == .linux) {
+            // Block until inotify event arrives.
+            var buf: [4096]u8 = undefined;
+            _ = std.posix.read(self.inotify_fd, &buf) catch {};
+            // Brief pause to coalesce rapid saves (editor write + rename).
+            std.time.sleep(200 * std.time.ns_per_ms);
+        } else {
+            // macOS: poll every second.
+            while (true) {
+                std.time.sleep(1 * std.time.ns_per_s);
+                const new_mtime = get_dir_mtime(self.path) catch continue;
+                if (new_mtime != self.last_mtime) {
+                    self.last_mtime = new_mtime;
+                    return;
+                }
+            }
+        }
+    }
+};
+
+/// Get the most recent mtime of any source file in a directory.
 fn get_dir_mtime(path: []const u8) !i128 {
     var dir = try std.fs.cwd().openDir(path, .{ .iterate = true });
     defer dir.close();
@@ -358,7 +400,6 @@ fn get_dir_mtime(path: []const u8) !i128 {
     var max_mtime: i128 = 0;
     while (try walker.next()) |entry| {
         if (entry.kind != .file) continue;
-        if (!std.mem.endsWith(u8, entry.basename, ".ts")) continue;
         const stat = dir.statFile(entry.path) catch continue;
         const mtime = stat.mtime;
         if (mtime > max_mtime) max_mtime = mtime;
