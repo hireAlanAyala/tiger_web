@@ -400,6 +400,11 @@ pub fn SharedMemoryBusType(comptime options: Options) type {
             if (sidecar_seq < self.server_seqs[slot_idx]) return;
             if (self.slot_delivered[slot_idx]) return;
 
+            // Verify explicit slot state — defense-in-depth alongside seq check.
+            // If sidecar_seq indicates a response but slot_state disagrees,
+            // the state machine has a bug (or memory corruption).
+            if (slot.header.slot_state != .result_written) return;
+
             const response_len = slot.header.response_len;
             if (response_len > slot_data_size) {
                 log.warn("shm: invalid response_len {d} on slot {d}", .{ response_len, slot_idx });

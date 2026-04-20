@@ -325,8 +325,9 @@ static napi_value poll_dispatch(napi_env env, napi_callback_info info) {
     cur_seq++;
     memcpy(hdr + SHM_SIDECAR_SEQ, &cur_seq, 4);
 
-    // Wake server's futex.
-    syscall(SYS_futex, (uint32_t *)(hdr + SHM_SIDECAR_SEQ), FUTEX_WAKE, 1, NULL, NULL, 0);
+    // No futex_wake needed: server polls sidecar_seq in its tick loop
+    // (poll_responses called every tick). Same optimization as the
+    // server→sidecar direction (sidecar_polling flag).
 
     found++;
   }

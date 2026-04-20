@@ -589,7 +589,7 @@ function writeWorkerResult(buf: Buffer, slot: number, regionHdr: number, slotPai
   // Bump sidecar_seq + futex wake.
   const curSeq = buf.readUInt32LE(hdr + 4);
   buf.writeUInt32LE(curSeq + 1, hdr + 4);
-  shmAddon.futexWake(buf, hdr + 4);
+  // No futex_wake: server polls sidecar_seq in tick loop.
 }
 
 /// Send a QUERY frame over the worker SHM and poll for QUERY_RESULT.
@@ -630,7 +630,7 @@ async function workerQuery(
   buf.writeUInt32LE(crcVal, hdr + 20); // response_crc.
   const curSeq = buf.readUInt32LE(hdr + 4);
   buf.writeUInt32LE(curSeq + 1, hdr + 4);
-  shmAddon.futexWake(buf, hdr + 4);
+  // No futex_wake: server polls sidecar_seq in tick loop.
 
   // Poll for QUERY_RESULT in the request area.
   const reqOffset = hdr + 64; // request area starts after slot header.

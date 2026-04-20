@@ -23,12 +23,12 @@ export const CallTag = {
 
 export const ResultFlag = {
   success: 0,
-  error: 1,
+  failure: 1,
 } as const;
 
 export const QueryMode = {
   query: 0,
-  queryAll: 1,
+  query_all: 1,
 } as const;
 
 export const SlotState = {

@@ -767,6 +767,91 @@ test "cross-language enum vector — write operation/status mappings" {
     file.writeAll(fbs.getWritten()) catch unreachable;
 }
 
+test "cross-language primitives vector — write type tags, constants, CRC spec" {
+    // Generate primitives.json from Zig definitions. This is the source
+    // of truth — not hand-written. CI asserts committed == generated.
+    var buf: [4096]u8 = undefined;
+    var fbs = std.io.fixedBufferStream(&buf);
+    const w = fbs.writer();
+
+    w.writeAll("{\n") catch unreachable;
+
+    // CRC spec.
+    w.writeAll("  \"crc\": {\n") catch unreachable;
+    w.writeAll("    \"algorithm\": \"CRC32-ISO-HDLC\",\n") catch unreachable;
+    w.writeAll("    \"polynomial\": \"0xEDB88320\",\n") catch unreachable;
+    w.writeAll("    \"note\": \"Standard IEEE 802.3 / zlib CRC32. Same as Zig std.hash.crc.Crc32 and Node.js zlib.crc32()\"\n") catch unreachable;
+    w.writeAll("  },\n") catch unreachable;
+
+    // Endianness.
+    w.writeAll("  \"endianness\": {\n") catch unreachable;
+    w.writeAll("    \"lengths_and_ids\": \"big-endian\",\n") catch unreachable;
+    w.writeAll("    \"row_data_integers\": \"little-endian\",\n") catch unreachable;
+    w.writeAll("    \"shm_header_fields\": \"little-endian\"\n") catch unreachable;
+    w.writeAll("  },\n") catch unreachable;
+
+    // Type tags from enum.
+    w.writeAll("  \"type_tags\": {") catch unreachable;
+    {
+        var first = true;
+        inline for (@typeInfo(TypeTag).@"enum".fields) |f| {
+            if (!first) w.writeAll(",") catch unreachable;
+            first = false;
+            w.print("\"{s}\":{d}", .{ f.name, f.value }) catch unreachable;
+        }
+    }
+    w.writeAll("},\n") catch unreachable;
+
+    // Call tags from enum.
+    w.writeAll("  \"call_tags\": {") catch unreachable;
+    {
+        var first = true;
+        inline for (@typeInfo(CallTag).@"enum".fields) |f| {
+            if (!first) w.writeAll(",") catch unreachable;
+            first = false;
+            w.print("\"{s}\":{d}", .{ f.name, f.value }) catch unreachable;
+        }
+    }
+    w.writeAll("},\n") catch unreachable;
+
+    // Result flags.
+    w.writeAll("  \"result_flags\": {") catch unreachable;
+    {
+        var first = true;
+        inline for (@typeInfo(ResultFlag).@"enum".fields) |f| {
+            if (!first) w.writeAll(",") catch unreachable;
+            first = false;
+            w.print("\"{s}\":{d}", .{ f.name, f.value }) catch unreachable;
+        }
+    }
+    w.writeAll("},\n") catch unreachable;
+
+    // Query modes.
+    w.writeAll("  \"query_modes\": {") catch unreachable;
+    {
+        var first = true;
+        inline for (@typeInfo(QueryMode).@"enum".fields) |f| {
+            if (!first) w.writeAll(",") catch unreachable;
+            first = false;
+            w.print("\"{s}\":{d}", .{ f.name, f.value }) catch unreachable;
+        }
+    }
+    w.writeAll("},\n") catch unreachable;
+
+    // Constants.
+    w.writeAll("  \"constants\": {") catch unreachable;
+    w.print("\"frame_max\":{d},\"columns_max\":{d},\"column_name_max\":{d},\"cell_value_max\":{d},\"sql_max\":{d},\"writes_max\":{d}", .{
+        frame_max, columns_max, column_name_max, cell_value_max, sql_max, writes_max,
+    }) catch unreachable;
+    w.writeAll("}\n") catch unreachable;
+
+    w.writeAll("}\n") catch unreachable;
+
+    const file = std.fs.cwd().createFile("packages/vectors/primitives.json", .{}) catch unreachable;
+    defer file.close();
+    file.writeAll(fbs.getWritten()) catch unreachable;
+}
+
 test "CALL frame build and parse round trip" {
     var buf: [1024]u8 = undefined;
     const len = build_call(&buf, 42, "handle_create_product", "args_data") orelse unreachable;

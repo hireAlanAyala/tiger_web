@@ -157,7 +157,7 @@ const SimSidecar = struct {
             data_buf[0..data_pos],
         ) orelse return;
 
-        // Set response metadata + CRC.
+        // Set response metadata + CRC + state.
         const response_len: u32 = @intCast(pos);
         shm_slot.header.response_len = response_len;
 
@@ -165,6 +165,7 @@ const SimSidecar = struct {
         crc.update(std.mem.asBytes(&response_len));
         crc.update(shm_slot.response[0..response_len]);
         shm_slot.header.response_crc = crc.final();
+        shm_slot.header.slot_state = .result_written;
 
         // Bump sidecar_seq — release store so server's acquire load
         // sees all response writes.
