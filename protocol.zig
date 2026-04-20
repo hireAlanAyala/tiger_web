@@ -726,7 +726,7 @@ test "cross-language test vector — write to /tmp for TS reader" {
     pos = write_value(&buf, pos, .{ .float = -0.0 }) orelse unreachable;
 
     // Write to file.
-    const file = std.fs.cwd().createFile("/tmp/tiger_row_test.bin", .{}) catch unreachable;
+    const file = std.fs.cwd().createFile("packages/vectors/row_sets.bin", .{}) catch unreachable;
     defer file.close();
     file.writeAll(buf[0..pos]) catch unreachable;
 }
@@ -762,7 +762,7 @@ test "cross-language enum vector — write operation/status mappings" {
     }) catch unreachable;
     w.writeAll("}}") catch unreachable;
 
-    const file = std.fs.cwd().createFile("/tmp/tiger_enum_test.json", .{}) catch unreachable;
+    const file = std.fs.cwd().createFile("packages/vectors/enums.json", .{}) catch unreachable;
     defer file.close();
     file.writeAll(fbs.getWritten()) catch unreachable;
 }
@@ -985,9 +985,35 @@ test "cross-language CALL/RESULT vector — write to /tmp for TS reader" {
         fpos += pos;
     }
 
-    const file = std.fs.cwd().createFile("/tmp/tiger_call_test.bin", .{}) catch unreachable;
+    const file = std.fs.cwd().createFile("packages/vectors/frames.bin", .{}) catch unreachable;
     defer file.close();
     file.writeAll(file_buf[0..fpos]) catch unreachable;
+}
+
+test "cross-language CRC vector — verify CRC32 convention" {
+    // Verify our CRC matches the committed crc_vectors.json values.
+    // CRC convention: standard IEEE CRC32 (Crc32IsoHdlc / zlib).
+    const Crc32 = std.hash.crc.Crc32;
+
+    // Vector 1: empty → 0x00000000
+    {
+        var crc = Crc32.init();
+        assert(crc.final() == 0x00000000);
+    }
+    // Vector 2: "hello" → 0x3610a686
+    {
+        var crc = Crc32.init();
+        crc.update("hello");
+        assert(crc.final() == 0x3610a686);
+    }
+    // Vector 3: SHM convention (u32 LE len ++ payload)
+    // len=11 as LE → [0x0B, 0x00, 0x00, 0x00], payload=[0x10, 0x00, 0x00, 0x00, 0x01, 0x00, 0x08, 0x70, 0x72, 0x65, 0x66]
+    {
+        var crc = Crc32.init();
+        crc.update(&[_]u8{ 0x0B, 0x00, 0x00, 0x00 }); // len
+        crc.update(&[_]u8{ 0x10, 0x00, 0x00, 0x00, 0x01, 0x00, 0x08, 0x70, 0x72, 0x65, 0x66 }); // payload
+        assert(crc.final() == 0xb1c7668a);
+    }
 }
 
 // =====================================================================

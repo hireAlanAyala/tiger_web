@@ -2,7 +2,7 @@
 // Hand-constructed binary matches what protocol.zig + storage.zig produce.
 //
 // Run:
-//   ./zig/zig build unit-test   # generates /tmp/tiger_row_test.bin
+//   ./zig/zig build unit-test   # generates packages/vectors/row_sets.bin
 //   npx tsx generated/serde_test.ts
 //
 // The Zig tests MUST run first to generate the cross-language vector.
@@ -359,10 +359,10 @@ function assertEq(actual: unknown, expected: unknown, msg: string): void {
 }
 
 // --- Test 13: Direct cross-language test vector ---
-// Reads /tmp/tiger_row_test.bin written by protocol.zig unit test.
+// Reads packages/vectors/row_sets.bin written by protocol.zig unit test.
 // Run `zig build unit-test` first to generate the file.
 {
-  const vectorPath = "/tmp/tiger_row_test.bin";
+  const vectorPath = "packages/vectors/row_sets.bin";
   if (existsSync(vectorPath)) {
     const fileBytes = readFileSync(vectorPath);
     const buf = new DataView(fileBytes.buffer, fileBytes.byteOffset, fileBytes.byteLength);
@@ -406,11 +406,11 @@ function assertEq(actual: unknown, expected: unknown, msg: string): void {
 }
 
 // --- Test 14: Cross-language enum mapping verification ---
-// Reads /tmp/tiger_enum_test.json written by protocol.zig unit test.
+// Reads packages/vectors/enums.json written by protocol.zig unit test.
 // Verifies that OperationValues and StatusValues in types.generated.ts
 // match the Zig enum values exactly.
 {
-  const enumPath = "/tmp/tiger_enum_test.json";
+  const enumPath = "packages/vectors/enums.json";
   if (existsSync(enumPath)) {
     const data = JSON.parse(readFileSync(enumPath, "utf-8"));
 

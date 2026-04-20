@@ -1,8 +1,8 @@
 // Cross-language test for CALL/RESULT protocol frames.
-// Reads /tmp/tiger_call_test.bin written by protocol.zig unit tests.
+// Reads packages/vectors/frames.bin written by protocol.zig unit tests.
 //
 // Run:
-//   ./zig/zig build unit-test   # generates /tmp/tiger_call_test.bin
+//   ./zig/zig build unit-test   # generates packages/vectors/frames.bin
 //   npx tsx generated/call_test.ts
 //
 // Verifies that TS parses the same bytes as Zig writes, catching
@@ -32,7 +32,7 @@ function assertEq(actual: unknown, expected: unknown, msg: string): void {
 }
 
 // Read the vector file.
-const vectorPath = "/tmp/tiger_call_test.bin";
+const vectorPath = "packages/vectors/frames.bin";
 const data = readFileSync(vectorPath);
 const dv = new DataView(data.buffer, data.byteOffset, data.byteLength);
 let pos = 0;
