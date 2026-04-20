@@ -11,10 +11,15 @@ concurrency:
 
 jobs:
   test:
-    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - { os: 'ubuntu-latest', deps: 'sudo apt-get install -y libsqlite3-dev' }
+          - { os: 'macos-latest', deps: 'brew install sqlite3' }
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
-      - run: sudo apt-get install -y libsqlite3-dev
+      - run: ${{ matrix.deps }}
       - run: sh zig/download.sh
       - run: ./zig/zig build ci -- test
 
