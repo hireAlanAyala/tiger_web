@@ -13,9 +13,10 @@ import { dirname, relative, resolve } from "path";
 const manifestPath = process.argv[2];
 const outputPath = process.argv[3];
 const opsRegistryPath = process.argv[4]; // optional: path to operations.json
+const opsOutputPath = process.argv[5];   // optional: path to write operations.ts
 
 if (!manifestPath || !outputPath) {
-  console.error("Usage: npx tsx adapters/typescript.ts <manifest.json> <output.ts> [operations.json]");
+  console.error("Usage: npx tsx adapters/typescript.ts <manifest.json> <output.ts> [operations.json] [operations.ts]");
   process.exit(1);
 }
 
@@ -225,3 +226,18 @@ export const workerFunctions: Record<string, WorkerFunction> = {\n`;
 
 writeFileSync(outputPath, out);
 console.log(`Generated: ${outputPath}`);
+
+// Generate operations.ts as a separate file (if output path given).
+// This replaces the inline node -e in focus-internal.
+if (opsOutputPath && Object.keys(opsJson).length > 0) {
+  const opNames = Object.keys(opsJson).filter(k => k !== "root");
+  const opUnion = opNames.length > 0
+    ? opNames.map(n => `"${n}"`).join(" | ")
+    : "string";
+  const opsOut =
+    `// Generated from operations.json — do not edit.\n` +
+    `export type Operation = ${opUnion};\n` +
+    `export const OperationValues: Record<string, number> = ${JSON.stringify(opsJson)};\n`;
+  writeFileSync(opsOutputPath, opsOut);
+  console.log(`Generated: ${opsOutputPath}`);
+}

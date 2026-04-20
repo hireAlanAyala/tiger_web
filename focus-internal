@@ -16,29 +16,6 @@ sync_types() {
   cp "$FRAMEWORK/generated/routing.ts" "$PROJECT/.focus/"
 }
 
-# Generate operations.ts from operations.json (after scanner runs).
-# Uses Node.js (already required for tsx) — no python dependency.
-generate_operations_ts() {
-  if [ ! -f "$FRAMEWORK/generated/operations.json" ]; then return; fi
-  node -e "
-    const ops = JSON.parse(require('fs').readFileSync('$FRAMEWORK/generated/operations.json', 'utf-8'));
-    const names = Object.keys(ops).filter(k => k !== 'root');
-    const union = names.map(n => '\"' + n + '\"').join(' | ') || 'string';
-    const vals = JSON.stringify(ops);
-    console.log('// Generated from operations.json — do not edit.');
-    console.log('export type Operation = ' + union + ';');
-    console.log('export const OperationValues: Record<string, number> = ' + vals + ';');
-  " > "$PROJECT/.focus/operations.ts"
-
-  # Replace the hand-written Operation type with a re-export.
-  node -e "
-    const path = '$PROJECT/.focus/types.generated.ts';
-    let src = require('fs').readFileSync(path, 'utf-8');
-    src = src.replace(/export type Operation =[\s\S]*?;/,
-      '// Operation type generated from operations.json.\nexport type { Operation } from \"./operations.ts\";');
-    require('fs').writeFileSync(path, src);
-  "
-}
 
 case "$1" in
   build)
@@ -56,20 +33,27 @@ case "$1" in
       --operations-zig=generated/operations.generated.zig \
       --routes-zig=generated/routes.generated.zig
 
-    # Generate TypeScript dispatch into the project's .focus/
+    # Generate TypeScript dispatch + operations.ts into the project's .focus/
     # so handler imports resolve relative to the project, not framework.
     PATH="$PROJECT/node_modules/.bin:$PATH" \
       tsx adapters/typescript.ts \
         "$PROJECT/.focus/manifest.json" \
         "$PROJECT/.focus/handlers.generated.ts" \
-        "$FRAMEWORK/generated/operations.json"
+        "$FRAMEWORK/generated/operations.json" \
+        "$PROJECT/.focus/operations.ts"
 
     # Symlink so the sidecar runtime finds handlers.generated.ts at
     # its expected import path (../generated/handlers.generated.ts).
     ln -sf "$PROJECT/.focus/handlers.generated.ts" generated/handlers.generated.ts
 
-    # Generate operations.ts with the Operation type after scanner runs.
-    generate_operations_ts
+    # Replace hand-written Operation type with re-export from generated.
+    node -e "
+      const path = '$PROJECT/.focus/types.generated.ts';
+      let src = require('fs').readFileSync(path, 'utf-8');
+      src = src.replace(/export type Operation =[\s\S]*?;/,
+        '// Operation type generated from operations.json.\nexport type { Operation } from \"./operations.ts\";');
+      require('fs').writeFileSync(path, src);
+    "
 
     echo "Build complete."
     ;;
