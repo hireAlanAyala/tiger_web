@@ -1,11 +1,7 @@
 .git
 .zig-cache
 zig-out
-zig/zig
-zig/lib
-zig/doc
 node_modules
 examples/*/node_modules
 *.db
 *.wal
-kcov-out
