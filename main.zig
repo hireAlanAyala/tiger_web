@@ -82,6 +82,12 @@ pub const ServerOptions = struct {
     log_trace: bool = false,
     trace: bool = false,
     trace_max: ?[]const u8 = null,
+    /// If non-null, the server stores the actual bound port here after listen.
+    /// Used by focus.zig to read the port from the server thread.
+    port_signal: ?*std.atomic.Value(u16) = null,
+    /// Suppress info-level logs. Only warn/err shown.
+    /// Used by focus dev to avoid server noise in the dev output.
+    quiet: bool = false,
 };
 
 /// Run the server. Returns errors instead of calling process.exit.
@@ -104,6 +110,7 @@ pub fn server_run(allocator: std.mem.Allocator, opts: ServerOptions) !void {
 
     const listen_fd = try io.open_listener(std.net.Address.parseIp4("0.0.0.0", opts.port) catch unreachable);
     const actual_port = resolve_port(listen_fd, opts.port);
+    if (opts.port_signal) |signal| signal.store(actual_port, .release);
 
     var pending_index = App.Wal.PendingIndex{};
     var wal = App.Wal.init("tiger_web.wal", &pending_index);
@@ -451,7 +458,7 @@ fn validate_config_opts(opts: ServerOptions) error{InvalidConfig}!*const [auth.k
         log.err("--log-debug must be provided when using --log-trace", .{});
         return error.InvalidConfig;
     }
-    log_level_runtime = if (opts.log_debug) .debug else .info;
+    log_level_runtime = if (opts.log_debug) .debug else if (opts.quiet) .warn else .info;
 
     const dev_default_key = "tiger-web-dev-default-key-0!!!!!";
     const secret_env = std.posix.getenv("SECRET_KEY") orelse blk: {
