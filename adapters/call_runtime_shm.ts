@@ -11,8 +11,7 @@
 // Usage: npx tsx adapters/call_runtime_shm.ts <shm-name> [slot-count]
 
 import { ShmClient } from "./shm_client.ts";
-import { modules, routeTable, prefetchKeyMap } from "../generated/handlers.generated.ts";
-import { OperationValues } from "../generated/types.generated.ts";
+import { modules, routeTable, prefetchKeyMap, OperationValues } from "../generated/handlers.generated.ts";
 import { matchRoute } from "../generated/routing.ts";
 import { readRowSet } from "../generated/serde.ts";
 
@@ -65,8 +64,9 @@ for (const [name, val] of Object.entries(OperationValues)) {
 // --- SHM setup ---
 
 const shmName = process.argv[2];
+const socketPath = process.argv[3];
 if (!shmName) {
-  console.error("Usage: npx tsx adapters/call_runtime_shm.ts <shm-name>");
+  console.error("Usage: npx tsx adapters/call_runtime_shm.ts <shm-name> [socket-path]");
   process.exit(1);
 }
 // Read slot_count and frame_max from the SHM region header.
@@ -74,6 +74,38 @@ if (!shmName) {
 const client = ShmClient.open(shmName);
 
 console.log(`[shm] connected to ${shmName}`);
+
+// --- Control channel (Unix socket) ---
+// The server requires a READY handshake on the Unix socket before
+// dispatching requests. SHM is the data channel; the socket is the
+// control channel (liveness detection, version negotiation).
+if (socketPath) {
+  const _net = require("net");
+  const sock = _net.createConnection(socketPath, () => {
+    // READY frame: [tag=0x20][version: u16 BE]
+    const PROTOCOL_VERSION = 1;
+    const payload = Buffer.alloc(3);
+    payload[0] = 0x20; // CallTag.ready
+    payload.writeUInt16BE(PROTOCOL_VERSION, 1);
+
+    // Wire frame: [len: u32 BE][crc32: u32 LE][payload]
+    const frame = Buffer.alloc(8 + payload.length);
+    frame.writeUInt32BE(payload.length, 0);
+    const lenBuf = Buffer.alloc(4);
+    lenBuf.writeUInt32BE(payload.length);
+    const crc = require("zlib").crc32(Buffer.concat([lenBuf, payload]));
+    frame.writeUInt32LE(crc, 4);
+    payload.copy(frame, 8);
+
+    sock.write(frame);
+    console.log(`[shm] READY sent to ${socketPath}`);
+  });
+  sock.on("error", (e: any) => {
+    console.error(`[shm] control socket error: ${e.message}`);
+    process.exit(1);
+  });
+  // Keep socket alive — disconnect = server kills our requests.
+}
 
 // --- Frame dispatch ---
 // C addon pre-parses CALL frames: tag, request_id, function name → funcIndex.
@@ -292,6 +324,7 @@ function dispatchHandleRender(requestId: number, args: Uint8Array): Uint8Array {
   pos += bodyLen;
 
   const rowSetCount = args[pos]; pos += 1;
+  // Row set deserialization follows.
 
   // Deserialize row sets.
   const keyInfos = prefetchKeyMap[opName] || [];
