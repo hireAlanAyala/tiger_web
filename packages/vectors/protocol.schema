@@ -1,0 +1,157 @@
+# Focus Protocol Schema — single definition of the wire format.
+#
+# This file is the source of truth for the binary protocol layout.
+# When a code generator exists, it will read this and produce:
+#   - protocol_generated.zig (server-side frame builder/parser)
+#   - protocol_generated.ts (client-side frame builder/parser)
+#   - protocol_generated.go (future)
+#
+# Until then, this is documentation that's validated by the test vectors.
+# Any change here must be reflected in both implementations manually.
+#
+# Format: <type> <name> { fields... }
+# Types: u8, u16be, u32be, u32le, i64le, f64le, bytes(len_field)
+# Enums: enum <name> : <underlying> { variants... }
+
+# === Primitives ===
+
+enum TypeTag : u8 {
+  integer = 0x01    # i64 little-endian (8 bytes)
+  float   = 0x02    # f64 little-endian (8 bytes)
+  text    = 0x03    # u16be length prefix + UTF-8 bytes
+  blob    = 0x04    # u16be length prefix + raw bytes
+  null    = 0x05    # 0 bytes payload
+}
+
+enum CallTag : u8 {
+  call         = 0x10
+  result       = 0x11
+  query        = 0x12
+  query_result = 0x13
+  ready        = 0x20
+}
+
+enum ResultFlag : u8 {
+  success = 0x00
+  error   = 0x01
+}
+
+enum QueryMode : u8 {
+  query    = 0x00    # single row or null
+  queryAll = 0x01    # array of rows
+}
+
+enum SlotState : u8 {
+  free           = 0x00
+  call_written   = 0x01
+  result_written = 0x02
+}
+
+# === Frame Formats ===
+
+frame CALL {
+  tag:         CallTag       # always 0x10
+  request_id:  u32be
+  name_len:    u16be
+  name:        bytes(name_len)
+  args:        bytes(remaining)
+}
+
+frame RESULT {
+  tag:         CallTag       # always 0x11
+  request_id:  u32be
+  flag:        ResultFlag
+  payload:     bytes(remaining)
+}
+
+frame QUERY {
+  tag:         CallTag       # always 0x12
+  request_id:  u32be
+  query_id:    u16be
+  sql_len:     u16be
+  sql:         bytes(sql_len)
+  mode:        QueryMode
+  param_count: u8
+  params:      typed_values(param_count)
+}
+
+frame QUERY_RESULT {
+  tag:         CallTag       # always 0x13
+  request_id:  u32be
+  query_id:    u16be
+  row_set:     RowSet
+}
+
+frame READY {
+  tag:         CallTag       # always 0x20
+  version:     u16be
+}
+
+# === Row Set Format ===
+
+struct RowSet {
+  col_count:   u16be
+  columns:     Column[col_count]
+  row_count:   u32be         # bounded: row_count * col_count <= remaining bytes
+  rows:        Row[row_count]
+}
+
+struct Column {
+  type_tag:    TypeTag
+  name_len:    u16be
+  name:        bytes(name_len)    # max 128 bytes
+}
+
+struct Row {
+  values:      TypedValue[col_count]   # one per column, type from Column.type_tag
+}
+
+# === SHM Region Layout ===
+
+struct RegionHeader {
+  @size = 64
+  epoch:            u32le     # offset 0  — bumped after every CALL write
+  slot_count:       u16le     # offset 4  — number of slot pairs
+  _reserved:        u16le     # offset 6
+  frame_max:        u32le     # offset 8  — max frame payload bytes
+  sidecar_polling:  u32le     # offset 12 — 1 when sidecar is in poll loop
+  _pad:             [48]u8    # offset 16
+}
+
+struct SlotHeader {
+  @size = 64
+  server_seq:       u32le     # offset 0  — server bumps after CALL write
+  sidecar_seq:      u32le     # offset 4  — sidecar bumps after RESULT write
+  request_len:      u32le     # offset 8
+  response_len:     u32le     # offset 12
+  request_crc:      u32le     # offset 16
+  response_crc:     u32le     # offset 20
+  slot_state:       SlotState # offset 24
+  _pad:             [39]u8    # offset 25
+}
+
+struct SlotPair {
+  header:           SlotHeader
+  request:          [frame_max]u8
+  response:        [frame_max]u8
+}
+
+struct Region {
+  header:           RegionHeader
+  slots:            SlotPair[slot_count]
+}
+
+# === Constants ===
+
+const frame_max       = 262144   # 256 KB
+const columns_max     = 32
+const column_name_max = 128
+const cell_value_max  = 4096
+const sql_max         = 4096
+const writes_max      = 21
+const protocol_version = 1
+
+# === CRC Convention ===
+# CRC32-ISO-HDLC (IEEE 802.3, polynomial 0xEDB88320)
+# Computed over: u32le(payload_len) ++ payload_bytes
+# Same as zlib.crc32() in Node.js and std.hash.crc.Crc32 in Zig.
