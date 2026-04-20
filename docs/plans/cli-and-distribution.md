@@ -699,8 +699,10 @@ environment.
 ### Next
 - [x] File watcher: inotify on Linux, stat polling on macOS
 - [x] Labeled output: [watch] from focus, scoped logs from server, [shm] from sidecar
-- [ ] Move smoke test to ci.zig (delete shell script)
-- [ ] Update Dockerfile (deployment only, remove shell references)
+- [x] Move smoke test to ci.zig (delete shell script)
+- [x] Update Dockerfile (deployment only, remove shell references)
+
+### COMPLETE — all items done.
 
 ### Deferred (after CLI works)
 - `focus self-update` (GitHub releases + checksum verification)
