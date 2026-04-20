@@ -458,6 +458,11 @@ pub fn SharedMemoryBusType(comptime options: Options) type {
                     log.warn("shm: request_id mismatch on slot {d}: sent {d}, got {d}", .{
                         slot_idx, self.sent_request_ids[slot_idx], resp_request_id,
                     });
+                    // Reset the slot — don't leave stuck. The request that
+                    // was in this slot is lost (timeout will handle its HTTP
+                    // client via sidecar_on_close or dispatch timeout).
+                    self.slot_delivered[slot_idx] = true;
+                    slot.header.slot_state = .free;
                     return;
                 }
             }
@@ -465,6 +470,12 @@ pub fn SharedMemoryBusType(comptime options: Options) type {
             // Mark as consumed BEFORE the callback — the callback may
             // send a new CALL on this same slot (clearing the flag).
             // Setting after would overwrite the cleared flag.
+            //
+            // NOTE (design tension): we set slot_state=free before the
+            // callback because the callback may immediately dispatch a new
+            // CALL to this slot. If the callback panics, the slot is free
+            // but has unfinished work — acceptable because a callback panic
+            // means the server is crashing anyway (assert failure).
             self.slot_delivered[slot_idx] = true;
             slot.header.slot_state = .free;
 

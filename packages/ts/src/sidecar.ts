@@ -71,7 +71,12 @@ const _handleCtx: any = {
 };
 const _writeDb = {
   execute: (...a: any[]) => {
-    if (_writes.length >= WRITES_MAX) throw new Error(`writes_max exceeded (${WRITES_MAX}) — handler has too many db.execute() calls`);
+    if (_writes.length >= WRITES_MAX) {
+      throw new Error(
+        `writes_max exceeded (${WRITES_MAX}) in handler '${_handleCtx.operation}'. ` +
+        `Split into a worker or batch your writes.`
+      );
+    }
     _writes.push(a as any);
   }
 };
@@ -463,6 +468,10 @@ function dispatchHandleRender(requestId: number, args: Uint8Array): Uint8Array {
   // HTML directly into result buffer — no intermediate encode + copy.
   const htmlLen = _encoder.encodeInto(html, _resultBuf.subarray(rpos)).written ?? 0;
   rpos += htmlLen;
+
+  // Post-dispatch invariants — catch state leaks between requests.
+  // These are O(1) checks that fire if a handler corrupts shared state.
+  if (rpos > FRAME_MAX) throw new Error(`RESULT frame overflow: ${rpos} > ${FRAME_MAX}`);
 
   return _resultBuf.subarray(0, rpos);
 }
