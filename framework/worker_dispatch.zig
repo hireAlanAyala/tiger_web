@@ -144,8 +144,12 @@ pub fn WorkerDispatchType(comptime max_entries: u8) type {
             ) catch return error.MmapFailed;
             self.region = @ptrCast(@alignCast(ptr));
 
-            // Zero the region.
-            @memset(@as([*]u8, @ptrCast(self.region.?))[0..@sizeOf(Region)], 0);
+            // Zero the region, then write header fields.
+            // Struct defaults don't apply to mmap'd memory.
+            const region = self.region.?;
+            @memset(@as([*]u8, @ptrCast(region))[0..@sizeOf(Region)], 0);
+            region.header.slot_count = max_entries;
+            region.header.frame_max = slot_data_size;
 
             log.info("worker shm: region={d}B, {d} slots", .{ @sizeOf(Region), max_entries });
         }
@@ -173,7 +177,10 @@ pub fn WorkerDispatchType(comptime max_entries: u8) type {
                 0,
             ) catch @panic("worker_dispatch: test mmap failed");
             self.region = @ptrCast(@alignCast(ptr));
-            @memset(@as([*]u8, @ptrCast(self.region.?))[0..@sizeOf(Region)], 0);
+            const region = self.region.?;
+            @memset(@as([*]u8, @ptrCast(region))[0..@sizeOf(Region)], 0);
+            region.header.slot_count = max_entries;
+            region.header.frame_max = slot_data_size;
             return self;
         }
 
@@ -499,6 +506,18 @@ test "WorkerDispatch: create and deinit" {
 
     try testing.expect(wd.region != null);
     try testing.expectEqual(@as(?u8, 0), wd.acquire_slot());
+}
+
+test "WorkerDispatch: header init — slot_count and frame_max written after memset" {
+    // Regression: mmap'd memory doesn't get struct defaults. If create/init_test
+    // zeroes the region but forgets to write header fields, the sidecar reads
+    // slot_count=0 and maps a 64-byte region (header only, no slots).
+    var wd = WorkerDispatchType(8).init_test();
+    defer wd.deinit_test();
+
+    const region = wd.region.?;
+    try testing.expectEqual(@as(u16, 8), region.header.slot_count);
+    try testing.expectEqual(@as(u32, constants.frame_max), region.header.frame_max);
 }
 
 test "WorkerDispatch: dispatch writes CALL to SHM" {
