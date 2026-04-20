@@ -55,20 +55,46 @@ pub fn main() !void {
 }
 
 pub fn cmd_start(cli: StartArgs, args: *std.process.ArgIterator) void {
-    const allocator = gpa.allocator();
     const sidecar_argv = collect_sidecar_argv(args);
-    const secret_key = validate_config(cli);
-
-    var io = IO.init() catch |err| {
-        log.err("IO init failed: {}", .{err});
+    server_run(.{
+        .port = cli.port,
+        .db = cli.db,
+        .sidecar = cli.sidecar,
+        .sidecar_argv = sidecar_argv,
+        .log_debug = cli.log_debug,
+        .log_trace = cli.log_trace,
+        .trace = cli.trace,
+        .trace_max = cli.@"trace-max",
+    }) catch |err| {
+        log.err("server failed: {}", .{err});
         std.process.exit(1);
     };
+}
+
+/// Server configuration — passed by main or focus.zig.
+/// No process args, no global state, no exit calls.
+pub const ServerOptions = struct {
+    port: u16 = 3000,
+    db: [:0]const u8 = "tiger_web.db",
+    sidecar: ?[]const u8 = null,
+    sidecar_argv: ?[]const []const u8 = null,
+    log_debug: bool = false,
+    log_trace: bool = false,
+    trace: bool = false,
+    trace_max: ?[]const u8 = null,
+};
+
+/// Run the server. Returns errors instead of calling process.exit.
+/// Callable from main.zig (standalone) and focus.zig (embedded).
+/// Blocks indefinitely in the event loop until the process is killed.
+pub fn server_run(opts: ServerOptions) !void {
+    const allocator = gpa.allocator();
+    const secret_key = validate_config_opts(opts);
+
+    var io = try IO.init();
     defer io.deinit();
 
-    var storage = App.Storage.init(cli.db) catch |err| {
-        log.err("storage init failed: {}", .{err});
-        std.process.exit(1);
-    };
+    var storage = try App.Storage.init(opts.db);
     defer storage.deinit();
 
     var sm = StateMachine.init(
@@ -77,11 +103,8 @@ pub fn cmd_start(cli: StartArgs, args: *std.process.ArgIterator) void {
         secret_key,
     );
 
-    const listen_fd = io.open_listener(std.net.Address.parseIp4("0.0.0.0", cli.port) catch unreachable) catch |err| {
-        log.err("listen failed: {}", .{err});
-        std.process.exit(1);
-    };
-    const actual_port = resolve_port(listen_fd, cli.port);
+    const listen_fd = try io.open_listener(std.net.Address.parseIp4("0.0.0.0", opts.port) catch unreachable);
+    const actual_port = resolve_port(listen_fd, opts.port);
 
     var pending_index = App.Wal.PendingIndex{};
     var wal = App.Wal.init("tiger_web.wal", &pending_index);
@@ -89,66 +112,47 @@ pub fn cmd_start(cli: StartArgs, args: *std.process.ArgIterator) void {
 
     var time_real = TimeReal{};
 
-    const trace_max_bytes = parse_trace_max(cli);
-    const trace_path = if (cli.trace) generate_trace_path() else @as([trace_path_len:0]u8, undefined);
-    var trace_file: ?std.fs.File = if (cli.trace)
-        std.fs.cwd().createFile(&trace_path, .{}) catch |err| {
-            log.err("failed to create trace file: {}", .{err});
-            std.process.exit(1);
-        }
-    else
-        null;
-    defer if (trace_file) |*f| f.close();
+    var tracer = try Trace.Tracer.init(allocator, time_real.time(), .{
+        .log_trace = opts.log_trace,
+    });
 
-    var trace_writer: ?TraceWriter = if (trace_file) |f|
-        TraceWriter.init(f, trace_max_bytes)
-    else
-        null;
-
-    var tracer = Trace.Tracer.init(allocator, time_real.time(), .{
-        .writer = if (trace_writer) |*tw| tw.any() else null,
-        .log_trace = cli.log_trace,
-    }) catch |err| {
-        log.err("tracer init failed: {}", .{err});
-        std.process.exit(1);
-    };
-
-    if (cli.trace) {
-        log.info("tracing to {s} (max {s})", .{
-            @as([]const u8, &trace_path),
-            cli.@"trace-max".?,
-        });
-    }
-
-    var server = Server.init(allocator, &io, &sm, &tracer, listen_fd, time_real.time(), &wal, pending_index) catch |err| {
-        log.err("server init failed: {}", .{err});
-        std.process.exit(1);
-    };
+    var server = try Server.init(allocator, &io, &sm, &tracer, listen_fd, time_real.time(), &wal, pending_index);
     server.wire_connections();
 
-    wire_sidecar(&server, cli, allocator) catch |err| {
-        log.err("sidecar init failed: {}", .{err});
-        std.process.exit(1);
-    };
-    const supervisor = init_supervisor(sidecar_argv, allocator) catch |err| {
-        log.err("supervisor init failed: {}", .{err});
-        std.process.exit(1);
-    };
+    if (App.sidecar_enabled) {
+        const sidecar_path: ?[]const u8 = opts.sidecar orelse "/tmp/tiger_web_sidecar.sock";
+        try server.wire_sidecar(allocator, sidecar_path);
+    }
 
-    var state = RunState{
-        .server = &server,
-        .io = &io,
-        .supervisor = supervisor,
-        .tracer = &tracer,
-        .admin = AdminSocket.init(actual_port),
-        .startup_trace_writer = if (trace_writer) |*tw| tw else null,
-    };
-    defer state.admin.deinit();
-
-    log_startup(cli, actual_port);
-    emit_readiness_signal(cli.port, actual_port);
-
-    run_loop(&state);
+    if (opts.sidecar_argv) |argv| {
+        var sup = try Supervisor.init(allocator, argv, App.sidecar_count);
+        try sup.spawn_all();
+        var state = RunState{
+            .server = &server,
+            .io = &io,
+            .supervisor = sup,
+            .tracer = &tracer,
+            .admin = AdminSocket.init(actual_port),
+            .startup_trace_writer = null,
+        };
+        defer state.admin.deinit();
+        log_startup_opts(opts, actual_port);
+        emit_readiness_signal(opts.port, actual_port);
+        run_loop(&state);
+    } else {
+        var state = RunState{
+            .server = &server,
+            .io = &io,
+            .supervisor = null,
+            .tracer = &tracer,
+            .admin = AdminSocket.init(actual_port),
+            .startup_trace_writer = null,
+        };
+        defer state.admin.deinit();
+        log_startup_opts(opts, actual_port);
+        emit_readiness_signal(opts.port, actual_port);
+        run_loop(&state);
+    }
 }
 
 fn cmd_trace(cli: TraceArgs) void {
@@ -425,13 +429,41 @@ fn init_supervisor(sidecar_argv: ?[]const []const u8, allocator: std.mem.Allocat
 }
 
 fn log_startup(cli: StartArgs, actual_port: u16) void {
+    log_startup_opts(.{
+        .port = cli.port,
+        .db = cli.db,
+        .log_debug = cli.log_debug,
+        .log_trace = cli.log_trace,
+    }, actual_port);
+}
+
+fn log_startup_opts(opts: ServerOptions, actual_port: u16) void {
     log.info("storage=sqlite wal=tiger_web.wal tick_interval={d}ms connections={d}", .{
         tick_ns / std.time.ns_per_ms,
         Server.max_connections,
     });
-    if (cli.log_debug) log.info("log_level=debug log_trace={}", .{cli.log_trace});
+    if (opts.log_debug) log.info("log_level=debug log_trace={}", .{opts.log_trace});
     if (App.sidecar_enabled) log.info("sidecar mode enabled", .{});
     log.info("listening on port {d}", .{actual_port});
+}
+
+fn validate_config_opts(opts: ServerOptions) *const [auth.key_length]u8 {
+    if (opts.log_trace and !opts.log_debug) {
+        log.err("--log-debug must be provided when using --log-trace", .{});
+        std.process.exit(1);
+    }
+    log_level_runtime = if (opts.log_debug) .debug else .info;
+
+    const dev_default_key = "tiger-web-dev-default-key-0!!!!!";
+    const secret_env = std.posix.getenv("SECRET_KEY") orelse blk: {
+        log.warn("SECRET_KEY not set — using development default (not safe for production)", .{});
+        break :blk dev_default_key;
+    };
+    if (secret_env.len != auth.key_length) {
+        log.err("SECRET_KEY must be exactly {d} bytes, got {d}", .{ auth.key_length, secret_env.len });
+        std.process.exit(1);
+    }
+    return secret_env[0..auth.key_length];
 }
 
 /// Readiness signal: write the port to stdout as a bare number.

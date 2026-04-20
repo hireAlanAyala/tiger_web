@@ -326,23 +326,20 @@ fn cmd_dev(gpa: std.mem.Allocator, args: DevArgs) !void {
 
 }
 
-/// Run the server in the current thread (called from a spawned thread).
+/// Run the server in a background thread.
 fn run_server() void {
-    // Empty arg iterator — no sidecar command argv (we manage the sidecar ourselves).
-    var args = std.process.args();
-    // Exhaust all args so the server sees no -- argv.
-    while (args.next()) |_| {}
-    server_main.cmd_start(.{
+    server_main.server_run(.{
         .port = 0,
-        .sidecar = "/tmp/focus-dev.sock",
         .db = "tiger_web.db",
-        .@"--" = {},
-    }, &args);
+        .sidecar = "/tmp/focus-dev.sock",
+    }) catch |err| {
+        std.io.getStdErr().writer().print("[server]  fatal: {}\n", .{err}) catch {};
+        std.process.exit(1);
+    };
 }
 
-/// Apply a schema SQL file to a database.
+/// Apply a schema SQL file to a database (same process, no subprocess).
 fn apply_schema(_: []const u8, _: [:0]const u8) void {
-    // Delegate to the server binary's schema command (same process).
     server_main.cmd_schema(.{
         .db = "tiger_web.db",
         .action = "apply",
