@@ -695,7 +695,7 @@ const TraceArgs = struct {
 };
 
 const SchemaArgs = struct {
-    db: [:0]const u8 = "tiger_web.db",
+    db: [:0]const u8,
     /// Positional: subcommand (apply/reset) + file path
     @"--": void,
     action: []const u8, // "apply" or "reset"
