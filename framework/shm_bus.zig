@@ -395,14 +395,20 @@ pub fn SharedMemoryBusType(comptime options: Options) type {
             const sidecar_seq_ptr: *u32 = &slot.header.sidecar_seq;
             const sidecar_seq = @atomicLoad(u32, sidecar_seq_ptr, .acquire);
 
-            // No request sent yet, stale response, or already delivered.
+            // Two complementary checks — different purposes:
+            //
+            // Seq check (ORDERING): sidecar_seq >= server_seq means a new
+            // response has been written since our last CALL. This is the
+            // primary detection mechanism — low-cost atomic load per tick.
+            //
+            // State check (SAFETY): slot_state == result_written confirms
+            // the sidecar completed the full write sequence (data → len →
+            // CRC → state → seq). If seq is bumped but state disagrees,
+            // either: memory corruption, or a code bug broke the write order.
+            // In both cases, refusing to read is the safe choice.
             if (self.server_seqs[slot_idx] == 0) return;
             if (sidecar_seq < self.server_seqs[slot_idx]) return;
             if (self.slot_delivered[slot_idx]) return;
-
-            // Verify explicit slot state — defense-in-depth alongside seq check.
-            // If sidecar_seq indicates a response but slot_state disagrees,
-            // the state machine has a bug (or memory corruption).
             if (slot.header.slot_state != .result_written) return;
 
             const response_len = slot.header.response_len;

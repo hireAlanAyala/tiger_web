@@ -4,10 +4,35 @@
 // Asserts: never crashes, never reads past buffer bounds, no infinite loops.
 // This is a safety test, not a performance test.
 //
+// DETERMINISTIC: uses a seeded PRNG so failures are reproducible.
+// Pass a seed as argv[2] to replay: npx tsx fuzz_test.ts 12345
+//
 // Run: npx tsx packages/ts/test/fuzz_test.ts
 
 import { readRowSet, TypeTag, frame_max, columns_max } from "../src/serde.ts";
-import * as crypto from "crypto";
+
+// --- Seeded PRNG (deterministic, reproducible) ---
+// Simple splitmix64-based PRNG. Same approach as TB's testing/fuzz.zig.
+class PRNG {
+  private state: bigint;
+  constructor(seed: number) { this.state = BigInt(seed); }
+  next(): number {
+    this.state = (this.state + 0x9E3779B97F4A7C15n) & 0xFFFFFFFFFFFFFFFFn;
+    let z = this.state;
+    z = ((z ^ (z >> 30n)) * 0xBF58476D1CE4E5B9n) & 0xFFFFFFFFFFFFFFFFn;
+    z = ((z ^ (z >> 27n)) * 0x94D049BB133111EBn) & 0xFFFFFFFFFFFFFFFFn;
+    z = (z ^ (z >> 31n)) & 0xFFFFFFFFFFFFFFFFn;
+    return Number(z & 0x7FFFFFFFn); // positive 31-bit int
+  }
+  nextFloat(): number { return this.next() / 0x7FFFFFFF; }
+  fillBytes(buf: Uint8Array): void {
+    for (let i = 0; i < buf.length; i++) buf[i] = this.next() & 0xFF;
+  }
+}
+
+const seed = process.argv[2] ? parseInt(process.argv[2]) : Date.now();
+const prng = new PRNG(seed);
+console.log(`[fuzz] seed: ${seed} (reproduce with: npx tsx fuzz_test.ts ${seed})`);
 
 const iterations = 50_000;
 let errors = 0;
@@ -21,8 +46,9 @@ console.log(`[fuzz] Starting ${iterations} iterations...`);
 // NOTE: This reveals a real serde bug — readRowSet should validate row_count
 // against remaining buffer before allocating. Filed as known issue.
 for (let i = 0; i < iterations; i++) {
-  const len = Math.floor(Math.random() * 512);
-  const garbage = crypto.getRandomValues(new Uint8Array(len));
+  const len = prng.next() % 512;
+  const garbage = new Uint8Array(len);
+  prng.fillBytes(garbage);
   const dv = new DataView(garbage.buffer, garbage.byteOffset, garbage.byteLength);
 
   try {

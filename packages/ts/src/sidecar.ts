@@ -44,6 +44,10 @@ const FRAME_MAX = 256 * 1024;
 const _hexTable: string[] = new Array(256);
 for (let i = 0; i < 256; i++) _hexTable[i] = i.toString(16).padStart(2, "0");
 
+// Bounded writes — matches server's writes_max (21).
+// If a handler exceeds this, it's a bug — fail fast, don't overflow the RESULT frame.
+const WRITES_MAX = 21;
+
 // Pre-allocated objects for handle_render hot path — reduces GC pressure.
 const _writes: Array<[string, ...any[]]> = [];
 const _emptyRows: any[] = [];
@@ -53,7 +57,12 @@ const _handleCtx: any = {
   rows: _emptyRows, prefetched: {},
   write: (decl: [string, ...any[]]) => { _writes.push(decl); },
 };
-const _writeDb = { execute: (...a: any[]) => { _writes.push(a as any); } };
+const _writeDb = {
+  execute: (...a: any[]) => {
+    if (_writes.length >= WRITES_MAX) throw new Error(`writes_max exceeded (${WRITES_MAX}) — handler has too many db.execute() calls`);
+    _writes.push(a as any);
+  }
+};
 const _workerDispatches: Array<{name: string, args: any[]}> = [];
 
 // Worker proxy — handlers call worker.charge_payment(id, { amount }) etc.
@@ -560,12 +569,17 @@ if (workerFns && Object.keys(workerFns).length > 0) {
   }
 }
 
+/// Write RESULT to worker SHM slot. Must follow the same write ordering
+/// as the C addon's pollDispatch: data → len → CRC → state → seq.
+/// INVARIANT: CRC is computed OVER the final data. If this function is
+/// interrupted (process killed), either CRC mismatches (partial write
+/// detected) or sidecar_seq isn't bumped (server never reads it). Safe.
 function writeWorkerResult(buf: Buffer, slot: number, regionHdr: number, slotPairSize: number,
   frameMax: number, requestId: number, flag: number, data: Uint8Array) {
   const hdr = regionHdr + slot * slotPairSize;
   const respOffset = hdr + 64 + frameMax; // slot header + request area.
 
-  // Build RESULT: [tag:0x11][request_id:4 BE][flag:1][data]
+  // Step 1: Write RESULT payload to response area.
   let pos = 0;
   buf[respOffset + pos] = 0x11; pos += 1;
   buf.writeUInt32BE(requestId, respOffset + pos); pos += 4;
@@ -575,18 +589,19 @@ function writeWorkerResult(buf: Buffer, slot: number, regionHdr: number, slotPai
     pos += data.length;
   }
 
-  // Set response_len.
+  // Step 2: Set response_len.
   buf.writeUInt32LE(pos, hdr + 12);
 
-  // CRC: len_bytes ++ payload_bytes (matches Zig convention).
+  // Step 3: Compute and write CRC (over len_bytes ++ payload_bytes).
   const lenBuf = Buffer.alloc(4);
   lenBuf.writeUInt32LE(pos);
-  // Simple CRC32 using Node.js zlib.
-  // crc32 imported at module level from node:zlib.
   const crcVal = crc32(Buffer.concat([lenBuf, buf.subarray(respOffset, respOffset + pos)]));
   buf.writeUInt32LE(crcVal, hdr + 20); // response_crc
 
-  // Bump sidecar_seq + futex wake.
+  // Step 4: Set slot_state = result_written.
+  buf[hdr + 24] = 2; // SlotState.result_written
+
+  // Step 5: Bump sidecar_seq (must be LAST — server reads this to detect response).
   const curSeq = buf.readUInt32LE(hdr + 4);
   buf.writeUInt32LE(curSeq + 1, hdr + 4);
   // No futex_wake: server polls sidecar_seq in tick loop.
