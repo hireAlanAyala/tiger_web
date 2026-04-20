@@ -13,6 +13,7 @@
 
 const std = @import("std");
 const stdx = @import("stdx");
+const scanner = @import("annotation_scanner.zig");
 
 pub const std_options: std.Options = .{ .log_level = .info };
 
@@ -132,9 +133,14 @@ fn cmd_new(args: NewArgs) !void {
 // focus build
 // =============================================================
 
-fn cmd_build(allocator: std.mem.Allocator, args: BuildArgs) !void {
+fn cmd_build(gpa: std.mem.Allocator, args: BuildArgs) !void {
     const path = args.path;
     const stdout = std.io.getStdOut().writer();
+
+    // Arena for scanner (allocates freely, freed after scan completes).
+    var arena = std.heap.ArenaAllocator.init(gpa);
+    defer arena.deinit();
+    const allocator = arena.allocator();
 
     // Read .focus file for build hook.
     const dot_focus = std.fs.cwd().readFileAlloc(allocator, ".focus", 4096) catch {
@@ -146,9 +152,19 @@ fn cmd_build(allocator: std.mem.Allocator, args: BuildArgs) !void {
         std.process.exit(1);
     };
 
-    // Step 1: Run the annotation scanner (framework-owned).
-    // TODO: link scanner in-process instead of shelling out.
-    try run_cmd(allocator, &.{ "sh", "-c", std.fmt.allocPrint(allocator, "focus build-scan {s}", .{path}) catch unreachable });
+    // Ensure focus/ directory exists for generated output.
+    std.fs.cwd().makeDir("focus") catch |err| {
+        if (err != error.PathAlreadyExists) return err;
+    };
+
+    // Step 1: Run the annotation scanner (linked in-process — no subprocess).
+    try scanner.scan(allocator, .{
+        .scan_dir = path,
+        .manifest_path = "focus/manifest.json",
+        .registry_path = "focus/operations.json",
+        .operations_zig_path = "focus/operations.generated.zig",
+        .routes_zig_path = "focus/routes.generated.zig",
+    });
 
     // Step 2: Run the user's build hook (from .focus file).
     try run_cmd(allocator, &.{ "sh", "-c", build_hook });

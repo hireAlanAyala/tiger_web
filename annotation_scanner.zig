@@ -845,6 +845,17 @@ fn scan_file_content(
     return errors;
 }
 
+/// Options for the scanner — used both by main() and by in-process callers (focus.zig).
+pub const ScanOptions = struct {
+    scan_dir: []const u8,
+    manifest_path: ?[]const u8 = null,
+    routes_zig_path: ?[]const u8 = null,
+    handlers_zig_path: ?[]const u8 = null,
+    prefetch_zig_path: ?[]const u8 = null,
+    operations_zig_path: ?[]const u8 = null,
+    registry_path: ?[]const u8 = null,
+};
+
 pub fn main() !void {
     var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
     defer arena.deinit();
@@ -858,27 +869,36 @@ pub fn main() !void {
         std.process.exit(1);
     };
 
-    var manifest_path: ?[]const u8 = null;
-    var routes_zig_path: ?[]const u8 = null;
-    var handlers_zig_path: ?[]const u8 = null;
-    var prefetch_zig_path: ?[]const u8 = null;
-    var operations_zig_path: ?[]const u8 = null;
-    var registry_path: ?[]const u8 = null;
+    var opts = ScanOptions{ .scan_dir = scan_dir };
     while (args.next()) |arg| {
         if (std.mem.startsWith(u8, arg, "--manifest=")) {
-            manifest_path = arg[11..];
+            opts.manifest_path = arg[11..];
         } else if (std.mem.startsWith(u8, arg, "--routes-zig=")) {
-            routes_zig_path = arg[13..];
+            opts.routes_zig_path = arg[13..];
         } else if (std.mem.startsWith(u8, arg, "--handlers-zig=")) {
-            handlers_zig_path = arg[15..];
+            opts.handlers_zig_path = arg[15..];
         } else if (std.mem.startsWith(u8, arg, "--prefetch-zig=")) {
-            prefetch_zig_path = arg[15..];
+            opts.prefetch_zig_path = arg[15..];
         } else if (std.mem.startsWith(u8, arg, "--operations-zig=")) {
-            operations_zig_path = arg[17..];
+            opts.operations_zig_path = arg[17..];
         } else if (std.mem.startsWith(u8, arg, "--registry=")) {
-            registry_path = arg[11..];
+            opts.registry_path = arg[11..];
         }
     }
+
+    try scan(allocator, opts);
+}
+
+/// Run the annotation scanner with the given options.
+/// Callable in-process from focus.zig (no process args dependency).
+pub fn scan(allocator: std.mem.Allocator, opts: ScanOptions) !void {
+    const scan_dir = opts.scan_dir;
+    const manifest_path = opts.manifest_path;
+    const routes_zig_path = opts.routes_zig_path;
+    const handlers_zig_path = opts.handlers_zig_path;
+    const prefetch_zig_path = opts.prefetch_zig_path;
+    const operations_zig_path = opts.operations_zig_path;
+    const registry_path = opts.registry_path;
 
     var annotations = std.ArrayList(Annotation).init(allocator);
     defer annotations.deinit();
