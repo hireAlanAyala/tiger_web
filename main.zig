@@ -50,6 +50,7 @@ pub fn main() !void {
     switch (cmd) {
         .start => |cli| cmd_start(cli, &args),
         .trace => |cli| cmd_trace(cli),
+        .schema => |cli| cmd_schema(cli),
     }
 }
 
@@ -247,6 +248,50 @@ fn cmd_trace(cli: TraceArgs) void {
     }
 
     std.posix.close(fd);
+}
+
+fn cmd_schema(cli: SchemaArgs) void {
+    const stdout = std.io.getStdOut().writer();
+
+    if (std.mem.eql(u8, cli.action, "reset")) {
+        // Delete the database file and recreate from schema.
+        std.fs.cwd().deleteFile(cli.db) catch |err| {
+            if (err != error.FileNotFound) {
+                stdout.print("error: could not delete {s}: {}\n", .{ cli.db, err }) catch {};
+                std.process.exit(1);
+            }
+        };
+        stdout.print("deleted {s}\n", .{cli.db}) catch {};
+    } else if (!std.mem.eql(u8, cli.action, "apply")) {
+        stdout.print("error: unknown schema action '{s}' — use 'apply' or 'reset'\n", .{cli.action}) catch {};
+        std.process.exit(1);
+    }
+
+    // Read the SQL file.
+    const sql = std.fs.cwd().readFileAlloc(gpa.allocator(), cli.file, 1024 * 1024) catch |err| {
+        stdout.print("error: could not read {s}: {}\n", .{ cli.file, err }) catch {};
+        std.process.exit(1);
+    };
+
+    // Open SQLite directly (not through Storage — schema is arbitrary DDL).
+    const c = @cImport(@cInclude("sqlite3.h"));
+    var db: ?*c.sqlite3 = null;
+    if (c.sqlite3_open(cli.db.ptr, &db) != c.SQLITE_OK) {
+        stdout.print("error: could not open database {s}\n", .{cli.db}) catch {};
+        std.process.exit(1);
+    }
+    defer _ = c.sqlite3_close(db);
+
+    // Execute the SQL file (may contain multiple statements).
+    var err_msg: [*c]u8 = null;
+    const rc = c.sqlite3_exec(db, @ptrCast(sql.ptr), null, null, &err_msg);
+    if (rc != c.SQLITE_OK) {
+        const msg: []const u8 = if (err_msg) |e| std.mem.sliceTo(e, 0) else "unknown error";
+        stdout.print("error: schema failed: {s}\n  file: {s}\n", .{ msg, cli.file }) catch {};
+        if (err_msg) |e| c.sqlite3_free(e);
+        std.process.exit(1);
+    }
+    stdout.print("schema applied: {s} → {s}\n", .{ cli.file, cli.db }) catch {};
 }
 
 // --- Init helpers (each under 70 lines) ---
@@ -605,15 +650,18 @@ fn run_loop(state: *RunState) void {
 const Command = union(enum) {
     start: StartArgs,
     trace: TraceArgs,
+    schema: SchemaArgs,
 
     pub const help =
         \\Usage:
         \\  tiger-web start [options] [-- sidecar-command...]
         \\  tiger-web trace --max=<size> :<port>
+        \\  tiger-web schema apply <file.sql> [--db=<path>]
         \\
         \\Runtime commands:
         \\  start   Run the server
         \\  trace   Attach to a running server, capture a Chrome Tracing file
+        \\  schema  Apply SQL schema to the database
         \\
         \\Development commands (via zig build):
         \\  zig build test       Simulation tests (correctness)
@@ -644,4 +692,12 @@ const TraceArgs = struct {
     @"--": void,
     /// Positional: ":port" (e.g. ":3000")
     target: []const u8,
+};
+
+const SchemaArgs = struct {
+    db: [:0]const u8 = "tiger_web.db",
+    /// Positional: subcommand (apply/reset) + file path
+    @"--": void,
+    action: []const u8, // "apply" or "reset"
+    file: []const u8, // "schema.sql"
 };
