@@ -100,6 +100,20 @@ fn run_tests(shell: *Shell) !void {
         try shell.exec("test -f focus/operations.ts", .{});
         try shell.exec("test -f focus/routes.generated.zig", .{});
 
+        // Dev loop: server + sidecar + watch, exits after 3s timeout.
+        // Exercises: embedded server start, SHM region creation, sidecar spawn,
+        // graceful shutdown. Catches: port conflicts, missing deps, env var wiring.
+        //
+        // Override .focus start hook with a stub sidecar (sleep) — CI doesn't have npx.
+        // The real sidecar is tested in the integration test (Level 2) above.
+        // Write a minimal .focus with a no-op build and sleep sidecar.
+        {
+            const focus_file = try std.fs.cwd().createFile(".focus", .{});
+            defer focus_file.close();
+            try focus_file.writeAll("build = true\nstart = sleep 10\n");
+        }
+        try shell.exec("{focus} dev --timeout=3 src/", .{ .focus = "../zig-out/bin/focus" });
+
         // Cleanup.
         shell.exec("rm -rf {project}", .{ .project = project }) catch {};
     }
