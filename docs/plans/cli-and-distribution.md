@@ -697,10 +697,10 @@ environment.
 - [x] Delete shell scripts (focus, focus-internal)
 
 ### Next
-1. **File watcher: inotify/kqueue** — replace stat polling with kernel events
-2. **Labeled output** — [server], [sidecar], [watch] prefixes
-3. **Move smoke test to ci.zig** — delete shell script
-4. **Update Dockerfile** — deployment only, remove shell references
+- [x] File watcher: inotify on Linux, stat polling on macOS
+- [x] Labeled output: [watch] from focus, scoped logs from server, [shm] from sidecar
+- [ ] Move smoke test to ci.zig (delete shell script)
+- [ ] Update Dockerfile (deployment only, remove shell references)
 
 ### Deferred (after CLI works)
 - `focus self-update` (GitHub releases + checksum verification)
