@@ -1060,3 +1060,42 @@ test "sidecar: crash mid-RESULT — CRC mismatch yields 503, no corruption" {
     // Assert: no garbage in body (it's the framework's 503 message, not corrupted RESULT).
     try std.testing.expect(final_resp.body.len < 200); // framework 503 is short
 }
+
+test "sidecar: liveness — normal request completes within bounded ticks" {
+    // LIVENESS assertion: a normal request through the full pipeline
+    // (route_prefetch → SQL → handle_render → HTTP response) must
+    // complete within a bounded number of ticks. If this fails, the
+    // pipeline is stuck — not just slow.
+    //
+    // This catches: broken poll loops (off-by-one in slot iteration),
+    // stuck state machines, lost responses. Different from correctness
+    // tests (which check the response IS correct but don't bound WHEN).
+    var h: TestHarness = undefined;
+    try h.init();
+    defer h.deinit();
+
+    h.connect_sidecar();
+    h.connect_http();
+    h.prepare_next_request();
+    h.inject_post();
+
+    // The request must complete within 100 ticks (1 second at 10ms/tick).
+    // Normal latency is <10 ticks. 100 gives 10× headroom for test
+    // infrastructure overhead without masking real liveness bugs.
+    const liveness_budget = 100;
+    var ticks: u32 = 0;
+    while (ticks < liveness_budget) : (ticks += 1) {
+        h.tick_all();
+        if (h.io.read_response(TestHarness.http_slot)) |resp| {
+            try std.testing.expectEqual(@as(u16, 200), resp.status_code);
+            // LIVENESS PROVED: response arrived within budget.
+            return;
+        }
+        if (h.io.read_close_response(TestHarness.http_slot)) |resp| {
+            try std.testing.expectEqual(@as(u16, 200), resp.status_code);
+            return;
+        }
+    }
+    // If we get here, liveness failed — request didn't complete in time.
+    return error.TestUnexpectedResult;
+}

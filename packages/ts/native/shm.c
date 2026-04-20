@@ -253,9 +253,11 @@ static napi_value poll_dispatch(napi_env env, napi_callback_info info) {
 
     uint8_t *payload = hdr + SHM_SLOT_HEADER; // request area starts after header
 
-    // Validate CRC.
+    // Validate CRC. Sentinel: CRC=0 means "not yet written" (server
+    // crashed mid-CALL write). Skip rather than risk 1-in-2^32 false positive.
     uint32_t stored_crc;
     memcpy(&stored_crc, hdr + SHM_REQUEST_CRC, 4);
+    if (stored_crc == 0) continue;
     uint32_t computed_crc = compute_crc(payload, request_len);
     if (stored_crc != computed_crc) continue;
 

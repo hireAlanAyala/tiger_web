@@ -89,15 +89,48 @@ export class ShmClient {
   }
 
   startPolling(): void {
-    // Signal the server: we're actively polling, no futex_wake needed.
-    // Offset 12 in region header = sidecar_polling flag.
-    // NOTE: once set, never transitions back to 0. The sidecar polls
-    // for the entire process lifetime. If adaptive idle/active transitions
-    // are needed in the future, add a tick counter that clears the flag
-    // after N idle ticks and calls startWaiting().
+    // Adaptive polling: poll aggressively (setImmediate) when active,
+    // back off to 1ms setTimeout when idle. Prevents 100% CPU at idle
+    // while maintaining low latency under load.
+    //
+    // Transition: active → idle after 1000 idle ticks (~10ms of no work).
+    // Transition: idle → active on first dispatched frame.
+    let idleTicks = 0;
+    const IDLE_THRESHOLD = 1000; // ticks with no work before backing off
+
+    const activeTick = () => {
+      const dispatched = this.poll();
+      if (dispatched > 0) {
+        idleTicks = 0;
+        setImmediate(activeTick);
+      } else {
+        idleTicks++;
+        if (idleTicks >= IDLE_THRESHOLD) {
+          // Switch to idle: back off to 1ms, clear polling flag so
+          // server sends futex_wake on next CALL.
+          this.buf.writeUInt32LE(0, SIDECAR_POLLING_OFFSET);
+          idleTick();
+        } else {
+          setImmediate(activeTick);
+        }
+      }
+    };
+
+    const idleTick = () => {
+      const dispatched = this.poll();
+      if (dispatched > 0) {
+        // Wake up: switch back to active polling.
+        idleTicks = 0;
+        this.buf.writeUInt32LE(1, SIDECAR_POLLING_OFFSET);
+        setImmediate(activeTick);
+      } else {
+        setTimeout(idleTick, 1);
+      }
+    };
+
+    // Start in active mode.
     this.buf.writeUInt32LE(1, SIDECAR_POLLING_OFFSET);
-    const tick = () => { this.poll(); setImmediate(tick); };
-    setImmediate(tick);
+    setImmediate(activeTick);
   }
 
   startWaiting(): void {

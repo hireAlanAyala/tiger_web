@@ -439,7 +439,12 @@ pub fn SharedMemoryBusType(comptime options: Options) type {
             }
 
             // Validate CRC (len ++ payload).
+            // Sentinel: CRC=0 means "not yet written" (partial CALL/RESULT crash).
+            // A valid CRC that computes to 0 is treated as invalid — one fewer
+            // valid value out of 2^32 is acceptable. Prevents 1-in-4B false
+            // positive on partial writes where the CRC field hasn't been set.
             const stored_crc = slot.header.response_crc;
+            if (stored_crc == 0) return; // CRC not yet written
             var crc = Crc32.init();
             crc.update(std.mem.asBytes(&response_len));
             crc.update(slot.response[0..response_len]);

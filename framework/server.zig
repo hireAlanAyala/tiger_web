@@ -370,6 +370,16 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
             assert(conn.state == .ready);
 
             const entry = server.shm_dispatch.acquire_entry() orelse {
+                // All slots occupied. Check if sidecar is stuck — if all
+                // slots have been pending longer than the response timeout,
+                // the sidecar is overloaded or dead. Fast-fail with 503
+                // instead of queueing (prevents latency pileup).
+                if (server.all_slots_stuck()) {
+                    const resp = sidecar_unavailable_response(conn);
+                    conn.keep_alive = false;
+                    conn.set_response(resp.offset, resp.len);
+                    return;
+                }
                 server.suspend_connection(conn);
                 return;
             };
@@ -394,6 +404,20 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
                 server.suspend_connection(conn);
                 return;
             }
+        }
+
+        /// Returns true if ALL dispatch slots have been pending longer than
+        /// half the timeout. Indicates sidecar is stuck/overloaded — new
+        /// requests should fast-fail with 503 instead of queueing.
+        fn all_slots_stuck(server: *Server) bool {
+            if (!App.sidecar_enabled) return false;
+            const half_timeout = sidecar_response_timeout_ticks / 2;
+            for (&server.shm_dispatch.entries) |*entry| {
+                if (entry.stage == .free) return false; // at least one free slot
+                const elapsed = server.tick_count -% entry.pending_since;
+                if (elapsed < half_timeout) return false; // at least one recent
+            }
+            return true; // all slots occupied AND all pending > half timeout
         }
 
         /// 1-RT dispatch: route natively, execute prefetch SQL, send

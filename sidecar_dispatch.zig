@@ -17,11 +17,10 @@
 
 const std = @import("std");
 const assert = std.debug.assert;
+const log = std.log.scoped(.sidecar_dispatch);
 const message = @import("message.zig");
 const protocol = @import("protocol.zig");
 const http = @import("framework/http.zig");
-
-const log = std.log.scoped(.sidecar_dispatch);
 
 pub fn SidecarDispatchType(comptime Bus: type) type {
     return struct {
@@ -624,7 +623,10 @@ pub fn SidecarDispatchType(comptime Bus: type) type {
             }
             assert(pos + status_len <= data.len);
 
-            entry.handle_status = message.Status.from_string(data[pos..][0..status_len]) orelse .storage_error;
+            entry.handle_status = message.Status.from_string(data[pos..][0..status_len]) orelse blk: {
+                log.warn("sidecar: unknown status '{s}' — treating as storage_error", .{data[pos..][0..status_len]});
+                break :blk .storage_error;
+            };
             pos += status_len;
 
             entry.handle_session_action = switch (data[pos]) {

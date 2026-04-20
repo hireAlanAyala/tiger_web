@@ -329,9 +329,12 @@ function dispatchRoutePrefetch(requestId: number, args: Uint8Array): Uint8Array 
 
 // --- Combined Handle+Render (1-RT) ---
 
-// Note: C-side pre-parsing of args was tested but N-API overhead for
-// creating 4 extra JS values (napi_create_string_utf8 etc.) exceeded
+// Handler timeout warning: if handle+render exceeds this, log a warning.
+// Not a hard kill (can't abort synchronous JS), but alerts the developer.
+const HANDLER_WARN_MS = 100;
+
 function dispatchHandleRender(requestId: number, args: Uint8Array): Uint8Array {
+  const startTime = performance.now();
   const dv = new DataView(args.buffer, args.byteOffset, args.byteLength);
   let pos = 0;
 
@@ -470,8 +473,14 @@ function dispatchHandleRender(requestId: number, args: Uint8Array): Uint8Array {
   rpos += htmlLen;
 
   // Post-dispatch invariants — catch state leaks between requests.
-  // These are O(1) checks that fire if a handler corrupts shared state.
   if (rpos > FRAME_MAX) throw new Error(`RESULT frame overflow: ${rpos} > ${FRAME_MAX}`);
+
+  // Handler timing warning — alerts developer to slow handlers that
+  // could cause server-side timeouts and abandoned slots.
+  const elapsed = performance.now() - startTime;
+  if (elapsed > HANDLER_WARN_MS) {
+    console.warn(`[shm] slow handler: ${opName} took ${elapsed.toFixed(1)}ms (warn threshold: ${HANDLER_WARN_MS}ms)`);
+  }
 
   return _resultBuf.subarray(0, rpos);
 }
