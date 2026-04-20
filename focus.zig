@@ -100,10 +100,17 @@ fn cmd_new(args: NewArgs) !void {
         .{ "tsconfig.json", @embedFile("templates/ts/tsconfig.json") },
         .{ "src/list_items.ts", @embedFile("templates/ts/src/list_items.ts") },
         .{ "src/create_item.ts", @embedFile("templates/ts/src/create_item.ts") },
+        .{ "focus/sidecar.ts", @embedFile("templates/ts/focus/sidecar.ts") },
+        .{ "focus/codegen.ts", @embedFile("templates/ts/focus/codegen.ts") },
+        .{ "focus/types.ts", @embedFile("templates/ts/focus/types.ts") },
+        .{ "focus/serde.ts", @embedFile("templates/ts/focus/serde.ts") },
+        .{ "focus/routing.ts", @embedFile("templates/ts/focus/routing.ts") },
+        .{ "focus/shm.c", @embedFile("templates/ts/focus/shm.c") },
     };
 
     const dir = try std.fs.cwd().openDir(name, .{});
     dir.makeDir("src") catch {};
+    dir.makeDir("focus") catch {};
 
     inline for (templates) |t| {
         const path = t[0];

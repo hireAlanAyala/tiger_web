@@ -1,2 +1,2 @@
-build = npx tsx focus/codegen.ts
+build = npx tsx focus/codegen.ts focus/manifest.json focus/handlers.generated.ts focus/operations.json focus/operations.ts
 start = npx tsx focus/sidecar.ts $SHM $SOCK
