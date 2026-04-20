@@ -1,0 +1,43 @@
+{
+  "crc": {
+    "algorithm": "CRC32-ISO-HDLC",
+    "polynomial": "0xEDB88320",
+    "note": "Standard IEEE 802.3 / zlib CRC32. Same as Zig std.hash.crc.Crc32 and Node.js zlib.crc32()"
+  },
+  "endianness": {
+    "lengths_and_ids": "big-endian",
+    "row_data_integers": "little-endian",
+    "shm_header_fields": "little-endian",
+    "note": "Frame fields (request_id, name_len, sql_len) are BE. SQLite integers in row sets are LE. SHM region/slot headers are LE."
+  },
+  "type_tags": {
+    "integer": 1,
+    "float": 2,
+    "text": 3,
+    "blob": 4,
+    "null": 5
+  },
+  "call_tags": {
+    "call": 16,
+    "result": 17,
+    "query": 18,
+    "query_result": 19,
+    "ready": 32
+  },
+  "result_flags": {
+    "success": 0,
+    "error": 1
+  },
+  "query_modes": {
+    "query": 0,
+    "queryAll": 1
+  },
+  "constants": {
+    "frame_max": 262144,
+    "columns_max": 32,
+    "column_name_max": 128,
+    "cell_value_max": 4096,
+    "sql_max": 4096,
+    "writes_max": 21
+  }
+}

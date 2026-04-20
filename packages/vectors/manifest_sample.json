@@ -1,0 +1,94 @@
+{
+  "annotations": [
+    {
+      "phase": "translate",
+      "operation": "list_items",
+      "file": "src/list_items.ts",
+      "line": 4,
+      "has_body": true,
+      "route_match": { "method": "get", "pattern": "/" }
+    },
+    {
+      "phase": "prefetch",
+      "operation": "list_items",
+      "file": "src/list_items.ts",
+      "line": 10,
+      "has_body": true
+    },
+    {
+      "phase": "execute",
+      "operation": "list_items",
+      "file": "src/list_items.ts",
+      "line": 16,
+      "has_body": true,
+      "statuses": ["ok"]
+    },
+    {
+      "phase": "render",
+      "operation": "list_items",
+      "file": "src/list_items.ts",
+      "line": 21,
+      "has_body": true
+    },
+    {
+      "phase": "translate",
+      "operation": "create_item",
+      "file": "src/create_item.ts",
+      "line": 3,
+      "has_body": true,
+      "route_match": { "method": "post", "pattern": "/items" }
+    },
+    {
+      "phase": "prefetch",
+      "operation": "create_item",
+      "file": "src/create_item.ts",
+      "line": 14,
+      "has_body": true
+    },
+    {
+      "phase": "execute",
+      "operation": "create_item",
+      "file": "src/create_item.ts",
+      "line": 17,
+      "has_body": true,
+      "statuses": ["ok"]
+    },
+    {
+      "phase": "render",
+      "operation": "create_item",
+      "file": "src/create_item.ts",
+      "line": 23,
+      "has_body": true
+    },
+    {
+      "phase": "translate",
+      "operation": "search_items",
+      "file": "src/search_items.ts",
+      "line": 4,
+      "has_body": true,
+      "route_match": { "method": "get", "pattern": "/search", "query_params": ["q"] }
+    },
+    {
+      "phase": "prefetch",
+      "operation": "search_items",
+      "file": "src/search_items.ts",
+      "line": 12,
+      "has_body": true
+    },
+    {
+      "phase": "execute",
+      "operation": "search_items",
+      "file": "src/search_items.ts",
+      "line": 20,
+      "has_body": true,
+      "statuses": ["ok", "not_found"]
+    },
+    {
+      "phase": "render",
+      "operation": "search_items",
+      "file": "src/search_items.ts",
+      "line": 25,
+      "has_body": true
+    }
+  ]
+}

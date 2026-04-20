@@ -1,0 +1,65 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "description": "Scanner manifest output — consumed by language-specific codegen",
+  "type": "object",
+  "required": ["annotations"],
+  "properties": {
+    "annotations": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["phase", "operation", "file", "line", "has_body"],
+        "properties": {
+          "phase": {
+            "type": "string",
+            "enum": ["translate", "prefetch", "execute", "render", "worker"],
+            "description": "Handler phase. translate=route, execute=handle in user-facing terminology."
+          },
+          "operation": {
+            "type": "string",
+            "description": "Operation name (matches scanner annotation: // [phase] .operation_name)"
+          },
+          "file": {
+            "type": "string",
+            "description": "Source file path relative to project root"
+          },
+          "line": {
+            "type": "integer",
+            "description": "Line number of the annotation"
+          },
+          "has_body": {
+            "type": "boolean",
+            "description": "Whether the function has a non-empty body"
+          },
+          "route_match": {
+            "type": "object",
+            "description": "Present only on translate (route) phase annotations",
+            "properties": {
+              "method": { "type": "string", "enum": ["get", "post", "put", "delete"] },
+              "pattern": { "type": "string", "description": "URL pattern (e.g. /products/:id)" },
+              "query_params": {
+                "type": "array",
+                "items": { "type": "string" },
+                "description": "Query parameters extracted by the route (e.g. ['q'] for search)"
+              }
+            },
+            "required": ["method", "pattern"]
+          },
+          "statuses": {
+            "type": "array",
+            "items": { "type": "string" },
+            "description": "Return statuses declared by execute (handle) phase"
+          },
+          "returns": {
+            "type": "string",
+            "description": "Worker completion target operation name"
+          },
+          "timeout": {
+            "type": "integer",
+            "description": "Handler timeout in milliseconds (from @timeout annotation)"
+          }
+        }
+      }
+    }
+  }
+}

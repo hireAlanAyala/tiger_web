@@ -1,0 +1,5 @@
+{
+  "protocol_version": 1,
+  "description": "Focus binary protocol — CALL/RESULT over shared memory",
+  "generated_by": "protocol.zig unit tests"
+}

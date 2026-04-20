@@ -1,0 +1,20 @@
+[
+  {
+    "description": "empty input",
+    "input_hex": "",
+    "expected_crc32": 0,
+    "expected_crc32_hex": "0x00000000"
+  },
+  {
+    "description": "ASCII 'hello'",
+    "input_hex": "68656c6c6f",
+    "expected_crc32": 907060870,
+    "expected_crc32_hex": "0x3610a686"
+  },
+  {
+    "description": "SHM CRC convention: u32 LE length bytes ++ payload bytes",
+    "input_hex": "0b0000001000000001000870726566",
+    "expected_crc32": 2982635146,
+    "expected_crc32_hex": "0xb1c7668a"
+  }
+]
