@@ -54,7 +54,7 @@ pub fn main() !void {
     }
 }
 
-fn cmd_start(cli: StartArgs, args: *std.process.ArgIterator) void {
+pub fn cmd_start(cli: StartArgs, args: *std.process.ArgIterator) void {
     const allocator = gpa.allocator();
     const sidecar_argv = collect_sidecar_argv(args);
     const secret_key = validate_config(cli);
@@ -250,7 +250,7 @@ fn cmd_trace(cli: TraceArgs) void {
     std.posix.close(fd);
 }
 
-fn cmd_schema(cli: SchemaArgs) void {
+pub fn cmd_schema(cli: SchemaArgs) void {
     const stdout = std.io.getStdOut().writer();
 
     if (std.mem.eql(u8, cli.action, "reset")) {
@@ -674,7 +674,7 @@ const Command = union(enum) {
     ;
 };
 
-const StartArgs = struct {
+pub const StartArgs = struct {
     port: u16 = 3000,
     log_debug: bool = false,
     log_trace: bool = false,
@@ -694,7 +694,7 @@ const TraceArgs = struct {
     target: []const u8,
 };
 
-const SchemaArgs = struct {
+pub const SchemaArgs = struct {
     db: [:0]const u8,
     /// Positional: subcommand (apply/reset) + file path
     @"--": void,

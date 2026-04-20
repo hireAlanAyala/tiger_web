@@ -160,6 +160,9 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
     focus_exe.root_module.addImport("stdx", stdx_module);
+    focus_exe.root_module.addOptions("build_options", build_options);
+    focus_exe.linkSystemLibrary("sqlite3");
+    focus_exe.linkLibC();
     b.installArtifact(focus_exe);
 
     const focus_cmd = b.addRunArtifact(focus_exe);

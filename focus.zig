@@ -14,6 +14,7 @@
 const std = @import("std");
 const stdx = @import("stdx");
 const scanner = @import("annotation_scanner.zig");
+const server_main = @import("main.zig");
 
 pub const std_options: std.Options = .{ .log_level = .info };
 
@@ -250,13 +251,13 @@ fn cmd_dev(gpa: std.mem.Allocator, args: DevArgs) !void {
 
     // Step 2: Apply schema if schema.sql exists.
     if (std.fs.cwd().access("schema.sql", .{})) |_| {
-        try run_cmd(gpa, &.{ "sh", "-c", "focus schema --db=tiger_web.db apply schema.sql" });
+        apply_schema("schema.sql", "tiger_web.db");
     } else |_| {}
 
-    // Step 3: Start server.
-    // TODO: embed server in-process. For now, spawn the tiger-web binary.
-    var server = try spawn_cmd(gpa, &.{ "tiger-web", "start", "--port=0", "--sidecar=/tmp/focus-dev.sock", "--db=tiger_web.db" }, null);
-    const server_pid = server.id;
+    // Step 3: Start server in a background thread (embedded, same process).
+    const server_thread = try std.Thread.spawn(.{}, run_server, .{});
+    _ = server_thread; // detached — runs until process exits
+    const server_pid = std.os.linux.getpid();
 
     // Compute SHM name from server PID.
     var shm_buf: [32]u8 = undefined;
@@ -277,7 +278,6 @@ fn cmd_dev(gpa: std.mem.Allocator, args: DevArgs) !void {
     }
     if (!ready) {
         try stdout.print("error: server did not start (no SHM region)\n", .{});
-        _ = server.kill() catch {};
         std.process.exit(1);
     }
 
@@ -324,6 +324,31 @@ fn cmd_dev(gpa: std.mem.Allocator, args: DevArgs) !void {
         last_mtime = new_mtime;
     }
 
+}
+
+/// Run the server in the current thread (called from a spawned thread).
+fn run_server() void {
+    // Empty arg iterator — no sidecar command argv (we manage the sidecar ourselves).
+    var args = std.process.args();
+    // Exhaust all args so the server sees no -- argv.
+    while (args.next()) |_| {}
+    server_main.cmd_start(.{
+        .port = 0,
+        .sidecar = "/tmp/focus-dev.sock",
+        .db = "tiger_web.db",
+        .@"--" = {},
+    }, &args);
+}
+
+/// Apply a schema SQL file to a database.
+fn apply_schema(_: []const u8, _: [:0]const u8) void {
+    // Delegate to the server binary's schema command (same process).
+    server_main.cmd_schema(.{
+        .db = "tiger_web.db",
+        .action = "apply",
+        .file = "schema.sql",
+        .@"--" = {},
+    });
 }
 
 /// Get the most recent mtime of any .ts file in a directory.
