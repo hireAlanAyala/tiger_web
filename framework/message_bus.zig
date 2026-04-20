@@ -129,6 +129,12 @@ pub fn ConnectionType(comptime IO: type, comptime options: Options) type {
         state: State,
         fd: IO.fd_t,
 
+        /// Tick when terminate() was called. If the connection stays
+        /// in .terminating for more than terminate_deadline_ticks,
+        /// force-close it. Prevents stuck connections when the IO
+        /// layer doesn't deliver completions for dead sockets.
+        terminate_tick: u32 = 0,
+
         // --- Recv state ---
         // Recv buffer is a *Message from the pool. Frame data points
         // into this buffer. Consumer can ref it to keep data alive.
@@ -311,8 +317,16 @@ pub fn ConnectionType(comptime IO: type, comptime options: Options) type {
                 self.io.shutdown(self.fd, .both);
             }
             self.state = .terminating;
+            self.terminate_tick = current_tick;
             self.terminate_join();
         }
+
+        /// Current tick counter — set by tick_connections().
+        var current_tick: u32 = 0;
+
+        /// Max ticks a connection can stay in .terminating before
+        /// force-close. 50 ticks = 500ms at 10ms/tick.
+        const terminate_deadline_ticks: u32 = 50;
 
         // =====================================================================
         // Recv internals
@@ -760,6 +774,25 @@ pub fn MessageBusType(comptime IO: type, comptime options: Options) type {
                 return;
             };
             log.info("listening on {s}", .{path});
+        }
+
+        /// Tick all connections — force-close stuck terminating connections.
+        /// Called every server tick. Cost: O(connections_max) = O(2).
+        pub fn tick_connections(self: *Self) void {
+            Connection.current_tick +%= 1;
+            for (&self.connections) |*conn| {
+                if (conn.state != .terminating) continue;
+                const elapsed = Connection.current_tick -% conn.terminate_tick;
+                if (elapsed >= Connection.terminate_deadline_ticks) {
+                    log.warn("force-closing stuck connection fd={d} (stuck {d} ticks)", .{
+                        conn.fd, elapsed,
+                    });
+                    // Force-clear submitted flags so terminate_close can proceed.
+                    conn.recv_submitted = false;
+                    conn.send_submitted = false;
+                    conn.terminate_close();
+                }
+            }
         }
 
         /// Accept pending connections — drain until EAGAIN.
@@ -1399,4 +1432,48 @@ test "Connection: re-entrancy — terminate from on_frame" {
     try testing.expectEqual(TestConnection.State.closed, conn.state);
 
     posix.close(client_fd);
+}
+
+test "Connection: peer death delivers recv completion within 1 tick" {
+    // Verifies the IO layer delivers a recv completion when the socket
+    // peer closes. This is the foundation for sidecar reconnection:
+    // if the completion doesn't arrive, the connection stays in
+    // .terminating and the bus slot is stuck.
+    //
+    // The bus termination deadline (50 ticks) is defense-in-depth.
+    // This test proves it's not needed for the happy path.
+    var io = TestIO{};
+    var pool = try TestConnection.Pool.init(testing.allocator, 8);
+    defer pool.deinit(testing.allocator);
+    const pair = test_socketpair();
+    const client_fd = pair[1];
+
+    var close_reason: ?TestConnection.CloseReason = null;
+    const CloseCtx = struct {
+        reason: *?TestConnection.CloseReason,
+
+        fn on_frame(_: *anyopaque, _: u8, _: []const u8) void {}
+        fn on_close(ctx_ptr: *anyopaque, _: u8, reason: TestConnection.CloseReason) void {
+            const self: *@This() = @ptrCast(@alignCast(ctx_ptr));
+            self.reason.* = reason;
+        }
+    };
+
+    var ctx = CloseCtx{ .reason = &close_reason };
+    var conn: TestConnection = undefined;
+    conn.state = .closed;
+    conn.recv_message = null;
+    conn.init(&io, &pool, pair[0], @ptrCast(&ctx), CloseCtx.on_frame, CloseCtx.on_close);
+
+    // Connection has a pending recv. Kill the peer.
+    try testing.expect(conn.recv_submitted);
+    try testing.expectEqual(TestConnection.State.connected, conn.state);
+
+    posix.close(client_fd);
+
+    // One tick: recv fires with 0 (EOF) → terminate → close.
+    TestIO.tick(&conn.recv_completion);
+
+    try testing.expectEqual(TestConnection.State.closed, conn.state);
+    try testing.expectEqual(TestConnection.CloseReason.eof, close_reason.?);
 }
