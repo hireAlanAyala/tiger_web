@@ -328,7 +328,7 @@ fn cmd_dev(gpa: std.mem.Allocator, args: DevArgs) !void {
 
 /// Run the server in a background thread.
 fn run_server() void {
-    server_main.server_run(.{
+    server_main.server_run(std.heap.page_allocator, .{
         .port = 0,
         .db = "tiger_web.db",
         .sidecar = "/tmp/focus-dev.sock",

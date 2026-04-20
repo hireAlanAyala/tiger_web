@@ -56,7 +56,7 @@ pub fn main() !void {
 
 pub fn cmd_start(cli: StartArgs, args: *std.process.ArgIterator) void {
     const sidecar_argv = collect_sidecar_argv(args);
-    server_run(.{
+    server_run(gpa.allocator(), .{
         .port = cli.port,
         .db = cli.db,
         .sidecar = cli.sidecar,
@@ -87,9 +87,8 @@ pub const ServerOptions = struct {
 /// Run the server. Returns errors instead of calling process.exit.
 /// Callable from main.zig (standalone) and focus.zig (embedded).
 /// Blocks indefinitely in the event loop until the process is killed.
-pub fn server_run(opts: ServerOptions) !void {
-    const allocator = gpa.allocator();
-    const secret_key = validate_config_opts(opts);
+pub fn server_run(allocator: std.mem.Allocator, opts: ServerOptions) !void {
+    const secret_key = try validate_config_opts(opts);
 
     var io = try IO.init();
     defer io.deinit();
@@ -447,10 +446,10 @@ fn log_startup_opts(opts: ServerOptions, actual_port: u16) void {
     log.info("listening on port {d}", .{actual_port});
 }
 
-fn validate_config_opts(opts: ServerOptions) *const [auth.key_length]u8 {
+fn validate_config_opts(opts: ServerOptions) error{InvalidConfig}!*const [auth.key_length]u8 {
     if (opts.log_trace and !opts.log_debug) {
         log.err("--log-debug must be provided when using --log-trace", .{});
-        std.process.exit(1);
+        return error.InvalidConfig;
     }
     log_level_runtime = if (opts.log_debug) .debug else .info;
 
@@ -461,7 +460,7 @@ fn validate_config_opts(opts: ServerOptions) *const [auth.key_length]u8 {
     };
     if (secret_env.len != auth.key_length) {
         log.err("SECRET_KEY must be exactly {d} bytes, got {d}", .{ auth.key_length, secret_env.len });
-        std.process.exit(1);
+        return error.InvalidConfig;
     }
     return secret_env[0..auth.key_length];
 }
