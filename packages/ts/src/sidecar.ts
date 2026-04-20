@@ -9,6 +9,15 @@
 // SHM I/O, CRC, frame header parsing. JS only runs handler logic.
 //
 // Library function — called by bin/focus-sidecar.ts with injected registry.
+//
+// DETERMINISM LIMITATION: This sidecar runs on V8 with setImmediate
+// polling. V8's event loop timing, GC pauses, and native addon blocking
+// are non-deterministic and cannot be seeded. Timing-dependent bugs
+// (race conditions, GC during RESULT write, event loop starvation) are
+// unreproducible. The Zig server's SimSidecar provides deterministic
+// coverage of the protocol state machine. This TS runtime is tested
+// via integration tests (end-to-end) and fuzz tests (parser boundary).
+// Accepted trade-off for TypeScript language support.
 
 import net from "node:net";
 import { crc32 } from "node:zlib";
@@ -39,6 +48,9 @@ const _decoder = new TextDecoder();
 const _encoder = new TextEncoder();
 
 const FRAME_MAX = 256 * 1024;
+
+// Pre-allocated CRC length buffer — reused by writeWorkerResult.
+const _crcLenBuf = Buffer.alloc(4);
 
 // Pre-computed hex lookup — avoids toString(16) + padStart per byte.
 const _hexTable: string[] = new Array(256);
@@ -593,9 +605,10 @@ function writeWorkerResult(buf: Buffer, slot: number, regionHdr: number, slotPai
   buf.writeUInt32LE(pos, hdr + 12);
 
   // Step 3: Compute and write CRC (over len_bytes ++ payload_bytes).
-  const lenBuf = Buffer.alloc(4);
-  lenBuf.writeUInt32LE(pos);
-  const crcVal = crc32(Buffer.concat([lenBuf, buf.subarray(respOffset, respOffset + pos)]));
+  // Pre-allocated 4-byte buffer for len — avoids allocation per call.
+  // TODO: expose C addon's compute_crc via N-API for zero-allocation CRC.
+  _crcLenBuf.writeUInt32LE(pos);
+  const crcVal = crc32(Buffer.concat([_crcLenBuf, buf.subarray(respOffset, respOffset + pos)]));
   buf.writeUInt32LE(crcVal, hdr + 20); // response_crc
 
   // Step 4: Set slot_state = result_written.

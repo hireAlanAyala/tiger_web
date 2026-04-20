@@ -240,8 +240,9 @@ static napi_value poll_dispatch(napi_env env, napi_callback_info info) {
 
   for (int i = 0; i < (int)slot_count; i++) {
     uint8_t *hdr = buf + region_header_size + (size_t)i * slot_pair_size;
-    uint32_t server_seq;
-    memcpy(&server_seq, hdr + SHM_SERVER_SEQ, 4); // LE native
+    // Acquire load: ensures all CALL data written by the server is visible
+    // after we observe the new server_seq value.
+    uint32_t server_seq = __atomic_load_n((uint32_t *)(hdr + SHM_SERVER_SEQ), __ATOMIC_ACQUIRE);
 
     if (server_seq <= last_seqs[i]) continue;
     last_seqs[i] = server_seq;
@@ -319,11 +320,18 @@ static napi_value poll_dispatch(napi_env env, napi_callback_info info) {
     memcpy(hdr + SHM_RESPONSE_CRC, &resp_crc, 4);
     hdr[SHM_SLOT_STATE] = 2; // result_written
 
-    // Bump sidecar_seq.
+    // Release fence: all stores above (data, len, CRC, state) must be
+    // visible before the sidecar_seq bump. Without this, ARM CPUs may
+    // reorder the seq write before data writes — the server would see
+    // the new seq but read stale/partial data.
+    __atomic_thread_fence(__ATOMIC_RELEASE);
+
+    // Bump sidecar_seq — the server's acquire load on this field orders
+    // all subsequent reads after this write becomes visible.
     uint32_t cur_seq;
     memcpy(&cur_seq, hdr + SHM_SIDECAR_SEQ, 4);
     cur_seq++;
-    memcpy(hdr + SHM_SIDECAR_SEQ, &cur_seq, 4);
+    __atomic_store_n((uint32_t *)(hdr + SHM_SIDECAR_SEQ), cur_seq, __ATOMIC_RELEASE);
 
     // No futex_wake needed: server polls sidecar_seq in its tick loop
     // (poll_responses called every tick). Same optimization as the

@@ -134,6 +134,10 @@ pub fn SharedMemoryBusType(comptime options: Options) type {
 
         server_seqs: [slot_count]u32 = [_]u32{0} ** slot_count,
         slot_delivered: [slot_count]bool = [_]bool{false} ** slot_count,
+        /// Tracks the request_id sent in each slot's CALL. Verified against
+        /// the RESULT's request_id on response — catches sidecar bugs that
+        /// respond to the wrong request (silent data corruption).
+        sent_request_ids: [slot_count]u32 = [_]u32{0} ** slot_count,
 
         // Message pool — heap-allocated to avoid 4MB inline in Server struct.
         message_pool: ?[*]Message = null,
@@ -317,6 +321,16 @@ pub fn SharedMemoryBusType(comptime options: Options) type {
             assert(slot_idx < slot_count);
             const slot = &region.slots[slot_idx];
 
+            // Precondition: slot must be free. If this fires, the server
+            // dispatched two CALLs to the same slot — a logic bug that would
+            // silently overwrite the first request.
+            assert(slot.header.slot_state == .free);
+
+            // Extract request_id from CALL frame (offset 1, u32 BE) for
+            // verification when the RESULT comes back.
+            assert(payload_len >= 5); // tag + request_id minimum
+            self.sent_request_ids[slot_idx] = std.mem.readInt(u32, slot.request[1..5], .big);
+
             var crc = Crc32.init();
             crc.update(std.mem.asBytes(&payload_len));
             crc.update(slot.request[0..payload_len]);
@@ -349,12 +363,19 @@ pub fn SharedMemoryBusType(comptime options: Options) type {
             assert(slot_idx < slot_count);
             var slot = &region.slots[slot_idx];
 
+            // Precondition: slot must be free before writing a new CALL.
+            assert(slot.header.slot_state == .free);
+
             // New CALL on this slot — clear delivery flag so
             // check_response will deliver the next response.
             self.slot_delivered[slot_idx] = false;
 
             // Write payload to request area.
             @memcpy(slot.request[0..payload_len], message.buffer[0..payload_len]);
+
+            // Extract request_id from CALL frame for response verification.
+            assert(payload_len >= 5);
+            self.sent_request_ids[slot_idx] = std.mem.readInt(u32, slot.request[1..5], .big);
 
             // CRC covers len_bytes ++ payload_bytes (TB convention).
             var crc = Crc32.init();
@@ -425,6 +446,20 @@ pub fn SharedMemoryBusType(comptime options: Options) type {
             if (crc.final() != stored_crc) {
                 log.warn("shm: CRC mismatch on slot {d}", .{slot_idx});
                 return;
+            }
+
+            // Verify request_id matches what we sent. If the sidecar
+            // responds to the wrong request, this catches it — prevents
+            // silent delivery of wrong data to the wrong HTTP client.
+            // RESULT frame layout: [tag:1][request_id:4 BE][flag:1][payload...]
+            if (response_len >= 5) {
+                const resp_request_id = std.mem.readInt(u32, slot.response[1..5], .big);
+                if (resp_request_id != self.sent_request_ids[slot_idx]) {
+                    log.warn("shm: request_id mismatch on slot {d}: sent {d}, got {d}", .{
+                        slot_idx, self.sent_request_ids[slot_idx], resp_request_id,
+                    });
+                    return;
+                }
             }
 
             // Mark as consumed BEFORE the callback — the callback may
