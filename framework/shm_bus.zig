@@ -68,7 +68,12 @@ pub fn SharedMemoryBusType(comptime options: Options) type {
             /// Maximum frame payload size (bytes). Sidecar reads this
             /// instead of hardcoding FRAME_MAX.
             frame_max: u32 = slot_data_size,
-            _pad: [52]u8 = [_]u8{0} ** 52,
+            /// Sidecar sets to 1 when actively polling (setImmediate loop).
+            /// Server skips futex_wake when this is set — the sidecar will
+            /// see the new CALL within one poll cycle without a syscall.
+            /// Set to 0 when sidecar enters futex_wait (idle mode).
+            sidecar_polling: u32 = 0,
+            _pad: [48]u8 = [_]u8{0} ** 48,
 
             comptime {
                 assert(@sizeOf(RegionHeader) == 64);
@@ -304,7 +309,13 @@ pub fn SharedMemoryBusType(comptime options: Options) type {
 
             const epoch_ptr: *u32 = &region.header.epoch;
             _ = @atomicRmw(u32, epoch_ptr, .Add, 1, .release);
-            futex_wake(epoch_ptr);
+
+            // Skip futex_wake when sidecar is actively polling — it will
+            // see the new epoch within one poll cycle (microseconds).
+            // Only wake when sidecar is in futex_wait (idle mode).
+            if (@atomicLoad(u32, &region.header.sidecar_polling, .acquire) == 0) {
+                futex_wake(epoch_ptr);
+            }
         }
 
         /// Write a CALL payload to shared memory for the given slot.
@@ -343,8 +354,10 @@ pub fn SharedMemoryBusType(comptime options: Options) type {
             const epoch_ptr: *u32 = &region.header.epoch;
             _ = @atomicRmw(u32, epoch_ptr, .Add, 1, .release);
 
-            // Wake sidecar via futex on epoch.
-            futex_wake(epoch_ptr);
+            // Skip futex_wake when sidecar is actively polling.
+            if (@atomicLoad(u32, &region.header.sidecar_polling, .acquire) == 0) {
+                futex_wake(epoch_ptr);
+            }
         }
 
         /// Check for responses. Called from the io_uring futex_wait

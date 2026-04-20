@@ -16,6 +16,7 @@ export interface ShmClientOptions {
 
 const REGION_HEADER_SIZE = 64;
 const EPOCH_OFFSET = 0;
+const SIDECAR_POLLING_OFFSET = 12; // RegionHeader.sidecar_polling — u32 LE at offset 12.
 const SLOT_HEADER_SIZE = 64;
 
 export class ShmClient {
@@ -88,11 +89,16 @@ export class ShmClient {
   }
 
   startPolling(): void {
+    // Signal the server: we're actively polling, no futex_wake needed.
+    // Offset 12 in region header = sidecar_polling flag.
+    this.buf.writeUInt32LE(1, SIDECAR_POLLING_OFFSET);
     const tick = () => { this.poll(); setImmediate(tick); };
     setImmediate(tick);
   }
 
   startWaiting(): void {
+    // Signal the server: we're in futex_wait, futex_wake is needed.
+    this.buf.writeUInt32LE(0, SIDECAR_POLLING_OFFSET);
     let lastEpoch = this.buf.readUInt32LE(EPOCH_OFFSET);
     while (true) {
       lastEpoch = shmAddon.spinWait(this.buf, EPOCH_OFFSET, lastEpoch, 100000);
