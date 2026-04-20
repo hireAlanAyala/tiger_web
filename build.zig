@@ -162,11 +162,13 @@ pub fn build(b: *std.Build) void {
 
     // --- Focus CLI (project scaffolding, build, dev) ---
     // Focus CLI always runs with sidecar (it embeds the server + spawns sidecar).
+    // Focus CLI: 4 pipeline slots for concurrent request handling.
+    // One sidecar connection, 4 concurrent in-flight requests.
     const focus_build_options = b.addOptions();
     focus_build_options.addOption(bool, "sidecar_enabled", true);
     focus_build_options.addOption(bool, "skip_native_routes", true);
-    focus_build_options.addOption(u8, "sidecar_count", sidecar_count);
-    focus_build_options.addOption(u8, "pipeline_slots", pipeline_slots);
+    focus_build_options.addOption(u8, "sidecar_count", 1);
+    focus_build_options.addOption(u8, "pipeline_slots", 4);
 
     const focus_exe = b.addExecutable(.{
         .name = "focus",
