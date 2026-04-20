@@ -648,6 +648,41 @@ Yes — `$SHM` and `$SOCK` are passed by the CLI to the start hook.
 No custom expansion logic — standard shell env vars via the subprocess
 environment.
 
+## Implementation order
+
+### Done
+- [x] Port io/darwin.zig from TigerBeetle (1 file, 2 line edits)
+- [x] Platform switch in io.zig (comptime Linux/macOS)
+- [x] CI: macOS runner added to GitHub Actions
+- [x] All framework bug fixes committed (18 commits)
+
+### Next
+1. **Extend typescript.ts** — generate operations.ts as 3rd output
+   (delete inline node -e from focus-internal)
+2. **Schema subcommand in main.zig** — `tiger-web schema apply schema.sql`
+   (server binary gains one subcommand, no runtime behavior change)
+3. **Write focus.zig** — the single Zig CLI binary:
+   - Embeds scanner (link, don't shell out)
+   - Embeds adapter templates (@embedFile)
+   - Subcommands: new, build, dev, start, schema, docs, compile-addon,
+     deploy, self-update, upgrade
+   - File watcher: inotify (Linux) / kqueue (macOS)
+   - Process management: fork server in-process, spawn sidecar,
+     restart sidecar on file change
+   - Labeled output: [server], [sidecar], [watch]
+4. **Move smoke test to ci.zig** — delete shell script
+5. **Delete focus, focus-internal shell scripts**
+6. **Update Dockerfile** — deployment only, slim
+
+### Deferred (after CLI works)
+- `focus self-update` (GitHub releases + checksum verification)
+- `focus upgrade` (diff vendored adapter against new version)
+- `focus deploy --dockerfile` (generate tailored Dockerfile)
+- Wire protocol error encoding (prefetch_error in RESULT frames)
+- install.sh (curl | sh distribution)
+
+---
+
 **How do SQL errors reach the user?**
 The framework always includes errors in the wire protocol — no "dev mode"
 flag, no mode awareness. When prefetch SQL fails, the RESULT frame includes

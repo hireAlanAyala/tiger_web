@@ -152,6 +152,22 @@ pub fn build(b: *std.Build) void {
     const fuzz_build_step = b.step("fuzz:build", "Build fuzz test binary");
     fuzz_build_step.dependOn(print_or_install(b, fuzz_exe, print_exe));
 
+    // --- Focus CLI (project scaffolding, build, dev) ---
+    const focus_exe = b.addExecutable(.{
+        .name = "focus",
+        .root_source_file = b.path("focus.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    focus_exe.root_module.addImport("stdx", stdx_module);
+    b.installArtifact(focus_exe);
+
+    const focus_cmd = b.addRunArtifact(focus_exe);
+    focus_cmd.step.dependOn(b.getInstallStep());
+    if (b.args) |args| focus_cmd.addArgs(args);
+    const focus_step = b.step("focus", "Run the focus CLI");
+    focus_step.dependOn(&focus_cmd.step);
+
     // --- Scripts executable (CFO and other automation) ---
     const scripts_exe = b.addExecutable(.{
         .name = "tiger-scripts",

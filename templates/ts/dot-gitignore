@@ -1,0 +1,4 @@
+node_modules/
+.focus/
+*.db
+*.wal
