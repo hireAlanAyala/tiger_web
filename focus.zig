@@ -13,7 +13,6 @@
 
 const std = @import("std");
 const stdx = @import("stdx");
-const Shell = @import("shell.zig");
 
 pub const std_options: std.Options = .{ .log_level = .info };
 
@@ -65,14 +64,7 @@ pub fn main() !void {
 
     switch (cli) {
         .new => |new_args| try cmd_new(new_args),
-        .build => |build_args| {
-            const shell = Shell.create(gpa) catch {
-                std.io.getStdErr().writer().print("error: must run from within a focus project (no build.zig found)\n", .{}) catch {};
-                std.process.exit(1);
-            };
-            defer shell.destroy();
-            try cmd_build(shell, build_args);
-        },
+        .build => |build_args| try cmd_build(gpa, build_args),
     }
 }
 
@@ -140,22 +132,61 @@ fn cmd_new(args: NewArgs) !void {
 // focus build
 // =============================================================
 
-fn cmd_build(shell: *Shell, args: BuildArgs) !void {
+fn cmd_build(allocator: std.mem.Allocator, args: BuildArgs) !void {
     const path = args.path;
     const stdout = std.io.getStdOut().writer();
 
-    // Step 1: Run the annotation scanner.
-    try shell.exec(
-        "./zig/zig build scan -- {path} --manifest=generated/manifest.json --registry=generated/operations.json --operations-zig=generated/operations.generated.zig --routes-zig=generated/routes.generated.zig",
-        .{ .path = path },
-    );
+    // Read .focus file for build hook.
+    const dot_focus = std.fs.cwd().readFileAlloc(allocator, ".focus", 4096) catch {
+        try stdout.print("error: no .focus file — run 'focus new' or create one with:\n  build = <your build command>\n  start = <your sidecar command>\n", .{});
+        std.process.exit(1);
+    };
+    const build_hook = parse_hook(dot_focus, "build") orelse {
+        try stdout.print("error: .focus file missing 'build' hook\n", .{});
+        std.process.exit(1);
+    };
 
-    // Step 2: Run the TypeScript adapter (codegen).
-    // TODO: read build hook from .focus file instead of hardcoding tsx.
-    try shell.exec(
-        "npx tsx adapters/typescript.ts generated/manifest.json generated/handlers.generated.ts generated/operations.json generated/operations.ts",
-        .{},
-    );
+    // Step 1: Run the annotation scanner (framework-owned).
+    // TODO: link scanner in-process instead of shelling out.
+    try run_cmd(allocator, &.{ "sh", "-c", std.fmt.allocPrint(allocator, "focus build-scan {s}", .{path}) catch unreachable });
+
+    // Step 2: Run the user's build hook (from .focus file).
+    try run_cmd(allocator, &.{ "sh", "-c", build_hook });
 
     try stdout.print("Build complete.\n", .{});
+}
+
+/// Parse a hook value from .focus file content. Format: "key = rest of line"
+fn parse_hook(content: []const u8, key: []const u8) ?[]const u8 {
+    var iter = std.mem.splitScalar(u8, content, '\n');
+    while (iter.next()) |line| {
+        if (line.len == 0) continue;
+        if (std.mem.startsWith(u8, line, key)) {
+            const rest = line[key.len..];
+            if (rest.len > 0 and rest[0] == ' ') {
+                // "key = value" → skip " = "
+                if (rest.len > 2 and rest[1] == '=' and rest[2] == ' ') {
+                    return rest[3..];
+                }
+            }
+            if (rest.len > 0 and rest[0] == '=') {
+                // "key=value" → skip "="
+                return rest[1..];
+            }
+        }
+    }
+    return null;
+}
+
+/// Run a command, wait for exit. Errors exit the process.
+fn run_cmd(allocator: std.mem.Allocator, argv: []const []const u8) !void {
+    var child = std.process.Child.init(argv, allocator);
+    child.stderr_behavior = .Inherit;
+    child.stdout_behavior = .Inherit;
+    try child.spawn();
+    const term = try child.wait();
+    if (term.Exited != 0) {
+        std.io.getStdErr().writer().print("command failed (exit {d})\n", .{term.Exited}) catch {};
+        std.process.exit(1);
+    }
 }

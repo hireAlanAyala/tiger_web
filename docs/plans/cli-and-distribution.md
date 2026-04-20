@@ -92,14 +92,43 @@ focus docs                  Print reference
 ### `focus dev src/`
 
 What it does:
-1. Scan `src/` for annotations (framework-owned, Zig scanner)
-2. Generate framework artifacts (operations.zig, routes.zig, manifest.json)
-3. Run the user's build hook (configured at scaffold time)
-4. Start the server (Zig binary, embedded in focus)
-5. Start the sidecar (user's runtime — tsx, go, python, etc.)
-6. Watch `src/` for changes (inotify on Linux, kqueue on macOS)
-7. On change: re-scan, re-run build hook, restart sidecar
-8. Server stays up — bus deadline handles reconnection
+1. Read `.focus` file (build + start hooks). Error if missing.
+2. Scan `src/` for annotations (scanner linked into the binary)
+3. Generate framework artifacts (operations.zig, routes.zig, manifest.json)
+4. Run the user's build hook (from `.focus`, e.g., `npx tsx focus/codegen.ts`)
+5. Start the server (embedded in the focus binary — same process)
+6. Start the sidecar (spawn start hook with $SHM $SOCK in env)
+7. Watch `src/` for changes (inotify on Linux, kqueue on macOS)
+8. On change: re-scan, re-run build hook, restart sidecar
+9. Server stays up — bus deadline handles reconnection
+
+### Self-contained binary
+
+The focus binary contains EVERYTHING framework-owned:
+- Annotation scanner (linked in, not shelled out to `zig build scan`)
+- Adapter templates (@embedFile for scaffold)
+- Server (embedded — `focus dev` runs the server in-process)
+- Schema apply (embedded SQLite, same as server)
+- Docs (@embedFile reference text)
+
+The binary does NOT contain or assume:
+- Node.js / Go / Python (user's runtime)
+- npx / tsx / go build (user's build tools)
+- Any package manager
+
+External dependencies are declared in `.focus` hooks. The binary
+reads the hooks and spawns them. It never hardcodes a runtime.
+
+### No install path, no relative walks
+
+The binary is self-contained. It doesn't need to find:
+- A framework installation directory
+- A scanner binary on disk
+- Adapter files in a lib/ folder
+- build.zig (that's for framework development only)
+
+Everything is compiled in. `focus` works from any directory without
+PATH configuration or install conventions. Download → run.
 
 ### Build and start hooks
 
