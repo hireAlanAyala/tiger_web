@@ -231,12 +231,28 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
         else {},
 
         /// Whether any sidecar connection is ready.
+        ///
+        /// Two independent channels must both be up:
+        /// - Data channel (SHM): shm_bus.ready — set once at init,
+        ///   indicates the SHM region exists and is mapped.
+        /// - Control channel (Unix socket): sidecar_connections_ready —
+        ///   set after the READY handshake, cleared on disconnect.
+        ///
+        /// The control channel gates dispatch because it's the only way
+        /// to detect sidecar liveness. A process that opens SHM but
+        /// never sends READY is treated as not connected (returns 503).
+        /// The supervisor enforces the startup sequence: sidecar connects
+        /// via Unix socket, sends READY, then starts polling SHM.
+        ///
         /// Read by main.zig for supervisor wiring and by
         /// process_inbox for 503 gating.
         pub fn sidecar_any_ready(server: *const Server) bool {
             if (!App.sidecar_enabled) return false;
-            // Shared memory transport is ready immediately — no handshake.
-            return server.shm_bus.ready;
+            if (!server.shm_bus.ready) return false;
+            for (server.sidecar_connections_ready) |ready| {
+                if (ready) return true;
+            }
+            return false;
         }
 
         /// Initialize the server. Allocates the connection pool on the heap.
@@ -373,7 +389,7 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
             if (server.try_dispatch_1rt(entry, conn, method, path, body)) return;
 
             // 2-RT fallback: send route_prefetch CALL to sidecar.
-            if (!server.shm_dispatch.start_request_2rt(entry, method, path, body, @ptrCast(@alignCast(conn)))) {
+            if (!server.shm_dispatch.start_request_2rt(entry, method, path, body, @ptrCast(@alignCast(conn)), server.tick_count)) {
                 entry.reset();
                 server.suspend_connection(conn);
                 return;
@@ -407,7 +423,7 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
             // Look up prefetch spec. null = 2-RT fallback.
             const op_idx = @intFromEnum(msg.operation);
             if (op_idx >= prefetch_specs.specs.len) return false;
-            const spec = prefetch_specs.specs[op_idx] orelse return false;
+            const spec = &(prefetch_specs.specs[op_idx] orelse return false);
 
             // Execute prefetch SQL → serialized row sets.
             var rows_buf: [@import("../protocol.zig").frame_max]u8 = undefined;
@@ -422,6 +438,7 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
                 rows_buf[0..prefetch_result.rows_len],
                 prefetch_result.row_set_count,
                 @ptrCast(@alignCast(conn)),
+                server.tick_count,
             );
         }
 
@@ -676,10 +693,12 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
                 const params_buf = data[params_start..pos];
 
                 const mode: proto.QueryMode = if (mode_byte == 0x00) .query else .query_all;
+                // Debug logs removed — SQL execution is validated by bind_raw_params.
                 const result = sm.storage.query_raw(sql, params_buf, param_count, mode, rows_buf[rows_pos..]);
                 if (result) |rows| {
                     rows_pos += rows.len;
                 } else {
+                    log.warn("prefetch SQL failed: \"{s}\" (params={d}). Check param placeholders (?1, ?2) and table names.", .{ sql, param_count });
                     // Empty row set.
                     if (rows_pos + 6 <= rows_buf.len) {
                         std.mem.writeInt(u16, rows_buf[rows_pos..][0..2], 0, .big);
@@ -796,83 +815,13 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
             });
             if (entry.is_mutation) sm.begin_batch();
 
-            // Use recording write view when WAL is enabled — captures raw
-            // SQL writes for the WAL entry (writes + dispatches atomic).
-            const use_recording = entry.is_mutation and server.wal != null;
-            // Capture WAL op before appending — used by add_dispatches_to_pending.
             const wal_op_before = if (server.wal) |wal| wal.op else 0;
-            if (entry.handle_write_count > 0) {
-                var write_view = if (use_recording)
-                    Storage.WriteView.init_recording(sm.storage, &server.wal_record_scratch)
-                else
-                    Storage.WriteView.init(sm.storage);
-                execute_parsed_writes(&write_view, entry.handle_writes, entry.handle_write_count);
-
-                // WAL: record writes (+ dispatches if present).
-                if (use_recording) {
-                    if (server.wal) |wal| {
-                        if (!wal.disabled) {
-                            if (entry.worker_completes_op != 0) {
-                                // Worker completion: WAL completion entry links
-                                // back to the dispatch op for recovery.
-                                wal.append_completion(
-                                    entry.operation,
-                                    sm.now,
-                                    if (write_view.record_buf) |buf| buf[0..write_view.record_pos] else "",
-                                    write_view.record_count,
-                                    entry.worker_completes_op,
-                                    &server.wal_scratch,
-                                );
-                            } else {
-                                wal.append_writes(
-                                    entry.operation,
-                                    sm.now,
-                                    if (write_view.record_buf) |buf| buf[0..write_view.record_pos] else "",
-                                    write_view.record_count,
-                                    entry.handle_dispatches,
-                                    entry.handle_dispatch_count,
-                                    &server.wal_scratch,
-                                );
-                            }
-                        }
-                    }
-                }
-            } else if (entry.worker_completes_op != 0 and entry.is_mutation) {
-                // Worker completion with no handler writes — still need WAL entry.
-                if (server.wal) |wal| {
-                    if (!wal.disabled) {
-                        wal.append_completion(
-                            entry.operation,
-                            sm.now,
-                            "",
-                            0,
-                            entry.worker_completes_op,
-                            &server.wal_scratch,
-                        );
-                    }
-                }
-            } else if (entry.handle_dispatch_count > 0 and entry.is_mutation) {
-                // No writes but has dispatches — still need a WAL entry.
-                if (server.wal) |wal| {
-                    if (!wal.disabled) {
-                        wal.append_writes(
-                            entry.operation,
-                            sm.now,
-                            "",
-                            0,
-                            entry.handle_dispatches,
-                            entry.handle_dispatch_count,
-                            &server.wal_scratch,
-                        );
-                    }
-                }
-            }
+            shm_execute_sql_and_wal(server, entry);
 
             if (entry.is_mutation) sm.commit_batch();
 
             // Update pending index AFTER commit — derived state must not
-            // advance before the transaction is durable. If commit_batch
-            // rolls back, the pending index stays consistent.
+            // advance before the transaction is durable.
             if (entry.handle_dispatch_count > 0 and wal_op_before > 0) {
                 server.add_dispatches_to_pending(entry, wal_op_before);
             }
@@ -882,6 +831,59 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
             server.handle_lock = null;
             server.shm_dispatch.write_committed(entry);
             server.shm_dispatch.advance();
+        }
+
+        /// Execute SQL writes and append WAL entry. Standalone helper
+        /// to keep execute_shm_writes under the 70-line limit.
+        fn shm_execute_sql_and_wal(server: *Server, entry: *const ShmDispatch.Entry) void {
+            const sm = server.state_machine;
+            const use_recording = entry.is_mutation and server.wal != null;
+
+            if (entry.handle_write_count > 0) {
+                var write_view = if (use_recording)
+                    Storage.WriteView.init_recording(sm.storage, &server.wal_record_scratch)
+                else
+                    Storage.WriteView.init(sm.storage);
+                execute_parsed_writes(&write_view, entry.handle_writes, entry.handle_write_count);
+
+                if (use_recording) {
+                    const recorded = if (write_view.record_buf) |buf| buf[0..write_view.record_pos] else "";
+                    shm_append_wal(server, entry, recorded, write_view.record_count);
+                }
+            } else if (entry.worker_completes_op != 0 and entry.is_mutation) {
+                shm_append_wal(server, entry, "", 0);
+            } else if (entry.handle_dispatch_count > 0 and entry.is_mutation) {
+                shm_append_wal(server, entry, "", 0);
+            }
+        }
+
+        /// Append a WAL entry for the given SHM dispatch entry.
+        /// Handles both normal writes and worker completions.
+        fn shm_append_wal(
+            server: *Server,
+            entry: *const ShmDispatch.Entry,
+            recorded_writes: []const u8,
+            record_count: u8,
+        ) void {
+            const wal = server.wal orelse return;
+            if (wal.disabled) return;
+            const sm = server.state_machine;
+
+            if (entry.worker_completes_op != 0) {
+                wal.append_completion(
+                    entry.operation, sm.now,
+                    recorded_writes, record_count,
+                    entry.worker_completes_op,
+                    &server.wal_scratch,
+                );
+            } else {
+                wal.append_writes(
+                    entry.operation, sm.now,
+                    recorded_writes, record_count,
+                    entry.handle_dispatches, entry.handle_dispatch_count,
+                    &server.wal_scratch,
+                );
+            }
         }
 
         /// Execute parsed write statements from sidecar RESULT data.
@@ -901,7 +903,9 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
                 dpos += 1;
                 const params_start = dpos;
                 dpos = proto.skip_params(data, dpos, param_count) orelse break;
-                _ = write_view.execute_raw(sql, data[params_start..dpos], param_count);
+                if (!write_view.execute_raw(sql, data[params_start..dpos], param_count)) {
+                    log.warn("handle SQL failed: \"{s}\" (params={d}). Check table names and column types.", .{ sql, param_count });
+                }
             }
         }
 
@@ -943,28 +947,19 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
             }
         }
 
-        // Global server pointer for shm_poll_all callback.
-        // Set during wire_sidecar. Only used when sidecar is enabled.
-        var shm_poll_server: ?*Server = null;
-
-        var shm_frames_received: u32 = 0;
-
-        fn shm_poll_all() bool {
-            const server = shm_poll_server orelse return false;
-            if (!App.sidecar_enabled) return false;
-            const before = shm_frames_received;
-            for (0..ShmBus.slot_count) |i| {
-                server.shm_bus.check_response(@intCast(i));
-            }
-            server.process_shm_completions();
-            // Poll worker SHM for completed workers.
+        /// Poll SHM for new sidecar responses and worker completions.
+        /// Called every tick — cost is slot_count atomic loads + worker
+        /// slot_count atomic loads. Bounded, no syscalls.
+        fn poll_shm(server: *Server) void {
+            if (!App.sidecar_enabled) return;
+            server.shm_bus.poll_responses();
             server.worker_dispatch.poll_completions(server.state_machine.storage);
-            return shm_frames_received != before;
         }
 
         /// Shared memory frame callback — routes frames to SHM dispatch.
+        /// Called by ShmBus.check_response when a new sidecar_seq is
+        /// detected, and by sidecar_on_frame (Unix socket control channel).
         fn shm_on_frame(ctx: *anyopaque, _: u8, frame: []const u8) void {
-            shm_frames_received += 1;
             const server: *Server = @ptrCast(@alignCast(ctx));
             if (!App.sidecar_enabled) return;
             server.shm_dispatch.on_frame(frame);
@@ -1038,16 +1033,12 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
                 handler.connection_index = @intCast(i % App.sidecar_count);
             }
             // Wire SHM dispatch — shared memory is the sole transport.
-            try server.io.init_uring();
             const pid = @as(u32, @intCast(std.os.linux.getpid()));
             var shm_name_buf: [64]u8 = undefined;
             const shm_name = std.fmt.bufPrint(&shm_name_buf, "tiger-{d}", .{pid}) catch "tiger-shm";
-            try server.shm_bus.create(shm_name, &server.io.uring.?, shm_on_frame, @ptrCast(server));
+            try server.shm_bus.create(shm_name, shm_on_frame, @ptrCast(server));
             server.shm_dispatch.bus = &server.shm_bus;
             server.shm_bus.set_ready();
-            // Register shm poll in run_for_ns — responses need sub-ms polling.
-            shm_poll_server = server;
-            server.io.shm_poll_fn = &shm_poll_all;
             log.info("shm transport: /dev/shm/{s}", .{shm_name});
             // Worker SHM — separate region for background dispatch.
             var worker_shm_buf: [64]u8 = undefined;
@@ -1067,8 +1058,30 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
             }
         }
 
+        /// Test-only: wire sidecar with anonymous mmap (no /dev/shm).
+        /// Used by sim_sidecar.zig to avoid filesystem dependencies.
+        pub fn wire_sidecar_test(server: *Server, allocator: std.mem.Allocator) !void {
+            if (!App.sidecar_enabled) return;
+            for (&server.handlers, 0..) |*handler, i| {
+                handler.connection_index = @intCast(i % App.sidecar_count);
+            }
+            server.shm_bus.create_test(shm_on_frame, @ptrCast(server));
+            server.shm_dispatch.bus = &server.shm_bus;
+            server.shm_bus.set_ready();
+            server.worker_dispatch = WorkerDispatch.init_test();
+            server.shm_dispatch.connection_index = 0;
+            try server.sidecar_bus.init_pool(
+                allocator,
+                server.io,
+                @ptrCast(server),
+                sidecar_on_frame,
+                sidecar_on_close,
+            );
+        }
+
         pub fn deinit(server: *Server, allocator: std.mem.Allocator) void {
             if (App.sidecar_enabled) {
+                server.shm_bus.deinit();
                 server.worker_dispatch.deinit();
                 server.sidecar_bus.deinit(allocator);
             }
@@ -1095,7 +1108,10 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
             server.tick_count +%= 1;
             server.time.tick();
             defer server.invariants();
-            if (App.sidecar_enabled) server.sidecar_bus.tick_accept();
+            if (App.sidecar_enabled) {
+                server.sidecar_bus.tick_connections();
+                server.sidecar_bus.tick_accept();
+            }
             server.maybe_accept();
             server.update_time();
             // Resume suspended connections when slots are free. Busy faults
@@ -1105,6 +1121,7 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
             if (server.suspended_head != null) server.resume_suspended();
             server.wake_handle_waiters();
             if (App.sidecar_enabled) server.timeout_sidecar_response();
+            server.poll_shm();
             server.process_shm_completions();
             if (App.sidecar_enabled) {
                 server.dispatch_pending_workers();
@@ -1526,10 +1543,10 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
                     server.sidecar_bus.terminate_connection(connection_index);
                     return;
                 };
-                const accepted_version: u8 = 2;
-                if (ready.version != accepted_version) {
+                const proto = @import("../protocol.zig");
+                if (ready.version != proto.protocol_version) {
                     log.warn("sidecar: version mismatch: expected {d}, got {d}", .{
-                        accepted_version, ready.version,
+                        proto.protocol_version, ready.version,
                     });
                     server.sidecar_bus.terminate_connection(connection_index);
                     return;
@@ -1544,8 +1561,21 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
             server.process_shm_completions();
         }
 
-        /// Called when the sidecar bus connection closes. Resets all
-        /// pipeline slots that were using this connection.
+        /// Called when the sidecar bus connection closes.
+        ///
+        /// Stage-aware recovery: entries that haven't committed get 503.
+        /// Entries whose writes already committed to SQLite get 200
+        /// (fallback or actual HTML). This preserves the invariant:
+        /// if the database was mutated, the client sees success.
+        ///
+        /// Ordering guarantee: write_pending entries have NOT committed
+        /// when this fires. Proof: execute_shm_writes runs in tick()
+        /// via process_shm_completions(). This callback fires from the
+        /// Unix socket recv_callback during io.run_for_ns(), which runs
+        /// AFTER tick() returns (see tick_all in sim, main loop in prod).
+        /// No re-entrancy: message_bus.terminate() defers the actual
+        /// close callback via terminate_join(), so nested callbacks from
+        /// poll_shm → on_frame can't trigger sidecar_on_close mid-tick.
         pub fn sidecar_on_close(ctx: *anyopaque, connection_index: u8, reason: SidecarBus.Connection.CloseReason) void {
             if (!App.sidecar_enabled) unreachable;
             const server: *Server = @ptrCast(@alignCast(ctx));
@@ -1553,20 +1583,74 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
 
             server.sidecar_connections_ready[connection_index] = false;
 
-            // Reset all slots that map to this connection.
-            for (&server.handlers, &server.pipeline_slots, 0..) |*handler, *slot, i| {
-                if (handler.connection_index != connection_index) continue;
-                handler.on_sidecar_close();
+            if (App.sidecar_enabled) {
+                for (&server.shm_dispatch.entries) |*entry| {
+                    switch (entry.stage) {
+                        .free => continue,
 
-                if (slot.stage == .render) {
-                    server.render_crash_fallback(slot);
-                } else if (slot.stage != .idle) {
-                    server.tracer.cancel_slot(@intCast(i));
-                    server.pipeline_reset(slot);
-                } else {
-                    handler.reset_handler_state();
+                        // Writes committed, HTML available — deliver normally.
+                        .render_complete => server.encode_shm_response(entry),
+
+                        // Writes committed, no HTML — fallback 200.
+                        .write_complete => server.shm_fallback_response(entry),
+
+                        // Not committed — 503 and cancel.
+                        .combined_pending,
+                        .combined_complete,
+                        .route_prefetch_pending,
+                        .route_prefetch_complete,
+                        .write_pending,
+                        => {
+                            if (entry.connection) |conn_ptr| {
+                                const conn: *Connection = @ptrCast(@alignCast(conn_ptr));
+                                const resp = sidecar_unavailable_response(conn);
+                                conn.keep_alive = false;
+                                conn.set_response(resp.offset, resp.len);
+                            }
+                            server.shm_dispatch.cancel_entry(entry);
+                        },
+                    }
                 }
             }
+
+            // Reset handler state.
+            for (&server.handlers) |*handler| {
+                if (handler.connection_index != connection_index) continue;
+                handler.on_sidecar_close();
+                handler.reset_handler_state();
+            }
+        }
+
+        /// Writes committed but sidecar died before render. Send fallback
+        /// HTML with the committed status. Never retry — retrying would
+        /// re-execute writes (duplicate mutations).
+        fn shm_fallback_response(server: *Server, entry: *ShmDispatch.Entry) void {
+            const conn: *Connection = @ptrCast(@alignCast(entry.connection orelse {
+                server.shm_dispatch.release_entry(entry);
+                return;
+            }));
+            if (conn.state != .ready) {
+                server.shm_dispatch.release_entry(entry);
+                return;
+            }
+
+            const sm = server.state_machine;
+            const fallback_html = "<html><body>Operation completed. Refresh for full page.</body></html>";
+            const commit_result = App.encode_response(
+                entry.handle_status,
+                fallback_html,
+                &conn.send_buf,
+                conn.is_datastar_request,
+                entry.handle_session_action,
+                entry.msg.user_id,
+                false,
+                false,
+                sm.secret_key,
+            );
+
+            conn.keep_alive = commit_result.response.keep_alive;
+            conn.set_response(commit_result.response.offset, commit_result.response.len);
+            server.shm_dispatch.release_entry(entry);
         }
 
         /// Terminate a specific sidecar bus connection. on_close will
@@ -1578,59 +1662,32 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
             server.sidecar_bus.terminate_connection(connection_idx);
         }
 
-        /// Sidecar response timeout — terminate the connection if the pipeline
-        /// has been pending for too long. A stuck handler (infinite loop,
-        /// deadlocked await, long GC) blocks the serial pipeline.
+        /// Sidecar response timeout — terminate the connection if the SHM
+        /// dispatch has been pending for too long. A stuck handler (infinite
+        /// loop, deadlocked await, long GC) blocks the pipeline.
         /// Uses existing recovery: kill → on_close → 503 or render fallback.
         fn timeout_sidecar_response(server: *Server) void {
+            if (!App.sidecar_enabled) return;
             if (!server.sidecar_any_ready()) return;
 
-            for (&server.pipeline_slots, 0..) |*slot, i| {
-                if (slot.stage == .idle) continue;
-
-                // Only timeout when actually waiting for sidecar response.
-                // .handle is synchronous — no sidecar involvement.
-                const pending = switch (slot.stage) {
-                    .route, .prefetch, .render => server.handlers[i].is_handler_pending(),
-                    .handle, .handle_wait, .idle => false,
-                };
+            for (&server.shm_dispatch.entries) |*entry| {
+                // Only timeout entries waiting for sidecar response.
+                const pending = (entry.stage == .combined_pending or
+                    entry.stage == .route_prefetch_pending);
                 if (!pending) continue;
 
-                const elapsed = server.tick_count -% slot.pending_since;
+                const elapsed = server.tick_count -% entry.pending_since;
                 if (elapsed >= sidecar_response_timeout_ticks) {
-                    log.warn("sidecar: response timeout ({d} ticks, stage={s}, op={s}, slot={d}), terminating", .{
+                    log.warn("sidecar: response timeout ({d} ticks, stage={s}, op={s}), terminating", .{
                         elapsed,
-                        @tagName(slot.stage),
-                        if (slot.msg) |msg| @tagName(msg.operation) else "unknown",
-                        i,
+                        @tagName(entry.stage),
+                        @tagName(entry.operation),
                     });
-                    server.terminate_sidecar_connection(@intCast(i));
+                    // Terminate the sidecar bus connection (triggers sidecar_on_close → 503).
+                    server.terminate_sidecar_connection(0);
                     return;
                 }
             }
-        }
-
-        /// Render crash fallback — writes committed, sidecar gone.
-        /// Send a minimal response using committed pipeline data.
-        /// Never retry — retrying re-executes handle → duplicate writes.
-        fn render_crash_fallback(server: *Server, slot: *PipelineSlot) void {
-            const conn = slot.connection orelse {
-                server.pipeline_reset(slot);
-                return;
-            };
-            // Connection may have timed out or closed while the pipeline
-            // was waiting for the sidecar render. Only send the fallback
-            // if the connection is still ready to receive a response.
-            if (conn.state != .ready) {
-                server.pipeline_reset(slot);
-                return;
-            }
-            const msg = slot.msg.?;
-            const pipeline_resp = slot.pipeline_resp.?;
-
-            // Minimal response: operation succeeded, render degraded.
-            const fallback_html = "<html><body>Operation completed. Refresh for full page.</body></html>";
-            server.encode_and_respond(slot, conn, msg, pipeline_resp, fallback_html);
         }
 
         // =============================================================
@@ -1752,6 +1809,7 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
                     "",
                     0,
                     null, // no HTTP connection — response discarded
+                    server.tick_count,
                 );
             }
         }
