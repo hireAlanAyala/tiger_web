@@ -1,5 +1,15 @@
 const std = @import("std");
 
+/// Link SQLite from the vendored amalgamation. Zero system dependencies.
+fn link_sqlite(step: *std.Build.Step.Compile) void {
+    step.addCSourceFile(.{
+        .file = step.step.owner.path("vendor/sqlite3/sqlite3.c"),
+        .flags = &.{ "-DSQLITE_THREADSAFE=1", "-DSQLITE_DQS=0", "-DSQLITE_DEFAULT_WAL_SYNCHRONOUS=1" },
+    });
+    step.addIncludePath(step.step.owner.path("vendor/sqlite3"));
+    step.linkLibC();
+}
+
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
@@ -30,8 +40,7 @@ pub fn build(b: *std.Build) void {
     });
     exe.root_module.addImport("stdx", stdx_module);
     exe.root_module.addOptions("build_options", build_options);
-    exe.linkSystemLibrary("sqlite3");
-    exe.linkLibC();
+    link_sqlite(exe);
     b.installArtifact(exe);
 
     const run_cmd = b.addRunArtifact(exe);
@@ -78,8 +87,7 @@ pub fn build(b: *std.Build) void {
     });
     replay_exe.root_module.addImport("stdx", stdx_module);
     replay_exe.root_module.addOptions("build_options", build_options);
-    replay_exe.linkSystemLibrary("sqlite3");
-    replay_exe.linkLibC();
+    link_sqlite(replay_exe);
     b.installArtifact(replay_exe);
 
     const replay_cmd = b.addRunArtifact(replay_exe);
@@ -96,8 +104,7 @@ pub fn build(b: *std.Build) void {
     });
     sim_tests.root_module.addImport("stdx", stdx_module);
     sim_tests.root_module.addOptions("build_options", build_options);
-    sim_tests.linkSystemLibrary("sqlite3");
-    sim_tests.linkLibC();
+    link_sqlite(sim_tests);
     const run_sim_tests = b.addRunArtifact(sim_tests);
     run_sim_tests.setEnvironmentVariable("ZIG_EXE", b.graph.zig_exe);
     const test_step = b.step("test", "Run simulation tests");
@@ -120,8 +127,7 @@ pub fn build(b: *std.Build) void {
     });
     sidecar_sim.root_module.addImport("stdx", stdx_module);
     sidecar_sim.root_module.addOptions("build_options", sidecar_sim_options);
-    sidecar_sim.linkSystemLibrary("sqlite3");
-    sidecar_sim.linkLibC();
+    link_sqlite(sidecar_sim);
     const run_sidecar_sim = b.addRunArtifact(sidecar_sim);
     run_sidecar_sim.setEnvironmentVariable("ZIG_EXE", b.graph.zig_exe);
     const sidecar_test_step = b.step("test-sidecar", "Run sidecar simulation tests");
@@ -136,8 +142,7 @@ pub fn build(b: *std.Build) void {
     });
     fuzz_exe.root_module.addImport("stdx", stdx_module);
     fuzz_exe.root_module.addOptions("build_options", build_options);
-    fuzz_exe.linkSystemLibrary("sqlite3");
-    fuzz_exe.linkLibC();
+    link_sqlite(fuzz_exe);
     b.installArtifact(fuzz_exe);
 
     const fuzz_cmd = b.addRunArtifact(fuzz_exe);
@@ -153,6 +158,12 @@ pub fn build(b: *std.Build) void {
     fuzz_build_step.dependOn(print_or_install(b, fuzz_exe, print_exe));
 
     // --- Focus CLI (project scaffolding, build, dev) ---
+    // Focus CLI always runs with sidecar (it embeds the server + spawns sidecar).
+    const focus_build_options = b.addOptions();
+    focus_build_options.addOption(bool, "sidecar_enabled", true);
+    focus_build_options.addOption(u8, "sidecar_count", sidecar_count);
+    focus_build_options.addOption(u8, "pipeline_slots", pipeline_slots);
+
     const focus_exe = b.addExecutable(.{
         .name = "focus",
         .root_source_file = b.path("focus.zig"),
@@ -160,9 +171,8 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
     focus_exe.root_module.addImport("stdx", stdx_module);
-    focus_exe.root_module.addOptions("build_options", build_options);
-    focus_exe.linkSystemLibrary("sqlite3");
-    focus_exe.linkLibC();
+    focus_exe.root_module.addOptions("build_options", focus_build_options);
+    link_sqlite(focus_exe);
     b.installArtifact(focus_exe);
 
     const focus_cmd = b.addRunArtifact(focus_exe);
@@ -253,8 +263,7 @@ pub fn build(b: *std.Build) void {
         });
         unit_test.root_module.addImport("stdx", stdx_module);
         unit_test.root_module.addOptions("build_options", build_options);
-        unit_test.linkSystemLibrary("sqlite3");
-        unit_test.linkLibC();
+        link_sqlite(unit_test);
         const run_ut = b.addRunArtifact(unit_test);
         run_ut.setEnvironmentVariable("ZIG_EXE", b.graph.zig_exe);
         unit_test_step.dependOn(&run_ut.step);
@@ -368,8 +377,7 @@ pub fn build(b: *std.Build) void {
     bench_smoke.root_module.addImport("stdx", stdx_module);
     bench_smoke.root_module.addOptions("build_options", build_options);
     bench_smoke.root_module.addOptions("bench_options", bench_smoke_options);
-    bench_smoke.linkSystemLibrary("sqlite3");
-    bench_smoke.linkLibC();
+    link_sqlite(bench_smoke);
     const run_bench_smoke = b.addRunArtifact(bench_smoke);
     run_bench_smoke.setEnvironmentVariable("ZIG_EXE", b.graph.zig_exe);
     unit_test_step.dependOn(&run_bench_smoke.step);
@@ -385,8 +393,7 @@ pub fn build(b: *std.Build) void {
     bench_real.root_module.addImport("stdx", stdx_module);
     bench_real.root_module.addOptions("build_options", build_options);
     bench_real.root_module.addOptions("bench_options", bench_real_options);
-    bench_real.linkSystemLibrary("sqlite3");
-    bench_real.linkLibC();
+    link_sqlite(bench_real);
     const bench_run = b.addRunArtifact(bench_real);
     bench_run.has_side_effects = true;
     const bench_step = b.step("bench", "Run state machine benchmark");
