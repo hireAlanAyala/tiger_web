@@ -448,11 +448,11 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
             const parse = @import("parse.zig");
             const gen = @import("../generated/routes.generated.zig");
 
-            // Sidecar-only mode: skip native routing. All dispatch goes through
-            // 2-RT to the sidecar which owns route matching for TS handlers.
-            // Without this guard, a focus binary compiled from a repo with native
-            // routes would match those routes instead of delegating to the sidecar.
-            if (App.sidecar_enabled) return null;
+            // Focus CLI mode: skip native routing. All dispatch goes through
+            // 2-RT to the sidecar which owns route matching for user handlers.
+            // This flag is only set for the focus binary (not sim tests which
+            // exercise 1-RT with native routes + sidecar_enabled).
+            if (@import("build_options").skip_native_routes) return null;
 
             const query_sep = std.mem.indexOfScalar(u8, path, '?');
             const clean_path = if (query_sep) |q| path[0..q] else path;

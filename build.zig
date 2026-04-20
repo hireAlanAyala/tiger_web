@@ -28,6 +28,7 @@ pub fn build(b: *std.Build) void {
     const pipeline_slots: u8 = b.option(u8, "pipeline-slots", "Number of concurrent pipeline slots (default = sidecar-count)") orelse sidecar_count;
     const build_options = b.addOptions();
     build_options.addOption(bool, "sidecar_enabled", sidecar_enabled);
+    build_options.addOption(bool, "skip_native_routes", false);
     build_options.addOption(u8, "sidecar_count", sidecar_count);
     build_options.addOption(u8, "pipeline_slots", pipeline_slots);
 
@@ -55,6 +56,7 @@ pub fn build(b: *std.Build) void {
     // without `-Dsidecar=true` doesn't contaminate the server binary.
     const load_build_options = b.addOptions();
     load_build_options.addOption(bool, "sidecar_enabled", sidecar_enabled);
+    load_build_options.addOption(bool, "skip_native_routes", false);
     load_build_options.addOption(u8, "sidecar_count", sidecar_count);
     load_build_options.addOption(u8, "pipeline_slots", pipeline_slots);
 
@@ -117,6 +119,7 @@ pub fn build(b: *std.Build) void {
     // the CALL/RESULT protocol deterministically.
     const sidecar_sim_options = b.addOptions();
     sidecar_sim_options.addOption(bool, "sidecar_enabled", true);
+    sidecar_sim_options.addOption(bool, "skip_native_routes", false);
     sidecar_sim_options.addOption(u8, "sidecar_count", 2);
     sidecar_sim_options.addOption(u8, "pipeline_slots", 2);
 
@@ -161,6 +164,7 @@ pub fn build(b: *std.Build) void {
     // Focus CLI always runs with sidecar (it embeds the server + spawns sidecar).
     const focus_build_options = b.addOptions();
     focus_build_options.addOption(bool, "sidecar_enabled", true);
+    focus_build_options.addOption(bool, "skip_native_routes", true);
     focus_build_options.addOption(u8, "sidecar_count", sidecar_count);
     focus_build_options.addOption(u8, "pipeline_slots", pipeline_slots);
 

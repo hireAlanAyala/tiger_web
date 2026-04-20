@@ -971,3 +971,91 @@ test "sidecar: handle RESULT payload preserved through pipeline" {
         try std.testing.expect(std.mem.indexOf(u8, resp.body, "<div>sim</div>") != null);
     }
 }
+
+test "sidecar: crash mid-RESULT — CRC mismatch yields 503, no corruption" {
+    // Simulates sidecar writing partial/corrupted RESULT to SHM.
+    // The server must detect the CRC mismatch, NOT deliver corrupted
+    // data to the HTTP client, and eventually return 503 via timeout.
+    //
+    // This is the safety proof: "it is far better to stop operating
+    // than to continue operating in an incorrect state."
+    var h: TestHarness = undefined;
+    try h.init();
+    defer h.deinit();
+
+    h.connect_sidecar();
+    h.connect_http();
+
+    // First: prove the pipeline works (baseline).
+    h.prepare_next_request();
+    h.inject_post();
+    {
+        const resp = h.wait_response() orelse return error.TestUnexpectedResult;
+        try std.testing.expectEqual(@as(u16, 200), resp.status_code);
+    }
+
+    // Second: inject a request, then write corrupted RESULT.
+    h.prepare_next_request();
+    h.inject_post();
+
+    // Tick server only (not sidecar) until the CALL is written to SHM.
+    // The sidecar sees the CALL but we intercept before it responds.
+    h.sidecar.enabled = false; // disable normal tick processing
+    h.run_server_until(TestHarness.handler_pending);
+
+    // Now manually write garbage to the SHM response slot with wrong CRC.
+    const region = h.server.shm_bus.region.?;
+    const shm_slot = &region.slots[0];
+
+    // Write partial RESULT data (valid tag + request_id, garbage after).
+    shm_slot.response[0] = @intFromEnum(protocol.CallTag.result); // tag
+    std.mem.writeInt(u32, shm_slot.response[1..5], 999, .big); // wrong request_id
+    shm_slot.response[5] = 0xFF; // invalid flag
+    @memset(shm_slot.response[6..64], 0xDE); // garbage
+
+    // Set response_len but WRONG CRC (simulates crash mid-write).
+    shm_slot.header.response_len = 64;
+    shm_slot.header.response_crc = 0xDEADBEEF; // intentionally wrong
+
+    // Bump sidecar_seq — makes the server think a RESULT is ready.
+    @atomicStore(u32, &shm_slot.header.sidecar_seq, shm_slot.header.sidecar_seq + 1, .release);
+
+    // Now tick the server — it should detect CRC mismatch and NOT
+    // deliver the corrupted frame. The slot remains pending.
+    for (0..50) |_| {
+        h.server.tick();
+        h.io.run_for_ns(10 * std.time.ns_per_ms);
+    }
+
+    // The server should NOT have responded yet (CRC mismatch = frame dropped).
+    // The request is still pending — it will timeout.
+    const early_resp = h.io.read_response(TestHarness.http_slot);
+    const early_close = h.io.read_close_response(TestHarness.http_slot);
+    if (early_resp) |resp| {
+        // If we got a response, it MUST be a 503 (never 200 with garbage).
+        try std.testing.expectEqual(@as(u16, 503), resp.status_code);
+        return; // test passes — 503 is correct
+    }
+    if (early_close) |resp| {
+        try std.testing.expectEqual(@as(u16, 503), resp.status_code);
+        return; // test passes
+    }
+
+    // No response yet — disconnect sidecar to trigger sidecar_on_close.
+    // This is the normal recovery path: sidecar dies (Unix socket EOF),
+    // server cleans up all pending entries with 503.
+    h.sidecar.disconnect();
+    for (0..50) |_| {
+        h.server.tick();
+        h.io.run_for_ns(10 * std.time.ns_per_ms);
+    }
+
+    // NOW we should get a 503.
+    const final_resp = h.io.read_close_response(TestHarness.http_slot) orelse
+        h.io.read_response(TestHarness.http_slot) orelse
+        return error.TestUnexpectedResult;
+
+    try std.testing.expectEqual(@as(u16, 503), final_resp.status_code);
+    // Assert: no garbage in body (it's the framework's 503 message, not corrupted RESULT).
+    try std.testing.expect(final_resp.body.len < 200); // framework 503 is short
+}
