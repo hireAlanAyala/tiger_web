@@ -1,0 +1,23 @@
+# Tiger Web — ecommerce example.
+#
+# docker compose up        → app on http://localhost:3000
+# docker compose up --build → rebuild after framework changes
+#
+# Edit handlers/*.ts on your host machine — the container watches
+# for changes and auto-reloads the sidecar (~300ms rebuild).
+
+services:
+  app:
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+    ports:
+      - "3000:3000"
+    volumes:
+      # Mount handler files from host — edit locally, run in container.
+      - ./handlers:/opt/focus/examples/ecommerce-ts/handlers
+    working_dir: /opt/focus/examples/ecommerce-ts
+    # io_uring requires relaxed seccomp (blocked by default in containers).
+    security_opt:
+      - seccomp:unconfined
+    command: ["sh", "-c", "npm install --silent 2>/dev/null && focus-internal dev"]
