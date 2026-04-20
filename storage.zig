@@ -55,6 +55,7 @@ fn stmt_cache_slot(comptime sql: [*:0]const u8) comptime_int {
 
 pub const SqliteStorage = struct {
     pub const LoginCodeEntry = message.LoginCodeEntry;
+    pub const QueryMode = proto.QueryMode;
 
     // No query result cache. Benchmarked (2026-04-04) and found no benefit:
     //
@@ -259,7 +260,7 @@ pub const SqliteStorage = struct {
     /// Runtime prepared statement cache for query_raw / execute_raw.
     /// Keyed by SQL string pointer identity (prefetch.generated.zig
     /// strings are comptime — same pointer every call).
-    raw_cache_keys: [raw_stmt_cache_size]?[*]const u8 = .{null} ** raw_stmt_cache_size,
+    raw_cache_keys: [raw_stmt_cache_size]?[]const u8 = .{null} ** raw_stmt_cache_size,
     raw_cache_stmts: [raw_stmt_cache_size]?*c.sqlite3_stmt = .{null} ** raw_stmt_cache_size,
 
     pub fn init(path: [*:0]const u8) !SqliteStorage {
@@ -535,25 +536,34 @@ pub const SqliteStorage = struct {
         return stmt.?;
     }
 
-    /// Look up a cached prepared statement by SQL pointer identity.
+    /// Hash SQL content for cache slot selection.
+    /// FNV-1a: fast, good distribution, no allocation.
+    fn sql_hash(sql: []const u8) usize {
+        var h: u64 = 0xcbf29ce484222325;
+        for (sql) |b| {
+            h ^= b;
+            h *%= 0x100000001b3;
+        }
+        return @intCast(h % raw_stmt_cache_size);
+    }
+
+    /// Look up a cached prepared statement by SQL content hash.
+    /// Content comparison avoids stale hits when different SQL
+    /// reuses the same buffer address (2-RT dispatch entries).
     fn raw_cache_get(self: *SqliteStorage, sql: []const u8) ?*c.sqlite3_stmt {
-        const key = sql.ptr;
-        const slot = @as(usize, @intFromPtr(key)) % raw_stmt_cache_size;
+        const slot = sql_hash(sql);
         if (self.raw_cache_keys[slot]) |cached_key| {
-            if (cached_key == key) return self.raw_cache_stmts[slot];
+            if (cached_key.len == sql.len and std.mem.eql(u8, cached_key, sql)) return self.raw_cache_stmts[slot];
         }
         return null;
     }
 
-    /// Cache a prepared statement by SQL pointer identity.
     fn raw_cache_put(self: *SqliteStorage, sql: []const u8, stmt: *c.sqlite3_stmt) void {
-        const key = sql.ptr;
-        const slot = @as(usize, @intFromPtr(key)) % raw_stmt_cache_size;
-        // Evict existing entry if present.
+        const slot = sql_hash(sql);
         if (self.raw_cache_stmts[slot]) |old| {
             _ = c.sqlite3_finalize(old);
         }
-        self.raw_cache_keys[slot] = key;
+        self.raw_cache_keys[slot] = sql;
         self.raw_cache_stmts[slot] = stmt;
     }
 
@@ -1489,6 +1499,42 @@ test "execute_raw: insert and verify" {
     try std.testing.expect(row != null);
     try std.testing.expectEqual(@as(i64, 7), row.?.id);
     try std.testing.expectEqualStrings("Hello", std.mem.sliceTo(&row.?.name, 0));
+}
+
+test "query_raw: cache distinguishes different SQL at same buffer address" {
+    // Regression: the 2-RT dispatch reuses SHM entry buffers. Two different
+    // SQL strings at the same memory address must not return a stale cached
+    // prepared statement. Before the fix, pointer-identity caching returned
+    // the wrong statement, causing param count mismatches or wrong results.
+    var s = try SqliteStorage.init(":memory:");
+    defer s.deinit();
+
+    try std.testing.expect(s.execute("CREATE TABLE t1 (id TEXT, name TEXT);", .{}));
+    try std.testing.expect(s.execute("INSERT INTO t1 VALUES ('a', 'Alice');", .{}));
+
+    // Two different SQL strings that we'll write to the SAME buffer.
+    const sql_a = "SELECT id, name FROM t1 WHERE id = ?1";
+    const sql_b = "SELECT id FROM t1 WHERE name = ?1";
+
+    var buf: [128]u8 = undefined;
+
+    // First query: SELECT id, name WHERE id = ?1
+    @memcpy(buf[0..sql_a.len], sql_a);
+    const sql_slice_a = buf[0..sql_a.len];
+    const param_a = [_]u8{ 0x03, 0, 1, 'a' }; // text "a"
+    var out_a: [4096]u8 = undefined;
+    const result_a = s.query_raw(sql_slice_a, &param_a, 1, .query, &out_a);
+    try std.testing.expect(result_a != null);
+
+    // Second query: DIFFERENT SQL at the SAME buffer address.
+    @memcpy(buf[0..sql_b.len], sql_b);
+    const sql_slice_b = buf[0..sql_b.len];
+    const param_b = [_]u8{ 0x03, 0, 5, 'A', 'l', 'i', 'c', 'e' }; // text "Alice"
+    var out_b: [4096]u8 = undefined;
+    const result_b = s.query_raw(sql_slice_b, &param_b, 1, .query, &out_b);
+    // Must succeed — before the fix, the cache returned sql_a's statement
+    // for sql_b, causing a wrong query or param mismatch.
+    try std.testing.expect(result_b != null);
 }
 
 test "WriteView recording captures SQL and params" {
