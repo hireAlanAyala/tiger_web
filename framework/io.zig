@@ -1,11 +1,15 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const posix = std.posix;
-const linux = std.os.linux;
 const assert = std.debug.assert;
 const marks = @import("marks.zig");
 const log = marks.wrap_log(std.log.scoped(.io));
 
-const InnerIO = @import("io/linux.zig").IO;
+const InnerIO = switch (builtin.target.os.tag) {
+    .linux => @import("io/linux.zig").IO,
+    .macos, .ios, .tvos, .watchos => @import("io/darwin.zig").IO,
+    else => @compileError("IO not supported on this platform"),
+};
 
 /// IO layer — wraps TigerBeetle's io_uring implementation with the
 /// callback signature used by connection.zig and message_bus.zig.
