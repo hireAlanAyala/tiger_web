@@ -73,4 +73,34 @@ fn run_tests(shell: *Shell) !void {
             try shell.exec("npm test", .{});
         }
     }
+
+    // New-project smoke test: scaffold + build without Docker.
+    // Catches: OperationValues missing, route table shadowing,
+    // schema init issues, scanner .zig filter bugs.
+    {
+        var section = try shell.open_section("new-project scaffold+build");
+        defer section.close();
+
+        const project = "/tmp/ci-focus-new-project";
+        shell.exec("rm -rf {project}", .{ .project = project }) catch {};
+        try shell.exec("./zig-out/bin/focus new --ts {project}", .{ .project = project });
+
+        try shell.pushd(project);
+        defer shell.popd();
+
+        try shell.exec("npm install", .{});
+        // Build: scanner + codegen (tests OperationValues generation,
+        // route table for TS-only projects, operations.ts output).
+        try shell.exec("{focus} build src/", .{ .focus = "../zig-out/bin/focus" });
+
+        // Verify expected outputs exist.
+        try shell.exec("test -f focus/manifest.json", .{});
+        try shell.exec("test -f focus/operations.json", .{});
+        try shell.exec("test -f focus/handlers.generated.ts", .{});
+        try shell.exec("test -f focus/operations.ts", .{});
+        try shell.exec("test -f focus/routes.generated.zig", .{});
+
+        // Cleanup.
+        shell.exec("rm -rf {project}", .{ .project = project }) catch {};
+    }
 }
