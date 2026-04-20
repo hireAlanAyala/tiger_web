@@ -684,24 +684,23 @@ environment.
 - [x] Platform switch in io.zig (comptime Linux/macOS)
 - [x] CI: macOS runner added to GitHub Actions
 - [x] All framework bug fixes committed (18 commits)
+- [x] Extend typescript.ts — generates operations.ts as 4th output
+- [x] Schema subcommand in main.zig (apply + reset, no default --db)
+- [x] Write focus.zig — single Zig binary with new, build, dev
+- [x] Scanner linked in-process (no subprocess)
+- [x] Adapter templates @embedFile'd (13 files scaffolded)
+- [x] Server embedded (server_run in background thread)
+- [x] Schema embedded (cmd_schema called in-process)
+- [x] Refactor server_run as composable library function (TB pattern)
+- [x] validate_config_opts returns errors (not process.exit)
+- [x] Allocator passed as parameter (not module-level global)
+- [x] Delete shell scripts (focus, focus-internal)
 
 ### Next
-1. **Extend typescript.ts** — generate operations.ts as 3rd output
-   (delete inline node -e from focus-internal)
-2. **Schema subcommand in main.zig** — `tiger-web schema apply schema.sql`
-   (server binary gains one subcommand, no runtime behavior change)
-3. **Write focus.zig** — the single Zig CLI binary:
-   - Embeds scanner (link, don't shell out)
-   - Embeds adapter templates (@embedFile)
-   - Subcommands: new, build, dev, start, schema, docs, compile-addon,
-     deploy, self-update, upgrade
-   - File watcher: inotify (Linux) / kqueue (macOS)
-   - Process management: fork server in-process, spawn sidecar,
-     restart sidecar on file change
-   - Labeled output: [server], [sidecar], [watch]
-4. **Move smoke test to ci.zig** — delete shell script
-5. **Delete focus, focus-internal shell scripts**
-6. **Update Dockerfile** — deployment only, slim
+1. **File watcher: inotify/kqueue** — replace stat polling with kernel events
+2. **Labeled output** — [server], [sidecar], [watch] prefixes
+3. **Move smoke test to ci.zig** — delete shell script
+4. **Update Dockerfile** — deployment only, remove shell references
 
 ### Deferred (after CLI works)
 - `focus self-update` (GitHub releases + checksum verification)
