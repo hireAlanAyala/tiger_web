@@ -20,17 +20,13 @@ pub const std_options: std.Options = .{ .log_level = .info };
 const CLIArgs = union(enum) {
     new: NewArgs,
     build: BuildArgs,
-    // dev: DevArgs,     // TODO: implement
-    // schema: SchemaArgs, // exists in main.zig, expose here
-    // docs: void,       // TODO: @embedFile reference
+    dev: DevArgs,
 
     pub const help =
         \\Usage:
         \\  focus new --ts <name>    Scaffold a TypeScript project
         \\  focus build <path>       Scan annotations + generate dispatch
         \\  focus dev <path>         Build + server + sidecar + watch + reload
-        \\  focus schema <args>      Apply/reset database schema
-        \\  focus docs               Print framework reference
         \\
     ;
 };
@@ -45,6 +41,12 @@ const NewArgs = struct {
 };
 
 const BuildArgs = struct {
+    /// Positional: handler source path
+    @"--": void,
+    path: []const u8,
+};
+
+const DevArgs = struct {
     /// Positional: handler source path
     @"--": void,
     path: []const u8,
@@ -66,6 +68,7 @@ pub fn main() !void {
     switch (cli) {
         .new => |new_args| try cmd_new(new_args),
         .build => |build_args| try cmd_build(gpa, build_args),
+        .dev => |dev_args| try cmd_dev(gpa, dev_args),
     }
 }
 
@@ -212,4 +215,131 @@ fn run_cmd(allocator: std.mem.Allocator, argv: []const []const u8) !void {
         std.io.getStdErr().writer().print("command failed (exit {d})\n", .{term.Exited}) catch {};
         std.process.exit(1);
     }
+}
+
+/// Spawn a command in background. Returns the child (caller manages lifecycle).
+fn spawn_cmd(allocator: std.mem.Allocator, argv: []const []const u8, env: ?*const std.process.EnvMap) !std.process.Child {
+    var child = std.process.Child.init(argv, allocator);
+    child.stderr_behavior = .Inherit;
+    child.stdout_behavior = .Inherit;
+    if (env) |e| child.env_map = e;
+    try child.spawn();
+    return child;
+}
+
+// =============================================================
+// focus dev
+// =============================================================
+
+fn cmd_dev(gpa: std.mem.Allocator, args: DevArgs) !void {
+    const path = args.path;
+    const stdout = std.io.getStdOut().writer();
+
+    // Read .focus hooks.
+    const dot_focus = std.fs.cwd().readFileAlloc(gpa, ".focus", 4096) catch {
+        try stdout.print("error: no .focus file — run 'focus new' first\n", .{});
+        std.process.exit(1);
+    };
+    const start_hook = parse_hook(dot_focus, "start") orelse {
+        try stdout.print("error: .focus file missing 'start' hook\n", .{});
+        std.process.exit(1);
+    };
+
+    // Step 1: Build (scanner + codegen).
+    try cmd_build(gpa, .{ .path = path, .@"--" = {} });
+
+    // Step 2: Apply schema if schema.sql exists.
+    if (std.fs.cwd().access("schema.sql", .{})) |_| {
+        try run_cmd(gpa, &.{ "sh", "-c", "focus schema --db=tiger_web.db apply schema.sql" });
+    } else |_| {}
+
+    // Step 3: Start server.
+    // TODO: embed server in-process. For now, spawn the tiger-web binary.
+    var server = try spawn_cmd(gpa, &.{ "tiger-web", "start", "--port=0", "--sidecar=/tmp/focus-dev.sock", "--db=tiger_web.db" }, null);
+    const server_pid = server.id;
+
+    // Compute SHM name from server PID.
+    var shm_buf: [32]u8 = undefined;
+    const shm_name = std.fmt.bufPrint(&shm_buf, "tiger-{d}", .{server_pid}) catch unreachable;
+    const sock_path = "/tmp/focus-dev.sock";
+
+    // Wait for SHM to appear.
+    try stdout.print("[server]  starting (PID {d})...\n", .{server_pid});
+    var ready = false;
+    for (0..100) |_| {
+        var shm_path_buf: [64]u8 = undefined;
+        const shm_path = std.fmt.bufPrint(&shm_path_buf, "/dev/shm/{s}", .{shm_name}) catch unreachable;
+        if (std.fs.cwd().access(shm_path, .{})) |_| {
+            ready = true;
+            break;
+        } else |_| {}
+        std.time.sleep(50 * std.time.ns_per_ms);
+    }
+    if (!ready) {
+        try stdout.print("error: server did not start (no SHM region)\n", .{});
+        _ = server.kill() catch {};
+        std.process.exit(1);
+    }
+
+    // Step 4: Start sidecar with $SHM and $SOCK env vars.
+    var env = std.process.EnvMap.init(gpa);
+    try env.put("SHM", shm_name);
+    try env.put("SOCK", sock_path);
+
+    var sidecar = try spawn_cmd(gpa, &.{ "sh", "-c", start_hook }, &env);
+
+    try stdout.print(
+        \\
+        \\  Focus running on http://localhost (port in server log above)
+        \\  Watching {s} for changes...
+        \\
+        \\
+    , .{path});
+
+    // Step 5: Watch + reload loop.
+    // TODO: inotify/kqueue. For now, poll with stat (same as shell version).
+    var last_mtime: i128 = 0;
+    while (true) {
+        std.time.sleep(1 * std.time.ns_per_s);
+
+        // Check if any file in path changed.
+        const new_mtime = get_dir_mtime(path) catch continue;
+        if (last_mtime != 0 and new_mtime != last_mtime) {
+            try stdout.print("[watch]   change detected, rebuilding...\n", .{});
+
+            // Rebuild.
+            cmd_build(gpa, .{ .path = path, .@"--" = {} }) catch {
+                try stdout.print("[watch]   build failed — sidecar not restarted\n", .{});
+                last_mtime = new_mtime;
+                continue;
+            };
+
+            // Restart sidecar.
+            _ = sidecar.kill() catch {};
+            _ = sidecar.wait() catch {};
+            std.time.sleep(500 * std.time.ns_per_ms); // bus deadline
+            sidecar = try spawn_cmd(gpa, &.{ "sh", "-c", start_hook }, &env);
+            try stdout.print("[watch]   sidecar restarted\n", .{});
+        }
+        last_mtime = new_mtime;
+    }
+
+}
+
+/// Get the most recent mtime of any .ts file in a directory.
+fn get_dir_mtime(path: []const u8) !i128 {
+    var dir = try std.fs.cwd().openDir(path, .{ .iterate = true });
+    defer dir.close();
+    var walker = try dir.walk(std.heap.page_allocator);
+    defer walker.deinit();
+
+    var max_mtime: i128 = 0;
+    while (try walker.next()) |entry| {
+        if (entry.kind != .file) continue;
+        if (!std.mem.endsWith(u8, entry.basename, ".ts")) continue;
+        const stat = dir.statFile(entry.path) catch continue;
+        const mtime = stat.mtime;
+        if (mtime > max_mtime) max_mtime = mtime;
+    }
+    return max_mtime;
 }
