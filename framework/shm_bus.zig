@@ -1,4 +1,4 @@
-//! Shared memory bus — mmap + io_uring futex transport.
+//! Shared memory bus — mmap + futex wake transport.
 //!
 //! Drop-in replacement for MessageBusType when used with the v2 dispatch.
 //! Same interface: send_message_to, is_connection_ready, can_send_to,
@@ -7,9 +7,9 @@
 //! Layout per slot pair:
 //!   [Header 64B][Request frame_max][Response frame_max]
 //!
-//! Signaling: io_uring FUTEX_WAIT on sidecar_seq. The server submits
-//! a futex wait; when the sidecar writes a new seq, the kernel
-//! completes the wait. No eventfd, no extra fd, no extra syscalls.
+//! Signaling: raw futex WAKE on epoch (fire-and-forget syscall).
+//! Server detects responses by polling sidecar_seq in the tick loop.
+//! No io_uring dependency — same raw futex as WorkerDispatch.
 //!
 //! CRC covers len_bytes ++ payload_bytes (TB convention — corrupted
 //! length produces CRC mismatch, not garbage read).
@@ -20,8 +20,6 @@ const posix = std.posix;
 const linux = std.os.linux;
 const protocol = @import("../protocol.zig");
 const Crc32 = std.hash.crc.Crc32;
-const IoUring = @import("io.zig").IoUring;
-
 const log = std.log.scoped(.shm_bus);
 
 pub fn SharedMemoryBusType(comptime options: Options) type {
@@ -107,7 +105,6 @@ pub fn SharedMemoryBusType(comptime options: Options) type {
 
         region: ?*Region = null,
         shm_fd: posix.fd_t = -1,
-        uring: ?*IoUring = null,
 
         server_seqs: [slot_count]u32 = [_]u32{0} ** slot_count,
         slot_delivered: [slot_count]bool = [_]bool{false} ** slot_count,
@@ -131,13 +128,11 @@ pub fn SharedMemoryBusType(comptime options: Options) type {
         pub fn create(
             self: *Self,
             name: []const u8,
-            uring: *IoUring,
             on_frame_fn: *const fn (*anyopaque, u8, []const u8) void,
             context: *anyopaque,
         ) !void {
             self.on_frame_fn = on_frame_fn;
             self.context = context;
-            self.uring = uring;
 
             // Allocate message pool on the heap (16 × 256KB = 4MB).
             const pool_count = slot_count * 2;
@@ -183,8 +178,12 @@ pub fn SharedMemoryBusType(comptime options: Options) type {
             ) catch return error.MmapFailed;
             self.region = @ptrCast(@alignCast(ptr));
 
-            // Zero the region.
-            @memset(@as([*]u8, @ptrCast(self.region.?))[0..@sizeOf(Region)], 0);
+            // Zero the region, then write header fields.
+            // Struct defaults don't apply to mmap'd memory — must be explicit.
+            const region = self.region.?;
+            @memset(@as([*]u8, @ptrCast(region))[0..@sizeOf(Region)], 0);
+            region.header.slot_count = slot_count;
+            region.header.frame_max = slot_data_size;
 
             log.info("shm bus: region={d}B, {d} slots, name={s}", .{
                 @sizeOf(Region), slot_count, name,
@@ -192,21 +191,61 @@ pub fn SharedMemoryBusType(comptime options: Options) type {
         }
 
         pub fn deinit(self: *Self) void {
+            if (self.message_pool) |pool| {
+                std.heap.page_allocator.free(pool[0 .. slot_count * 2]);
+                self.message_pool = null;
+            }
             if (self.region) |r| {
-                posix.munmap(@as([*]u8, @ptrCast(r))[0..@sizeOf(Region)]);
+                posix.munmap(@as([*]align(std.heap.page_size_min) u8, @ptrCast(@alignCast(r)))[0..@sizeOf(Region)]);
                 self.region = null;
             }
             if (self.shm_fd >= 0) {
                 posix.close(self.shm_fd);
                 self.shm_fd = -1;
             }
-            // Unlink.
+            // Unlink named SHM (no-op for anonymous test regions).
             if (self.shm_name_len > 0) {
                 var path_buf: [128]u8 = undefined;
                 if (std.fmt.bufPrintZ(&path_buf, "/{s}", .{self.shm_name[0..self.shm_name_len]})) |path| {
                     _ = std.c.shm_unlink(path.ptr);
                 } else |_| {}
             }
+        }
+
+        /// Create a test-only instance backed by anonymous mmap (no /dev/shm).
+        /// Same layout as create() but no filesystem involvement.
+        pub fn create_test(
+            self: *Self,
+            on_frame_fn: *const fn (*anyopaque, u8, []const u8) void,
+            context: *anyopaque,
+        ) void {
+            self.on_frame_fn = on_frame_fn;
+            self.context = context;
+
+            // Message pool.
+            const pool_count = slot_count * 2;
+            const pool = std.heap.page_allocator.alloc(Message, pool_count) catch
+                @panic("shm_bus: test pool alloc failed");
+            for (pool) |*m| {
+                m.references = 0;
+                m.slot_index = 0;
+            }
+            self.message_pool = pool.ptr;
+
+            // Anonymous mmap — no /dev/shm, no cleanup needed.
+            const ptr = posix.mmap(
+                null,
+                @sizeOf(Region),
+                posix.PROT.READ | posix.PROT.WRITE,
+                .{ .TYPE = .PRIVATE, .ANONYMOUS = true },
+                -1,
+                0,
+            ) catch @panic("shm_bus: test mmap failed");
+            self.region = @ptrCast(@alignCast(ptr));
+            const region = self.region.?;
+            @memset(@as([*]u8, @ptrCast(region))[0..@sizeOf(Region)], 0);
+            region.header.slot_count = slot_count;
+            region.header.frame_max = slot_data_size;
         }
 
         pub fn set_ready(self: *Self) void {
@@ -265,7 +304,7 @@ pub fn SharedMemoryBusType(comptime options: Options) type {
 
             const epoch_ptr: *u32 = &region.header.epoch;
             _ = @atomicRmw(u32, epoch_ptr, .Add, 1, .release);
-            IoUring.futex_wake(@ptrCast(epoch_ptr));
+            futex_wake(epoch_ptr);
         }
 
         /// Write a CALL payload to shared memory for the given slot.
@@ -305,7 +344,7 @@ pub fn SharedMemoryBusType(comptime options: Options) type {
             _ = @atomicRmw(u32, epoch_ptr, .Add, 1, .release);
 
             // Wake sidecar via futex on epoch.
-            IoUring.futex_wake(@ptrCast(epoch_ptr));
+            futex_wake(epoch_ptr);
         }
 
         /// Check for responses. Called from the io_uring futex_wait
@@ -350,45 +389,26 @@ pub fn SharedMemoryBusType(comptime options: Options) type {
             if (self.on_frame_fn) |cb| {
                 cb(self.context.?, slot_idx, slot.response[0..response_len]);
             }
-
-            // Re-submit futex wait for next response.
-            self.submit_futex_wait(slot_idx);
         }
 
-        /// Submit a futex wait on sidecar_seq for the given slot.
-        /// The io_uring completion fires when sidecar_seq changes.
-        pub fn submit_futex_wait(self: *Self, slot_idx: u8) void {
-            const region = self.region orelse return;
-            const slot = &region.slots[slot_idx];
-            const current_seq = @as(*volatile u32, @ptrCast(&slot.header.sidecar_seq)).*;
-
-            if (self.uring) |ring| {
-                _ = ring.submit_futex_wait(
-                    @ptrCast(&slot.header.sidecar_seq),
-                    current_seq,
-                    @ptrCast(self),
-                    shm_futex_callback,
-                );
-            }
-        }
-
-        fn shm_futex_callback(ctx: *anyopaque, result: i32) void {
-            _ = result;
-            const self: *Self = @ptrCast(@alignCast(ctx));
-            // Check all slots — the futex could have fired for any.
+        /// Poll all slots for new responses. Called from the server
+        /// tick loop. Cost: slot_count atomic loads per tick.
+        pub fn poll_responses(self: *Self) void {
             for (0..slot_count) |i| {
                 self.check_response(@intCast(i));
             }
         }
-
-        /// Submit initial futex waits for all slots. Call after sidecar
-        /// connects and is ready.
-        pub fn start_watching(self: *Self) void {
-            for (0..slot_count) |i| {
-                self.submit_futex_wait(@intCast(i));
-            }
-        }
     };
+}
+
+/// Raw futex WAKE syscall — fire-and-forget, no io_uring dependency.
+/// Same as WorkerDispatch.futex_wake.
+fn futex_wake(ptr: *const u32) void {
+    _ = linux.futex_wake(
+        @ptrCast(ptr),
+        linux.FUTEX.WAKE,
+        1,
+    );
 }
 
 pub const Options = struct {

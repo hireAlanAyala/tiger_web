@@ -41,10 +41,6 @@ pub const IO = struct {
 
     inner: InnerIO,
 
-    /// Compatibility shims — kept to avoid changing server.zig wire_sidecar.
-    shm_poll_fn: ?*const fn () bool = null,
-    uring: ?void = null,
-
     pub fn init() !IO {
         return .{
             // 256 entries — enough for max_connections recv/send + timeouts.
@@ -186,6 +182,4 @@ pub const IO = struct {
         };
     }
 
-    /// Init uring — no-op, the ring is created in init().
-    pub fn init_uring(_: *IO) !void {}
 };
