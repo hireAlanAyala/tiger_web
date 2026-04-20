@@ -102,6 +102,10 @@ pub fn SidecarDispatchType(comptime Bus: type) type {
             /// completion entry with this op and resolves the pending index.
             worker_completes_op: u64 = 0,
 
+            /// Tick when this entry entered a pending stage. Used for
+            /// response timeout — terminate if the sidecar is stuck.
+            pending_since: u32 = 0,
+
             // Render result — stored in shared render_buf, not per-entry.
             html: []const u8 = "",
             // 1-RT: HTML stored in handle_buf at this offset until
@@ -189,6 +193,7 @@ pub fn SidecarDispatchType(comptime Bus: type) type {
             path: []const u8,
             body: []const u8,
             connection: *anyopaque,
+            tick_count: u32,
         ) bool {
             assert(entry.stage == .free);
             assert(path.len > 0);
@@ -225,6 +230,7 @@ pub fn SidecarDispatchType(comptime Bus: type) type {
             entry.stage = .route_prefetch_pending;
             entry.request_id = request_id;
             entry.connection = connection;
+            entry.pending_since = tick_count;
             return true;
         }
 
@@ -240,6 +246,7 @@ pub fn SidecarDispatchType(comptime Bus: type) type {
             rows_data: []const u8,
             row_set_count: u8,
             connection: ?*anyopaque,
+            tick_count: u32,
         ) bool {
             assert(entry.stage == .free);
             assert(operation != .root);
@@ -254,6 +261,7 @@ pub fn SidecarDispatchType(comptime Bus: type) type {
             b.finalize_slot_send(entry_idx, @intCast(frame_len));
 
             entry.stage = .combined_pending;
+            entry.pending_since = tick_count;
             entry.request_id = request_id;
             entry.operation = operation;
             entry.msg = msg;
@@ -416,6 +424,24 @@ pub fn SidecarDispatchType(comptime Bus: type) type {
             }
             self.pending_mutation_count = 0;
             self.lowest_pending_mutation_seq = std.math.maxInt(u32);
+        }
+
+        /// Cancel a single pending entry, fixing mutation tracking.
+        pub fn cancel_entry(self: *Self, entry: *Entry) void {
+            assert(entry.stage != .free);
+            if (entry.is_mutation) {
+                switch (entry.stage) {
+                    .combined_pending, .combined_complete,
+                    .write_pending,
+                    .route_prefetch_pending, .route_prefetch_complete => {
+                        assert(self.pending_mutation_count > 0);
+                        self.pending_mutation_count -= 1;
+                        self.recompute_lowest_pending_mutation();
+                    },
+                    else => {},
+                }
+            }
+            entry.reset();
         }
 
         pub fn count_active(self: *const Self) u32 {
@@ -732,6 +758,9 @@ pub fn SidecarDispatchType(comptime Bus: type) type {
             // Store remaining (SQL declarations + keys) in route_buf.
             const remaining = data[pos..];
             const copy_len = @min(remaining.len, entry.route_buf.len);
+            if (remaining.len > entry.route_buf.len) {
+                log.warn("route_prefetch: SQL declarations truncated: {d} > route_buf {d}", .{ remaining.len, entry.route_buf.len });
+            }
             @memcpy(entry.route_buf[0..copy_len], remaining[0..copy_len]);
             entry.route_len = copy_len;
             assert(entry.route_len <= entry.route_buf.len);
