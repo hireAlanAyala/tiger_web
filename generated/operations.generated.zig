@@ -35,6 +35,8 @@ pub const Operation = enum(u8) {
     charge_payment = 25,
     process_image = 26,
     send_order_email = 27,
+    list_items = 28,
+    create_item = 29,
 
     pub fn is_mutation(op: Operation) bool {
         return switch (op) {

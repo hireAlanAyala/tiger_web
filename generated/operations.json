@@ -26,5 +26,7 @@
   "page_load_login": 24,
   "charge_payment": 25,
   "process_image": 26,
-  "send_order_email": 27
+  "send_order_email": 27,
+  "list_items": 28,
+  "create_item": 29
 }
