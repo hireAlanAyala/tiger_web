@@ -1,0 +1,27 @@
+{
+  "name": "focus",
+  "version": "0.1.0",
+  "description": "Focus framework TypeScript runtime — protocol client, types, codegen, serde",
+  "type": "module",
+  "main": "src/index.ts",
+  "types": "src/index.ts",
+  "bin": {
+    "focus-sidecar": "src/bin/focus-sidecar.ts",
+    "focus-codegen": "src/bin/focus-codegen.ts"
+  },
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "files": ["src", "native/shm.node", "README.md"],
+  "engines": { "node": ">=22" },
+  "scripts": {
+    "build:native": "../../zig/zig cc -shared -o native/shm.node native/shm.c -I/usr/include/node -lrt -lz -fPIC"
+  },
+  "dependencies": {
+    "tsx": "^4"
+  },
+  "devDependencies": {
+    "@types/node": "^22",
+    "typescript": "^5"
+  }
+}
