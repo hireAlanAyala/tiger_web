@@ -424,6 +424,29 @@ pub fn build_call(buf: []u8, request_id: u32, function_name: []const u8, args: [
     return pos;
 }
 
+/// Build a RESULT frame in buf. Returns the payload length.
+/// Layout: [tag: 0x11][request_id: u32 BE][flag: u8][data...]
+/// Mirrors build_call for the response direction.
+pub fn build_result(buf: []u8, request_id: u32, flag: ResultFlag, data: []const u8) ?usize {
+    const total = 1 + 4 + 1 + data.len;
+    if (total > buf.len) return null;
+    if (total > frame_max) return null;
+
+    var pos: usize = 0;
+    buf[pos] = @intFromEnum(CallTag.result);
+    pos += 1;
+    std.mem.writeInt(u32, buf[pos..][0..4], request_id, .big);
+    pos += 4;
+    buf[pos] = @intFromEnum(flag);
+    pos += 1;
+    if (data.len > 0) {
+        @memcpy(buf[pos..][0..data.len], data);
+        pos += data.len;
+    }
+    assert(pos == total);
+    return pos;
+}
+
 /// Build a QUERY_RESULT frame in buf. Returns the payload length.
 /// Layout: [tag: u8][request_id: u32 BE][query_id: u16 BE][row_set...]
 pub fn build_query_result(buf: []u8, request_id: u32, query_id: u16, row_set: []const u8) ?usize {
@@ -1044,6 +1067,37 @@ test "RESULT parse round-trip" {
     const result = parse_result_payload(frame.payload) orelse unreachable;
     try std.testing.expectEqual(ResultFlag.success, result.flag);
     try std.testing.expectEqualStrings("hello", result.data);
+}
+
+test "build_result round-trip" {
+    // Pair assertion: build_result produces frames that parse_sidecar_frame
+    // + parse_result_payload accept. Catches format drift.
+    var buf: [256]u8 = undefined;
+    const data = "test_payload";
+    const len = build_result(&buf, 42, .success, data) orelse unreachable;
+    try std.testing.expectEqual(@as(usize, 1 + 4 + 1 + data.len), len);
+
+    const frame = parse_sidecar_frame(buf[0..len]) orelse unreachable;
+    try std.testing.expectEqual(CallTag.result, frame.tag);
+    try std.testing.expectEqual(@as(u32, 42), frame.request_id);
+
+    const result = parse_result_payload(frame.payload) orelse unreachable;
+    try std.testing.expectEqual(ResultFlag.success, result.flag);
+    try std.testing.expectEqualStrings(data, result.data);
+}
+
+test "build_result — failure flag" {
+    var buf: [64]u8 = undefined;
+    const len = build_result(&buf, 7, .failure, "") orelse unreachable;
+    const frame = parse_sidecar_frame(buf[0..len]) orelse unreachable;
+    const result = parse_result_payload(frame.payload) orelse unreachable;
+    try std.testing.expectEqual(ResultFlag.failure, result.flag);
+    try std.testing.expectEqual(@as(usize, 0), result.data.len);
+}
+
+test "build_result — overflow returns null" {
+    var buf: [5]u8 = undefined; // too small for header (6 bytes min)
+    try std.testing.expect(build_result(&buf, 1, .success, "") == null);
 }
 
 test "QUERY_RESULT build round-trip" {
