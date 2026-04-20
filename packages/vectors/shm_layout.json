@@ -20,7 +20,8 @@
       "response_len": { "offset": 12, "size": 4, "type": "u32 LE", "description": "Byte length of RESULT frame in response area." },
       "request_crc":  { "offset": 16, "size": 4, "type": "u32 LE", "description": "CRC32 of (request_len as LE bytes ++ request payload)." },
       "response_crc": { "offset": 20, "size": 4, "type": "u32 LE", "description": "CRC32 of (response_len as LE bytes ++ response payload)." },
-      "_pad":         { "offset": 24, "size": 40 }
+      "slot_state":   { "offset": 24, "size": 1, "type": "u8", "description": "Explicit lifecycle state: 0=free, 1=call_written, 2=result_written. Written by both server and sidecar at state transitions." },
+      "_pad":         { "offset": 25, "size": 39 }
     }
   },
   "slot_pair": {

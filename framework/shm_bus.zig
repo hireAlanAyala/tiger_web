@@ -33,6 +33,19 @@ pub fn SharedMemoryBusType(comptime options: Options) type {
         // Shared memory layout — extern struct, comptime-verified
         // =============================================================
 
+        /// Slot state — explicit lifecycle tracking for crash safety analysis.
+        /// The state is the source of truth for where the slot is in the
+        /// CALL/RESULT cycle. Sequence numbers are for ordering and wake
+        /// detection; state is for safety invariants.
+        pub const SlotState = enum(u8) {
+            /// No active request. Safe to write a new CALL.
+            free = 0,
+            /// Server wrote CALL + CRC, bumped server_seq. Sidecar can read.
+            call_written = 1,
+            /// Sidecar wrote RESULT + CRC, bumped sidecar_seq. Server can read.
+            result_written = 2,
+        };
+
         pub const SlotHeader = extern struct {
             server_seq: u32 = 0,
             sidecar_seq: u32 = 0,
@@ -40,7 +53,15 @@ pub fn SharedMemoryBusType(comptime options: Options) type {
             response_len: u32 = 0,
             request_crc: u32 = 0,
             response_crc: u32 = 0,
-            _pad: [40]u8 = [_]u8{0} ** 40,
+            /// Explicit slot lifecycle state. Written by both sides:
+            ///   server: free → call_written (after CALL write)
+            ///   sidecar: call_written → result_written (after RESULT write)
+            ///   server: result_written → free (after RESULT read)
+            /// Crash safety: if sidecar crashes in call_written, server
+            /// times out. If server crashes in result_written, sidecar's
+            /// RESULT is lost (acceptable — client retries).
+            slot_state: SlotState = .free,
+            _pad: [39]u8 = [_]u8{0} ** 39,
 
             comptime {
                 assert(@sizeOf(SlotHeader) == 64);
@@ -302,6 +323,7 @@ pub fn SharedMemoryBusType(comptime options: Options) type {
 
             slot.header.request_len = payload_len;
             slot.header.request_crc = crc.final();
+            slot.header.slot_state = .call_written;
 
             self.server_seqs[slot_idx] += 1;
             const seq_ptr: *u32 = &slot.header.server_seq;
@@ -342,6 +364,7 @@ pub fn SharedMemoryBusType(comptime options: Options) type {
             // Update header (non-atomic — only seq needs ordering).
             slot.header.request_len = payload_len;
             slot.header.request_crc = crc.final();
+            slot.header.slot_state = .call_written;
 
             // Increment seq with release ordering — all payload stores
             // are visible before the seq update.
@@ -397,6 +420,7 @@ pub fn SharedMemoryBusType(comptime options: Options) type {
             // send a new CALL on this same slot (clearing the flag).
             // Setting after would overwrite the cleared flag.
             self.slot_delivered[slot_idx] = true;
+            slot.header.slot_state = .free;
 
             // Deliver frame to dispatch module.
             if (self.on_frame_fn) |cb| {
