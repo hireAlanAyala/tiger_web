@@ -4,15 +4,11 @@
     "node": ">=22"
   },
   "scripts": {
-    "build": "../../tiger-web build",
-    "dev": "../../tiger-web dev"
+    "build": "../../focus build",
+    "dev": "../../focus dev"
   },
   "devDependencies": {
-    "concurrently": "^9",
     "tsx": "^4",
     "typescript": "^5"
-  },
-  "dependencies": {
-    "better-sqlite3": "^12.8.0"
   }
 }

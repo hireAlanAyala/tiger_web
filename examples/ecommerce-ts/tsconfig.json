@@ -6,7 +6,7 @@
     "module": "nodenext",
     "moduleResolution": "nodenext",
     "paths": {
-      "tiger-web": ["../../generated/types.generated.ts"]
+      "tiger-web": [".focus/types.generated.ts"]
     },
     "baseUrl": "."
   },
