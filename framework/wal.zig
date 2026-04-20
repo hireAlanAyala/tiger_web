@@ -129,6 +129,16 @@ pub fn WalType(comptime Operation: type) type {
 
         pub const PendingIndex = pd.PendingIndexType(constants.max_in_flight_workers);
 
+        /// Static recovery buffer — avoids heap allocation during init.
+        /// Sized to entry_max (256KB). Used only during recovery scan.
+        var recovery_buffer: [entry_max]u8 align(@alignOf(EntryHeader)) = undefined;
+
+        /// Recovery state returned by scan_entries.
+        const RecoveryResult = struct {
+            op: u64,
+            parent: u128,
+        };
+
         /// Initialize a WAL from the given path. If `pending` is non-null,
         /// the recovery scan populates the pending dispatch index.
         pub fn init(path: [:0]const u8, pending: ?*PendingIndex) Wal {
@@ -141,122 +151,132 @@ pub fn WalType(comptime Operation: type) type {
                 @panic("wal: failed to open file");
             };
 
-            var op: u64 = 0;
-            var parent: u128 = 0;
-
             const stat = std.posix.fstat(fd) catch |err| {
                 log.err("fstat failed: {}", .{err});
                 @panic("wal: failed to stat file");
             };
             const file_size: u64 = @intCast(stat.size);
 
-            if (file_size > 0) {
-                // Recovery: read existing entries.
-                const read_fd = std.posix.open(
-                    path,
-                    .{ .ACCMODE = .RDONLY },
-                    0,
-                ) catch |err| {
-                    log.err("open for recovery failed: {}", .{err});
-                    @panic("wal: failed to open file for recovery");
-                };
-                defer std.posix.close(read_fd);
-
-                // Verify root.
-                var root_buf: [@sizeOf(EntryHeader)]u8 align(@alignOf(EntryHeader)) = undefined;
-                const root_n = std.posix.pread(read_fd, &root_buf, 0) catch 0;
-                if (root_n < @sizeOf(EntryHeader)) {
-                    log.warn("stale WAL — too small for root, deleting", .{});
-                    std.posix.close(fd);
-                    std.fs.cwd().deleteFile(path) catch {};
-                    return init(path, pending);
-                }
-
-                const root_hdr: *const EntryHeader = @ptrCast(@alignCast(&root_buf));
-                const expected = root_entry();
-                if (root_hdr.checksum != expected.checksum) {
-                    log.warn("stale WAL — root mismatch, deleting", .{});
-                    std.posix.close(fd);
-                    std.fs.cwd().deleteFile(path) catch {};
-                    return init(path, pending);
-                }
-
-                // Scan forward to find the last valid entry.
-                // Read each full entry and verify checksum + parent chain.
-                // Cost: reads the entire WAL file once at startup. Acceptable
-                // for a diagnostic WAL — recovery runs once, not per request.
-                // Heap-allocated: entry_max (256KB) is too large for the stack.
-                const entry_buf = std.heap.page_allocator.alignedAlloc(
-                    u8, @alignOf(EntryHeader), entry_max,
-                ) catch @panic("wal: failed to allocate recovery buffer");
-                defer std.heap.page_allocator.free(entry_buf);
-                var scan_offset: u64 = 0;
-                var last_valid_checksum: u128 = expected.checksum;
-                var last_valid_op: u64 = 0;
-                var last_valid_end: u64 = @sizeOf(EntryHeader); // after root
-                var entries_read: u64 = 0;
-
-                while (scan_offset < file_size) {
-                    // Read header to get entry_len.
-                    const n = std.posix.pread(read_fd, entry_buf[0..@sizeOf(EntryHeader)], scan_offset) catch break;
-                    if (n < @sizeOf(EntryHeader)) break;
-
-                    const hdr: *const EntryHeader = @ptrCast(@alignCast(entry_buf.ptr));
-                    if (hdr.entry_len < @sizeOf(EntryHeader) or hdr.entry_len > entry_max) break;
-                    if (scan_offset + hdr.entry_len > file_size) break;
-
-                    // Read full entry for checksum verification.
-                    const full_n = std.posix.pread(read_fd, entry_buf[0..hdr.entry_len], scan_offset) catch break;
-                    if (full_n != hdr.entry_len) break;
-
-                    // Verify parent chain.
-                    if (hdr.parent != last_valid_checksum and entries_read > 0) break;
-
-                    // Verify checksum over everything after the checksum field.
-                    const checksum_offset = @offsetOf(EntryHeader, "checksum") + @sizeOf(u128);
-                    const computed = cs.checksum(entry_buf[checksum_offset..hdr.entry_len]);
-                    if (computed != hdr.checksum) break;
-
-                    // Rebuild pending dispatch index during recovery.
-                    if (pending) |idx| {
-                        recover_dispatches(idx, hdr, entry_buf[0..hdr.entry_len]);
-                    }
-
-                    last_valid_checksum = hdr.checksum;
-                    last_valid_op = hdr.op;
-                    entries_read += 1;
-                    last_valid_end = scan_offset + hdr.entry_len;
-                    scan_offset += hdr.entry_len;
-                }
-
-                op = last_valid_op + 1;
-                parent = last_valid_checksum;
-
-                if (last_valid_end < file_size) {
-                    log.warn("truncating {d} corrupt bytes at tail", .{file_size - last_valid_end});
-                    std.posix.ftruncate(fd, last_valid_end) catch {};
-                }
-                log.info("recovered: entries={d} next_op={d}", .{ entries_read, op });
-            } else {
-                // New file — write root entry.
-                const root_hdr = root_entry();
-                if (!write_all(fd, std.mem.asBytes(&root_hdr))) {
-                    log.err("root write failed", .{});
-                    @panic("wal: failed to write root entry");
-                }
-                op = 1;
-                parent = root_hdr.checksum;
-                log.info("created new WAL", .{});
-            }
+            const result = if (file_size > 0)
+                recover(path, fd, file_size, pending)
+            else
+                create_new(fd);
 
             var wal = Wal{
                 .fd = fd,
-                .op = op,
-                .parent = parent,
+                .op = result.op,
+                .parent = result.parent,
                 .disabled = false,
             };
             wal.invariants();
             return wal;
+        }
+
+        /// Create a new WAL file — write the root entry.
+        fn create_new(fd: std.posix.fd_t) RecoveryResult {
+            const root_hdr = root_entry();
+            if (!write_all(fd, std.mem.asBytes(&root_hdr))) {
+                log.err("root write failed", .{});
+                @panic("wal: failed to write root entry");
+            }
+            log.info("created new WAL", .{});
+            return .{ .op = 1, .parent = root_hdr.checksum };
+        }
+
+        /// Recover an existing WAL — verify root, scan entries.
+        fn recover(
+            path: [:0]const u8,
+            fd: std.posix.fd_t,
+            file_size: u64,
+            pending: ?*PendingIndex,
+        ) RecoveryResult {
+            const read_fd = std.posix.open(
+                path,
+                .{ .ACCMODE = .RDONLY },
+                0,
+            ) catch |err| {
+                log.err("open for recovery failed: {}", .{err});
+                @panic("wal: failed to open file for recovery");
+            };
+            defer std.posix.close(read_fd);
+
+            if (!verify_root(read_fd)) {
+                log.warn("stale WAL — root invalid, deleting", .{});
+                std.posix.close(fd);
+                std.fs.cwd().deleteFile(path) catch {};
+                return init(path, pending).to_result();
+            }
+
+            return scan_entries(read_fd, fd, file_size, pending);
+        }
+
+        /// Verify the root entry matches the expected deterministic sentinel.
+        fn verify_root(read_fd: std.posix.fd_t) bool {
+            var root_buf: [@sizeOf(EntryHeader)]u8 align(@alignOf(EntryHeader)) = undefined;
+            const root_n = std.posix.pread(read_fd, &root_buf, 0) catch 0;
+            if (root_n < @sizeOf(EntryHeader)) return false;
+
+            const root_hdr: *const EntryHeader = @ptrCast(@alignCast(&root_buf));
+            const expected = root_entry();
+            return root_hdr.checksum == expected.checksum;
+        }
+
+        /// Forward-scan all entries, verify checksums + parent chain,
+        /// rebuild pending dispatch index, truncate corrupt tail.
+        fn scan_entries(
+            read_fd: std.posix.fd_t,
+            write_fd: std.posix.fd_t,
+            file_size: u64,
+            pending: ?*PendingIndex,
+        ) RecoveryResult {
+            const expected_root = root_entry();
+            var scan_offset: u64 = 0;
+            var last_valid_checksum: u128 = expected_root.checksum;
+            var last_valid_op: u64 = 0;
+            var last_valid_end: u64 = @sizeOf(EntryHeader);
+            var entries_read: u64 = 0;
+            const entry_buf = &recovery_buffer;
+
+            while (scan_offset < file_size) {
+                const n = std.posix.pread(read_fd, entry_buf[0..@sizeOf(EntryHeader)], scan_offset) catch break;
+                if (n < @sizeOf(EntryHeader)) break;
+
+                const hdr: *const EntryHeader = @ptrCast(@alignCast(entry_buf.ptr));
+                if (hdr.entry_len < @sizeOf(EntryHeader) or hdr.entry_len > entry_max) break;
+                if (scan_offset + hdr.entry_len > file_size) break;
+
+                const full_n = std.posix.pread(read_fd, entry_buf[0..hdr.entry_len], scan_offset) catch break;
+                if (full_n != hdr.entry_len) break;
+
+                if (hdr.parent != last_valid_checksum and entries_read > 0) break;
+
+                const checksum_offset = @offsetOf(EntryHeader, "checksum") + @sizeOf(u128);
+                const computed = cs.checksum(entry_buf[checksum_offset..hdr.entry_len]);
+                if (computed != hdr.checksum) break;
+
+                if (pending) |idx| {
+                    recover_dispatches(idx, hdr, entry_buf[0..hdr.entry_len]);
+                }
+
+                last_valid_checksum = hdr.checksum;
+                last_valid_op = hdr.op;
+                entries_read += 1;
+                last_valid_end = scan_offset + hdr.entry_len;
+                scan_offset += hdr.entry_len;
+            }
+
+            if (last_valid_end < file_size) {
+                log.warn("truncating {d} corrupt bytes at tail", .{file_size - last_valid_end});
+                std.posix.ftruncate(write_fd, last_valid_end) catch {};
+            }
+            log.info("recovered: entries={d} next_op={d}", .{ entries_read, last_valid_op + 1 });
+
+            return .{ .op = last_valid_op + 1, .parent = last_valid_checksum };
+        }
+
+        /// Convert a Wal to RecoveryResult (for recursive init after delete).
+        fn to_result(wal: Wal) RecoveryResult {
+            return .{ .op = wal.op, .parent = wal.parent };
         }
 
         /// Parse dispatch/completion/dead entries and update the pending index.
