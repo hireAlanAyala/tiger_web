@@ -1900,6 +1900,9 @@ fn emit_routes_zig(
     for (annotations) |ann| {
         if (ann.phase != .translate) continue;
         const rm = ann.route_match orelse continue;
+        // Only generate native Zig routes. TypeScript handlers go
+        // through the sidecar's 2-RT route_prefetch path.
+        if (!std.mem.endsWith(u8, ann.file, ".zig")) continue;
         try routes.append(.{
             .operation = ann.operation,
             .method = @tagName(rm.method),
@@ -1976,27 +1979,11 @@ fn emit_routes_zig(
     try w.writeAll(
         \\};
         \\
-        \\// Comptime assertions — pair with scanner's validation.
+        \\// Comptime assertions — validate routes that exist.
+        \\// Exhaustiveness (every operation has a route) is NOT checked here —
+        \\// sidecar operations have no native routes and go through 2-RT.
+        \\// The scanner validates exhaustiveness at build time.
         \\comptime {
-        \\    const enums = @import("std").enums;
-        \\
-        \\    // Assert: every Operation has at least one route entry.
-        \\    // If a handler file exists without a // match annotation, this catches it.
-        \\    for (enums.values(message.Operation)) |op| {
-        \\        // .root is the zero-valued sentinel in message.Operation — it's not
-        \\        // a real operation and has no handler. If more sentinels are added,
-        \\        // they must be listed here.
-        \\        if (op == .root) continue;
-        \\        // Worker completion operations have [route] but no // match —
-        \\        // they are triggered by worker completion, not HTTP requests.
-        \\        if (is_completion_operation(op)) continue;
-        \\        var found = false;
-        \\        for (routes) |r| {
-        \\            if (r.operation == op) { found = true; break; }
-        \\        }
-        \\        if (!found) @compileError("no // match annotation for operation: " ++ @tagName(op));
-        \\    }
-        \\
         \\    // Assert: path params + query params fit in RouteParams for every route.
         \\    const parse = @import("../framework/parse.zig");
         \\    for (routes) |r| {
