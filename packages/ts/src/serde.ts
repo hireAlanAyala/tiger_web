@@ -72,9 +72,16 @@ export function readRowSet(buf: DataView, offset: number): { result: RowSet; off
     columns.push({ typeTag, name });
   }
 
-  // Row count.
+  // Row count — bounded by remaining buffer size.
   const rowCount = buf.getUint32(pos, false);
   pos += 4;
+  // Each row has at least 1 byte per column (type tag for null).
+  // If rowCount * colCount > remaining bytes, the data is truncated/corrupt.
+  const remainingBytes = buf.byteLength - pos;
+  const minBytesPerRow = colCount > 0 ? colCount : 1;
+  if (rowCount > 0 && rowCount * minBytesPerRow > remainingBytes) {
+    throw new RangeError(`row_count ${rowCount} exceeds buffer capacity (${remainingBytes} bytes remaining)`);
+  }
 
   // Rows.
   const rows: Record<string, unknown>[] = [];
