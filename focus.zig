@@ -171,6 +171,10 @@ fn cmd_build(gpa: std.mem.Allocator, args: BuildArgs) !void {
     const path = args.path;
     const stdout = std.io.getStdOut().writer();
 
+    // Ensure the focus package is extracted to node_modules/focus/.
+    // The binary bundles the package — no npm install needed.
+    ensure_package();
+
     // Arena for scanner (allocates freely, freed after scan completes).
     var arena = std.heap.ArenaAllocator.init(gpa);
     defer arena.deinit();
@@ -416,6 +420,74 @@ fn parse_hook(content: []const u8, key: []const u8) ?[]const u8 {
         }
     }
     return null;
+}
+
+// =============================================================
+// Package extraction — binary bundles the focus TS package
+// =============================================================
+
+/// Embedded package files — extracted to node_modules/focus/ on first run.
+/// The binary IS the distribution: no npm install, no registry, no version skew.
+const package_files = .{
+    .{ "node_modules/focus/package.json", @embedFile("packages/ts/package.json") },
+    .{ "node_modules/focus/src/index.ts", @embedFile("packages/ts/src/index.ts") },
+    .{ "node_modules/focus/src/types.ts", @embedFile("packages/ts/src/types.ts") },
+    .{ "node_modules/focus/src/serde.ts", @embedFile("packages/ts/src/serde.ts") },
+    .{ "node_modules/focus/src/routing.ts", @embedFile("packages/ts/src/routing.ts") },
+    .{ "node_modules/focus/src/sidecar.ts", @embedFile("packages/ts/src/sidecar.ts") },
+    .{ "node_modules/focus/src/shm_client.ts", @embedFile("packages/ts/src/shm_client.ts") },
+    .{ "node_modules/focus/src/codegen.ts", @embedFile("packages/ts/src/codegen.ts") },
+    .{ "node_modules/focus/src/protocol_generated.ts", @embedFile("packages/ts/src/protocol_generated.ts") },
+    .{ "node_modules/focus/src/bin/focus-sidecar.ts", @embedFile("packages/ts/src/bin/focus-sidecar.ts") },
+    .{ "node_modules/focus/src/bin/focus-codegen.ts", @embedFile("packages/ts/src/bin/focus-codegen.ts") },
+    .{ "node_modules/focus/native/shm.node", @embedFile("addons/shm/shm.node") },
+};
+
+/// Extract the embedded focus package to node_modules/focus/ if missing or stale.
+/// Called at the start of cmd_build — before codegen needs the package.
+fn ensure_package() void {
+    const cwd = std.fs.cwd();
+
+    // Check if package already exists and is current version.
+    if (cwd.access("node_modules/focus/package.json", .{})) |_| {
+        // Package exists. Check if it matches the embedded version.
+        // For now: always overwrite. The extraction is fast (<1ms for ~100KB)
+        // and guarantees the package matches the binary. No stale risk.
+    } else |_| {}
+
+    // Create directory structure.
+    cwd.makePath("node_modules/focus/src/bin") catch {};
+    cwd.makePath("node_modules/focus/native") catch {};
+
+    // Write all embedded files.
+    inline for (package_files) |entry| {
+        const path = entry[0];
+        const content = entry[1];
+        const file = cwd.createFile(path, .{}) catch |err| {
+            stderr.print("error: failed to write {s}: {}\n", .{ path, err }) catch {};
+            return;
+        };
+        defer file.close();
+        file.writeAll(content) catch {};
+    }
+
+    // Make bin entry points executable (npm does this on install, we extract manually).
+    const bins = [_][]const u8{
+        "node_modules/focus/src/bin/focus-codegen.ts",
+        "node_modules/focus/src/bin/focus-sidecar.ts",
+    };
+    for (bins) |bin_path| {
+        const f = cwd.openFile(bin_path, .{}) catch continue;
+        defer f.close();
+        f.chmod(0o755) catch {};
+    }
+
+    // Create bin symlinks (npm creates these on install, we extract manually).
+    cwd.makePath("node_modules/.bin") catch {};
+    cwd.deleteFile("node_modules/.bin/focus-codegen") catch {};
+    cwd.deleteFile("node_modules/.bin/focus-sidecar") catch {};
+    cwd.symLink("../focus/src/bin/focus-codegen.ts", "node_modules/.bin/focus-codegen", .{}) catch {};
+    cwd.symLink("../focus/src/bin/focus-sidecar.ts", "node_modules/.bin/focus-sidecar", .{}) catch {};
 }
 
 // =============================================================

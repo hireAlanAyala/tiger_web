@@ -2,10 +2,8 @@
   "private": true,
   "type": "module",
   "engines": { "node": ">=22" },
-  "dependencies": {
-    "focus": "*"
-  },
   "devDependencies": {
+    "tsx": "^4",
     "typescript": "^5"
   }
 }
