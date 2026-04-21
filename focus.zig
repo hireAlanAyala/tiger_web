@@ -440,7 +440,7 @@ const package_files = .{
     .{ "node_modules/focus/src/protocol_generated.ts", @embedFile("packages/ts/src/protocol_generated.ts") },
     .{ "node_modules/focus/src/bin/focus-sidecar.ts", @embedFile("packages/ts/src/bin/focus-sidecar.ts") },
     .{ "node_modules/focus/src/bin/focus-codegen.ts", @embedFile("packages/ts/src/bin/focus-codegen.ts") },
-    .{ "node_modules/focus/native/shm.node", @embedFile("addons/shm/shm.node") },
+    .{ "node_modules/focus/native/shm.node", @embedFile("packages/ts/native/shm.node") },
 };
 
 /// Extract the embedded focus package to node_modules/focus/ if missing or stale.

@@ -19,7 +19,7 @@ cp generated/types.generated.ts node_modules/tiger-web/index.ts
 echo '{"name":"tiger-web","main":"index.ts"}' > node_modules/tiger-web/package.json
 
 # Ensure handlers.generated.ts has OperationValues
-npx tsx adapters/typescript.ts generated/manifest.json generated/handlers.generated.ts generated/operations.json > /dev/null 2>&1
+npx tsx packages/ts/src/bin/focus-codegen.ts generated/manifest.json generated/handlers.generated.ts generated/operations.json > /dev/null 2>&1
 
 # Start server (sidecar mode, in-memory)
 ./zig-out/bin/tiger-web start --port=0 --db=:memory: --sidecar=/tmp/ci-shm-sock > /tmp/ci-shm-port.txt 2>/dev/null &
@@ -34,8 +34,8 @@ if [ -z "$PORT" ]; then
     exit 1
 fi
 
-# Start sidecar (uses rebuilt addon from addons/shm/)
-npx tsx adapters/call_runtime_shm.ts "$SHM" "/tmp/ci-shm-sock" > /dev/null 2>&1 &
+# Start sidecar (uses rebuilt addon from packages/ts/native/)
+npx tsx packages/ts/src/bin/focus-sidecar.ts "$SHM" "/tmp/ci-shm-sock" > /dev/null 2>&1 &
 SC_PID=$!
 sleep 5
 
@@ -55,7 +55,7 @@ if [ "$STATUS" = "200" ]; then
     exit 0
 else
     echo "FAIL: expected HTTP 200, got $STATUS"
-    echo "  Likely cause: stale addons/shm/shm.node — rebuild with:"
-    echo "  cd addons/shm && ../../zig/zig cc -shared -o shm.node shm.c -I/usr/include/node -lrt -lz -fPIC"
+    echo "  Likely cause: stale packages/ts/native/shm.node — rebuild with:"
+    echo "  cd packages/ts/native && ../../zig/zig cc -shared -o shm.node shm.c -I/usr/include/node -lrt -lz -fPIC"
     exit 1
 fi

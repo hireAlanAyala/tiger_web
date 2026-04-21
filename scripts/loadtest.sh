@@ -40,7 +40,7 @@ setup_ts_shim() {
     mkdir -p "$PROJ/node_modules/tiger-web"
     cp "$PROJ/generated/types.generated.ts" "$PROJ/node_modules/tiger-web/index.ts"
     echo '{"name":"tiger-web","main":"index.ts"}' > "$PROJ/node_modules/tiger-web/package.json"
-    npx tsx adapters/typescript.ts generated/manifest.json generated/handlers.generated.ts generated/operations.json > /dev/null 2>&1
+    npx tsx packages/ts/src/bin/focus-codegen.ts generated/manifest.json generated/handlers.generated.ts generated/operations.json > /dev/null 2>&1
 }
 
 cleanup_ts_shim() {
@@ -85,7 +85,7 @@ run_bench() {
         SC_PID=$!
         sleep 3
     elif [ "$sidecar_type" = "ts" ]; then
-        npx tsx adapters/call_runtime_shm.ts "$SHM" "/tmp/bench-sock" > /dev/null 2>&1 &
+        npx tsx packages/ts/src/bin/focus-sidecar.ts "$SHM" "/tmp/bench-sock" > /dev/null 2>&1 &
         SC_PID=$!
         sleep 5
     fi
@@ -153,8 +153,8 @@ if [ "$1" = "sidecar" ]; then
     # TS sidecar (informational — tracks Node.js overhead)
     echo ""
     echo "Preparing TS sidecar..."
-    cd addons/shm
-    ../../zig/zig cc -shared -o shm.node shm.c -I/usr/include/node -lrt -lz -fPIC 2>/dev/null
+    cd packages/ts/native
+    ../../../zig/zig cc -shared -o shm.node shm.c -I/usr/include/node -lrt -lz -fPIC 2>/dev/null
     cd "$PROJ"
     echo "  native addon: rebuilt from source"
     setup_ts_shim

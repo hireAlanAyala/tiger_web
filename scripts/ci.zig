@@ -51,14 +51,8 @@ fn run_tests(shell: *Shell) !void {
     for (examples) |example| {
         const example_dir = try shell.fmt("./examples/{s}", .{example});
 
-        // Level 1: Adapter test (protocol boundary).
-        {
-            var section = try shell.open_section(try shell.fmt("{s} adapter", .{example}));
-            defer section.close();
-
-            // Adapter test runs from project root, not example dir.
-            try shell.exec("npx -y tsx adapters/typescript_test.ts", .{});
-        }
+        // Level 1: Protocol tests (package vectors — no server needed).
+        // Runs once above (packages/ts tests section), not per example.
 
         // Level 2: Integration test (full handler logic).
         {
@@ -82,11 +76,11 @@ fn run_tests(shell: *Shell) !void {
         var section = try shell.open_section("native addon rebuild");
         defer section.close();
 
-        try shell.pushd("./addons/shm");
+        try shell.pushd("./packages/ts/native");
         defer shell.popd();
 
         // Rebuild from source.
-        try shell.exec("../../zig/zig cc -shared -o shm.node shm.c -I/usr/include/node -lrt -lz -fPIC", .{});
+        try shell.exec("../../../zig/zig cc -shared -o shm.node shm.c -I/usr/include/node -lrt -lz -fPIC", .{});
         try shell.exec("test -f shm.node", .{});
     }
 
