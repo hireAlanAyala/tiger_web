@@ -126,7 +126,7 @@ fn run_tests(shell: *Shell) !void {
         // The real sidecar is tested in the integration test (Level 2) above.
         // Write a minimal .focus with a no-op build and sleep sidecar.
         {
-            const focus_file = try std.fs.cwd().createFile(".focus", .{});
+            const focus_file = try shell.cwd.createFile(".focus", .{});
             defer focus_file.close();
             try focus_file.writeAll("build = true\nstart = sleep 10\n");
         }

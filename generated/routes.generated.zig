@@ -42,26 +42,11 @@ pub const routes = [_]Route{
     .{ .operation = .page_load_dashboard, .method = .get, .pattern = "/", .query_params = &.{}, .handler = @import("../handlers/page_load_dashboard.zig") },
 };
 
-// Comptime assertions — pair with scanner's validation.
+// Comptime assertions — validate routes that exist.
+// Exhaustiveness (every operation has a route) is NOT checked here —
+// sidecar operations have no native routes and go through 2-RT.
+// The scanner validates exhaustiveness at build time.
 comptime {
-    const enums = @import("std").enums;
-
-    // Assert: every Operation has at least one route entry.
-    // If a handler file exists without a // match annotation, this catches it.
-    for (enums.values(message.Operation)) |op| {
-        // .root is the zero-valued sentinel in message.Operation — it's not
-        // a real operation and has no handler. If more sentinels are added,
-        // they must be listed here.
-        if (op == .root) continue;
-        // Sidecar-only operations have no HTTP route — auto-derived from handler_imports.
-        if (@import("handlers.generated.zig").is_sidecar_operation(op)) continue;
-        var found = false;
-        for (routes) |r| {
-            if (r.operation == op) { found = true; break; }
-        }
-        if (!found) @compileError("no // match annotation for operation: " ++ @tagName(op));
-    }
-
     // Assert: path params + query params fit in RouteParams for every route.
     const parse = @import("../framework/parse.zig");
     for (routes) |r| {
