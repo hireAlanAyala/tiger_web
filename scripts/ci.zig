@@ -48,6 +48,15 @@ pub fn main(shell: *Shell, gpa: std.mem.Allocator, cli_args: CLIArgs) !void {
 }
 
 fn run_tests(shell: *Shell) !void {
+    // Build focus binary — examples call ../../focus from their directory.
+    // Symlink zig-out/bin/focus to repo root so the path resolves.
+    {
+        var section = try shell.open_section("build focus");
+        defer section.close();
+        try shell.exec("./zig/zig build", .{});
+        shell.exec("ln -sf zig-out/bin/focus focus", .{}) catch {};
+    }
+
     for (examples) |example| {
         const example_dir = try shell.fmt("./examples/{s}", .{example});
 
@@ -76,7 +85,7 @@ fn run_tests(shell: *Shell) !void {
         var section = try shell.open_section("native addon rebuild");
         defer section.close();
 
-        try shell.exec("{zig} build native-addon", .{ .zig = "../zig/zig" });
+        try shell.exec("./zig/zig build native-addon", .{});
         try shell.exec("test -f packages/ts/native/dist/x86_64-linux/shm.node", .{});
     }
 

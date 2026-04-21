@@ -539,6 +539,9 @@ fn build_ci(
         build_ci_step(b, step_ci, &.{"unit-test"});
         // Simulation tests.
         build_ci_step(b, step_ci, &.{"test"});
+        // Cross-language adapter tests (Level 1: binary protocol boundary).
+        // Must run after unit-test which generates the binary vectors.
+        build_ci_step(b, step_ci, &.{"test-adapter"});
         // Fuzz smoke.
         build_ci_step(b, step_ci, &.{ "fuzz", "--", "smoke" });
         // Scripts help (verifies scripts compile).
@@ -561,9 +564,8 @@ fn build_ci(
     }
 
     if (default or all or mode == .clients) {
-        // Cross-language tests (Level 1: binary protocol boundary).
-        build_ci_step(b, step_ci, &.{"test-adapter"});
         // Example project integration test (Level 2: full handler logic).
+        // ci.zig builds the focus binary + symlinks it before running examples.
         build_ci_script(b, step_ci, scripts, &.{"ci"}, options.zig_exe);
     }
 }
