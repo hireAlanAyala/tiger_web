@@ -38,7 +38,7 @@ pub const IO = struct {
 
         /// Operation state — for assertion compatibility with connection.zig.
         operation: Op = .none,
-        const Op = enum { none, recv, send, futex_wait };
+        const Op = enum { none, recv, send };
     };
 
     pub const CallbackFn = *const fn (*anyopaque, i32) void;
@@ -161,32 +161,6 @@ pub const IO = struct {
         completion.operation = .none;
         const bytes: i32 = if (result) |n| @intCast(n) else |_| -1;
         completion.callback(completion.context, bytes);
-    }
-
-    /// Submit IORING_OP_FUTEX_WAIT — wait for a u32 to change from expected value.
-    /// The kernel wakes the completion when the value at futex_addr differs from
-    /// expected_val (via FUTEX_WAKE or value already changed). Callback fires
-    /// with result 0 (success — value changed, go read it).
-    pub fn futex_wait(self: *IO, futex_addr: *const u32, expected_val: u32, completion: *Completion, context: *anyopaque, callback: CallbackFn) void {
-        assert(completion.operation == .none);
-        completion.context = context;
-        completion.callback = callback;
-        completion.operation = .futex_wait;
-        self.inner.futex_wait(
-            *Completion,
-            completion,
-            futex_wait_bridge,
-            &completion.inner,
-            futex_addr,
-            expected_val,
-        );
-    }
-
-    fn futex_wait_bridge(completion: *Completion, _: *InnerIO.Completion, result: *const (InnerIO.FutexWaitError!void)) void {
-        completion.operation = .none;
-        // Both success (woken) and EAGAIN (value already changed) mean: check the value now.
-        const res: i32 = if (result.*) |_| 0 else |_| -1;
-        completion.callback(completion.context, res);
     }
 
     /// Non-blocking send — try to send immediately without the ring.
