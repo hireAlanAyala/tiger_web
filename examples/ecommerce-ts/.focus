@@ -1,0 +1,3 @@
+# Focus project hooks.
+build = npx focus-codegen focus/manifest.json focus/handlers.generated.ts focus/operations.json focus/operations.ts
+start = npx focus-sidecar $SHM $SOCK
