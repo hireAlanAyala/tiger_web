@@ -2,12 +2,79 @@ const std = @import("std");
 
 /// Link SQLite from the vendored amalgamation. Zero system dependencies.
 fn link_sqlite(step: *std.Build.Step.Compile) void {
+    const sqlite_flags: []const []const u8 = &.{ "-DSQLITE_THREADSAFE=1", "-DSQLITE_DQS=0", "-DSQLITE_DEFAULT_WAL_SYNCHRONOUS=1" };
     step.addCSourceFile(.{
         .file = step.step.owner.path("vendor/sqlite3/sqlite3.c"),
-        .flags = &.{ "-DSQLITE_THREADSAFE=1", "-DSQLITE_DQS=0", "-DSQLITE_DEFAULT_WAL_SYNCHRONOUS=1" },
+        .flags = sqlite_flags,
+    });
+    // Zig shim: compiled wrappers for SQLITE_TRANSIENT (see sqlite3_zig.h).
+    step.addCSourceFile(.{
+        .file = step.step.owner.path("vendor/sqlite3/sqlite3_zig.c"),
+        .flags = sqlite_flags,
     });
     step.addIncludePath(step.step.owner.path("vendor/sqlite3"));
     step.linkLibC();
+}
+
+/// Platforms for cross-compiling the SHM native addon.
+/// Matches TigerBeetle's Platform enum pattern (build.zig line 1328).
+/// No Windows — we target Linux and macOS only.
+const NativePlatform = enum {
+    @"aarch64-linux",
+    @"x86_64-linux",
+    @"aarch64-macos",
+    @"x86_64-macos",
+
+    const all: []const NativePlatform = std.enums.values(NativePlatform);
+
+    fn target_resolved(platform: NativePlatform, b: *std.Build) std.Build.ResolvedTarget {
+        const query = std.Target.Query.parse(.{
+            .arch_os_abi = @tagName(platform),
+        }) catch unreachable;
+        return b.resolveTargetQuery(query);
+    }
+};
+
+/// Cross-compile the SHM native addon (shm.c) for all platforms.
+/// Matches TigerBeetle's build_node_client pattern:
+/// - addLibrary(.dynamic) per platform
+/// - vendored node-api-headers
+/// - linker_allow_shlib_undefined = true
+/// - output to packages/ts/native/dist/{platform}/shm.node
+fn build_native_addon(b: *std.Build) *std.Build.Step {
+    const step = b.step("native-addon", "Cross-compile shm.node for all platforms");
+
+    for (NativePlatform.all) |platform| {
+        const resolved_target = platform.target_resolved(b);
+
+        const lib = b.addLibrary(.{
+            .name = "shm",
+            .linkage = .dynamic,
+            .root_module = b.createModule(.{
+                .target = resolved_target,
+                .optimize = .ReleaseFast,
+            }),
+        });
+
+        lib.root_module.addCSourceFile(.{
+            .file = b.path("packages/ts/native/shm.c"),
+            .flags = &.{"-fPIC"},
+        });
+
+        lib.root_module.addSystemIncludePath(b.path("vendor/node-api-headers"));
+        lib.linkLibC();
+        lib.linker_allow_shlib_undefined = true;
+
+        // Install to packages/ts/native/dist/{platform}/shm.node in the source tree.
+        const usf = b.addUpdateSourceFiles();
+        usf.addCopyFileToSource(
+            lib.getEmittedBin(),
+            b.fmt("packages/ts/native/dist/{s}/shm.node", .{@tagName(platform)}),
+        );
+        step.dependOn(&usf.step);
+    }
+
+    return step;
 }
 
 pub fn build(b: *std.Build) void {
@@ -170,6 +237,10 @@ pub fn build(b: *std.Build) void {
     focus_build_options.addOption(u8, "sidecar_count", 1);
     focus_build_options.addOption(u8, "pipeline_slots", 4);
 
+    // Cross-compile native addon for all platforms before building focus,
+    // so @embedFile can find the platform-specific shm.node binary.
+    const native_addon_step = build_native_addon(b);
+
     const focus_exe = b.addExecutable(.{
         .name = "focus",
         .root_source_file = b.path("focus.zig"),
@@ -178,6 +249,7 @@ pub fn build(b: *std.Build) void {
     });
     focus_exe.root_module.addImport("stdx", stdx_module);
     focus_exe.root_module.addOptions("build_options", focus_build_options);
+    focus_exe.step.dependOn(native_addon_step);
     link_sqlite(focus_exe);
     b.installArtifact(focus_exe);
 

@@ -32,6 +32,10 @@ const log = marks.wrap_log(std.log.scoped(.storage));
 
 const c = @cImport({
     @cInclude("sqlite3.h");
+    // Zig shim: wraps SQLITE_TRANSIENT calls in C inline functions.
+    // Zig's c_translation can't cast -1 to a function pointer on macOS
+    // (alignment enforced). See vendor/sqlite3/sqlite3_zig.h.
+    @cInclude("sqlite3_zig.h");
 });
 
 /// Statement cache size — must be large enough to avoid FNV-1a
@@ -605,7 +609,7 @@ pub const SqliteStorage = struct {
                     if (buf_pos + len > params_buf.len) return false;
                     const val = params_buf[buf_pos..][0..len];
                     buf_pos += len;
-                    bind_ok(c.sqlite3_bind_text(stmt, col, val.ptr, @intCast(len), c.SQLITE_TRANSIENT));
+                    bind_ok(c.sqlite3_bind_text_transient(stmt, col, val.ptr, @intCast(len)));
                 },
                 .blob => {
                     if (buf_pos + 2 > params_buf.len) return false;
@@ -614,7 +618,7 @@ pub const SqliteStorage = struct {
                     if (buf_pos + len > params_buf.len) return false;
                     const val = params_buf[buf_pos..][0..len];
                     buf_pos += len;
-                    bind_ok(c.sqlite3_bind_blob(stmt, col, val.ptr, @intCast(len), c.SQLITE_TRANSIENT));
+                    bind_ok(c.sqlite3_bind_blob_transient(stmt, col, val.ptr, @intCast(len)));
                 },
                 .null => {
                     bind_ok(c.sqlite3_bind_null(stmt, col));
@@ -879,7 +883,7 @@ pub const SqliteStorage = struct {
         // []const u8. The alignment is irrelevant for SQLite binding.
         if (comptime is_byte_slice(T)) {
             const slice: []const u8 = val;
-            const rc = c.sqlite3_bind_text(stmt, col, slice.ptr, @intCast(slice.len), c.SQLITE_TRANSIENT);
+            const rc = c.sqlite3_bind_text_transient(stmt, col, slice.ptr, @intCast(slice.len));
             assert(rc == c.SQLITE_OK);
             return;
         }
@@ -890,10 +894,10 @@ pub const SqliteStorage = struct {
             if (T == u128) {
                 var buf: [16]u8 = undefined;
                 std.mem.writeInt(u128, &buf, val, .big);
-                break :rc c.sqlite3_bind_blob(stmt, col, &buf, 16, c.SQLITE_TRANSIENT);
+                break :rc c.sqlite3_bind_blob_transient(stmt, col, &buf, 16);
             } else if (comptime is_string_literal(T)) {
                 const slice: []const u8 = val;
-                break :rc c.sqlite3_bind_text(stmt, col, slice.ptr, @intCast(slice.len), c.SQLITE_TRANSIENT);
+                break :rc c.sqlite3_bind_text_transient(stmt, col, slice.ptr, @intCast(slice.len));
             } else if (T == bool) {
                 break :rc c.sqlite3_bind_int(stmt, col, if (val) @as(c_int, 1) else @as(c_int, 0));
             } else if (T == i64) {

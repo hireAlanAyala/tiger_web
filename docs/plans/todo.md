@@ -51,7 +51,7 @@
    All connections active (no standby concept). Tested + benchmarked.
 
 12. **Tracer port (TB pattern)** — DONE
-   Copied TB's trace.zig + surgical edits. Time vtable (TimeSim/TimeReal),
+   Copied TB's trace.zig + surgical edits. Time vtable (TimeSim/TimeOS),
    7 boundary events, EventTracing (concurrent stacks), EventTiming
    (aggregate by work type), EventMetric (gauge/count). Chrome Tracing
    JSON output. Server owns tracer (not SM). cancel_slot for concurrent

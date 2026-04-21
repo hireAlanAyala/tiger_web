@@ -416,10 +416,12 @@ pub fn timing(tracer: *Tracer, event_timing: EventTiming, duration: Duration) vo
     }
 }
 
-const TimeSim = @import("framework/time.zig").TimeSim;
+const time_mod = @import("framework/time.zig");
+const TimeSim = time_mod.TimeSim;
+const init_time = time_mod.init_time;
 
 test "start/stop produces valid timing" {
-    var sim = TimeSim{ .resolution = 1000 };
+    var sim = init_time(.{ .resolution = 1000 });
     const time = sim.time();
 
     var tracer = try Tracer.init(std.testing.allocator, time, .{});
@@ -437,7 +439,7 @@ test "start/stop produces valid timing" {
 }
 
 test "cancel does not record timing" {
-    var sim = TimeSim{ .resolution = 1000 };
+    var sim = init_time(.{ .resolution = 1000 });
     const time = sim.time();
 
     var tracer = try Tracer.init(std.testing.allocator, time, .{});
@@ -452,7 +454,7 @@ test "cancel does not record timing" {
 }
 
 test "cancel_slot cancels only target slot" {
-    var sim = TimeSim{ .resolution = 1000 };
+    var sim = init_time(.{ .resolution = 1000 });
     const time = sim.time();
 
     var tracer = try Tracer.init(std.testing.allocator, time, .{});
@@ -469,7 +471,7 @@ test "aggregate_only: tick timing captured but no JSON" {
     var trace_buf = std.ArrayList(u8).init(std.testing.allocator);
     defer trace_buf.deinit();
 
-    var sim = TimeSim{ .resolution = 1000 };
+    var sim = init_time(.{ .resolution = 1000 });
     const time = sim.time();
 
     var tracer = try Tracer.init(std.testing.allocator, time, .{
@@ -494,7 +496,7 @@ test "Chrome Tracing JSON format" {
     var trace_buf = std.ArrayList(u8).init(std.testing.allocator);
     defer trace_buf.deinit();
 
-    var sim = TimeSim{ .resolution = 1000 };
+    var sim = init_time(.{ .resolution = 1000 });
     const time = sim.time();
 
     var tracer = try Tracer.init(std.testing.allocator, time, .{
@@ -513,7 +515,7 @@ test "Chrome Tracing JSON format" {
 }
 
 test "span duration > 0 in sim (time.tick integration)" {
-    var sim = TimeSim{ .resolution = 1000 };
+    var sim = init_time(.{ .resolution = 1000 });
     const time = sim.time();
 
     var tracer = try Tracer.init(std.testing.allocator, time, .{});
@@ -529,7 +531,7 @@ test "span duration > 0 in sim (time.tick integration)" {
 }
 
 test "timing overflow saturates" {
-    var sim = TimeSim{ .resolution = 1000 };
+    var sim = init_time(.{ .resolution = 1000 });
     const time = sim.time();
 
     var tracer = try Tracer.init(std.testing.allocator, time, .{});
@@ -549,7 +551,7 @@ test "timing overflow saturates" {
 }
 
 test "gauge sets last value, count accumulates" {
-    var sim = TimeSim{ .resolution = 1000 };
+    var sim = init_time(.{ .resolution = 1000 });
     const time = sim.time();
 
     var tracer = try Tracer.init(std.testing.allocator, time, .{});
@@ -575,7 +577,7 @@ test "gauge sets last value, count accumulates" {
 }
 
 test "emit_metrics resets gauges and counters" {
-    var sim = TimeSim{ .resolution = 1000 };
+    var sim = init_time(.{ .resolution = 1000 });
     const time = sim.time();
 
     var tracer = try Tracer.init(std.testing.allocator, time, .{});

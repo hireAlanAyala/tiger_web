@@ -17,7 +17,9 @@ const ServerType = @import("framework/server.zig").ServerType;
 const ConnectionType = @import("framework/connection.zig").ConnectionType;
 const marks = @import("framework/marks.zig");
 const PRNG = @import("stdx").PRNG;
-const TimeSim = @import("framework/time.zig").TimeSim;
+const time_mod = @import("framework/time.zig");
+const TimeSim = time_mod.TimeSim;
+const init_time = time_mod.init_time;
 const Trace = @import("trace.zig");
 const auth = @import("framework/auth.zig");
 const sim_io = @import("sim_io.zig");
@@ -138,7 +140,7 @@ test "deterministic replay — same seed same result" {
         var storage = try App.Storage.init(":memory:");
         defer storage.deinit();
         var sm = StateMachine.init(&storage, 0, test_key);
-        var time_sim = TimeSim{};
+        var time_sim = init_time(.{});
         var tracer = try Trace.Tracer.init(std.testing.allocator, time_sim.time(), .{});
         defer tracer.deinit(std.testing.allocator);
         var server = try Server.init(std.testing.allocator, &io, &sm, &tracer, 1, time_sim.time(), null, .{});
@@ -170,7 +172,7 @@ test "pipelining — back-to-back requests on one connection" {
     var storage = try App.Storage.init(":memory:");
     defer storage.deinit();
     var sm = StateMachine.init(&storage, 0, test_key);
-    var time_sim = TimeSim{};
+    var time_sim = init_time(.{});
     var tracer = try Trace.Tracer.init(std.testing.allocator, time_sim.time(), .{});
     defer tracer.deinit(std.testing.allocator);
     var server = try Server.init(std.testing.allocator, &io, &sm, &tracer, 1, time_sim.time(), null, .{});
@@ -203,7 +205,7 @@ test "connection drops and reconnects — state machine survives" {
     var storage = try App.Storage.init(":memory:");
     defer storage.deinit();
     var sm = StateMachine.init(&storage, 0, test_key);
-    var time_sim = TimeSim{};
+    var time_sim = init_time(.{});
     var tracer = try Trace.Tracer.init(std.testing.allocator, time_sim.time(), .{});
     defer tracer.deinit(std.testing.allocator);
     var server = try Server.init(std.testing.allocator, &io, &sm, &tracer, 1, time_sim.time(), null, .{});
@@ -244,7 +246,7 @@ test "timeout — partial request triggers close" {
     var storage = try App.Storage.init(":memory:");
     defer storage.deinit();
     var sm = StateMachine.init(&storage, 0, test_key);
-    var time_sim = TimeSim{};
+    var time_sim = init_time(.{});
     var tracer = try Trace.Tracer.init(std.testing.allocator, time_sim.time(), .{});
     defer tracer.deinit(std.testing.allocator);
     var server = try Server.init(std.testing.allocator, &io, &sm, &tracer, 1, time_sim.time(), null, .{});
@@ -295,7 +297,7 @@ test "mark: disconnect triggers recv peer closed" {
     var storage = try App.Storage.init(":memory:");
     defer storage.deinit();
     var sm = StateMachine.init(&storage, 0, test_key);
-    var time_sim = TimeSim{};
+    var time_sim = init_time(.{});
     var tracer = try Trace.Tracer.init(std.testing.allocator, time_sim.time(), .{});
     defer tracer.deinit(std.testing.allocator);
     var server = try Server.init(std.testing.allocator, &io, &sm, &tracer, 1, time_sim.time(), null, .{});
@@ -317,7 +319,7 @@ test "mark: send fault triggers send error" {
     var storage = try App.Storage.init(":memory:");
     defer storage.deinit();
     var sm = StateMachine.init(&storage, 0, test_key);
-    var time_sim = TimeSim{};
+    var time_sim = init_time(.{});
     var tracer = try Trace.Tracer.init(std.testing.allocator, time_sim.time(), .{});
     defer tracer.deinit(std.testing.allocator);
     var server = try Server.init(std.testing.allocator, &io, &sm, &tracer, 1, time_sim.time(), null, .{});
@@ -349,7 +351,7 @@ test "mark: disconnected client triggers recv close" {
     var storage = try App.Storage.init(":memory:");
     defer storage.deinit();
     var sm = StateMachine.init(&storage, 0, test_key);
-    var time_sim = TimeSim{};
+    var time_sim = init_time(.{});
     var tracer = try Trace.Tracer.init(std.testing.allocator, time_sim.time(), .{});
     defer tracer.deinit(std.testing.allocator);
     var server = try Server.init(std.testing.allocator, &io, &sm, &tracer, 1, time_sim.time(), null, .{});
@@ -377,7 +379,7 @@ test "mark: garbage bytes trigger invalid HTTP" {
     var storage = try App.Storage.init(":memory:");
     defer storage.deinit();
     var sm = StateMachine.init(&storage, 0, test_key);
-    var time_sim = TimeSim{};
+    var time_sim = init_time(.{});
     var tracer = try Trace.Tracer.init(std.testing.allocator, time_sim.time(), .{});
     defer tracer.deinit(std.testing.allocator);
     var server = try Server.init(std.testing.allocator, &io, &sm, &tracer, 1, time_sim.time(), null, .{});
@@ -399,7 +401,7 @@ test "mark: unknown route triggers unmapped request" {
     var storage = try App.Storage.init(":memory:");
     defer storage.deinit();
     var sm = StateMachine.init(&storage, 0, test_key);
-    var time_sim = TimeSim{};
+    var time_sim = init_time(.{});
     var tracer = try Trace.Tracer.init(std.testing.allocator, time_sim.time(), .{});
     defer tracer.deinit(std.testing.allocator);
     var server = try Server.init(std.testing.allocator, &io, &sm, &tracer, 1, time_sim.time(), null, .{});
@@ -431,7 +433,7 @@ test "first request without cookie gets identity + Set-Cookie" {
     var storage = try App.Storage.init(":memory:");
     defer storage.deinit();
     var sm = StateMachine.init(&storage, 0, test_key);
-    var time_sim = TimeSim{};
+    var time_sim = init_time(.{});
     var tracer = try Trace.Tracer.init(std.testing.allocator, time_sim.time(), .{});
     defer tracer.deinit(std.testing.allocator);
     var server = try Server.init(std.testing.allocator, &io, &sm, &tracer, 1, time_sim.time(), null, .{});
@@ -458,7 +460,7 @@ test "request with valid cookie — no Set-Cookie header" {
     var storage = try App.Storage.init(":memory:");
     defer storage.deinit();
     var sm = StateMachine.init(&storage, 0, test_key);
-    var time_sim = TimeSim{};
+    var time_sim = init_time(.{});
     var tracer = try Trace.Tracer.init(std.testing.allocator, time_sim.time(), .{});
     defer tracer.deinit(std.testing.allocator);
     var server = try Server.init(std.testing.allocator, &io, &sm, &tracer, 1, time_sim.time(), null, .{});
@@ -483,7 +485,7 @@ test "mark: accept failure logs warning" {
     var storage = try App.Storage.init(":memory:");
     defer storage.deinit();
     var sm = StateMachine.init(&storage, 0, test_key);
-    var time_sim = TimeSim{};
+    var time_sim = init_time(.{});
     var tracer = try Trace.Tracer.init(std.testing.allocator, time_sim.time(), .{});
     defer tracer.deinit(std.testing.allocator);
     var server = try Server.init(std.testing.allocator, &io, &sm, &tracer, 1, time_sim.time(), null, .{});
@@ -513,7 +515,7 @@ test "storage busy fault — prefetch retries next tick then succeeds" {
     var storage = try App.Storage.init(":memory:");
     defer storage.deinit();
     var sm = StateMachine.init(&storage, 0, test_key);
-    var time_sim = TimeSim{};
+    var time_sim = init_time(.{});
     var tracer = try Trace.Tracer.init(std.testing.allocator, time_sim.time(), .{});
     defer tracer.deinit(std.testing.allocator);
     var server = try Server.init(std.testing.allocator, &io, &sm, &tracer, 1, time_sim.time(), null, .{});
@@ -559,7 +561,7 @@ test "storage err fault — renders dashboard page" {
     var storage = try App.Storage.init(":memory:");
     defer storage.deinit();
     var sm = StateMachine.init(&storage, 0, test_key);
-    var time_sim = TimeSim{};
+    var time_sim = init_time(.{});
     var tracer = try Trace.Tracer.init(std.testing.allocator, time_sim.time(), .{});
     defer tracer.deinit(std.testing.allocator);
     var server = try Server.init(std.testing.allocator, &io, &sm, &tracer, 1, time_sim.time(), null, .{});
@@ -595,7 +597,7 @@ test "concurrent connections — busy client deferred, ready client served" {
     var storage = try App.Storage.init(":memory:");
     defer storage.deinit();
     var sm = StateMachine.init(&storage, 0, test_key);
-    var time_sim = TimeSim{};
+    var time_sim = init_time(.{});
     var tracer = try Trace.Tracer.init(std.testing.allocator, time_sim.time(), .{});
     defer tracer.deinit(std.testing.allocator);
     var server = try Server.init(std.testing.allocator, &io, &sm, &tracer, 2, time_sim.time(), null, .{});
@@ -644,7 +646,7 @@ test "interleaved writes — update and delete same entity across connections" {
     var storage = try App.Storage.init(":memory:");
     defer storage.deinit();
     var sm = StateMachine.init(&storage, 0, test_key);
-    var time_sim = TimeSim{};
+    var time_sim = init_time(.{});
     var tracer = try Trace.Tracer.init(std.testing.allocator, time_sim.time(), .{});
     defer tracer.deinit(std.testing.allocator);
     var server = try Server.init(std.testing.allocator, &io, &sm, &tracer, 2, time_sim.time(), null, .{});
@@ -710,7 +712,7 @@ test "two-phase order — create on client 0, complete on client 1" {
     var storage = try App.Storage.init(":memory:");
     defer storage.deinit();
     var sm = StateMachine.init(&storage, 0, test_key);
-    var time_sim = TimeSim{};
+    var time_sim = init_time(.{});
     var tracer = try Trace.Tracer.init(std.testing.allocator, time_sim.time(), .{});
     defer tracer.deinit(std.testing.allocator);
     var server = try Server.init(std.testing.allocator, &io, &sm, &tracer, 2, time_sim.time(), null, .{});
@@ -759,7 +761,7 @@ test "two-phase order — failed completion restores inventory" {
     var storage = try App.Storage.init(":memory:");
     defer storage.deinit();
     var sm = StateMachine.init(&storage, 0, test_key);
-    var time_sim = TimeSim{};
+    var time_sim = init_time(.{});
     var tracer = try Trace.Tracer.init(std.testing.allocator, time_sim.time(), .{});
     defer tracer.deinit(std.testing.allocator);
     var server = try Server.init(std.testing.allocator, &io, &sm, &tracer, 2, time_sim.time(), null, .{});
@@ -803,7 +805,7 @@ test "two-phase order — completion after timeout expires" {
     var storage = try App.Storage.init(":memory:");
     defer storage.deinit();
     var sm = StateMachine.init(&storage, 0, test_key);
-    var time_sim = TimeSim{};
+    var time_sim = init_time(.{});
     var tracer = try Trace.Tracer.init(std.testing.allocator, time_sim.time(), .{});
     defer tracer.deinit(std.testing.allocator);
     var server = try Server.init(std.testing.allocator, &io, &sm, &tracer, 2, time_sim.time(), null, .{});
@@ -850,7 +852,7 @@ test "two-phase order — idempotent same-result retry" {
     var storage = try App.Storage.init(":memory:");
     defer storage.deinit();
     var sm = StateMachine.init(&storage, 0, test_key);
-    var time_sim = TimeSim{};
+    var time_sim = init_time(.{});
     var tracer = try Trace.Tracer.init(std.testing.allocator, time_sim.time(), .{});
     defer tracer.deinit(std.testing.allocator);
     var server = try Server.init(std.testing.allocator, &io, &sm, &tracer, 2, time_sim.time(), null, .{});
@@ -901,7 +903,7 @@ test "two-phase order — poll pending then complete (worker pattern)" {
     var storage = try App.Storage.init(":memory:");
     defer storage.deinit();
     var sm = StateMachine.init(&storage, 0, test_key);
-    var time_sim = TimeSim{};
+    var time_sim = init_time(.{});
     var tracer = try Trace.Tracer.init(std.testing.allocator, time_sim.time(), .{});
     defer tracer.deinit(std.testing.allocator);
     var server = try Server.init(std.testing.allocator, &io, &sm, &tracer, 2, time_sim.time(), null, .{});
@@ -956,7 +958,7 @@ test "cancel order — client cancels, worker completion rejected" {
     var storage = try App.Storage.init(":memory:");
     defer storage.deinit();
     var sm = StateMachine.init(&storage, 0, test_key);
-    var time_sim = TimeSim{};
+    var time_sim = init_time(.{});
     var tracer = try Trace.Tracer.init(std.testing.allocator, time_sim.time(), .{});
     defer tracer.deinit(std.testing.allocator);
     var server = try Server.init(std.testing.allocator, &io, &sm, &tracer, 2, time_sim.time(), null, .{});
@@ -1008,7 +1010,7 @@ test "cancel order — cancel already confirmed is rejected" {
     var storage = try App.Storage.init(":memory:");
     defer storage.deinit();
     var sm = StateMachine.init(&storage, 0, test_key);
-    var time_sim = TimeSim{};
+    var time_sim = init_time(.{});
     var tracer = try Trace.Tracer.init(std.testing.allocator, time_sim.time(), .{});
     defer tracer.deinit(std.testing.allocator);
     var server = try Server.init(std.testing.allocator, &io, &sm, &tracer, 2, time_sim.time(), null, .{});
@@ -1794,7 +1796,7 @@ fn run_fuzz(seed: u64) !void {
         App.fault_busy_ratio = PRNG.ratio(prng.range_inclusive(u64, 5, 20), 100);
         var sm = StateMachine.init(&storage, 0, test_key);
         sm.now = 1_700_000_000;
-        var time_sim = TimeSim{};
+        var time_sim = init_time(.{});
         var tracer = try Trace.Tracer.init(std.testing.allocator, time_sim.time(), .{});
         defer tracer.deinit(std.testing.allocator);
         var server = try Server.init(std.testing.allocator, &io, &sm, &tracer, 1, time_sim.time(), null, .{});

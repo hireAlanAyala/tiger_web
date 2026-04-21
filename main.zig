@@ -7,7 +7,7 @@ const App = @import("app.zig");
 // SM is handler-agnostic — pure framework services.
 const StateMachine = App.StateMachineWith(App.Storage);
 const ServerType = @import("framework/server.zig").ServerType;
-const TimeReal = @import("framework/time.zig").TimeReal;
+const TimeOS = @import("framework/time.zig").TimeOS;
 const Trace = @import("trace.zig");
 const TraceWriter = @import("trace_writer.zig").TraceWriter;
 const auth = @import("framework/auth.zig");
@@ -116,7 +116,7 @@ pub fn server_run(allocator: std.mem.Allocator, opts: ServerOptions) !void {
     var wal = App.Wal.init("tiger_web.wal", &pending_index);
     defer wal.deinit();
 
-    var time_real = TimeReal{};
+    var time_real = TimeOS{};
 
     var tracer = try Trace.Tracer.init(allocator, time_real.time(), .{
         .log_trace = opts.log_trace,

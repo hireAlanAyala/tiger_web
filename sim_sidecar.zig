@@ -18,7 +18,9 @@ const App = @import("app.zig");
 const Storage = App.Storage;
 const ServerType = @import("framework/server.zig").ServerType;
 const PRNG = @import("stdx").PRNG;
-const TimeSim = @import("framework/time.zig").TimeSim;
+const time_mod = @import("framework/time.zig");
+const TimeSim = time_mod.TimeSim;
+const init_time = time_mod.init_time;
 const auth = @import("framework/auth.zig");
 const SimIO = @import("sim_io.zig").SimIO;
 
@@ -288,7 +290,7 @@ const TestHarness = struct {
         h.io = SimIO.init(seed_prng.int(u64));
         h.storage = try Storage.init(":memory:");
 
-        var time_sim = TimeSim{};
+        var time_sim = init_time(.{});
         h.sm = StateMachine.init(&h.storage, 0, test_key);
         h.tracer = try Trace.Tracer.init(h.allocator, time_sim.time(), .{});
         h.server = try Server.init(h.allocator, &h.io, &h.sm, &h.tracer, http_listen_fd, time_sim.time(), null, .{});

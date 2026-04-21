@@ -99,14 +99,21 @@ pub const IO = struct {
         return fd;
     }
 
+    const is_linux = builtin.target.os.tag == .linux;
+
     /// Apply TCP socket options on accepted connections.
+    /// Matches TigerBeetle's io/common.zig: Linux-specific options
+    /// (KEEPIDLE, KEEPINTVL, KEEPCNT, USER_TIMEOUT, NODELAY) are
+    /// guarded — macOS doesn't expose the same TCP constants.
     pub fn set_tcp_options(fd: fd_t) void {
-        posix.setsockopt(fd, posix.IPPROTO.TCP, posix.TCP.NODELAY, &std.mem.toBytes(@as(c_int, 1))) catch {};
         posix.setsockopt(fd, posix.SOL.SOCKET, posix.SO.KEEPALIVE, &std.mem.toBytes(@as(c_int, 1))) catch {};
-        posix.setsockopt(fd, posix.IPPROTO.TCP, posix.TCP.KEEPIDLE, &std.mem.toBytes(@as(c_int, 60))) catch {};
-        posix.setsockopt(fd, posix.IPPROTO.TCP, posix.TCP.KEEPINTVL, &std.mem.toBytes(@as(c_int, 10))) catch {};
-        posix.setsockopt(fd, posix.IPPROTO.TCP, posix.TCP.KEEPCNT, &std.mem.toBytes(@as(c_int, 3))) catch {};
-        posix.setsockopt(fd, posix.IPPROTO.TCP, posix.TCP.USER_TIMEOUT, &std.mem.toBytes(@as(c_int, 90_000))) catch {};
+        if (is_linux) {
+            posix.setsockopt(fd, posix.IPPROTO.TCP, posix.TCP.NODELAY, &std.mem.toBytes(@as(c_int, 1))) catch {};
+            posix.setsockopt(fd, posix.IPPROTO.TCP, posix.TCP.KEEPIDLE, &std.mem.toBytes(@as(c_int, 60))) catch {};
+            posix.setsockopt(fd, posix.IPPROTO.TCP, posix.TCP.KEEPINTVL, &std.mem.toBytes(@as(c_int, 10))) catch {};
+            posix.setsockopt(fd, posix.IPPROTO.TCP, posix.TCP.KEEPCNT, &std.mem.toBytes(@as(c_int, 3))) catch {};
+            posix.setsockopt(fd, posix.IPPROTO.TCP, posix.TCP.USER_TIMEOUT, &std.mem.toBytes(@as(c_int, 90_000))) catch {};
+        }
     }
 
     /// Synchronous non-blocking accept. Direct syscall, not through the ring.
@@ -178,8 +185,8 @@ pub const IO = struct {
     }
 
     /// Run the event loop for the given duration. io_uring unified wait —
-    /// one io_uring_enter() waits for recv/send completions, futex wakeups,
-    /// and timeouts simultaneously. No epoll, no busy-polling.
+    /// one io_uring_enter() waits for recv/send completions and timeouts
+    /// simultaneously. No epoll, no busy-polling.
     pub fn run_for_ns(self: *IO, ns: u64) void {
         self.inner.run_for_ns(@intCast(@min(ns, std.math.maxInt(u63)))) catch |err| {
             log.err("io_uring run_for_ns error: {}", .{err});
