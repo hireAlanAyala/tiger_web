@@ -335,9 +335,10 @@ static napi_value poll_dispatch(napi_env env, napi_callback_info info) {
     cur_seq++;
     __atomic_store_n((uint32_t *)(hdr + SHM_SIDECAR_SEQ), cur_seq, __ATOMIC_RELEASE);
 
-    // No futex_wake needed: server polls sidecar_seq in its tick loop
-    // (poll_responses called every tick). Same optimization as the
-    // server→sidecar direction (sidecar_polling flag).
+    // Futex wake: the server has IORING_OP_FUTEX_WAIT pending on sidecar_seq.
+    // This wake completes that wait, delivering the response through io_uring
+    // instead of polling. Required for event-driven SHM response detection.
+    syscall(SYS_futex, (uint32_t *)(hdr + SHM_SIDECAR_SEQ), FUTEX_WAKE, 1, NULL, NULL, 0);
 
     found++;
   }

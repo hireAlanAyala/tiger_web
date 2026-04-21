@@ -471,6 +471,24 @@ pub const IO = struct {
                         op.offset,
                     );
                 },
+                .futex_wait => |op| {
+                    // IORING_OP_FUTEX_WAIT — maps per liburing's io_uring_prep_futex_wait:
+                    //   opcode = 51
+                    //   fd = FUTEX2_SIZE_U32 (2)
+                    //   addr = futex address
+                    //   len = 0 (non-vectored)
+                    //   off = expected value
+                    //   futex_flags = 0 (no extra flags)
+                    //   addr3 = FUTEX_BITSET_MATCH_ANY (0xFFFFFFFF)
+                    sqe.* = std.mem.zeroes(io_uring_sqe);
+                    sqe.opcode = @enumFromInt(51);
+                    sqe.fd = 0x02; // FUTEX2_SIZE_U32
+                    sqe.addr = @intFromPtr(op.futex_addr);
+                    sqe.len = 0;
+                    sqe.off = op.expected_val;
+                    sqe.splice_fd_in = 0; // futex_flags (same union offset)
+                    sqe.addr3 = 0xFFFFFFFF; // FUTEX_BITSET_MATCH_ANY
+                },
             }
             sqe.user_data = @intFromPtr(completion);
         }
@@ -808,6 +826,33 @@ pub const IO = struct {
                     };
                     completion.callback(completion.context, completion, &result);
                 },
+                .futex_wait => {
+                    // Futex wait completion:
+                    //   result = 0: woken by FUTEX_WAKE (value changed)
+                    //   result = -EAGAIN: value didn't match expected (already changed)
+                    //   result = -ECANCELED: cancelled
+                    // Both 0 and -EAGAIN mean "check the value now" — the callback
+                    // handles both by reading the current sidecar_seq.
+                    const result: FutexWaitError!void = blk: {
+                        if (completion.result == 0) {
+                            break :blk {}; // woken
+                        } else if (completion.result < 0) {
+                            const err = switch (@as(posix.E, @enumFromInt(-completion.result))) {
+                                .AGAIN => break :blk {}, // value already changed — treat as woken
+                                .INTR => {
+                                    completion.io.enqueue(completion);
+                                    return;
+                                },
+                                .CANCELED => error.Canceled,
+                                else => |errno| stdx.unexpected_errno("futex_wait", errno),
+                            };
+                            break :blk err;
+                        } else {
+                            break :blk {};
+                        }
+                    };
+                    completion.callback(completion.context, completion, &result);
+                },
             }
         }
     };
@@ -866,6 +911,10 @@ pub const IO = struct {
             fd: fd_t,
             buffer: []const u8,
             offset: u64,
+        },
+        futex_wait: struct {
+            futex_addr: *const u32,
+            expected_val: u32,
         },
     };
 
@@ -1316,6 +1365,44 @@ pub const IO = struct {
                     .offset = offset,
                 },
             },
+        };
+        self.enqueue(completion);
+    }
+
+    pub const FutexWaitError = error{Canceled} || posix.UnexpectedError;
+
+    /// Submit IORING_OP_FUTEX_WAIT — wait for a u32 to change from expected_val.
+    /// Completes when: the value is changed and FUTEX_WAKE is called, or the value
+    /// already differs from expected (EAGAIN — treated as success).
+    pub fn futex_wait(
+        self: *IO,
+        comptime Context: type,
+        context: Context,
+        comptime callback: fn (
+            context: Context,
+            completion: *Completion,
+            result: *const FutexWaitError!void,
+        ) void,
+        completion: *Completion,
+        futex_addr: *const u32,
+        expected_val: u32,
+    ) void {
+        completion.* = .{
+            .io = self,
+            .context = context,
+            .callback = struct {
+                fn wrapper(ctx: ?*anyopaque, comp: *Completion, res: *const anyopaque) void {
+                    callback(
+                        @ptrCast(@alignCast(ctx)),
+                        comp,
+                        @ptrCast(@alignCast(res)),
+                    );
+                }
+            }.wrapper,
+            .operation = .{ .futex_wait = .{
+                .futex_addr = futex_addr,
+                .expected_val = expected_val,
+            } },
         };
         self.enqueue(completion);
     }

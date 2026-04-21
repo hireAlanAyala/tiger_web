@@ -230,6 +230,16 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
             .{false} ** App.sidecar_count
         else {},
 
+        /// Per-slot io_uring futex_wait completions. After sending a CALL,
+        /// submit futex_wait on sidecar_seq. The kernel wakes the completion
+        /// when the sidecar bumps the seq — event-driven, no polling.
+        shm_futex_completions: if (App.sidecar_enabled)
+            [constants.pipeline_slots_max]IO.Completion
+        else
+            void = if (App.sidecar_enabled)
+            [_]IO.Completion{IO.Completion{}} ** constants.pipeline_slots_max
+        else {},
+
         /// Whether any sidecar connection is ready.
         ///
         /// Two independent channels must both be up:
@@ -413,6 +423,11 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
                 entry.reset();
                 server.suspend_connection(conn);
                 return;
+            }
+            // Submit futex_wait for the 2-RT CALL.
+            if (App.sidecar_enabled) {
+                const entry_idx = server.shm_dispatch.entry_index(entry);
+                server.submit_shm_futex_wait(entry_idx);
             }
         }
 
@@ -796,6 +811,12 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
                 entry.reset();
                 return;
             }
+            // Submit io_uring futex_wait on sidecar_seq — the kernel wakes
+            // the completion when the sidecar bumps the seq after writing RESULT.
+            // Event-driven: no polling needed.
+            if (App.sidecar_enabled) {
+                server.submit_shm_futex_wait(entry_idx);
+            }
             entry.stage = .combined_pending;
         }
 
@@ -987,9 +1008,47 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
             }
         }
 
+        /// Submit IORING_OP_FUTEX_WAIT on a slot's sidecar_seq.
+        /// The kernel completes the wait when the sidecar bumps the seq.
+        /// Callback processes the SHM response through the same path as poll_shm.
+        fn submit_shm_futex_wait(server: *Server, slot_idx: u8) void {
+            if (!App.sidecar_enabled) return;
+            const region = server.shm_bus.region orelse return;
+            const slot = &region.slots[slot_idx];
+            const completion = &server.shm_futex_completions[slot_idx];
+
+            // Don't submit if a futex_wait is already pending for this slot.
+            if (completion.operation != .none) return;
+
+            // Wait for sidecar_seq to change from its current value.
+            const current_seq = @atomicLoad(u32, &slot.header.sidecar_seq, .acquire);
+            server.io.futex_wait(
+                &slot.header.sidecar_seq,
+                current_seq,
+                completion,
+                @ptrCast(server),
+                shm_futex_callback,
+            );
+        }
+
+        /// Callback when io_uring futex_wait completes — sidecar_seq changed.
+        /// Process the SHM response, then re-submit futex_wait if the slot
+        /// has a new in-flight CALL (the dispatch callback may immediately reuse it).
+        fn shm_futex_callback(ctx: *anyopaque, result: i32) void {
+            const server: *Server = @ptrCast(@alignCast(ctx));
+            _ = result;
+            if (!App.sidecar_enabled) return;
+            // Poll all slots — the woken slot's seq changed, but checking all
+            // is O(4) and ensures no responses are missed.
+            server.shm_bus.poll_responses();
+            // Process any SHM completions that were queued by poll_responses.
+            server.process_shm_completions();
+        }
+
         /// Poll SHM for new sidecar responses and worker completions.
-        /// Called every tick — cost is slot_count atomic loads + worker
-        /// slot_count atomic loads. Bounded, no syscalls.
+        /// Called every tick as fallback — the futex_wait path handles
+        /// most responses event-driven. This catches stragglers and
+        /// ensures progress even if a futex_wait is missed.
         fn poll_shm(server: *Server) void {
             if (!App.sidecar_enabled) return;
             server.shm_bus.poll_responses();
