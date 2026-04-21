@@ -1073,18 +1073,18 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
                 handler.connection_index = @intCast(i % App.sidecar_count);
             }
             // Wire SHM dispatch — shared memory is the sole transport.
-            const pid = @as(u32, @intCast(std.os.linux.getpid()));
+            const pid = @as(u32, @intCast(std.c.getpid()));
             var shm_name_buf: [64]u8 = undefined;
             const shm_name = std.fmt.bufPrint(&shm_name_buf, "tiger-{d}", .{pid}) catch "tiger-shm";
             try server.shm_bus.create(shm_name, shm_on_frame, @ptrCast(server));
             server.shm_dispatch.bus = &server.shm_bus;
             server.shm_bus.set_ready();
-            log.info("shm transport: /dev/shm/{s}", .{shm_name});
+            log.info("shm transport: {s}", .{shm_name});
             // Worker SHM — separate region for background dispatch.
             var worker_shm_buf: [64]u8 = undefined;
             const worker_shm_name = std.fmt.bufPrint(&worker_shm_buf, "tiger-{d}-workers", .{pid}) catch "tiger-shm-workers";
             try server.worker_dispatch.create(worker_shm_name);
-            log.info("worker shm transport: /dev/shm/{s}", .{worker_shm_name});
+            log.info("worker shm transport: {s}", .{worker_shm_name});
             server.shm_dispatch.connection_index = 0;
             try server.sidecar_bus.init_pool(
                 allocator,
