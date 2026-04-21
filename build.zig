@@ -187,6 +187,18 @@ pub fn build(b: *std.Build) void {
     const focus_step = b.step("focus", "Run the focus CLI");
     focus_step.dependOn(&focus_cmd.step);
 
+    // --- Zig sidecar benchmark tool ---
+    const zig_sidecar_exe = b.addExecutable(.{
+        .name = "zig-sidecar",
+        .root_source_file = b.path("zig_sidecar.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    // Allow imports from the root (protocol.zig, message.zig).
+    zig_sidecar_exe.root_module.addImport("stdx", stdx_module);
+    link_sqlite(zig_sidecar_exe);
+    b.installArtifact(zig_sidecar_exe);
+
     // --- Scripts executable (CFO and other automation) ---
     const scripts_exe = b.addExecutable(.{
         .name = "tiger-scripts",
