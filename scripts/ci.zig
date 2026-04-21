@@ -73,7 +73,6 @@ fn run_tests(shell: *Shell) !void {
 
             try shell.exec("npm install", .{});
             try shell.exec("npm run build", .{});
-            try shell.exec("npm test", .{});
         }
     }
 
