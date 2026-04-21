@@ -51,10 +51,11 @@ jobs:
         with: { node-version: '22' }
       - run: ./zig/zig build
       - run: |
-          mkdir -p /tmp/macos-dev-test && cd /tmp/macos-dev-test
-          $GITHUB_WORKSPACE/zig-out/bin/focus new --ts .
+          FOCUS=$GITHUB_WORKSPACE/zig-out/bin/focus
+          $FOCUS new --ts /tmp/macos-dev-test
+          cd /tmp/macos-dev-test
           npm install
-          $GITHUB_WORKSPACE/zig-out/bin/focus build src/
+          $FOCUS build src/
           echo 'build = true' > .focus
           echo 'start = sleep 10' >> .focus
-          $GITHUB_WORKSPACE/zig-out/bin/focus dev --timeout=5 src/ 2>&1 || true
+          $FOCUS dev --timeout=5 src/ 2>&1 || true
