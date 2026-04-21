@@ -222,31 +222,62 @@ Change in `main.zig`: replace `"tiger_web.wal"` with
 `db_path ++ ".wal"`. Load test and perf script cleanup already
 delete the db file — the paired WAL deletes with it.
 
-## SHM transport: unified wait (explore, not urgent)
+## SHM transport: unified wait — EXPLORED, RESOLVED
 
-HTTP recv/send now uses io_uring (TB's linux.zig). SHM signaling
-still uses busy-poll with adaptive sleep. This is correct — the
-SHM check is a single atomic load in userspace, no syscall. io_uring
-can't make a memory read faster. Under load the poll always finds
-work; when idle the adaptive threshold sleeps.
+Busy-poll with adaptive idle is the correct primitive. Explored and
+rejected alternatives:
 
-Explored approaches and findings:
-- IORING_OP_FUTEX_WAIT: not supported on all kernels (probe shows
-  flags=0x0). futex2 syscalls (454-456) also return EINVAL.
-- eventfd via io_uring READ: works intra-process, but eventfd is
-  per-process — can't write to it from the sidecar without fd passing.
-- SCM_RIGHTS fd passing: correct but adds protocol complexity to the
-  READY handshake for marginal gain (SHM poll is already ~3µs).
-- Tick-based polling (1ms): 6K req/s vs 87K busy-poll. Too slow.
+- IORING_OP_FUTEX_WAIT: kernel 6.18 DOES support it (verified with
+  liburing). But TB's batched io_uring submission model means new
+  futex_wait SQEs aren't flushed within completion callbacks. Under
+  sustained load, futex_wait was SLOWER than busy-poll (28K vs 45K).
+  See commits 5ff1088 (WIP) and 687761f (revert).
+- eventfd, SCM_RIGHTS, tick-based polling: all inferior.
 
-Conclusion: busy-poll is the right primitive for cross-process SHM
-signaling at our scale. The only real issue is 100% idle CPU, which
-the adaptive threshold already mitigates. If 1-core starvation
-becomes a production issue, lower the threshold or use cgroups.
+Current approach: run_for_ns(0) when SHM slots are in-flight (busy-
+poll at CPU speed), run_for_ns(10ms) when idle. Sidecar adaptive idle
+(setImmediate → setTimeout 1ms after 1000 idle ticks). 52K req/s TS,
+64K Zig sidecar, 75K native.
 
-Future: if IORING_OP_FUTEX_WAIT becomes universally available, it
-would be the clean solution (one ring waits for everything). Monitor
-kernel support.
+## Focus LSP — typed handler contexts for all languages
+
+The correct primitive for user-space type inference. Replaces the
+per-language generated declaration files approach (7.8 + 7.9).
+
+One custom LSP serves all languages:
+1. Reads `focus/manifest.json` (operations, prefetch keys, statuses)
+2. Reads `schema.sql` (column names and types per table)
+3. Maps filename → operation (`src/list_todos.ts` → `list_todos`)
+4. Provides completions + hover for `ctx.prefetched.*` and `ctx.status`
+
+Language-aware only for type FORMATTING (struct vs interface vs class).
+Type EXTRACTION is language-independent (from manifest + schema).
+
+Works alongside existing language LSPs (tsserver, gopls, pyright) —
+VS Code supports multiple LSPs per file. The focus LSP provides only
+handler-specific intelligence.
+
+Prerequisite: extend scanner to emit type information in manifest:
+```json
+{
+  "types": {
+    "list_todos": {
+      "prefetch": {
+        "todos": { "mode": "queryAll", "columns": [
+          {"name": "id", "type": "text"},
+          {"name": "title", "type": "text"},
+          {"name": "done", "type": "integer"}
+        ]}
+      },
+      "statuses": ["ok"]
+    }
+  }
+}
+```
+
+Engineering cost: ~1 week for basic LSP (hover + completions).
+Scales to all languages with zero per-language codegen.
+Replaces plan items 7.8 (typed prefetch) and 7.9 (status unions).
 
 ## Status-to-HTTP-code mapping — handler returns domain status, framework owns the code
 
@@ -293,13 +324,11 @@ that opt in. The native handlers already exist — just need to wire them
 into the 1-RT dispatch as a "0-RT" path when the operation has a native
 renderer.
 
-## Typed schemas — type-safe TS interfaces from SQL schema
+## Typed schemas — SUPERSEDED by Focus LSP
 
-Generate TypeScript interfaces from the SQLite schema so
-`ctx.prefetched.product` has typed fields instead of `any`. The
-annotation scanner already knows column names from the SQL. Emit
-`.d.ts` files with `{ id: string; name: string; price_cents: number; ... }`.
-Correctness fix (catch typos at build time), not perf.
+Previously: generate per-language `.d.ts` / `types.go` from schema.
+Now: Focus LSP reads manifest + schema.sql and provides types inline
+for all languages via a single LSP server. See "Focus LSP" section above.
 
 ## Remote auth via worker pattern
 
