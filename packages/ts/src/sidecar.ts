@@ -27,8 +27,20 @@ import { matchRoute } from "./routing.ts";
 import { readRowSet } from "./serde.ts";
 
 // Native addon must use require (Node.js doesn't support import for .node files).
+// Platform detection follows TB's index.ts pattern — same as shm_client.ts.
 const require_ = createRequire(import.meta.url);
-const shmAddon = require_("../native/shm.node");
+const shmAddon = (() => {
+  try {
+    return require_("../native/shm.node");
+  } catch {
+    const archMap: Record<string, string> = { "arm64": "aarch64", "x64": "x86_64" };
+    const platformMap: Record<string, string> = { "linux": "linux", "darwin": "macos" };
+    const arch = archMap[process.arch];
+    const platform = platformMap[process.platform];
+    if (!arch || !platform) throw new Error(`Unsupported platform: ${process.arch}-${process.platform}`);
+    return require_(`../native/dist/${arch}-${platform}/shm.node`);
+  }
+})();
 
 /** Registry of generated handler modules — injected by the bin entry point. */
 export interface SidecarRegistry {
@@ -163,10 +175,7 @@ client.setDispatchHandler((_slotIndex: number, funcIndex: number, requestId: num
   }
 });
 
-// Start polling. setImmediate gives higher throughput than futex
-// under load (~15K vs ~8K) because V8 JIT stays hot between ticks.
-// Futex is better for idle CPU (0% vs 100%) — use startWaiting()
-// when idle efficiency matters more than peak throughput.
+// Adaptive polling: setImmediate when active, 1ms setTimeout when idle.
 client.startPolling();
 console.log("[shm] polling started");
 

@@ -3,12 +3,10 @@
   "region_header": {
     "size": 64,
     "fields": {
-      "epoch":      { "offset": 0,  "size": 4, "type": "u32 LE", "description": "Bumped after every CALL write. Sidecar futex-waits on this address." },
-      "slot_count": { "offset": 4,  "size": 2, "type": "u16 LE", "description": "Number of slot pairs in region." },
-      "_reserved":  { "offset": 6,  "size": 2, "type": "u16 LE" },
-      "frame_max":  { "offset": 8,  "size": 4, "type": "u32 LE", "description": "Maximum frame payload size (bytes)." },
-      "sidecar_polling": { "offset": 12, "size": 4, "type": "u32 LE", "description": "Sidecar sets to 1 when actively polling (setImmediate). Server skips futex_wake when set. 0 = idle (futex_wait mode)." },
-      "_pad":       { "offset": 16, "size": 48 }
+      "slot_count": { "offset": 0,  "size": 2, "type": "u16 LE", "description": "Number of slot pairs in region." },
+      "_reserved":  { "offset": 2,  "size": 2, "type": "u16 LE" },
+      "frame_max":  { "offset": 4,  "size": 4, "type": "u32 LE", "description": "Maximum frame payload size (bytes)." },
+      "_pad":       { "offset": 8,  "size": 56 }
     }
   },
   "slot_header": {
@@ -41,7 +39,7 @@
     "example": "For a 11-byte payload: crc32([0x0B, 0x00, 0x00, 0x00] ++ payload[0..11])"
   },
   "coordination": {
-    "server_to_sidecar": "Server writes request area + request_len + request_crc, then increments server_seq, then futex_wake(epoch)",
-    "sidecar_to_server": "Sidecar writes response area + response_len + response_crc, then increments sidecar_seq, then futex_wake(sidecar_seq address)"
+    "server_to_sidecar": "Server writes request area + request_len + request_crc + slot_state, then increments server_seq with release ordering. Sidecar busy-polls server_seq.",
+    "sidecar_to_server": "Sidecar writes response area + response_len + response_crc + slot_state, then increments sidecar_seq with release ordering. Server busy-polls sidecar_seq."
   }
 }

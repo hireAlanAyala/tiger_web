@@ -58,10 +58,8 @@ let passed = 0;
   const layout = JSON.parse(readFileSync(resolve(vectorsDir, "shm_layout.json"), "utf-8"));
 
   assert(RegionHeader.size === layout.region_header.size, "RegionHeader.size");
-  assert(RegionHeader.epoch.offset === layout.region_header.fields.epoch.offset, "epoch offset");
   assert(RegionHeader.slot_count.offset === layout.region_header.fields.slot_count.offset, "slot_count offset");
   assert(RegionHeader.frame_max.offset === layout.region_header.fields.frame_max.offset, "frame_max offset");
-  assert(RegionHeader.sidecar_polling.offset === layout.region_header.fields.sidecar_polling.offset, "sidecar_polling offset");
 
   assert(SlotHeader.size === layout.slot_header.size, "SlotHeader.size");
   assert(SlotHeader.server_seq.offset === layout.slot_header.fields.server_seq.offset, "server_seq offset");

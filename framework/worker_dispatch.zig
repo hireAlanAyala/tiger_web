@@ -8,12 +8,11 @@
 //! Region), same CRC convention, same seq protocol. Different
 //! lifecycle: unbounded latency, no write ordering, no render buffer.
 //!
-//! No io_uring dependency — uses raw futex syscalls for signaling.
+//! Both sides busy-poll per-slot sequence numbers. No futex dependency.
 
 const std = @import("std");
 const assert = std.debug.assert;
 const posix = std.posix;
-const linux = std.os.linux;
 const constants = @import("constants.zig");
 const Crc32 = std.hash.crc.Crc32;
 
@@ -57,11 +56,10 @@ pub fn WorkerDispatchType(comptime max_entries: u8) type {
         };
 
         pub const RegionHeader = extern struct {
-            epoch: u32 = 0,
             slot_count: u16 = max_entries,
             _reserved: u16 = 0,
             frame_max: u32 = slot_data_size,
-            _pad: [52]u8 = [_]u8{0} ** 52,
+            _pad: [56]u8 = [_]u8{0} ** 56,
 
             comptime {
                 assert(@sizeOf(RegionHeader) == 64);
@@ -123,10 +121,10 @@ pub fn WorkerDispatchType(comptime max_entries: u8) type {
             // Clean stale region.
             _ = std.c.shm_unlink(path.ptr);
 
-            // Create shared memory.
+            // Create shared memory — POSIX flags, cross-platform.
             const fd = std.c.shm_open(
                 path.ptr,
-                @bitCast(linux.O{ .ACCMODE = .RDWR, .CREAT = true, .EXCL = true }),
+                @bitCast(posix.O{ .ACCMODE = .RDWR, .CREAT = true, .EXCL = true }),
                 0o600,
             );
             if (fd < 0) return error.ShmOpenFailed;
@@ -244,13 +242,9 @@ pub fn WorkerDispatchType(comptime max_entries: u8) type {
             slot.header.request_len = len32;
             slot.header.request_crc = crc.final();
 
-            // Bump server_seq (release — visible to sidecar).
+            // Bump server_seq (release — visible to worker).
             self.server_seqs[slot_idx] +%= 1;
             @atomicStore(u32, &slot.header.server_seq, self.server_seqs[slot_idx], .release);
-
-            // Bump epoch + futex wake.
-            _ = @atomicRmw(u32, &region.header.epoch, .Add, 1, .release);
-            futex_wake(&region.header.epoch);
 
             // Mark entry.
             self.entries[slot_idx] = .{
@@ -362,12 +356,9 @@ pub fn WorkerDispatchType(comptime max_entries: u8) type {
             // Build QUERY_RESULT and write to the slot's request area.
             write_query_result(slot, request_id, query_id, row_set);
 
-            // Bump server_seq + futex wake — signals the sidecar.
+            // Bump server_seq (release — visible to worker).
             self.server_seqs[slot_index] +%= 1;
             @atomicStore(u32, &slot.header.server_seq, self.server_seqs[slot_index], .release);
-            const region = self.region.?;
-            _ = @atomicRmw(u32, &region.header.epoch, .Add, 1, .release);
-            futex_wake(&region.header.epoch);
 
             log.debug("worker slot {d}: QUERY handled, sql_length={d}.", .{ slot_index, sql_length });
         }
@@ -470,19 +461,6 @@ pub fn WorkerDispatchType(comptime max_entries: u8) type {
             assert(in_flight + completed <= max_entries);
         }
 
-        // =============================================================
-        // Futex — raw syscall, no io_uring
-        // =============================================================
-
-        fn futex_wake(ptr: *const u32) void {
-            // Raw futex WAKE syscall — same as IoUring.futex_wake but
-            // without the io_uring dependency.
-            _ = linux.futex_wake(
-                @ptrCast(ptr),
-                linux.FUTEX.WAKE,
-                1,
-            );
-        }
     };
 }
 

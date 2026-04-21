@@ -48,10 +48,8 @@ export const writes_max = 21;
 // === SHM Region Header (64 bytes) ===
 export const RegionHeader = {
   size: 64,
-  epoch: { offset: 0, size: 4 },
-  slot_count: { offset: 4, size: 2 },
-  frame_max: { offset: 8, size: 4 },
-  sidecar_polling: { offset: 12, size: 4 },
+  slot_count: { offset: 0, size: 2 },
+  frame_max: { offset: 4, size: 4 },
 } as const;
 
 // === SHM Slot Header (64 bytes) ===

@@ -58,8 +58,8 @@ pub fn main() !void {
         std.process.exit(1);
     };
     const header_bytes: [*]const u8 = @ptrCast(header_map);
-    const slot_count = std.mem.readInt(u16, header_bytes[4..6], .little);
-    const frame_max = std.mem.readInt(u32, header_bytes[8..12], .little);
+    const slot_count = std.mem.readInt(u16, header_bytes[0..2], .little);
+    const frame_max = std.mem.readInt(u32, header_bytes[4..8], .little);
     const slot_pair_size = SLOT_HEADER_SIZE + frame_max * 2;
     const region_size = REGION_HEADER_SIZE + @as(usize, slot_count) * slot_pair_size;
 
@@ -77,10 +77,6 @@ pub fn main() !void {
     const sock_fd = try connect_and_ready(socket_path);
     _ = sock_fd; // keep alive
     try stdout.print("[zig-sidecar] READY sent to {s}\n", .{socket_path});
-
-    // Set sidecar_polling flag.
-    const polling_ptr: *u32 = @ptrCast(@alignCast(region + 12));
-    @atomicStore(u32, polling_ptr, 1, .release);
 
     // --- Poll loop ---
     var last_seqs: [32]u32 = .{0} ** 32;

@@ -1,4 +1,4 @@
-//! Shared memory bus — mmap + futex wake transport.
+//! Shared memory bus — mmap + busy-poll transport.
 //!
 //! Drop-in replacement for MessageBusType when used with the v2 dispatch.
 //! Same interface: send_message_to, is_connection_ready, can_send_to,
@@ -7,9 +7,10 @@
 //! Layout per slot pair:
 //!   [Header 64B][Request frame_max][Response frame_max]
 //!
-//! Signaling: raw futex WAKE on epoch (fire-and-forget syscall).
-//! Server detects responses by polling sidecar_seq in the tick loop.
-//! No io_uring dependency — same raw futex as WorkerDispatch.
+//! Signaling: both sides busy-poll per-slot sequence numbers.
+//! Server polls sidecar_seq in the tick loop (run_for_ns(0) when pending).
+//! Sidecar polls server_seq via C addon (setImmediate when active,
+//! setTimeout(1ms) when idle). No futex, no io_uring dependency.
 //!
 //! CRC covers len_bytes ++ payload_bytes (TB convention — corrupted
 //! length produces CRC mismatch, not garbage read).
@@ -17,7 +18,6 @@
 const std = @import("std");
 const assert = std.debug.assert;
 const posix = std.posix;
-const linux = std.os.linux;
 const protocol = @import("../protocol.zig");
 const Crc32 = std.hash.crc.Crc32;
 const log = std.log.scoped(.shm_bus);
@@ -77,10 +77,6 @@ pub fn SharedMemoryBusType(comptime options: Options) type {
         };
 
         pub const RegionHeader = extern struct {
-            /// Epoch counter — bumped after every CALL write.
-            /// Sidecar futex-waits on this address. One futex for
-            /// all slots instead of per-slot futex.
-            epoch: u32 = 0,
             /// Number of slot pairs in this region. Sidecar reads this
             /// instead of hardcoding the slot count.
             slot_count: u16 = slot_count,
@@ -89,12 +85,7 @@ pub fn SharedMemoryBusType(comptime options: Options) type {
             /// Maximum frame payload size (bytes). Sidecar reads this
             /// instead of hardcoding FRAME_MAX.
             frame_max: u32 = slot_data_size,
-            /// Sidecar sets to 1 when actively polling (setImmediate loop).
-            /// Server skips futex_wake when this is set — the sidecar will
-            /// see the new CALL within one poll cycle without a syscall.
-            /// Set to 0 when sidecar enters futex_wait (idle mode).
-            sidecar_polling: u32 = 0,
-            _pad: [48]u8 = [_]u8{0} ** 48,
+            _pad: [56]u8 = [_]u8{0} ** 56,
 
             comptime {
                 assert(@sizeOf(RegionHeader) == 64);
@@ -185,10 +176,10 @@ pub fn SharedMemoryBusType(comptime options: Options) type {
             // Clean stale region.
             _ = std.c.shm_unlink(path.ptr);
 
-            // Create shared memory.
+            // Create shared memory — POSIX flags, cross-platform.
             const fd = std.c.shm_open(
                 path.ptr,
-                @bitCast(linux.O{ .ACCMODE = .RDWR, .CREAT = true, .EXCL = true }),
+                @bitCast(posix.O{ .ACCMODE = .RDWR, .CREAT = true, .EXCL = true }),
                 0o600,
             );
             if (fd < 0) return error.ShmOpenFailed;
@@ -314,7 +305,7 @@ pub fn SharedMemoryBusType(comptime options: Options) type {
             return &region.slots[slot_idx].request;
         }
 
-        /// Finalize a direct-write send: compute CRC, bump seq, wake sidecar.
+        /// Finalize a direct-write send: compute CRC, bump seq.
         /// Call after writing payload into the buffer returned by get_slot_request_buf.
         pub fn finalize_slot_send(self: *Self, slot_idx: u8, payload_len: u32) void {
             const region = self.region orelse return;
@@ -342,16 +333,6 @@ pub fn SharedMemoryBusType(comptime options: Options) type {
             self.server_seqs[slot_idx] += 1;
             const seq_ptr: *u32 = &slot.header.server_seq;
             @atomicStore(u32, seq_ptr, self.server_seqs[slot_idx], .release);
-
-            const epoch_ptr: *u32 = &region.header.epoch;
-            _ = @atomicRmw(u32, epoch_ptr, .Add, 1, .release);
-
-            // Skip futex_wake when sidecar is actively polling — it will
-            // see the new epoch within one poll cycle (microseconds).
-            // Only wake when sidecar is in futex_wait (idle mode).
-            if (@atomicLoad(u32, &region.header.sidecar_polling, .acquire) == 0) {
-                futex_wake(epoch_ptr);
-            }
         }
 
         /// Write a CALL payload to shared memory for the given slot.
@@ -392,20 +373,10 @@ pub fn SharedMemoryBusType(comptime options: Options) type {
             self.server_seqs[slot_idx] += 1;
             const seq_ptr: *u32 = &slot.header.server_seq;
             @atomicStore(u32, seq_ptr, self.server_seqs[slot_idx], .release);
-
-            // Bump epoch — one atomic counter the sidecar futex-waits on.
-            // Release ordering: all slot writes visible before epoch update.
-            const epoch_ptr: *u32 = &region.header.epoch;
-            _ = @atomicRmw(u32, epoch_ptr, .Add, 1, .release);
-
-            // Skip futex_wake when sidecar is actively polling.
-            if (@atomicLoad(u32, &region.header.sidecar_polling, .acquire) == 0) {
-                futex_wake(epoch_ptr);
-            }
         }
 
-        /// Check for responses. Called from the io_uring futex_wait
-        /// completion callback — the sidecar wrote a new sidecar_seq.
+        /// Check for responses. Called from poll_responses in the
+        /// server tick loop — checks if sidecar wrote a new sidecar_seq.
         pub fn check_response(self: *Self, slot_idx: u8) void {
             const region = self.region orelse return;
             assert(slot_idx < slot_count);
@@ -498,16 +469,6 @@ pub fn SharedMemoryBusType(comptime options: Options) type {
             }
         }
     };
-}
-
-/// Raw futex WAKE syscall — fire-and-forget, no io_uring dependency.
-/// Same as WorkerDispatch.futex_wake.
-fn futex_wake(ptr: *const u32) void {
-    _ = linux.futex_wake(
-        @ptrCast(ptr),
-        linux.FUTEX.WAKE,
-        1,
-    );
 }
 
 pub const Options = struct {

@@ -5,8 +5,24 @@
 import { createRequire } from "node:module";
 
 // Native addon must use require — Node.js doesn't support import for .node files.
+// Platform detection follows TigerBeetle's index.ts pattern:
+// focus binary extracts to native/shm.node (flat path), npm distribution
+// uses native/dist/{arch}-{os}/shm.node (platform subdirectory).
 const require_ = createRequire(import.meta.url);
-const shmAddon = require_("../native/shm.node");
+const shmAddon = (() => {
+  try {
+    // Focus binary extracts the correct platform binary to this flat path.
+    return require_("../native/shm.node");
+  } catch {
+    // npm distribution: platform-specific subdirectory.
+    const archMap: Record<string, string> = { "arm64": "aarch64", "x64": "x86_64" };
+    const platformMap: Record<string, string> = { "linux": "linux", "darwin": "macos" };
+    const arch = archMap[process.arch];
+    const platform = platformMap[process.platform];
+    if (!arch || !platform) throw new Error(`Unsupported platform: ${process.arch}-${process.platform}`);
+    return require_(`../native/dist/${arch}-${platform}/shm.node`);
+  }
+})();
 
 export interface ShmClientOptions {
   shmName: string;
@@ -15,8 +31,6 @@ export interface ShmClientOptions {
 }
 
 const REGION_HEADER_SIZE = 64;
-const EPOCH_OFFSET = 0;
-const SIDECAR_POLLING_OFFSET = 12; // RegionHeader.sidecar_polling — u32 LE at offset 12.
 const SLOT_HEADER_SIZE = 64;
 
 export class ShmClient {
@@ -49,8 +63,8 @@ export class ShmClient {
     // First map just the header to read slot_count and frame_max.
     const shmPath = shmName.startsWith("/") ? shmName : "/" + shmName;
     const headerBuf: Buffer = shmAddon.mmapShm(shmPath, REGION_HEADER_SIZE);
-    const slotCount = headerBuf.readUInt16LE(4);   // RegionHeader.slot_count @ offset 4.
-    const frameMax = headerBuf.readUInt32LE(8);     // RegionHeader.frame_max @ offset 8.
+    const slotCount = headerBuf.readUInt16LE(0);   // RegionHeader.slot_count @ offset 0.
+    const frameMax = headerBuf.readUInt32LE(4);     // RegionHeader.frame_max @ offset 4.
     // Unmap the header-only mapping — we'll remap the full region.
     // (Node Buffer from mmap stays valid; we just need the values.)
     return new ShmClient({ shmName, slotCount, slotDataSize: frameMax });
@@ -74,20 +88,6 @@ export class ShmClient {
     );
   }
 
-  // Write response to SHM slot. Used by 2-RT path where the server
-  // (not the C addon) triggers the response write.
-  writeResponse(slot: number, data: Uint8Array): void {
-    const hdr = REGION_HEADER_SIZE + slot * this.slotPairSize;
-    const respOffset = hdr + SLOT_HEADER_SIZE + this.slotDataSize;
-    if (data.length > 0) this.buf.set(data, respOffset);
-    this.buf.writeUInt32LE(data.length, hdr + 12);
-    // CRC skipped in legacy path — pollDispatch handles CRC in C.
-    this.buf.writeUInt32LE(0, hdr + 20);
-    const curSeq = this.buf.readUInt32LE(hdr + 4);
-    this.buf.writeUInt32LE(curSeq + 1, hdr + 4);
-    shmAddon.futexWake(this.buf, hdr + 4);
-  }
-
   startPolling(): void {
     // Adaptive polling: poll aggressively (setImmediate) when active,
     // back off to 1ms setTimeout when idle. Prevents 100% CPU at idle
@@ -106,9 +106,6 @@ export class ShmClient {
       } else {
         idleTicks++;
         if (idleTicks >= IDLE_THRESHOLD) {
-          // Switch to idle: back off to 1ms, clear polling flag so
-          // server sends futex_wake on next CALL.
-          this.buf.writeUInt32LE(0, SIDECAR_POLLING_OFFSET);
           idleTick();
         } else {
           setImmediate(activeTick);
@@ -119,27 +116,14 @@ export class ShmClient {
     const idleTick = () => {
       const dispatched = this.poll();
       if (dispatched > 0) {
-        // Wake up: switch back to active polling.
         idleTicks = 0;
-        this.buf.writeUInt32LE(1, SIDECAR_POLLING_OFFSET);
         setImmediate(activeTick);
       } else {
         setTimeout(idleTick, 1);
       }
     };
 
-    // Start in active mode.
-    this.buf.writeUInt32LE(1, SIDECAR_POLLING_OFFSET);
     setImmediate(activeTick);
   }
 
-  startWaiting(): void {
-    // Signal the server: we're in futex_wait, futex_wake is needed.
-    this.buf.writeUInt32LE(0, SIDECAR_POLLING_OFFSET);
-    let lastEpoch = this.buf.readUInt32LE(EPOCH_OFFSET);
-    while (true) {
-      lastEpoch = shmAddon.spinWait(this.buf, EPOCH_OFFSET, lastEpoch, 100000);
-      this.poll();
-    }
-  }
 }
