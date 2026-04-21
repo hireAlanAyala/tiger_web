@@ -57,7 +57,7 @@ if [ "$STATUS" = "200" ]; then
     exit 0
 else
     echo "FAIL: expected HTTP 200, got $STATUS"
-    echo "  Likely cause: stale packages/ts/native/shm.node — rebuild with:"
-    echo "  cd packages/ts/native && ../../zig/zig cc -shared -o shm.node shm.c -I/usr/include/node -lrt -lz -fPIC"
+    echo "  Likely cause: stale native addon — rebuild with:"
+    echo "  ./zig/zig build native-addon"
     exit 1
 fi

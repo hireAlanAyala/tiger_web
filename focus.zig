@@ -426,8 +426,19 @@ fn parse_hook(content: []const u8, key: []const u8) ?[]const u8 {
 // Package extraction — binary bundles the focus TS package
 // =============================================================
 
+/// Comptime platform name for selecting the correct native addon binary.
+/// Matches the NativePlatform enum in build.zig and TB's target_no_glibc_version().
+fn native_platform() []const u8 {
+    return @tagName(builtin.cpu.arch) ++ "-" ++ switch (builtin.os.tag) {
+        .linux => "linux",
+        .macos => "macos",
+        else => @compileError("unsupported OS for native addon"),
+    };
+}
+
 /// Embedded package files — extracted to node_modules/focus/ on first run.
 /// The binary IS the distribution: no npm install, no registry, no version skew.
+/// The native addon is selected at comptime based on the build target.
 const package_files = .{
     .{ "node_modules/focus/package.json", @embedFile("packages/ts/package.json") },
     .{ "node_modules/focus/src/index.ts", @embedFile("packages/ts/src/index.ts") },
@@ -440,7 +451,7 @@ const package_files = .{
     .{ "node_modules/focus/src/protocol_generated.ts", @embedFile("packages/ts/src/protocol_generated.ts") },
     .{ "node_modules/focus/src/bin/focus-sidecar.ts", @embedFile("packages/ts/src/bin/focus-sidecar.ts") },
     .{ "node_modules/focus/src/bin/focus-codegen.ts", @embedFile("packages/ts/src/bin/focus-codegen.ts") },
-    .{ "node_modules/focus/native/shm.node", @embedFile("packages/ts/native/shm.node") },
+    .{ "node_modules/focus/native/shm.node", @embedFile("packages/ts/native/dist/" ++ native_platform() ++ "/shm.node") },
 };
 
 /// Extract the embedded focus package to node_modules/focus/ if missing or stale.

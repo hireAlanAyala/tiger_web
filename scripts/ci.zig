@@ -68,20 +68,16 @@ fn run_tests(shell: *Shell) !void {
         }
     }
 
-    // Native addon rebuild — catches stale prebuilt shm.node.
-    // The addon MUST be rebuilt from source on every CI run. A prebuilt
-    // binary that drifts from the C source causes silent response drops
-    // (server requires slot_state == result_written, only current source writes it).
+    // Native addon cross-compile — builds shm.node for all platforms.
+    // Uses zig build native-addon (cross-compilation via build.zig).
+    // Catches stale binaries: a prebuilt that drifts from C source causes
+    // silent response drops (server requires slot_state == result_written).
     {
         var section = try shell.open_section("native addon rebuild");
         defer section.close();
 
-        try shell.pushd("./packages/ts/native");
-        defer shell.popd();
-
-        // Rebuild from source.
-        try shell.exec("../../../zig/zig cc -shared -o shm.node shm.c -I/usr/include/node -lrt -lz -fPIC", .{});
-        try shell.exec("test -f shm.node", .{});
+        try shell.exec("{zig} build native-addon", .{ .zig = "../zig/zig" });
+        try shell.exec("test -f packages/ts/native/dist/x86_64-linux/shm.node", .{});
     }
 
     // TypeScript package tests — protocol vectors, fuzz, round-trip.

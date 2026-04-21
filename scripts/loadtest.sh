@@ -153,10 +153,8 @@ if [ "$1" = "sidecar" ]; then
     # TS sidecar (informational — tracks Node.js overhead)
     echo ""
     echo "Preparing TS sidecar..."
-    cd packages/ts/native
-    ../../../zig/zig cc -shared -o shm.node shm.c -I/usr/include/node -lrt -lz -fPIC 2>/dev/null
-    cd "$PROJ"
-    echo "  native addon: rebuilt from source"
+    ./zig/zig build native-addon 2>/dev/null
+    echo "  native addon: cross-compiled for all platforms"
     setup_ts_shim
     echo "  module shim: OK"
 
