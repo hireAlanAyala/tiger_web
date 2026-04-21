@@ -4,7 +4,7 @@ import { esc, price } from "focus";
 // [route] .page_load_dashboard
 // match GET /
 export function route(_req: RouteRequest): RouteResult | null {
-  return { operation: "page_load_dashboard", id: "0".repeat(32) };
+  return {};
 }
 
 // [prefetch] .page_load_dashboard

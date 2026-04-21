@@ -7,7 +7,6 @@ export function route(req: RouteRequest): RouteResult | null {
   const quantity = Number(parsed.quantity ?? 0);
   if (quantity <= 0) return null;
   return {
-    operation: "transfer_inventory",
     id: req.params.id,
     body: { target_id: req.params.sub_id, quantity },
   };

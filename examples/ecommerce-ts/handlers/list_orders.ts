@@ -4,7 +4,7 @@ import { price } from "focus";
 // [route] .list_orders
 // match GET /orders
 export function route(_req: RouteRequest): RouteResult | null {
-  return { operation: "list_orders", id: "0".repeat(32) };
+  return {};
 }
 
 // [prefetch] .list_orders

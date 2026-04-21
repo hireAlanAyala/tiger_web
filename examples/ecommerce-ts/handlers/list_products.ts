@@ -8,7 +8,7 @@ export function route(req: RouteRequest): RouteResult | null {
   // Reject if ?q= is present — search_products handles filtered queries.
   // q is extracted by the framework from // query annotation into req.params.
   if (req.params.q) return null;
-  return { operation: "list_products", id: "0".repeat(32) };
+  return {};
 }
 
 // [prefetch] .list_products

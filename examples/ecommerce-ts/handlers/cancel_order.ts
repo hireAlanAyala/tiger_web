@@ -4,7 +4,7 @@ import type { RouteRequest, RouteResult, PrefetchMessage, PrefetchDb, HandleCont
 // [route] .cancel_order
 // match POST /orders/:id/cancel
 export function route(req: RouteRequest): RouteResult | null {
-  return { operation: "cancel_order", id: req.params.id };
+  return { id: req.params.id };
 }
 
 // [prefetch] .cancel_order

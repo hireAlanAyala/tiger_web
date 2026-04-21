@@ -4,7 +4,7 @@ import { esc, price } from "focus";
 // [route] .get_product
 // match GET /products/:id
 export function route(req: RouteRequest): RouteResult | null {
-  return { operation: "get_product", id: req.params.id };
+  return { id: req.params.id };
 }
 
 // [prefetch] .get_product

@@ -3,7 +3,7 @@ import type { RouteRequest, RouteResult, PrefetchMessage, PrefetchDb, HandleCont
 // [route] .remove_collection_member
 // match DELETE /collections/:id/members/:sub_id
 export function route(req: RouteRequest): RouteResult | null {
-  return { operation: "remove_collection_member", id: req.params.id, body: { product_id: req.params.sub_id } };
+  return { id: req.params.id, body: { product_id: req.params.sub_id } };
 }
 
 // [prefetch] .remove_collection_member

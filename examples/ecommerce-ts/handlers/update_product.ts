@@ -7,7 +7,6 @@ export function route(req: RouteRequest): RouteResult | null {
   const name = String(parsed.name || "");
   if (name.length === 0) return null;
   return {
-    operation: "update_product",
     id: req.params.id,
     body: {
       name,

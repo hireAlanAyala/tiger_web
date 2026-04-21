@@ -4,7 +4,7 @@ import { esc } from "focus";
 // [route] .list_collections
 // match GET /collections
 export function route(_req: RouteRequest): RouteResult | null {
-  return { operation: "list_collections", id: "0".repeat(32) };
+  return {};
 }
 
 // [prefetch] .list_collections

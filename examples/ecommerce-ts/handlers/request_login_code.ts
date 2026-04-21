@@ -6,7 +6,7 @@ export function route(req: RouteRequest): RouteResult | null {
   const parsed = JSON.parse(req.body || "{}");
   const email = String(parsed.email || "");
   if (email.length === 0) return null;
-  return { operation: "request_login_code", id: "0".repeat(32), body: { email } };
+  return { id: "0".repeat(32), body: { email } };
 }
 
 // [prefetch] .request_login_code

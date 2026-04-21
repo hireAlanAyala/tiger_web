@@ -6,7 +6,7 @@ export function route(req: RouteRequest): RouteResult | null {
   const parsed = JSON.parse(req.body || "{}");
   const product_id = String(parsed.product_id || "");
   if (product_id.length !== 32) return null;
-  return { operation: "add_collection_member", id: req.params.id, body: { product_id } };
+  return { id: req.params.id, body: { product_id } };
 }
 
 // [prefetch] .add_collection_member

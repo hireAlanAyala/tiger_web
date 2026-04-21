@@ -8,7 +8,7 @@ export function route(req: RouteRequest): RouteResult | null {
   // q is extracted by the framework from // query annotation into req.params.
   const q = req.params.q || "";
   if (q.length === 0) return null;
-  return { operation: "search_products", id: "0".repeat(32), body: { query: q } };
+  return { id: "0".repeat(32), body: { query: q } };
 }
 
 // [prefetch] .search_products

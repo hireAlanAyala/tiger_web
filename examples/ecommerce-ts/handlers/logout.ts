@@ -3,7 +3,7 @@ import type { RouteRequest, RouteResult, PrefetchMessage, PrefetchDb, HandleCont
 // [route] .logout
 // match POST /logout
 export function route(_req: RouteRequest): RouteResult | null {
-  return { operation: "logout", id: "0".repeat(32) };
+  return {};
 }
 
 // [prefetch] .logout

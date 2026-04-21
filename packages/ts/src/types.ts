@@ -14,10 +14,11 @@ export interface RouteRequest {
   params: Record<string, string>;
 }
 
-/** Route result — what the route function returns. null = no match. */
+/** Route result — what the route function returns. null = no match.
+ *  Operation is inferred from the annotation — don't repeat it here.
+ *  id is optional — reads without an entity ID omit it (defaults to zero). */
 export interface RouteResult {
-  operation: string;
-  id: string;
+  id?: string;
   body?: Record<string, unknown>;
 }
 

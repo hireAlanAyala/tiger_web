@@ -8,7 +8,6 @@ export function route(req: RouteRequest): RouteResult | null {
   if (name.length === 0) return null;
   const id = String(parsed.id || "0".repeat(32));
   return {
-    operation: "create_product",
     id,
     body: {
       id, name,

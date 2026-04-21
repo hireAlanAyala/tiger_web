@@ -8,7 +8,6 @@ export function route(req: RouteRequest): RouteResult | null {
   const result = String(parsed.result || "");
   if (result !== "confirmed" && result !== "failed") return null;
   return {
-    operation: "complete_order",
     id: req.params.id,
     body: { result, payment_ref: String(parsed.payment_ref || "") },
   };

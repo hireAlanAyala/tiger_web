@@ -3,7 +3,7 @@ import type { RouteRequest, RouteResult, PrefetchMessage, PrefetchDb, HandleCont
 // [route] .get_product_inventory
 // match GET /products/:id/inventory
 export function route(req: RouteRequest): RouteResult | null {
-  return { operation: "get_product_inventory", id: req.params.id };
+  return { id: req.params.id };
 }
 
 // [prefetch] .get_product_inventory

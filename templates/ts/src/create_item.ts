@@ -7,7 +7,7 @@ export function route(req: RouteRequest): RouteResult | null {
   const name = String(parsed.name || "");
   if (!name) return null;
   const id = String(parsed.id || "0".repeat(32));
-  return { operation: "create_item", id, body: { id, name } };
+  return { id, body: { id, name } };
 }
 
 // [prefetch] .create_item

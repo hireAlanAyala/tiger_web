@@ -3,7 +3,7 @@ import type { RouteRequest, RouteResult, PrefetchMessage, PrefetchDb, HandleCont
 // [route] .delete_product
 // match DELETE /products/:id
 export function route(req: RouteRequest): RouteResult | null {
-  return { operation: "delete_product", id: req.params.id };
+  return { id: req.params.id };
 }
 
 // [prefetch] .delete_product

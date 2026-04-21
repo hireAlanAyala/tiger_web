@@ -7,7 +7,7 @@ export function route(req: RouteRequest): RouteResult | null {
   const email = String(parsed.email || "");
   const code = String(parsed.code || "");
   if (email.length === 0 || code.length !== 6) return null;
-  return { operation: "verify_login_code", id: "0".repeat(32), body: { email, code } };
+  return { id: "0".repeat(32), body: { email, code } };
 }
 
 // [prefetch] .verify_login_code

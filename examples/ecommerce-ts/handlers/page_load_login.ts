@@ -3,7 +3,7 @@ import type { RouteRequest, RouteResult, PrefetchMessage, PrefetchDb, HandleCont
 // [route] .page_load_login
 // match GET /login
 export function route(_req: RouteRequest): RouteResult | null {
-  return { operation: "page_load_login", id: "0".repeat(32) };
+  return {};
 }
 
 // [prefetch] .page_load_login

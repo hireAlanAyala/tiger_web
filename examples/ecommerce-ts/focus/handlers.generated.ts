@@ -8,7 +8,6 @@ import * as addCollectionMember from '../handlers/add_collection_member.ts';
 import * as cancelOrder from '../handlers/cancel_order.ts';
 import * as chargePayment from '../handlers/charge_payment.ts';
 import * as completeOrder from '../handlers/complete_order.ts';
-import * as createCollection from '../handlers/create_collection.ts';
 import * as createOrder from '../handlers/create_order.ts';
 import * as createProduct from '../handlers/create_product.ts';
 import * as deleteCollection from '../handlers/delete_collection.ts';
@@ -44,7 +43,6 @@ export const modules: Record<string, HandlerModule> = {
   cancel_order: cancelOrder,
   charge_payment: chargePayment,
   complete_order: completeOrder,
-  create_collection: createCollection,
   create_order: createOrder,
   create_product: createProduct,
   delete_collection: deleteCollection,
@@ -96,7 +94,6 @@ export const routeTable: RouteTableEntry[] = [
   { operation: 'complete_order', method: 'post', pattern: '/orders/:id/complete', query_params: [] },
   { operation: 'request_login_code', method: 'post', pattern: '/login/request', query_params: [] },
   { operation: 'verify_login_code', method: 'post', pattern: '/login/verify', query_params: [] },
-  { operation: 'create_collection', method: 'post', pattern: '/collections', query_params: [] },
   { operation: 'create_order', method: 'post', pattern: '/orders', query_params: [] },
   { operation: 'create_product', method: 'post', pattern: '/products', query_params: [] },
   { operation: 'logout', method: 'post', pattern: '/logout', query_params: [] },
@@ -104,7 +101,7 @@ export const routeTable: RouteTableEntry[] = [
 ];
 
 export interface PrefetchKeyInfo { key: string; mode: "query" | "queryAll"; }
-export const prefetchKeyMap: Record<string, PrefetchKeyInfo[]> = {"add_collection_member":[{"key":"collection","mode":"query"}],"cancel_order":[{"key":"order","mode":"query"}],"complete_order":[{"key":"order","mode":"query"}],"create_collection":[{"key":"existing","mode":"query"}],"create_product":[{"key":"existing","mode":"query"}],"delete_collection":[{"key":"collection","mode":"query"}],"delete_product":[{"key":"product","mode":"query"}],"get_collection":[{"key":"collection","mode":"query"}],"get_order":[{"key":"order","mode":"query"}],"get_product":[{"key":"product","mode":"query"}],"get_product_inventory":[{"key":"product","mode":"query"}],"list_collections":[{"key":"collections","mode":"queryAll"}],"list_orders":[{"key":"orders","mode":"queryAll"}],"list_products":[{"key":"products","mode":"queryAll"}],"page_load_dashboard":[{"key":"products","mode":"queryAll"},{"key":"collections","mode":"queryAll"},{"key":"orders","mode":"queryAll"}],"remove_collection_member":[{"key":"collection","mode":"query"}],"search_products":[{"key":"results","mode":"queryAll"}],"transfer_inventory":[{"key":"source","mode":"query"},{"key":"target","mode":"query"}],"update_product":[{"key":"product","mode":"query"}],"verify_login_code":[{"key":"login_code","mode":"query"}]};
+export const prefetchKeyMap: Record<string, PrefetchKeyInfo[]> = {"add_collection_member":[{"key":"collection","mode":"query"}],"cancel_order":[{"key":"order","mode":"query"}],"complete_order":[{"key":"order","mode":"query"}],"create_product":[{"key":"existing","mode":"query"}],"delete_collection":[{"key":"collection","mode":"query"}],"delete_product":[{"key":"product","mode":"query"}],"get_collection":[{"key":"collection","mode":"query"}],"get_order":[{"key":"order","mode":"query"}],"get_product":[{"key":"product","mode":"query"}],"get_product_inventory":[{"key":"product","mode":"query"}],"list_collections":[{"key":"collections","mode":"queryAll"}],"list_orders":[{"key":"orders","mode":"queryAll"}],"list_products":[{"key":"products","mode":"queryAll"}],"page_load_dashboard":[{"key":"products","mode":"queryAll"},{"key":"collections","mode":"queryAll"},{"key":"orders","mode":"queryAll"}],"remove_collection_member":[{"key":"collection","mode":"query"}],"search_products":[{"key":"results","mode":"queryAll"}],"transfer_inventory":[{"key":"source","mode":"query"},{"key":"target","mode":"query"}],"update_product":[{"key":"product","mode":"query"}],"verify_login_code":[{"key":"login_code","mode":"query"}]};
 
 // Generated from operations.json — always includes new operations.
 export const OperationValues: Record<string, number> = {"root":0,"delete_product":1,"create_order":2,"charge_payment":3,"complete_order":4,"remove_collection_member":5,"get_product_inventory":6,"send_order_email":7,"get_order":8,"verify_login_code":9,"request_login_code":10,"search_products":11,"cancel_order":12,"list_orders":13,"list_products":14,"add_collection_member":15,"page_load_dashboard":16,"list_collections":17,"get_product":18,"logout":19,"get_collection":20,"delete_collection":21,"create_collection":22,"page_load_login":23,"create_product":24,"process_image":25,"transfer_inventory":26,"update_product":27};

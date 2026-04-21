@@ -4,7 +4,7 @@ import { esc } from "focus";
 // [route] .get_collection
 // match GET /collections/:id
 export function route(req: RouteRequest): RouteResult | null {
-  return { operation: "get_collection", id: req.params.id };
+  return { id: req.params.id };
 }
 
 // [prefetch] .get_collection
