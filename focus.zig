@@ -243,7 +243,7 @@ fn cmd_dev(gpa: std.mem.Allocator, args: DevArgs) !void {
 
     // Step 3: Start server in a background thread (embedded, same process).
     // PID-scoped socket path avoids collisions between concurrent focus dev sessions.
-    const server_pid = std.os.linux.getpid();
+    const server_pid = std.c.getpid();
     var sock_path_buf: [64]u8 = undefined;
     const sock_path = std.fmt.bufPrint(&sock_path_buf, "/tmp/focus-dev-{d}.sock", .{server_pid}) catch unreachable;
 
@@ -265,16 +265,19 @@ fn cmd_dev(gpa: std.mem.Allocator, args: DevArgs) !void {
     var shm_buf: [32]u8 = undefined;
     const shm_name = std.fmt.bufPrint(&shm_buf, "tiger-{d}", .{server_pid}) catch unreachable;
 
-    // Wait for SHM to appear.
+    // Wait for SHM to appear. Use shm_open(O_RDONLY) — works on both
+    // Linux (/dev/shm/) and macOS (kernel-managed, no visible path).
     try stdout.print("{s}[server]{s}  starting...\n", .{ color("\x1b[36m"), color("\x1b[0m") });
     var ready = false;
+    var shm_probe_buf: [64]u8 = undefined;
+    const shm_probe_name = std.fmt.bufPrintZ(&shm_probe_buf, "/{s}", .{shm_name}) catch unreachable;
     for (0..100) |_| {
-        var shm_path_buf: [64]u8 = undefined;
-        const shm_path = std.fmt.bufPrint(&shm_path_buf, "/dev/shm/{s}", .{shm_name}) catch unreachable;
-        if (std.fs.cwd().access(shm_path, .{})) |_| {
+        const fd = std.c.shm_open(shm_probe_name.ptr, @bitCast(std.posix.O{ .ACCMODE = .RDONLY }), 0);
+        if (fd >= 0) {
+            std.posix.close(fd);
             ready = true;
             break;
-        } else |_| {}
+        }
         std.time.sleep(50 * std.time.ns_per_ms);
     }
     if (!ready) {
@@ -538,7 +541,7 @@ const SidecarChild = struct {
         const elapsed = std.time.nanoTimestamp() - self.last_spawn;
         if (elapsed < 5 * std.time.ns_per_s) return null;
 
-        const result = std.posix.waitpid(self.child.id, std.os.linux.W.NOHANG);
+        const result = std.posix.waitpid(self.child.id, std.c.W.NOHANG);
         if (result.pid != 0) {
             self.state = .exited;
             return @as(u32, @intCast((result.status & 0xff00) >> 8));

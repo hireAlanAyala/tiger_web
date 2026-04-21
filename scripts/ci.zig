@@ -120,19 +120,16 @@ fn run_tests(shell: *Shell) !void {
 
         // Dev loop: server + sidecar + watch, exits after 3s timeout.
         // Exercises: embedded server start, SHM region creation, sidecar spawn,
-        // graceful shutdown. Linux-only for now — kqueue IO (macOS) not yet
-        // tested in the server event loop.
+        // graceful shutdown.
         //
         // Override .focus start hook with a stub sidecar (sleep) — CI doesn't have npx.
         // The real sidecar is tested in the integration test (Level 2) above.
-        if (builtin.target.os.tag == .linux) {
-            {
-                const focus_file = try shell.cwd.createFile(".focus", .{});
-                defer focus_file.close();
-                try focus_file.writeAll("build = true\nstart = sleep 10\n");
-            }
-            try shell.exec("{focus} dev --timeout=3 src/", .{ .focus = focus });
+        {
+            const focus_file = try shell.cwd.createFile(".focus", .{});
+            defer focus_file.close();
+            try focus_file.writeAll("build = true\nstart = sleep 10\n");
         }
+        try shell.exec("{focus} dev --timeout=3 src/", .{ .focus = focus });
 
         // Cleanup.
         shell.exec("rm -rf {project}", .{ .project = project }) catch {};
