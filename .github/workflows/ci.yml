@@ -14,34 +14,25 @@ jobs:
     strategy:
       matrix:
         include:
-          - { os: 'ubuntu-latest', deps: 'sudo apt-get install -y libsqlite3-dev' }
-          - { os: 'macos-latest', deps: 'brew install sqlite3' }
+          - { os: 'ubuntu-latest' }
+          - { os: 'macos-latest' }
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
-      - run: ${{ matrix.deps }}
       - run: sh zig/download.sh
       - run: ./zig/zig build ci -- test
 
   clients:
-    runs-on: ubuntu-latest
     strategy:
       matrix:
         include:
-          - { example: 'ecommerce-ts', language: 'node', version: '22' }
+          - { os: 'ubuntu-latest', node: '22' }
+          # macOS: test native addon loading on real hardware.
+          - { os: 'macos-latest', node: '22' }
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
-      - run: sudo apt-get install -y libsqlite3-dev
       - run: sh zig/download.sh
-
-      - if: matrix.language == 'node'
-        uses: actions/setup-node@v4
-        with: { node-version: '${{ matrix.version }}' }
-
-      - if: matrix.language == 'python'
-        uses: actions/setup-python@v4
-        with: { python-version: '${{ matrix.version }}' }
-
-      # No npm install / pip install here — scripts/ci.zig handles deps.
-      # Each example is self-contained: zig build ci -- clients runs everything.
+      - uses: actions/setup-node@v4
+        with: { node-version: '${{ matrix.node }}' }
       - run: ./zig/zig build ci -- clients
