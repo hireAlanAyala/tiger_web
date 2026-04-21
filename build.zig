@@ -330,18 +330,22 @@ pub fn build(b: *std.Build) void {
     }
 
     // Modules that need libc (socketpair for tests) but not sqlite.
-    for ([_][]const u8{ "framework/message_bus.zig", "framework/io/linux.zig", "framework/worker_dispatch.zig", "worker_integration_test.zig" }) |mod| {
-        const unit_test = b.addTest(.{
-            .root_source_file = b.path(mod),
-            .target = target,
-            .optimize = optimize,
-        });
-        unit_test.root_module.addImport("stdx", stdx_module);
-        unit_test.root_module.addOptions("build_options", build_options);
-        unit_test.linkLibC();
-        const run_ut = b.addRunArtifact(unit_test);
-        run_ut.setEnvironmentVariable("ZIG_EXE", b.graph.zig_exe);
-        unit_test_step.dependOn(&run_ut.step);
+    // Linux-only: io/linux.zig (io_uring), message_bus.zig (unix sockets),
+    // worker_dispatch.zig (SHM), worker_integration_test.zig.
+    if (target.result.os.tag == .linux) {
+        for ([_][]const u8{ "framework/message_bus.zig", "framework/io/linux.zig", "framework/worker_dispatch.zig", "worker_integration_test.zig" }) |mod| {
+            const unit_test = b.addTest(.{
+                .root_source_file = b.path(mod),
+                .target = target,
+                .optimize = optimize,
+            });
+            unit_test.root_module.addImport("stdx", stdx_module);
+            unit_test.root_module.addOptions("build_options", build_options);
+            unit_test.linkLibC();
+            const run_ut = b.addRunArtifact(unit_test);
+            run_ut.setEnvironmentVariable("ZIG_EXE", b.graph.zig_exe);
+            unit_test_step.dependOn(&run_ut.step);
+        }
     }
 
     // Modules that need sqlite3 + libc.
@@ -359,8 +363,8 @@ pub fn build(b: *std.Build) void {
         unit_test_step.dependOn(&run_ut.step);
     }
 
-    // Load gen tests (needs libc for posix sockets, no sqlite3).
-    {
+    // Load gen tests (needs libc for posix sockets, linux-only).
+    if (target.result.os.tag == .linux) {
         const load_test = b.addTest(.{
             .root_source_file = b.path("load_gen.zig"),
             .target = target,
