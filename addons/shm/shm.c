@@ -177,6 +177,7 @@ static napi_value spin_wait(napi_env env, napi_callback_info info) {
 #define SHM_RESPONSE_LEN 12
 #define SHM_REQUEST_CRC  16
 #define SHM_RESPONSE_CRC 20
+#define SHM_SLOT_STATE   24   // SlotState: 0=free, 1=call_written, 2=result_written
 #define SHM_SLOT_HEADER  64
 
 // CRC32 over len_bytes ++ payload_bytes (TB convention).
@@ -239,8 +240,9 @@ static napi_value poll_dispatch(napi_env env, napi_callback_info info) {
 
   for (int i = 0; i < (int)slot_count; i++) {
     uint8_t *hdr = buf + region_header_size + (size_t)i * slot_pair_size;
-    uint32_t server_seq;
-    memcpy(&server_seq, hdr + SHM_SERVER_SEQ, 4); // LE native
+    // Acquire load: ensures all CALL data written by the server is visible
+    // after we observe the new server_seq value.
+    uint32_t server_seq = __atomic_load_n((uint32_t *)(hdr + SHM_SERVER_SEQ), __ATOMIC_ACQUIRE);
 
     if (server_seq <= last_seqs[i]) continue;
     last_seqs[i] = server_seq;
@@ -251,9 +253,11 @@ static napi_value poll_dispatch(napi_env env, napi_callback_info info) {
 
     uint8_t *payload = hdr + SHM_SLOT_HEADER; // request area starts after header
 
-    // Validate CRC.
+    // Validate CRC. Sentinel: CRC=0 means "not yet written" (server
+    // crashed mid-CALL write). Skip rather than risk 1-in-2^32 false positive.
     uint32_t stored_crc;
     memcpy(&stored_crc, hdr + SHM_REQUEST_CRC, 4);
+    if (stored_crc == 0) continue;
     uint32_t computed_crc = compute_crc(payload, request_len);
     if (stored_crc != computed_crc) continue;
 
@@ -311,20 +315,29 @@ static napi_value poll_dispatch(napi_env env, napi_callback_info info) {
       memcpy(resp_area, result_data, result_len);
     }
 
-    // Write response header: length, CRC, then seq.
+    // Write response header: length, CRC, state, then seq.
     uint32_t resp_len32 = (uint32_t)result_len;
     memcpy(hdr + SHM_RESPONSE_LEN, &resp_len32, 4);
     uint32_t resp_crc = compute_crc(resp_area, resp_len32);
     memcpy(hdr + SHM_RESPONSE_CRC, &resp_crc, 4);
+    hdr[SHM_SLOT_STATE] = 2; // result_written
 
-    // Bump sidecar_seq.
+    // Release fence: all stores above (data, len, CRC, state) must be
+    // visible before the sidecar_seq bump. Without this, ARM CPUs may
+    // reorder the seq write before data writes — the server would see
+    // the new seq but read stale/partial data.
+    __atomic_thread_fence(__ATOMIC_RELEASE);
+
+    // Bump sidecar_seq — the server's acquire load on this field orders
+    // all subsequent reads after this write becomes visible.
     uint32_t cur_seq;
     memcpy(&cur_seq, hdr + SHM_SIDECAR_SEQ, 4);
     cur_seq++;
-    memcpy(hdr + SHM_SIDECAR_SEQ, &cur_seq, 4);
+    __atomic_store_n((uint32_t *)(hdr + SHM_SIDECAR_SEQ), cur_seq, __ATOMIC_RELEASE);
 
-    // Wake server's futex.
-    syscall(SYS_futex, (uint32_t *)(hdr + SHM_SIDECAR_SEQ), FUTEX_WAKE, 1, NULL, NULL, 0);
+    // No futex_wake needed: server polls sidecar_seq in its tick loop
+    // (poll_responses called every tick). Same optimization as the
+    // server→sidecar direction (sidecar_polling flag).
 
     found++;
   }
