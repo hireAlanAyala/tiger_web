@@ -95,9 +95,13 @@ fn run_tests(shell: *Shell) !void {
         var section = try shell.open_section("new-project scaffold+build");
         defer section.close();
 
+        // Use absolute path — pushd to /tmp means relative paths won't resolve.
+        const root = try shell.project_root.realpathAlloc(shell.arena.allocator(), ".");
+        const focus = try shell.fmt("{s}/zig-out/bin/focus", .{root});
+
         const project = "/tmp/ci-focus-new-project";
         shell.exec("rm -rf {project}", .{ .project = project }) catch {};
-        try shell.exec("./zig-out/bin/focus new --ts {project}", .{ .project = project });
+        try shell.exec("{focus} new --ts {project}", .{ .focus = focus, .project = project });
 
         try shell.pushd(project);
         defer shell.popd();
@@ -105,7 +109,7 @@ fn run_tests(shell: *Shell) !void {
         try shell.exec("npm install", .{});
         // Build: scanner + codegen (tests OperationValues generation,
         // route table for TS-only projects, operations.ts output).
-        try shell.exec("{focus} build src/", .{ .focus = "../zig-out/bin/focus" });
+        try shell.exec("{focus} build src/", .{ .focus = focus });
 
         // Verify expected outputs exist.
         try shell.exec("test -f focus/manifest.json", .{});
@@ -126,7 +130,7 @@ fn run_tests(shell: *Shell) !void {
             defer focus_file.close();
             try focus_file.writeAll("build = true\nstart = sleep 10\n");
         }
-        try shell.exec("{focus} dev --timeout=3 src/", .{ .focus = "../zig-out/bin/focus" });
+        try shell.exec("{focus} dev --timeout=3 src/", .{ .focus = focus });
 
         // Cleanup.
         shell.exec("rm -rf {project}", .{ .project = project }) catch {};
