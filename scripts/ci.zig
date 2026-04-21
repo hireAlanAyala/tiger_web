@@ -74,6 +74,22 @@ fn run_tests(shell: *Shell) !void {
         }
     }
 
+    // Native addon rebuild — catches stale prebuilt shm.node.
+    // The addon MUST be rebuilt from source on every CI run. A prebuilt
+    // binary that drifts from the C source causes silent response drops
+    // (server requires slot_state == result_written, only current source writes it).
+    {
+        var section = try shell.open_section("native addon rebuild");
+        defer section.close();
+
+        try shell.pushd("./addons/shm");
+        defer shell.popd();
+
+        // Rebuild from source.
+        try shell.exec("../../zig/zig cc -shared -o shm.node shm.c -I/usr/include/node -lrt -lz -fPIC", .{});
+        try shell.exec("test -f shm.node", .{});
+    }
+
     // New-project smoke test: scaffold + build without Docker.
     // Catches: OperationValues missing, route table shadowing,
     // schema init issues, scanner .zig filter bugs.
