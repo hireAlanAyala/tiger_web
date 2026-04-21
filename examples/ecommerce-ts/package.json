@@ -4,8 +4,8 @@
     "node": ">=22"
   },
   "scripts": {
-    "build": "../../focus build",
-    "dev": "../../focus dev"
+    "build": "../../focus build handlers/",
+    "dev": "../../focus dev handlers/"
   },
   "devDependencies": {
     "tsx": "^4",

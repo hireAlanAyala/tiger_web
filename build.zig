@@ -434,14 +434,14 @@ pub fn build(b: *std.Build) void {
     unit_test_step.dependOn(&run_scripts_test.step);
 
     // --- Cross-language adapter tests (requires npx tsx) ---
-    // These read binary vectors written by Zig unit tests (/tmp/tiger_*.bin).
-    // CI must run unit-test BEFORE test-adapter to generate the vectors.
+    // Protocol vectors + round-trip tests validate TS serde against committed vectors.
     {
         const adapter_test_step = b.step("test-adapter", "Run TypeScript cross-language tests");
         for ([_][]const u8{
-            "generated/serde_test.ts",
-            "generated/call_test.ts",
             "generated/routing_test.ts",
+            "packages/ts/test/protocol_test.ts",
+            "packages/ts/test/round_trip_test.ts",
+            "packages/ts/test/fuzz_test.ts",
         }) |test_file| {
             const cmd = b.addSystemCommand(&.{ "npx", "-y", "tsx", test_file });
             adapter_test_step.dependOn(&cmd.step);

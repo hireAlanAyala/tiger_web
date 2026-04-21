@@ -89,18 +89,6 @@ fn run_tests(shell: *Shell) !void {
         try shell.exec("test -f packages/ts/native/dist/x86_64-linux/shm.node", .{});
     }
 
-    // TypeScript package tests — protocol vectors, fuzz, round-trip.
-    // Validates the package's serde implementation against committed
-    // binary vectors. No server needed — fast.
-    {
-        var section = try shell.open_section("packages/ts tests");
-        defer section.close();
-
-        try shell.exec("npx tsx packages/ts/test/protocol_test.ts", .{});
-        try shell.exec("npx tsx packages/ts/test/round_trip_test.ts", .{});
-        try shell.exec("npx tsx packages/ts/test/fuzz_test.ts", .{});
-    }
-
     // New-project smoke test: scaffold + build without Docker.
     // Catches: OperationValues missing, route table shadowing,
     // schema init issues, scanner .zig filter bugs.

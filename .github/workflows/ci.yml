@@ -20,6 +20,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - run: sh zig/download.sh
+      - uses: actions/setup-node@v4
+        with: { node-version: '22' }
       - run: ./zig/zig build ci -- test
 
   clients:
