@@ -43,8 +43,10 @@ sleep 5
 STATUS=$(curl -s -o /dev/null -w "%{http_code}" "http://localhost:$PORT/")
 
 # Cleanup
-kill $SRV_PID 2>/dev/null
-kill $SC_PID 2>/dev/null
+kill $SRV_PID 2>/dev/null || true
+kill $SC_PID 2>/dev/null || true
+pkill -P $SC_PID 2>/dev/null || true
+sleep 1
 rm -f /tmp/ci-shm-sock /tmp/ci-shm-port.txt
 rm -f node_modules/tiger-web/index.ts node_modules/tiger-web/package.json
 rmdir node_modules/tiger-web 2>/dev/null
