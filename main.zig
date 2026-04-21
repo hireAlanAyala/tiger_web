@@ -681,7 +681,16 @@ fn run_loop(state: *RunState) void {
             sup.tick(state.server.tick_count);
         }
 
-        state.io.run_for_ns(tick_ns);
+        // Busy-poll when SHM slots are in-flight: responses arrive via shared
+        // memory (no kernel notification), so we must poll frequently. With a
+        // 10ms timeout, throughput is capped at slots/tick. With 0 timeout,
+        // poll_shm runs at CPU speed — same mechanism that achieved 57K req/s.
+        // When idle (no in-flight slots), use the full tick_ns to save CPU.
+        const wait_ns: u64 = if (App.sidecar_enabled and state.server.has_pending_shm())
+            0
+        else
+            tick_ns;
+        state.io.run_for_ns(wait_ns);
     }
 }
 

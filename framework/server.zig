@@ -255,6 +255,16 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
             return false;
         }
 
+        /// Returns true if any SHM dispatch entry is waiting for a sidecar response.
+        /// Used by the main loop to busy-poll (run_for_ns=0) when work is in-flight.
+        pub fn has_pending_shm(server: *const Server) bool {
+            if (!App.sidecar_enabled) return false;
+            for (&server.shm_dispatch.entries) |*entry| {
+                if (entry.stage != .free) return true;
+            }
+            return false;
+        }
+
         /// Initialize the server. Allocates the connection pool on the heap.
         /// When sidecar_enabled, also initializes the embedded Bus and Client,
         /// wires per-slot handlers, and starts listening on the socket path.
