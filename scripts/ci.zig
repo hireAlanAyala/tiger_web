@@ -13,7 +13,6 @@
 //! sidecar runs user-space business logic, not just protocol wrapping.
 
 const std = @import("std");
-const builtin = @import("builtin");
 const log = std.log;
 const assert = std.debug.assert;
 

@@ -157,7 +157,7 @@ fn spawn_server(allocator: std.mem.Allocator, db: [:0]const u8, sidecar: bool, l
 
     // Generate unique socket path using our PID — no collisions.
     var sock_path_buf: [64]u8 = undefined;
-    const sock_path_len = make_sock_path(&sock_path_buf, @intCast(std.os.linux.getpid()));
+    const sock_path_len = make_sock_path(&sock_path_buf, @intCast(std.c.getpid()));
     const sock_path = sock_path_buf[0..sock_path_len];
 
     // Clean stale socket from a previous run with the same PID (unlikely but safe).

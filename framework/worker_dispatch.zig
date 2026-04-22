@@ -33,6 +33,10 @@ pub fn WorkerDispatchType(comptime max_entries: u8) type {
         // IoUring dependency. Same extern struct sizes.
         // =============================================================
 
+        /// NOTE: No slot_state field — unlike shm_bus.zig's SlotHeader which
+        /// has an explicit SlotState enum. Worker dispatch uses Entry.State for
+        /// lifecycle tracking (in-flight/completed/free), not a shared-memory
+        /// field. Different SHM region, different protocol.
         pub const SlotHeader = extern struct {
             server_seq: u32 = 0,
             sidecar_seq: u32 = 0,

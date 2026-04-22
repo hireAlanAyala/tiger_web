@@ -339,6 +339,19 @@ fetches periodically, keeps local storage current, state machine
 resolves per-request from local data. Already works for login codes.
 Generalize when a second auth strategy is needed.
 
+# Cross-platform gaps (from macOS port audit)
+
+- musl Linux variants: NativePlatform has glibc only. Alpine/Docker
+  containers need x86_64-linux-musl + aarch64-linux-musl. TS platform
+  detection needs glibcVersionRuntime check (TB pattern). Add when a
+  user reports it or Docker deployment is prioritized.
+- Vendored node-api-headers unversioned: copied from /usr/include/node/
+  without version tracking. TB uses node-api-headers npm package (^0.0.2).
+  N-API is ABI-stable so functionally equivalent, but no audit trail.
+- worker_dispatch.zig SlotHeader lacks slot_state field (shm_bus.zig has
+  it). Different SHM regions, different protocols — correct but needs a
+  comment explaining why the layouts differ.
+
 # Backlog
 
 - ensure the server is compatible with http 2/3
