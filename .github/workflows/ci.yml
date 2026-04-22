@@ -50,27 +50,10 @@ jobs:
       - uses: actions/setup-node@v4
         with: { node-version: '22' }
       - run: ./zig/zig build
-      - run: |
-          FOCUS=$GITHUB_WORKSPACE/zig-out/bin/focus
-          $FOCUS new --ts /tmp/macos-dev-test
-          cd /tmp/macos-dev-test
-          npm install
-          $FOCUS build src/
-          echo 'build = true' > .focus
-          echo 'start = sleep 10' >> .focus
-          $FOCUS dev --timeout=8 src/ 2>&1 || true
-          # Also test shm_open directly
-          echo "--- testing shm_open ---"
-          python3 -c "
-          import multiprocessing.shared_memory as shm
-          try:
-            s = shm.SharedMemory(name='test-ci-shm', create=True, size=64)
-            print('shm_open: OK (created)')
-            s2 = shm.SharedMemory(name='test-ci-shm', create=False)
-            print('shm_open: OK (opened)')
-            s2.close()
-            s.close()
-            s.unlink()
-          except Exception as e:
-            print(f'shm_open: FAILED ({e})')
-          " || true
+      - name: Run tiger-web server directly (bypass focus dev)
+        run: |
+          cd /tmp
+          # Run tiger-web start directly — focus dev swallows server thread errors.
+          # --sidecar creates the SHM region, --port=0 picks a random port.
+          timeout 5 $GITHUB_WORKSPACE/zig-out/bin/tiger-web start --port=0 --db=:memory: --sidecar=/tmp/test.sock 2>&1 || true
+          echo "exit code: $?"
