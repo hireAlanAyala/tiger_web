@@ -315,22 +315,22 @@ pub fn SharedMemoryBusType(comptime options: Options) type {
         /// Get direct write access to a slot's request buffer.
         /// Caller writes the CALL frame directly, then calls finalize_slot_send.
         /// Eliminates intermediate buffer copies.
-        pub fn get_slot_request_buf(self: *Self, slot_idx: u8) ?[]u8 {
-            assert(slot_idx < slot_count);
+        pub fn get_slot_request_buf(self: *Self, slot_index: u8) ?[]u8 {
+            assert(slot_index < slot_count);
             const region = self.region orelse return null;
             // The slot must be free — dispatching a CALL to a slot that
             // already carries one would overwrite the pending request.
-            assert(region.slots[slot_idx].header.slot_state == .free);
-            self.slot_delivered[slot_idx] = false;
-            return &region.slots[slot_idx].request;
+            assert(region.slots[slot_index].header.slot_state == .free);
+            self.slot_delivered[slot_index] = false;
+            return &region.slots[slot_index].request;
         }
 
         /// Finalize a direct-write send: compute CRC, bump seq.
         /// Call after writing payload into the buffer returned by get_slot_request_buf.
-        pub fn finalize_slot_send(self: *Self, slot_idx: u8, payload_len: u32) void {
+        pub fn finalize_slot_send(self: *Self, slot_index: u8, payload_len: u32) void {
             const region = self.region orelse return;
-            assert(slot_idx < slot_count);
-            const slot = &region.slots[slot_idx];
+            assert(slot_index < slot_count);
+            const slot = &region.slots[slot_index];
 
             // Precondition: slot must be free. If this fires, the server
             // dispatched two CALLs to the same slot — a logic bug that would
@@ -340,15 +340,15 @@ pub fn SharedMemoryBusType(comptime options: Options) type {
             // Extract request_id from CALL frame (offset 1, u32 BE) for
             // verification when the RESULT comes back.
             assert(payload_len >= 5); // tag + request_id minimum
-            self.sent_request_ids[slot_idx] = std.mem.readInt(u32, slot.request[1..5], .big);
+            self.sent_request_ids[slot_index] = std.mem.readInt(u32, slot.request[1..5], .big);
 
             slot.header.request_len = payload_len;
             slot.header.request_crc = shm_layout.crc_frame(payload_len, &slot.request);
             slot.header.slot_state = .call_written;
 
-            self.server_seqs[slot_idx] += 1;
+            self.server_seqs[slot_index] += 1;
             const seq_ptr: *u32 = &slot.header.server_seq;
-            @atomicStore(u32, seq_ptr, self.server_seqs[slot_idx], .release);
+            @atomicStore(u32, seq_ptr, self.server_seqs[slot_index], .release);
         }
 
         /// Write a CALL payload to shared memory for the given slot.
@@ -356,23 +356,23 @@ pub fn SharedMemoryBusType(comptime options: Options) type {
         /// to dispatch entries. No round-robin, no collisions.
         pub fn send_message_to(self: *Self, _: u8, message: *Message, payload_len: u32) void {
             const region = self.region orelse return;
-            const slot_idx = message.slot_index;
-            assert(slot_idx < slot_count);
-            var slot = &region.slots[slot_idx];
+            const slot_index = message.slot_index;
+            assert(slot_index < slot_count);
+            var slot = &region.slots[slot_index];
 
             // Precondition: slot must be free before writing a new CALL.
             assert(slot.header.slot_state == .free);
 
             // New CALL on this slot — clear delivery flag so
             // check_response will deliver the next response.
-            self.slot_delivered[slot_idx] = false;
+            self.slot_delivered[slot_index] = false;
 
             // Write payload to request area.
             @memcpy(slot.request[0..payload_len], message.buffer[0..payload_len]);
 
             // Extract request_id from CALL frame for response verification.
             assert(payload_len >= 5);
-            self.sent_request_ids[slot_idx] = std.mem.readInt(u32, slot.request[1..5], .big);
+            self.sent_request_ids[slot_index] = std.mem.readInt(u32, slot.request[1..5], .big);
 
             // Update header (non-atomic — only seq needs ordering).
             // CRC convention (len ++ payload) is defined in shm_layout.
@@ -382,20 +382,20 @@ pub fn SharedMemoryBusType(comptime options: Options) type {
 
             // Increment seq with release ordering — all payload stores
             // are visible before the seq update.
-            self.server_seqs[slot_idx] += 1;
+            self.server_seqs[slot_index] += 1;
             const seq_ptr: *u32 = &slot.header.server_seq;
-            @atomicStore(u32, seq_ptr, self.server_seqs[slot_idx], .release);
+            @atomicStore(u32, seq_ptr, self.server_seqs[slot_index], .release);
         }
 
         /// Check for responses. Called from poll_responses in the
         /// server tick loop — checks if sidecar wrote a new sidecar_seq.
-        pub fn check_response(self: *Self, slot_idx: u8) void {
-            assert(slot_idx < slot_count);
+        pub fn check_response(self: *Self, slot_index: u8) void {
+            assert(slot_index < slot_count);
             const region = self.region orelse return;
-            const slot = &region.slots[slot_idx];
+            const slot = &region.slots[slot_index];
 
-            const response_len = self.validate_pending_response(slot, slot_idx) orelse return;
-            if (!self.verify_response_request_id(slot, slot_idx, response_len)) return;
+            const response_len = self.validate_pending_response(slot, slot_index) orelse return;
+            if (!self.verify_response_request_id(slot, slot_index, response_len)) return;
 
             // Mark as consumed BEFORE the callback — the callback may send
             // a new CALL on this same slot (which clears the flag). Setting
@@ -404,11 +404,11 @@ pub fn SharedMemoryBusType(comptime options: Options) type {
             // If the callback panics, the slot is left free but with
             // unfinished work — acceptable because a callback panic means
             // the server is crashing anyway (assert failure).
-            self.slot_delivered[slot_idx] = true;
+            self.slot_delivered[slot_index] = true;
             slot.header.slot_state = .free;
 
             if (self.on_frame_fn) |cb| {
-                cb(self.context.?, slot_idx, slot.response[0..response_len]);
+                cb(self.context.?, slot_index, slot.response[0..response_len]);
             }
         }
 
@@ -428,20 +428,20 @@ pub fn SharedMemoryBusType(comptime options: Options) type {
         fn validate_pending_response(
             self: *const Self,
             slot: *const SlotPair,
-            slot_idx: u8,
+            slot_index: u8,
         ) ?u32 {
-            assert(slot_idx < slot_count);
+            assert(slot_index < slot_count);
             assert(self.server_seqs.len == slot_count);
 
             const sidecar_seq = @atomicLoad(u32, &slot.header.sidecar_seq, .acquire);
-            if (self.server_seqs[slot_idx] == 0) return null;
-            if (sidecar_seq < self.server_seqs[slot_idx]) return null;
-            if (self.slot_delivered[slot_idx]) return null;
+            if (self.server_seqs[slot_index] == 0) return null;
+            if (sidecar_seq < self.server_seqs[slot_index]) return null;
+            if (self.slot_delivered[slot_index]) return null;
             if (slot.header.slot_state != .result_written) return null;
 
             const response_len = slot.header.response_len;
             if (response_len > slot_data_size) {
-                log.warn("shm: invalid response_len {d} on slot {d}", .{ response_len, slot_idx });
+                log.warn("shm: invalid response_len {d} on slot {d}", .{ response_len, slot_index });
                 return null;
             }
 
@@ -451,7 +451,7 @@ pub fn SharedMemoryBusType(comptime options: Options) type {
             const stored_crc = slot.header.response_crc;
             if (stored_crc == 0) return null;
             if (shm_layout.crc_frame(response_len, &slot.response) != stored_crc) {
-                log.warn("shm: CRC mismatch on slot {d}", .{slot_idx});
+                log.warn("shm: CRC mismatch on slot {d}", .{slot_index});
                 return null;
             }
 
@@ -467,21 +467,21 @@ pub fn SharedMemoryBusType(comptime options: Options) type {
         fn verify_response_request_id(
             self: *Self,
             slot: *SlotPair,
-            slot_idx: u8,
+            slot_index: u8,
             response_len: u32,
         ) bool {
-            assert(slot_idx < slot_count);
+            assert(slot_index < slot_count);
             assert(response_len <= slot_data_size);
 
             if (response_len < 5) return true; // too short to carry a request_id
 
             const resp_request_id = std.mem.readInt(u32, slot.response[1..5], .big);
-            if (resp_request_id == self.sent_request_ids[slot_idx]) return true;
+            if (resp_request_id == self.sent_request_ids[slot_index]) return true;
 
             log.warn("shm: request_id mismatch on slot {d}: sent {d}, got {d}", .{
-                slot_idx, self.sent_request_ids[slot_idx], resp_request_id,
+                slot_index, self.sent_request_ids[slot_index], resp_request_id,
             });
-            self.slot_delivered[slot_idx] = true;
+            self.slot_delivered[slot_index] = true;
             slot.header.slot_state = .free;
             return false;
         }

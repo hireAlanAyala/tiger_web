@@ -229,21 +229,21 @@ pub fn WorkerDispatchType(comptime max_entries: u8) type {
         /// Returns false if the CALL frame is too large (name + args exceed frame_max).
         pub fn dispatch(
             self: *Self,
-            slot_idx: u8,
+            slot_index: u8,
             name: []const u8,
             args: []const u8,
             dispatch_op: u64,
             tick: u32,
         ) bool {
-            assert(slot_idx < max_entries);
+            assert(slot_index < max_entries);
             assert(self.region != null);
-            assert(self.entries[slot_idx].state == .free);
-            assert(self.entries[slot_idx].dispatch_op == 0); // Pair: free state implies no active dispatch.
+            assert(self.entries[slot_index].state == .free);
+            assert(self.entries[slot_index].dispatch_op == 0); // Pair: free state implies no active dispatch.
             assert(name.len > 0);
             assert(dispatch_op > 0);
 
             const region = self.region.?;
-            var slot = &region.slots[slot_idx];
+            var slot = &region.slots[slot_index];
 
             // Build CALL frame directly into SHM request area.
             const payload_len = build_call(
@@ -262,11 +262,11 @@ pub fn WorkerDispatchType(comptime max_entries: u8) type {
             slot.header.request_crc = shm_layout.crc_frame(len32, &slot.request);
 
             // Bump server_seq (release — visible to worker).
-            self.server_seqs[slot_idx] +%= 1;
-            @atomicStore(u32, &slot.header.server_seq, self.server_seqs[slot_idx], .release);
+            self.server_seqs[slot_index] +%= 1;
+            @atomicStore(u32, &slot.header.server_seq, self.server_seqs[slot_index], .release);
 
             // Mark entry.
-            self.entries[slot_idx] = .{
+            self.entries[slot_index] = .{
                 .state = .in_flight,
                 .request_id = self.next_request_id,
                 .dispatch_op = dispatch_op,
@@ -642,13 +642,13 @@ test "CRC32 cross-language test vector" {
 
 fn simulate_result(
     wd: anytype,
-    slot_idx: u8,
+    slot_index: u8,
     request_id: u32,
     flag: ResultFlag,
     data: []const u8,
 ) void {
     const region = wd.region.?;
-    var slot = &region.slots[slot_idx];
+    var slot = &region.slots[slot_index];
 
     // Build RESULT frame: [tag:0x11][request_id:4 BE][flag:1][data]
     var pos: usize = 0;
@@ -669,5 +669,5 @@ fn simulate_result(
     slot.header.response_crc = shm_layout.crc_frame(response_len, &slot.response);
 
     // Bump sidecar_seq to signal response ready.
-    @atomicStore(u32, &slot.header.sidecar_seq, wd.server_seqs[slot_idx], .release);
+    @atomicStore(u32, &slot.header.sidecar_seq, wd.server_seqs[slot_index], .release);
 }

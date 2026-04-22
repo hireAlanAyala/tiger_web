@@ -554,7 +554,7 @@ pub fn SidecarDispatchType(comptime Bus: type) type {
         /// Build a handle_render CALL frame directly into the SHM slot buffer.
         /// Returns the total frame length.
         fn build_handle_render_frame(
-            buf: []u8,
+            buffer: []u8,
             request_id: u32,
             operation: message.Operation,
             id: u128,
@@ -566,34 +566,34 @@ pub fn SidecarDispatchType(comptime Bus: type) type {
             var pos: usize = 0;
 
             // CALL header: [tag:1][request_id:4 BE][name_len:2 BE][name]
-            buf[pos] = 0x10;
+            buffer[pos] = 0x10;
             pos += 1;
-            std.mem.writeInt(u32, buf[pos..][0..4], request_id, .big);
+            std.mem.writeInt(u32, buffer[pos..][0..4], request_id, .big);
             pos += 4;
-            std.mem.writeInt(u16, buf[pos..][0..2], func_name.len, .big);
+            std.mem.writeInt(u16, buffer[pos..][0..2], func_name.len, .big);
             pos += 2;
-            @memcpy(buf[pos..][0..func_name.len], func_name);
+            @memcpy(buffer[pos..][0..func_name.len], func_name);
             pos += func_name.len;
 
             // Args: [operation:1][id:16 LE][body_len:2 BE][body][row_set_count:1][rows...]
-            buf[pos] = @intFromEnum(operation);
+            buffer[pos] = @intFromEnum(operation);
             pos += 1;
-            std.mem.writeInt(u128, buf[pos..][0..16], id, .little);
+            std.mem.writeInt(u128, buffer[pos..][0..16], id, .little);
             pos += 16;
-            std.mem.writeInt(u16, buf[pos..][0..2], @intCast(body.len), .big);
+            std.mem.writeInt(u16, buffer[pos..][0..2], @intCast(body.len), .big);
             pos += 2;
             if (body.len > 0) {
-                @memcpy(buf[pos..][0..body.len], body);
+                @memcpy(buffer[pos..][0..body.len], body);
                 pos += body.len;
             }
-            buf[pos] = row_set_count;
+            buffer[pos] = row_set_count;
             pos += 1;
             if (rows_data.len > 0) {
-                @memcpy(buf[pos..][0..rows_data.len], rows_data);
+                @memcpy(buffer[pos..][0..rows_data.len], rows_data);
                 pos += rows_data.len;
             }
 
-            assert(pos <= buf.len);
+            assert(pos <= buffer.len);
             return pos;
         }
 
