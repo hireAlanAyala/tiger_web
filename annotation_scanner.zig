@@ -1850,8 +1850,13 @@ fn emit_manifest(
     try w.writeAll("{\n  \"annotations\": [\n");
     for (sorted, 0..) |ann, i| {
         if (i > 0) try w.writeAll(",\n");
-        try w.print("    {{ \"phase\": \"{s}\", \"operation\": \"{s}\", \"file\": \"{s}\", \"line\": {d}, \"has_body\": {s}", .{
-            @tagName(ann.phase), ann.operation, ann.file, ann.line, if (ann.has_body) "true" else "false",
+        // Line numbers are intentionally omitted from the committed manifest.
+        // They churn on every unrelated handler edit and pollute the CI
+        // `git diff --exit-code` drift check. Codegen locates function
+        // bodies by searching for the `// [phase] .operation` annotation
+        // marker, which is stable under line-number drift.
+        try w.print("    {{ \"phase\": \"{s}\", \"operation\": \"{s}\", \"file\": \"{s}\", \"has_body\": {s}", .{
+            @tagName(ann.phase), ann.operation, ann.file, if (ann.has_body) "true" else "false",
         });
 
         // Include route match for translate (route) phase annotations.

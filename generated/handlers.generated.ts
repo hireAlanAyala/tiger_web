@@ -4,33 +4,30 @@
 // CALL/RESULT sidecar runtime. Generated from the annotation
 // scanner's manifest.json.
 
-import * as addCollectionMember from '../examples/ecommerce-ts/handlers/add_collection_member.ts';
-import * as cancelOrder from '../examples/ecommerce-ts/handlers/cancel_order.ts';
-import * as chargePayment from '../examples/ecommerce-ts/handlers/charge_payment.ts';
-import * as completeOrder from '../examples/ecommerce-ts/handlers/complete_order.ts';
-import * as createCollection from '../examples/ecommerce-ts/handlers/create_collection.ts';
-import * as createOrder from '../examples/ecommerce-ts/handlers/create_order.ts';
-import * as createProduct from '../examples/ecommerce-ts/handlers/create_product.ts';
-import * as deleteCollection from '../examples/ecommerce-ts/handlers/delete_collection.ts';
-import * as deleteProduct from '../examples/ecommerce-ts/handlers/delete_product.ts';
-import * as getCollection from '../examples/ecommerce-ts/handlers/get_collection.ts';
-import * as getOrder from '../examples/ecommerce-ts/handlers/get_order.ts';
-import * as getProduct from '../examples/ecommerce-ts/handlers/get_product.ts';
-import * as getProductInventory from '../examples/ecommerce-ts/handlers/get_product_inventory.ts';
-import * as listCollections from '../examples/ecommerce-ts/handlers/list_collections.ts';
-import * as listOrders from '../examples/ecommerce-ts/handlers/list_orders.ts';
-import * as listProducts from '../examples/ecommerce-ts/handlers/list_products.ts';
-import * as logout from '../examples/ecommerce-ts/handlers/logout.ts';
-import * as pageLoadDashboard from '../examples/ecommerce-ts/handlers/page_load_dashboard.ts';
-import * as pageLoadLogin from '../examples/ecommerce-ts/handlers/page_load_login.ts';
-import * as processImage from '../examples/ecommerce-ts/handlers/process_image.ts';
-import * as removeCollectionMember from '../examples/ecommerce-ts/handlers/remove_collection_member.ts';
-import * as requestLoginCode from '../examples/ecommerce-ts/handlers/request_login_code.ts';
-import * as searchProducts from '../examples/ecommerce-ts/handlers/search_products.ts';
-import * as sendOrderEmail from '../examples/ecommerce-ts/handlers/send_order_email.ts';
-import * as transferInventory from '../examples/ecommerce-ts/handlers/transfer_inventory.ts';
-import * as updateProduct from '../examples/ecommerce-ts/handlers/update_product.ts';
-import * as verifyLoginCode from '../examples/ecommerce-ts/handlers/verify_login_code.ts';
+import * as addCollectionMember from '../handlers/add_collection_member.zig';
+import * as cancelOrder from '../handlers/cancel_order.zig';
+import * as completeOrder from '../handlers/complete_order.zig';
+import * as createCollection from '../handlers/create_collection.zig';
+import * as createOrder from '../handlers/create_order.zig';
+import * as createProduct from '../handlers/create_product.zig';
+import * as deleteCollection from '../handlers/delete_collection.zig';
+import * as deleteProduct from '../handlers/delete_product.zig';
+import * as getCollection from '../handlers/get_collection.zig';
+import * as getOrder from '../handlers/get_order.zig';
+import * as getProduct from '../handlers/get_product.zig';
+import * as getProductInventory from '../handlers/get_product_inventory.zig';
+import * as listCollections from '../handlers/list_collections.zig';
+import * as listOrders from '../handlers/list_orders.zig';
+import * as listProducts from '../handlers/list_products.zig';
+import * as logout from '../handlers/logout.zig';
+import * as pageLoadDashboard from '../handlers/page_load_dashboard.zig';
+import * as pageLoadLogin from '../handlers/page_load_login.zig';
+import * as removeCollectionMember from '../handlers/remove_collection_member.zig';
+import * as requestLoginCode from '../handlers/request_login_code.zig';
+import * as searchProducts from '../handlers/search_products.zig';
+import * as transferInventory from '../handlers/transfer_inventory.zig';
+import * as updateProduct from '../handlers/update_product.zig';
+import * as verifyLoginCode from '../handlers/verify_login_code.zig';
 
 export interface HandlerModule {
   route?: (req: any) => any | null;
@@ -42,7 +39,6 @@ export interface HandlerModule {
 export const modules: Record<string, HandlerModule> = {
   add_collection_member: addCollectionMember,
   cancel_order: cancelOrder,
-  charge_payment: chargePayment,
   complete_order: completeOrder,
   create_collection: createCollection,
   create_order: createOrder,
@@ -59,11 +55,9 @@ export const modules: Record<string, HandlerModule> = {
   logout: logout,
   page_load_dashboard: pageLoadDashboard,
   page_load_login: pageLoadLogin,
-  process_image: processImage,
   remove_collection_member: removeCollectionMember,
   request_login_code: requestLoginCode,
   search_products: searchProducts,
-  send_order_email: sendOrderEmail,
   transfer_inventory: transferInventory,
   update_product: updateProduct,
   verify_login_code: verifyLoginCode,
@@ -77,24 +71,24 @@ export interface RouteTableEntry {
 }
 
 export const routeTable: RouteTableEntry[] = [
-  { operation: 'remove_collection_member', method: 'delete', pattern: '/collections/:id/members/:sub_id', query_params: [] },
+  { operation: 'remove_collection_member', method: 'delete', pattern: '/collections/:id/products/:sub_id', query_params: [] },
   { operation: 'delete_collection', method: 'delete', pattern: '/collections/:id', query_params: [] },
   { operation: 'delete_product', method: 'delete', pattern: '/products/:id', query_params: [] },
   { operation: 'get_product_inventory', method: 'get', pattern: '/products/:id/inventory', query_params: [] },
   { operation: 'get_collection', method: 'get', pattern: '/collections/:id', query_params: [] },
   { operation: 'get_order', method: 'get', pattern: '/orders/:id', query_params: [] },
   { operation: 'get_product', method: 'get', pattern: '/products/:id', query_params: [] },
-  { operation: 'list_collections', method: 'get', pattern: '/collections', query_params: [] },
-  { operation: 'list_orders', method: 'get', pattern: '/orders', query_params: [] },
-  { operation: 'list_products', method: 'get', pattern: '/products', query_params: ['q'] },
+  { operation: 'list_collections', method: 'get', pattern: '/collections', query_params: ['cursor'] },
+  { operation: 'list_orders', method: 'get', pattern: '/orders', query_params: ['cursor'] },
+  { operation: 'list_products', method: 'get', pattern: '/products', query_params: ['q', 'cursor'] },
   { operation: 'page_load_login', method: 'get', pattern: '/login', query_params: [] },
   { operation: 'search_products', method: 'get', pattern: '/products', query_params: ['q'] },
   { operation: 'page_load_dashboard', method: 'get', pattern: '/', query_params: [] },
+  { operation: 'add_collection_member', method: 'post', pattern: '/collections/:id/products/:sub_id', query_params: [] },
   { operation: 'transfer_inventory', method: 'post', pattern: '/products/:id/transfer-inventory/:sub_id', query_params: [] },
-  { operation: 'add_collection_member', method: 'post', pattern: '/collections/:id/members', query_params: [] },
   { operation: 'cancel_order', method: 'post', pattern: '/orders/:id/cancel', query_params: [] },
   { operation: 'complete_order', method: 'post', pattern: '/orders/:id/complete', query_params: [] },
-  { operation: 'request_login_code', method: 'post', pattern: '/login/request', query_params: [] },
+  { operation: 'request_login_code', method: 'post', pattern: '/login/code', query_params: [] },
   { operation: 'verify_login_code', method: 'post', pattern: '/login/verify', query_params: [] },
   { operation: 'create_collection', method: 'post', pattern: '/collections', query_params: [] },
   { operation: 'create_order', method: 'post', pattern: '/orders', query_params: [] },
@@ -104,19 +98,8 @@ export const routeTable: RouteTableEntry[] = [
 ];
 
 export interface PrefetchKeyInfo { key: string; mode: "query" | "queryAll"; }
-export const prefetchKeyMap: Record<string, PrefetchKeyInfo[]> = {"add_collection_member":[{"key":"collection","mode":"query"}],"cancel_order":[{"key":"order","mode":"query"}],"complete_order":[{"key":"order","mode":"query"}],"create_collection":[{"key":"existing","mode":"query"}],"create_product":[{"key":"existing","mode":"query"}],"delete_collection":[{"key":"collection","mode":"query"}],"delete_product":[{"key":"product","mode":"query"}],"get_collection":[{"key":"collection","mode":"query"}],"get_order":[{"key":"order","mode":"query"}],"get_product":[{"key":"product","mode":"query"}],"get_product_inventory":[{"key":"product","mode":"query"}],"list_collections":[{"key":"collections","mode":"queryAll"}],"list_orders":[{"key":"orders","mode":"queryAll"}],"list_products":[{"key":"products","mode":"queryAll"}],"page_load_dashboard":[{"key":"products","mode":"queryAll"},{"key":"collections","mode":"queryAll"},{"key":"orders","mode":"queryAll"}],"remove_collection_member":[{"key":"collection","mode":"query"}],"search_products":[{"key":"results","mode":"queryAll"}],"transfer_inventory":[{"key":"source","mode":"query"},{"key":"target","mode":"query"}],"update_product":[{"key":"product","mode":"query"}],"verify_login_code":[{"key":"login_code","mode":"query"}]};
+export const prefetchKeyMap: Record<string, PrefetchKeyInfo[]> = {};
 
 // Generated from operations.json — always includes new operations.
 export const OperationValues: Record<string, number> = {"root":0,"create_product":1,"get_product":2,"list_products":3,"update_product":4,"delete_product":5,"get_product_inventory":6,"create_collection":7,"get_collection":8,"list_collections":9,"delete_collection":10,"add_collection_member":11,"remove_collection_member":12,"transfer_inventory":13,"create_order":14,"get_order":15,"list_orders":16,"complete_order":17,"cancel_order":18,"search_products":19,"page_load_dashboard":20,"request_login_code":21,"verify_login_code":22,"logout":23,"page_load_login":24,"charge_payment":25,"process_image":26,"send_order_email":27,"list_items":28,"create_item":29};
 export type Operation = "create_product" | "get_product" | "list_products" | "update_product" | "delete_product" | "get_product_inventory" | "create_collection" | "get_collection" | "list_collections" | "delete_collection" | "add_collection_member" | "remove_collection_member" | "transfer_inventory" | "create_order" | "get_order" | "list_orders" | "complete_order" | "cancel_order" | "search_products" | "page_load_dashboard" | "request_login_code" | "verify_login_code" | "logout" | "page_load_login" | "charge_payment" | "process_image" | "send_order_email" | "list_items" | "create_item";
-
-export interface WorkerFunction {
-  fn: (...args: any[]) => Promise<any>;
-  returns: string;
-}
-
-export const workerFunctions: Record<string, WorkerFunction> = {
-  charge_payment: { fn: chargePayment.charge_payment, returns: '' },
-  process_image: { fn: processImage.process_image, returns: '' },
-  send_order_email: { fn: sendOrderEmail.send_order_email, returns: '' },
-};

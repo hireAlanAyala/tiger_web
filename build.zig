@@ -534,11 +534,17 @@ fn build_ci(
             "--routes-zig=generated/routes.generated.zig",
             "--manifest=generated/manifest.json",
         });
-        // Freshness check — committed routes file must match scanner output.
-        // Only check routes.generated.zig (from Zig handlers). manifest.json
-        // is overwritten by both Zig and TypeScript scans — can't freshness check.
-        const freshness = b.addSystemCommand(&.{ "git", "diff", "--exit-code", "generated/routes.generated.zig" });
-        freshness.setName("freshness check: routes.generated.zig");
+        // Freshness check — committed codegen outputs must match the scanner.
+        // The manifest no longer embeds source line numbers (they polluted
+        // the diff on every unrelated handler edit), so it is stable under
+        // handler-body edits and can be freshness-checked like the routes.
+        // A manual scan that clobbers `generated/manifest.json` with a
+        // non-canonical source dir will now fail CI loudly.
+        const freshness = b.addSystemCommand(&.{
+            "git",                "diff",                            "--exit-code",
+            "generated/routes.generated.zig", "generated/manifest.json",
+        });
+        freshness.setName("freshness check: generated/");
         step_ci.dependOn(&freshness.step);
         // Unit tests.
         build_ci_step(b, step_ci, &.{"unit-test"});

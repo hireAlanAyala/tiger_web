@@ -23,7 +23,6 @@ interface ManifestAnnotation {
   phase: "translate" | "prefetch" | "execute" | "render" | "worker";
   operation: string;
   file: string;
-  line: number;
   has_body?: boolean;
   route_match?: { method: string; pattern: string; query_params?: string[] };
   returns?: string;
@@ -133,15 +132,20 @@ out += `];\n`;
 
 // Prefetch key map — extracted from handler source at build time.
 // Replaces the runtime fn.toString() hack in call_runtime_shm.ts.
+//
+// The annotation marker `// [prefetch] .<operation>` is stable under
+// unrelated edits in the file, unlike a line number. We locate the
+// function body by searching for the marker and slicing from there.
 interface PrefetchKeyInfo { key: string; mode: "query" | "queryAll"; }
 const prefetchKeyMapData: Record<string, PrefetchKeyInfo[]> = {};
 for (const ann of manifest.annotations) {
   if (ann.phase !== "prefetch" || !ann.has_body) continue;
   try {
     const src = readFileSync(ann.file, "utf-8");
-    const lines = src.split("\n");
-    // Find the function body starting from the annotation line.
-    const bodyLines = lines.slice(ann.line - 1).join("\n");
+    const marker = `// [prefetch] .${ann.operation}`;
+    const markerIdx = src.indexOf(marker);
+    if (markerIdx < 0) continue;
+    const bodyLines = src.slice(markerIdx);
     const infos: PrefetchKeyInfo[] = [];
     const callRe = /db\.(query|queryAll)\s*\(/g;
     let cm;

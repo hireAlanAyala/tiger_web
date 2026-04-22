@@ -8,7 +8,7 @@
       "type": "array",
       "items": {
         "type": "object",
-        "required": ["phase", "operation", "file", "line", "has_body"],
+        "required": ["phase", "operation", "file", "has_body"],
         "properties": {
           "phase": {
             "type": "string",
@@ -22,10 +22,6 @@
           "file": {
             "type": "string",
             "description": "Source file path relative to project root"
-          },
-          "line": {
-            "type": "integer",
-            "description": "Line number of the annotation"
           },
           "has_body": {
             "type": "boolean",
