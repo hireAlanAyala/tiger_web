@@ -772,7 +772,16 @@ Post-retrofit invariant audit:
 
 ## Phase D — SLA benchmark as `tiger-web` subcommand
 
-Effort: 1–2 days. Dependencies: A. Independent of C.
+Effort: 2–3 days (post-DR-3). Dependencies: A. Independent of C and E.
+
+**Execution order note (2026-04-22 revision):** Phase E now runs
+*before* Phase D. The original "D then E" ordering assumed all three
+tiers would land together. Post-Phase-C, the primitive + pipeline
+tiers already emit TB-parseable output that `devhub.zig`'s
+`get_measurement` parser consumes directly — E can ship against
+those alone, get the dashboard populated in ~1 day, and then D adds
+the SLA tier as a third metric category. Section numbering unchanged
+for commit-history continuity.
 
 ### D.1 CLI integration
 
@@ -851,11 +860,13 @@ cross-referencing with TB's original.
 - [ ] Connection-error handling: reconnect + track reconnection count
   as a reported metric
 
-### D.4 Machine-readable output for state_machine_benchmark
+### D.4 — REMOVED
 
-- [ ] Add `--json` flag to `state_machine_benchmark.zig` so phase E
-  can merge its output into the `MetricBatch`
-- [ ] Existing human-readable mode remains default for developer runs
+Originally called for adding `--json` flag to
+`state_machine_benchmark.zig`. Redundant after Phase 0's addendum:
+every bench (state_machine + C.1–C.5) already emits TB-parseable
+`label = value unit` lines that `devhub.zig`'s `get_measurement`
+helper consumes directly. No JSON required.
 
 ### D.5 Verification
 
@@ -876,7 +887,18 @@ cross-referencing with TB's original.
 
 ## Phase E — devhub uploader
 
-Effort: 1 day. Dependencies: B, C, D.
+Effort: 1–1.5 days. Dependencies: **B, C** (not D — reordering below).
+
+**Execution order note (2026-04-22 revision):** Phase E now runs
+*before* Phase D. At Phase E's ship time the `MetricBatch` carries
+**primitive + pipeline tiers only**; SLA tier joins when Phase D
+lands. The uploader code doesn't care about the tier count — it
+shells out to benches, parses their lines, and pushes. Adding a
+third tier later is a one-line change to E's run order.
+
+Why this order: dashboard data starts flowing in ~1 day instead of
+~4 days (D is 2–3 days before E can even start). The primitive +
+pipeline tiers become the baseline trends by the time SLA joins.
 
 ### E.1 Port from TB — partial cp, ~50% survival (per DR-4)
 
@@ -947,13 +969,19 @@ merge.
 
 ### E.4 Run order
 
-The uploader invokes all three tiers in sequence, parses their output,
-merges into one `MetricBatch`, commits one NDJSON array element:
+The uploader invokes the available tiers in sequence, parses their
+output (`label = value unit` per `get_measurement`), merges into one
+`MetricBatch`, commits one array element:
 
-- [ ] `./zig/zig build bench` (primitive + pipeline tiers, via `--json`)
-- [ ] `./zig-out/bin/tiger-web benchmark --json` (SLA tier)
-- [ ] Parse outputs; build `MetricBatch`
+**At Phase E's ship time (SLA tier not yet present):**
+
+- [ ] `./zig/zig build bench` (primitive + pipeline tiers, text output)
+- [ ] Parse outputs via `get_measurement`; build `MetricBatch`
 - [ ] Clone devhubdb, perform the append-only upload per E.2
+
+**When Phase D lands later** — add one step between parse and build:
+
+- [ ] `./zig-out/bin/tiger-web benchmark` (SLA tier, text output)
 
 ### E.5 File header
 
@@ -1051,26 +1079,36 @@ known end conditions.
 | preflight measurements | done | — |
 | 0 (harness re-port) | done (~30 min actual) | preflight |
 | 0 addendum (output format) | done (~10 min actual) | 0 |
-| A | 30 min | 0 |
-| B | 30 min | nothing |
-| C | 1.5–2 days | 0, A |
-| D | **2–3 days** (up from 1-2 after DR-3) | A |
-| E | **1–1.5 days** (up from 1 after DR-4) | B, C, D |
-| F | 1 hour | B, E |
-| G | 1–2 days | F + ≥1 week of data |
+| A | 30 min | 0 | done |
+| B | 30 min | nothing | done (partial — user-action PAT blocks F) |
+| C | 1.5–2 days | 0, A | done (incl. strict-cp retrofit + `bench-check` automation) |
+| E | **1–1.5 days** (up from 1 after DR-4) | B, C | **next** |
+| D | **2–3 days** (up from 1-2 after DR-3) | A | after E |
+| F | 1 hour + user PAT | B, E | — |
+| G | 1–2 days | F + ≥1 week of data | — |
 
-**Pragmatic sequencing:** 0 → A + B in parallel → **C, then D**
-→ E → F → G.
+**Pragmatic sequencing (2026-04-22 revision):** 0 → A + B in parallel
+→ **C, then E, then D** → F → G.
 
-C before D is the default. C validates the discipline on easy cases
-(~85% survival cp-with-trim); D is the higher-risk pattern-transplant
+The D-before-E ordering this plan originally carried assumed all
+three tiers would land together. Post-Phase-C, primitive + pipeline
+already emit `devhub.zig`-parseable output, so E can ship against
+those alone and light up the dashboard in ~1 day. D follows, adding
+the SLA tier as a third metric category. Shorter feedback loop;
+dashboard trends on primitives already exist when SLA joins.
+
+C before D is still the default. C validates the discipline on easy
+cases (~85% survival cp-with-trim); D is the higher-risk pattern-transplant
 with fresh HTTP code. Learning from C first reduces the risk surface
 of D. Parallelizing saves calendar time only if you're confident D
 won't reshape anything in C, which you're not confident of until C
 is done.
 
 Total to phase F (CI uploading on every main merge): **~5-6 focused
-days** (up from ~4 after dry-run findings DR-3 and DR-4).
+days** (up from ~4 after dry-run findings DR-3 and DR-4). The
+E-before-D revision shortens *time to first dashboard data point* to
+~1–1.5 days after the user registers the PAT, since E doesn't wait
+on D.
 
 The 25-50% scope growth is itself a finding: TB's benchmark tooling
 is more domain-entangled than the cp-first rule initially suggested.
