@@ -127,7 +127,9 @@ pub fn server_run(allocator: std.mem.Allocator, opts: ServerOptions) !void {
 
     if (App.sidecar_enabled) {
         const sidecar_path: ?[]const u8 = opts.sidecar orelse "/tmp/tiger_web_sidecar.sock";
+        log.warn("wire_sidecar: about to create SHM (path={s})", .{sidecar_path orelse "(null)"});
         try server.wire_sidecar(allocator, sidecar_path);
+        log.warn("wire_sidecar: SHM created", .{});
     }
 
     if (opts.sidecar_argv) |argv| {
