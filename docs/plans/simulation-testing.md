@@ -949,8 +949,12 @@ receive `*const Model`. Same patterns, different syntax.
 sim second. The Zig fuzzer already has the loop, the PRNG, the fault
 injection. It needs the model, assert dispatch, and invariant
 scheduling bolted onto `fuzz.zig`. The sidecar sim needs a new loop
-built from scratch. Zig first is less work and tests the real
-implementation.
+built from scratch — and crucially, an **in-process** loop that
+imports the sidecar runtime and drives handler dispatch directly,
+not an HTTP client that sacrifices determinism. See "Why the sim is
+in-process, not HTTP" below. Zig first is less work and tests the
+real implementation; the TS sim follows the same shape with a
+different dispatch entry point.
 
 ## DB-grounded invariants
 
@@ -1163,10 +1167,85 @@ calls invariants manually.
 
 ### Phase 3: TypeScript sidecar sim
 
-11. Sim loop — swarm weights, operation selection, HTTP execution
+**In-process, not HTTP.** The sim loop imports the sidecar runtime as a
+library and feeds it synthetic CALL frames directly through the existing
+protocol serde, then reads RESULT frames back. No Unix socket, no SHM,
+no Zig server process. This matches how Phase 1 tests Zig handlers —
+the sim IS the driver; the transport is not on the test path.
+
+HTTP-driven dispatch was considered and rejected for the reasons
+in [Why the sim is in-process, not HTTP](#why-the-sim-is-in-process-not-http)
+below. The short version: the sim's core value is **deterministic
+replay from a seed**, and V8 event-loop timing plus GC pauses plus
+real sockets forfeit exactly that. Protocol drift between the Zig
+server and the TS sidecar is caught by a separate small set of
+integration tests with real processes — not by running 10K domain
+assertions through the full network stack.
+
+11. Sim loop — swarm weights, operation selection, in-process dispatch
+    via the sidecar runtime's handler entry point
 12. `[sim:model]` — call function, carry the object
 13. `[sim:attempt]` dispatch — call user generators, default generation fallback
 14. `[sim:assert]` dispatch — call user assert with model, req, status
 15. `[sim:invariant]` dispatch — call invariants with model and DB handle
 16. Column advisory warnings
 17. Failure output — seed, event index, reproduction command
+
+### Why the sim is in-process, not HTTP
+
+The sim's load-bearing property is **deterministic replay**: given the
+seed, the exact sequence of events replays identically so any failure
+reproduces from that seed alone. Everything else in the design —
+annotations, predicates, coverage, advisories — is ergonomics for that
+one property. Sacrificing determinism sacrifices the sim.
+
+**What in-process dispatch tests (correctly):**
+- The scanner-generated dispatch table — catches wrong-handler routing
+- The protocol serde — catches frame-format bugs (pairs with the
+  cross-language CRC vector in packages/ts/src/shm_layout.ts)
+- The handler logic itself — the domain code under test
+- Model ↔ DB consistency via DB-grounded invariants
+
+**What in-process dispatch deliberately skips:**
+- Real SHM I/O — tested by Zig-side SHM tests + the cross-language
+  test vector (0x5CAC007A) at every boundary
+- Real sockets — tested by the Zig server sim (sim.zig with SimIO)
+- Real process lifecycle — tested by supervisor tests
+
+Each of those *is* tested, by the right layer. Dragging every domain
+assertion through the full network stack buys nothing and forfeits
+determinism.
+
+**What HTTP dispatch would have cost:**
+- Non-determinism: V8 event-loop timing, GC pauses, setImmediate
+  scheduling, native addon blocking are not seedable. The sidecar
+  runtime's own header says so.
+- Speed: process spawn + SHM setup per seed, or shared state across
+  seeds with cleanup hazards.
+- Fault-injection gap: no way to inject SQLite errors, freeze time,
+  or deterministically advance the clock through HTTP without
+  rebuilding the fault harness on the Zig side.
+- Test-isolation friction: stale SQLite files, port collisions,
+  orphaned Node processes — the supervisor has had to solve these
+  repeatedly just for the loadtest harness.
+
+**Protocol drift between Zig server and TS sidecar** is a separate
+concern caught by:
+- The cross-language CRC test vector (Zig test, C init, TS module load)
+- A small set of end-to-end integration tests with real processes
+  (already partially exists: scripts/test_shm_protocol.sh, the 2-RT
+  concurrent dispatch sim tests)
+- The committed generated/manifest.json freshness check
+
+None of those belongs inside the domain sim loop.
+
+### TigerBeetle analog
+
+TB's VOPR runs N Replicas in one process with a *simulated* network
+between them — not "skip the network" but "simulate it deterministically."
+VOPR tests the Zig core. For client libraries (Node, Java, Go), TB uses
+integration tests with real subprocesses, separate from VOPR. Tiger Web
+does the analogous thing: the domain sim tests handler logic + dispatch
+deterministically in-process; real-process tests cover the server ↔
+sidecar boundary. Two concerns, two test loops, one determinism
+guarantee preserved for the part that needs it most.
