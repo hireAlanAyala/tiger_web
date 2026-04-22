@@ -247,8 +247,9 @@ fn cmd_dev(gpa: std.mem.Allocator, args: DevArgs) !void {
     var sock_path_buf: [64]u8 = undefined;
     const sock_path = std.fmt.bufPrint(&sock_path_buf, "/tmp/focus-dev-{d}.sock", .{server_pid}) catch unreachable;
 
-    // Atomic port signal: server thread stores after bind, we load after SHM ready.
+    // Atomic signals: server thread stores after init completes.
     var port_signal = std.atomic.Value(u16).init(0);
+    var ready_signal = std.atomic.Value(bool).init(false);
 
     const db_z = to_sentinel(db_name);
 
@@ -257,6 +258,7 @@ fn cmd_dev(gpa: std.mem.Allocator, args: DevArgs) !void {
         .sock_path = sock_path,
         .db = &db_z,
         .port_signal = &port_signal,
+        .ready_signal = &ready_signal,
     };
     const server_thread = try std.Thread.spawn(.{}, run_server, .{&server_config});
     _ = server_thread; // detached — runs until process exits
@@ -265,29 +267,22 @@ fn cmd_dev(gpa: std.mem.Allocator, args: DevArgs) !void {
     var shm_buf: [32]u8 = undefined;
     const shm_name = std.fmt.bufPrint(&shm_buf, "tiger-{d}", .{server_pid}) catch unreachable;
 
-    // Wait for SHM to appear. Use shm_open(O_RDONLY) — works on both
-    // Linux (/dev/shm/) and macOS (kernel-managed, no visible path).
+    // Wait for the server thread to complete init (SHM created, event loop starting).
+    // Atomic poll — no shm_open probe needed (macOS shm_open has cross-thread issues).
     try stdout.print("{s}[server]{s}  starting...\n", .{ color("\x1b[36m"), color("\x1b[0m") });
     var ready = false;
-    var shm_probe_buf: [64]u8 = undefined;
-    const shm_probe_name = std.fmt.bufPrintZ(&shm_probe_buf, "/{s}", .{shm_name}) catch unreachable;
-    var last_shm_errno: c_int = 0;
     for (0..100) |_| {
-        const fd = std.c.shm_open(shm_probe_name.ptr, @bitCast(std.posix.O{ .ACCMODE = .RDWR }), 0);
-        if (fd >= 0) {
-            std.posix.close(fd);
+        if (ready_signal.load(.acquire)) {
             ready = true;
             break;
         }
-        last_shm_errno = std.c._errno().*;
         std.time.sleep(50 * std.time.ns_per_ms);
     }
     if (!ready) {
-        stderr.print("error: server did not start (no SHM region after 5s, probe={s}, shm_errno={d})\n", .{ shm_probe_name, last_shm_errno }) catch {};
+        stderr.print("error: server did not start (no ready signal after 5s)\n", .{}) catch {};
         std.process.exit(1);
     }
 
-    // Read actual port from server thread (guaranteed written before SHM create).
     const actual_port = port_signal.load(.acquire);
 
     // Step 4: Start sidecar.
@@ -612,6 +607,7 @@ const ServerConfig = struct {
     sock_path: []const u8,
     db: *const [128]u8, // sentinel-terminated buffer (see to_sentinel)
     port_signal: *std.atomic.Value(u16),
+    ready_signal: *std.atomic.Value(bool),
 };
 
 /// Run the server in a background thread.
@@ -626,6 +622,7 @@ fn run_server(config: *const ServerConfig) void {
         .db = db_z,
         .sidecar = config.sock_path,
         .port_signal = config.port_signal,
+        .ready_signal = config.ready_signal,
         .quiet = true,
     }) catch |err| {
         stderr.print("{s}[server]{s}  fatal: {}\n", .{ color("\x1b[31m"), color("\x1b[0m"), err }) catch {};

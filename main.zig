@@ -85,6 +85,9 @@ pub const ServerOptions = struct {
     /// If non-null, the server stores the actual bound port here after listen.
     /// Used by focus.zig to read the port from the server thread.
     port_signal: ?*std.atomic.Value(u16) = null,
+    /// If non-null, set to true after server init completes (SHM created, ready to serve).
+    /// Used by focus.zig to wait for the server thread to finish init.
+    ready_signal: ?*std.atomic.Value(bool) = null,
     /// Suppress info-level logs. Only warn/err shown.
     /// Used by focus dev to avoid server noise in the dev output.
     quiet: bool = false,
@@ -129,6 +132,9 @@ pub fn server_run(allocator: std.mem.Allocator, opts: ServerOptions) !void {
         const sidecar_path: ?[]const u8 = opts.sidecar orelse "/tmp/tiger_web_sidecar.sock";
         try server.wire_sidecar(allocator, sidecar_path);
     }
+
+    // Signal readiness to focus.zig (server init complete, SHM created).
+    if (opts.ready_signal) |signal| signal.store(true, .release);
 
     if (opts.sidecar_argv) |argv| {
         var sup = try Supervisor.init(allocator, argv, App.sidecar_count);
