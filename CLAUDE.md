@@ -104,8 +104,8 @@ npm run dev                 # start sidecar + server on port 3000
 # scan — validate handler annotations against the database schema
 ./zig/zig build scan -- examples/ecommerce-ts/handlers/  # validate annotations
 #
-# bench — measure how fast the internals are (per-operation µs/op, budget assertions)
-./zig/zig build bench           # state machine benchmark (real measurements)
+# bench — measure how fast the internals are (per-operation ns/µs, budget assertions)
+./zig/zig build bench           # all tiers: primitive (5 files) + pipeline (state_machine)
 ```
 
 (SLA-tier HTTP throughput benchmarking and `perf`-based profiling are
@@ -220,7 +220,12 @@ Both handler sets implement the same operations and render the same HTML shapes.
 | `storage_fuzz.zig` | Storage equivalence fuzzer — runs SqliteStorage(:memory:) vs Auditor, asserts agreement |
 | `replay.zig` | WAL replay tool — verify, inspect, query, replay operations |
 | `replay_fuzz.zig` | Replay round-trip fuzzer — WAL serialization boundary verification |
-| `state_machine_benchmark.zig` | State machine benchmark — per-operation prefetch/commit throughput, regression detector |
+| `state_machine_benchmark.zig` | Pipeline-tier benchmark — per-operation prefetch/commit throughput, regression detector |
+| `aegis_checksum_benchmark.zig` | Primitive-tier benchmark — Aegis-128L MAC (WAL hash chain) throughput |
+| `crc_frame_benchmark.zig` | Primitive-tier benchmark — SHM frame CRC32 across canonical payload sizes, cross-language pair-assertion |
+| `hmac_session_benchmark.zig` | Primitive-tier benchmark — session cookie HMAC-SHA256 verify throughput |
+| `wal_parse_benchmark.zig` | Primitive-tier benchmark — WAL body parse (skip_writes_section + parse_one_dispatch) throughput |
+| `route_match_benchmark.zig` | Primitive-tier benchmark — full route-table iteration + `parse.match_route` throughput |
 | `worker_dispatch_fuzz.zig` | Worker dispatch boundary fuzzer — malformed RESULTs, bad CRC, wrong request_ids |
 | `sidecar_dispatch.zig` | `SidecarDispatchType(Bus)` — SHM 1-RT/2-RT pipeline, parse RESULT, stage machine |
 | `sim_sidecar.zig` | Sidecar simulation — builds CALL/RESULT frames in Zig for sim tests |

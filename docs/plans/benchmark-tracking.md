@@ -544,24 +544,28 @@ Each file's header contains: purpose, external commitment, the
 actionability statement drafted below, and a list of the specific
 substitutions we made relative to `checksum_benchmark.zig`.
 
-### C.1 `crc_frame_benchmark.zig`
+### C.1 `crc_frame_benchmark.zig` ✅ DONE (commit `cabcc0c`)
 
-- [ ] `cp src/vsr/checksum_benchmark.zig crc_frame_benchmark.zig` as starting point
-- [ ] Substitute: `checksum(blob)` → `shm_layout.crc_frame(len, payload)`
-- [ ] Substitute: `blob_size` parameter → payload sizes 64, 256, 1024, 4096, 65536
-- [ ] Substitute: checksum counter hash-print → CRC counter hash-print
-- [ ] Substitute: `bench.report` format → `"crc_frame = {d} ns"` (TB-parseable per DR-2)
-- [ ] Add: cross-verify `"hello"` (len=5) matches 0x5CAC007A at test
-  start (pair-assertion with cross-language vector)
-- [ ] Add: `bench.assert_budget` call. **Budget calibration:** follow
-  the pattern in `state_machine_benchmark.zig` — run three times in
-  smoke mode on the CI runner class, record `max(observed)`,
-  multiply by 10, round up. The 10× headroom catches order-of-
-  magnitude regressions while tolerating CI-runner slowness. Record
-  the calibration numbers in the file header.
-- [ ] Preserve (do not modify): `Bench.init`/`deinit`, arena
-  allocation, `repetitions` constant, estimate call, report pattern
-- [ ] Add to `build.zig` under the `bench` step
+Landed as written. Divergence from this checklist: per-size metrics
+(`crc_frame_64` … `crc_frame_65536`) via `inline for` rather than a
+single `blob_size` parameter — the file header's actionability
+statement already references cross-size comparison, so a single
+parameter would have undercut it.
+
+**Historical checklist:**
+
+- [x] `cp src/vsr/checksum_benchmark.zig crc_frame_benchmark.zig` as starting point
+- [x] Substitute: `checksum(blob)` → `shm_layout.crc_frame(len, payload)`
+- [x] Substitute: single `blob_size` parameter → inline-for over 5 sizes
+- [x] Substitute: checksum counter hash-print → CRC counter hash-print
+- [x] Substitute: `bench.report` format → `"crc_frame_{size} = {d} ns"`
+- [x] Add: cross-verify `"hello"` → `0x5CAC007A` at test start
+- [x] Add: per-size `bench.assert_budget`. Budgets calibrated off
+  dev-machine Debug (325/1123/4211/16671/260084 ns) at 10-20×
+  headroom; phase F re-calibrates on CI.
+- [x] Preserved TB's scaffold (Bench init/deinit, arena, repetitions,
+  estimate, report, hash-of-run print)
+- [x] Wired into `build.zig` under `bench_sources`
 
 **Actionability statement for the file header:**
 *"If MB/s drops >10%, check `std.hash.crc.Crc32` stdlib changes first,
@@ -570,34 +574,27 @@ optimization. If MB/s jumps >10%, inspect whether Zig added SIMD
 specialization for CRC32 and whether that applies here. A drop on one
 payload size but not others usually means cache behavior changed."*
 
-### C.2 `aegis_checksum_benchmark.zig`
+### C.2 `aegis_checksum_benchmark.zig` ✅ DONE (commit `382102b`)
 
-**Prerequisite** (surfaced by DR-1): port `cache_line_size` into our
-`framework/constants.zig` first.
+Prerequisite landed in same commit: `cache_line_size: u16 = 64` added
+to `framework/constants.zig` with a `comptime` assertion (citing
+TB `src/config.zig:154` and `src/constants.zig:480`).
 
-- [ ] Check TB's concrete value:
-  `grep cache_line_size /home/walker/Documents/personal/tigerbeetle/src/constants.zig`
-  and the upstream it points to (likely 64 on x86_64).
-- [ ] Add `pub const cache_line_size: u16 = 64;` (or resolved value)
-  to `framework/constants.zig` with a comment citing TB's source line.
-- [ ] Verify `framework/constants.zig` compiles and the existing
-  build passes.
+Port itself: 40/43 lines verbatim (93% — matches DR-1 estimate). Three
+surgical additions beyond the import path changes, all documented
+in the file header: test name disambiguation, TB-parseable report
+format, `assert_budget` call. One test name rename (`checksum` →
+`aegis_checksum`) is a flaw fix, not a principled change.
 
-Then the port itself:
+**Historical checklist:**
 
-- [ ] `cp src/vsr/checksum_benchmark.zig aegis_checksum_benchmark.zig`
-- [ ] Substitute (verified by dry-run — these are the only three
-  imports that need changing):
-  - `@import("../constants.zig")` → `@import("framework/constants.zig")`
-  - `@import("checksum.zig")` → `@import("framework/checksum.zig")`
-  - `@import("../testing/bench.zig")` → `@import("framework/bench.zig")`
-- [ ] Preserve everything else verbatim (43 lines total, 40 survive
-  unchanged = 93% — confirmed by dry-run)
-- [ ] Adjust `bench.report` format from `"{} for whole blob"` to
-  `"aegis_checksum = {d} ns"` to match TB's parser (DR-2)
-- [ ] Add: `bench.assert_budget` call. **Budget calibration:** same
-  10×max(observed) pattern as C.1. Record in file header.
-- [ ] Add to `build.zig` under the `bench` step
+- [x] `cache_line_size` prereq (verified concrete value = 64)
+- [x] `cp src/vsr/checksum_benchmark.zig aegis_checksum_benchmark.zig`
+- [x] Three import-path substitutions
+- [x] Report format adjusted to `"aegis_checksum = {d} ns"` (DR-2)
+- [x] `assert_budget` at 10 µs (dev-machine 1 KiB ≈ 200 ns, ~50×
+  headroom; phase F re-calibrates)
+- [x] Wired into `build.zig` under `bench_sources`
 
 **Actionability statement for the file header:**
 *"If MB/s drops >10%, check whether AES-NI hardware acceleration is
@@ -606,18 +603,28 @@ architecture CI change or VM disabling AES-NI will produce a step
 function drop. If the fallback software path is active, WAL throughput
 bottlenecks on checksum computation."*
 
-### C.3 `hmac_session_benchmark.zig`
+### C.3 `hmac_session_benchmark.zig` ✅ DONE (commit `638b183`)
 
-- [ ] `cp src/vsr/checksum_benchmark.zig hmac_session_benchmark.zig`
-- [ ] Substitute: `checksum(blob)` → `session_verify(cookie, key)`
-  (full path: decode cookie, HMAC verify, timestamp check)
-- [ ] Substitute: `blob_size` parameter → realistic cookie sizes
-- [ ] Substitute: checksum counter → verify-success counter
-- [ ] Substitute: `bench.report` format → `"hmac_session = {d} ns"`
-- [ ] Add: pair-assertion that a known-good cookie succeeds at test start
-- [ ] Preserve (do not modify): Bench scaffold, arena, repetitions,
-  estimate, report
-- [ ] Add to `build.zig` under the `bench` step
+Landed with one principled divergence from the plan text: `blob_size`
+parameter dropped, not varied. Our cookie is fixed-length
+(`cookie_value_max = 97`) by the auth protocol — there is no
+realistic size to vary. Documented inline in the file header. Plan
+text inherited TB's blob-size parameter shape verbatim without
+reconciling it against our domain.
+
+"Timestamp check" also dropped: our `verify_cookie` does not validate
+a time window; plan text speculated one existed.
+
+**Historical checklist:**
+
+- [x] `cp` starting point
+- [x] Substitute kernel → `auth.verify_cookie(cookie, key)`
+- [x] `blob_size` parameter removed (divergence above)
+- [x] Substitute counter → `verify_counter: u64`
+- [x] Report format `"hmac_session = {d} ns"`
+- [x] Pair-assertion: sign → verify round-trip recovers `user_id` and `kind`
+- [x] Preserved scaffold
+- [x] Wired into `build.zig`
 
 **Actionability statement for the file header:**
 *"If ns/op rises >20%, check whether HMAC-SHA256 stdlib changed or the
@@ -626,19 +633,23 @@ the cookie schema drifted — session invalidation is a user-visible
 breaking change. If ns/op drops sharply, a verification step was
 removed; check the auth flow covers time-window enforcement."*
 
-### C.4 `wal_parse_benchmark.zig`
+### C.4 `wal_parse_benchmark.zig` ✅ DONE (commit `13dcc25`)
 
-- [ ] `cp src/vsr/checksum_benchmark.zig wal_parse_benchmark.zig`
-- [ ] Substitute: `checksum(blob)` → `skip_writes_section(body, ...)`
-  + `parse_one_dispatch(body, &pos)` sequence
-- [ ] Substitute: `blob` → pre-built WAL body buffer (in-memory, no IO)
-- [ ] Substitute: counter → parsed-entries counter
-- [ ] Substitute: `bench.report` format → `"wal_parse = {d} ns"`
-- [ ] Substitute: hash-of-run print → "parsed N entries" with a
-  content hash (separate from the parseable line)
-- [ ] Add: pair-assertion parse round-trip against a known-good entry
-- [ ] Preserve: Bench scaffold, arena, repetitions, estimate, report
-- [ ] Add to `build.zig` under the `bench` step
+Body hand-constructed in a `build_body` helper (3 writes with SQL +
+params, 2 dispatches with name + args, ~300 bytes). Pair-assertion
+checks both dispatches' names round-trip. Kernel: `Wal.skip_writes_section`
++ loop of `parse_one_dispatch`.
+
+**Historical checklist:**
+
+- [x] `cp` starting point
+- [x] Kernel → `skip_writes_section` + `parse_one_dispatch` loop
+- [x] Input → pre-built in-memory body (`build_body` helper, no IO)
+- [x] Counter → `parse_counter: u64`
+- [x] Report `"wal_parse = {d} ns"` + separate `"parsed N dispatches"` line
+- [x] Pair-assertion: round-trip names (`charge_payment`, `send_email`)
+- [x] Preserved scaffold
+- [x] Wired into `build.zig`
 
 **Actionability statement for the file header:**
 *"If ns/entry rises, check whether the WAL entry body format gained
@@ -647,20 +658,23 @@ entries × ns/entry; a 30% parse regression translates to 30% slower
 startup on WAL replay. If the pair assertion fails, the on-disk format
 changed — coordinate migration before shipping."*
 
-### C.5 `route_match_benchmark.zig`
+### C.5 `route_match_benchmark.zig` ✅ DONE (commit `7c014b2`)
 
-- [ ] `cp src/vsr/checksum_benchmark.zig route_match_benchmark.zig`
-- [ ] Substitute: `checksum(blob)` → route-match call against full
-  `generated/routes.generated.zig` table
-- [ ] Substitute: `blob` → mixed input (exact-match routes,
-  parameterized routes, unmatched paths)
-- [ ] Substitute: counter → match-count counter
-- [ ] Substitute: `bench.report` format → `"route_match = {d} ns"`
-- [ ] Substitute: hash-of-run print → match-count + hash (separate line)
-- [ ] Add: pair-assertion that a known route resolves to expected
-  operation at test start
-- [ ] Preserve: Bench scaffold, arena, repetitions, estimate, report
-- [ ] Add to `build.zig` under the `bench` step
+`match_any` mirrors `app.zig:handler_route` (inline iteration over
+`gen.routes` calling `parse.match_route`) minus the handler-body
+decode. Probe set covers exact, parameterized, deeper parameterized,
+unmatched (DoS surface), and root.
+
+**Historical checklist:**
+
+- [x] `cp` starting point
+- [x] Kernel → inline iteration over `gen.routes` calling `parse.match_route`
+- [x] Input → 5 mixed probes with expected `Operation`
+- [x] Counter → `match_counter: u64`
+- [x] Report `"route_match = {d} ns"` + separate `"match_sum"` hash line
+- [x] Pair-assertion: every probe resolves to its expected operation
+- [x] Preserved scaffold
+- [x] Wired into `build.zig`
 
 **Actionability statement for the file header:**
 *"If ns/match rises, check whether the generated route table grew
