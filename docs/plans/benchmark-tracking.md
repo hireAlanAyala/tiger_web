@@ -686,28 +686,62 @@ DoS surface."*
 
 ### C.6 harness invariants (shared across all 5) ✅ DONE
 
-- [x] Every benchmark body fits under 70 lines; measured 30/42/43/51/37.
-  All helper setup extracted (e.g., `build_body` in wal_parse).
-- [x] Every benchmark has a pair-assertion at test start — one of
-  {cross-language vector, round-trip, scanner-table probe set} — so
-  schema/format drift fires before measurement. Explicit `assert()`
-  counts: 0/1/4/10/1. Aegis inherits TB's sparse template shape;
-  its invariants are carried by the harness itself
-  (`Bench.start`/`stop` assertions).
-- [x] Every benchmark imports `framework/bench.zig`. No second harness.
-- [x] Every benchmark is deterministic. Aegis/CRC seed via
-  `stdx.PRNG.from_seed(bench.seed)`; HMAC seeds user_id via PRNG;
-  wal_parse / route_match use fixed input (deterministic by
-  construction).
+Initial landing was flagged by a TIGER_STYLE audit as having three
+systemic gaps (discipline violations, not correctness bugs):
+
+1. C.3/C.4/C.5 were written "in the style of" the template rather
+   than a real `cp`-then-trim with per-deletion bucket tags. No
+   audit trail against TB's file.
+2. Budgets were set from single dev-machine observations, not the
+   plan-mandated `10× max(3 runs)` discipline. "Loose on purpose"
+   comments slipped in.
+3. Pair-assertions were positive-only; TIGER_STYLE's golden rule
+   requires positive AND negative space.
+
+All three closed by a retrofit pass:
+
+- C.3/C.4/C.5 restarted from a verbatim `cp` of TB's
+  `checksum_benchmark.zig`, surgical deletion pass with inline
+  bucket tags on every removed line. Commits `9c78f22` / `5ba2173`
+  / `da10fdc`.
+- C.1/C.2 retrofitted in place (already cp'd, so no restart
+  needed) with the same header structure, negative-space
+  pair-assertions, 3-run calibration, and units-last naming.
+  Commit `c0ebf28`.
+- `framework/constants.zig` `cache_line_size` assert replaced —
+  was `assert(cache_line_size == 64)` (tautology), now checks
+  three relationships (bounds 16..256, power-of-two,
+  `>= @alignOf(std.atomic.Value(u64))`). Part of commit `9c78f22`.
+
+Post-retrofit invariant audit:
+
+- [x] Every benchmark body fits under 70 lines. Helper setup
+  extracted (`build_body` in wal_parse, `match_any` in route_match).
+- [x] Every benchmark has **both** a positive AND a negative
+  pair-assertion at test start. Negative probes:
+  - aegis: `checksum("hello") != checksum("hallo")` (hash property)
+  - crc_frame: length-prefix participates (`crc_frame(4, "hello")
+    != crc_frame(5, "hello")`) AND payload sensitivity
+  - hmac_session: tampered cookie (flipped bit in HMAC tail) → `null`
+  - wal_parse: truncated dispatch header → `null`
+  - route_match: explicit unmatched probe → `null`
+- [x] Every benchmark imports `framework/bench.zig` (no second harness).
+- [x] Every benchmark is deterministic — PRNG seeded from
+  `bench.seed`, or fixed input by construction.
 - [x] Every benchmark calls `bench.assert_budget` in smoke mode.
-- [x] `zig build bench` runs all five. Observed dev-machine Debug:
-  - `aegis_checksum = 2058551 ns` (1 MiB blob, ~500 MB/s)
-  - `crc_frame_64 = 325 ns` … `crc_frame_65536 = 260084 ns`
-  - `hmac_session = 2109 ns`
-  - `wal_parse = 139 ns`
-  - `route_match = 4205 ns`
-- [x] `zig build unit-test`, `test`, `test-sidecar` all green after
-  all five land.
+- [x] Every budget is `10× max(3 runs)` rounded up, with the three
+  observed numbers recorded in the file header.
+- [x] `zig build bench` runs all five. Dev-machine Debug, post-retrofit:
+  - `aegis_checksum = 2046328 / 2062949 / 2061315 ns` at 1 MiB
+    (benchmark mode) / `4942 / 2976 / 4841 ns` at 1 KiB (smoke-
+    equivalent via `blob_size=1024`) — budget 50000 ns
+  - `crc_frame_{size}`: per-size budgets 15k/50k/150k/600k/3M ns
+  - `hmac_session = 2109 / 2072 / 2691 ns` — budget 30000 ns
+  - `wal_parse = 139 / 136 / 112 ns` — budget 2000 ns
+  - `route_match = 4083 / 6485 / 5702 ns` — budget 70000 ns
+- [x] `zig build unit-test`, `test` green post-retrofit.
+  `test-sidecar` flaky on one run (unrelated — no sidecar code
+  touched), clean on retry.
 
 ---
 
