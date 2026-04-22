@@ -471,7 +471,7 @@ pub fn build(b: *std.Build) void {
     });
     bench_smoke.root_module.addImport("stdx", stdx_module);
     bench_smoke.root_module.addOptions("build_options", build_options);
-    bench_smoke.root_module.addOptions("bench_options", bench_smoke_options);
+    bench_smoke.root_module.addOptions("test_options", bench_smoke_options);
     link_sqlite(bench_smoke);
     const run_bench_smoke = b.addRunArtifact(bench_smoke);
     run_bench_smoke.setEnvironmentVariable("ZIG_EXE", b.graph.zig_exe);
@@ -487,7 +487,7 @@ pub fn build(b: *std.Build) void {
     });
     bench_real.root_module.addImport("stdx", stdx_module);
     bench_real.root_module.addOptions("build_options", build_options);
-    bench_real.root_module.addOptions("bench_options", bench_real_options);
+    bench_real.root_module.addOptions("test_options", bench_real_options);
     link_sqlite(bench_real);
     const bench_run = b.addRunArtifact(bench_real);
     bench_run.has_side_effects = true;

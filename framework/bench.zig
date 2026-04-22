@@ -1,10 +1,17 @@
-//! Micro benchmarking harness.
+//! **Port note:** verbatim cp from TigerBeetle's
+//! `src/testing/bench.zig`. One surgical addition — `assert_budget`
+//! at the bottom — marked with its own comment. Every other function
+//! is TB's code unchanged. The earlier Tiger Web version of this file
+//! was written "in the style of" TB's and lost specific decisions
+//! (`TimeOS`/`Duration` simplified to raw `std.time.Timer`) — this
+//! re-port restores those. See docs/plans/benchmark-tracking.md
+//! phase 0 for the full rationale.
 //!
-//! Modeled on TigerBeetle's src/testing/bench.zig.
+//! Micro benchmarking harness.
 //!
 //! Goals:
 //! - relative (comparative) benchmarking,
-//! - manual checks when refactoring/optimizing,
+//! - manual checks when refactoring/optimizing/upgrading compiler,
 //! - no benchmark bitrot.
 //!
 //! Non-goals:
@@ -12,50 +19,92 @@
 //! - continuous benchmarking,
 //! - automatic regression detection.
 //!
-//! Smoke mode runs as part of `zig build unit-test` — small inputs, silent,
-//! prevents bitrot. Benchmark mode runs via `zig build bench` — large inputs,
-//! prints results to stderr.
+//! If you run
+//!     $ ./zig/zig build test
+//! the benchmarks are run in "test" mode which uses small inputs, finishes quickly, and doesn't
+//! print anything to stdout.
+//!
+//! If you run
+//!     $ ./zig/zig build -Drelease test -- "benchmark: binary search"
+//! the benchmark is run for real, with a large input, longer runtime, and results on stderr.
+//! The `benchmark` in the test name is the secret code to unlock benchmarking code.
+
+test "benchmark: API tutorial" { // `benchmark:` in the name is important!
+    var bench: Bench = .init();
+    defer bench.deinit();
+
+    // Parameters are named, and have two default values.
+    // The small value is used in tests, to prevent bitrot.
+    // The large value is the canonical when running benchmark "for real".
+    // You can pass custom values via env variables:
+    //    $ a=92 ./zig/zig build test -- "benchmark: tutorial"
+    const a = bench.parameter("a", 1, 1_000);
+    const b = bench.parameter("b", 2, 2_000);
+
+    bench.start(); // Built-in timer.
+    const c = a + b;
+    const elapsed = bench.stop();
+
+    // Always print a "hash" of the run:
+    // - to prevent compiler from optimizing the code away,
+    // - to prevent YOU from "optimizing" the code by changing semantics.
+    bench.report("hash: {}", .{c});
+    // Print the time, and any other metrics you find important.
+    bench.report("elapsed: {}", .{elapsed});
+
+    // NB: print as little as possible, because humans read slowly.
+    // It's the job of benchmark author to optimize for conciseness.
+
+    // You can compile individual benchmark  via
+    //   ./zig/zig build test:unit:build -- "benchmark: binary search"
+    // and use the resulting binary with perf/hyperfine/poop.
+}
 
 const std = @import("std");
 const assert = std.debug.assert;
+const stdx = @import("stdx");
+const Duration = stdx.Duration;
+const Instant = stdx.Instant;
+// Path substitution: TB has bench.zig under src/testing/ and time.zig
+// at src/, so their import is `../time.zig`. Ours are co-located at
+// framework/, so the path is simply `time.zig`. Same type.
+const TimeOS = @import("time.zig").TimeOS;
 
 const seed_benchmark: u64 = 42;
 
 const mode: enum { smoke, benchmark } =
-    if (@import("bench_options").benchmark) .benchmark else .smoke;
+    // See build.zig for how this is ultimately determined.
+    if (@import("test_options").benchmark) .benchmark else .smoke;
 
 seed: u64,
-timer: std.time.Timer,
-timing: bool,
+time: TimeOS = .{},
+instant_start: ?Instant = null,
 
 const Bench = @This();
 
 pub fn init() Bench {
     return .{
-        .seed = if (mode == .benchmark) seed_benchmark else 12345,
-        .timer = undefined,
-        .timing = false,
+        // Benchmarks require a fixed seed for reproducibility; smoke mode uses a random seed.
+        .seed = if (mode == .benchmark) seed_benchmark else std.testing.random_seed,
     };
 }
 
 pub fn deinit(bench: *Bench) void {
-    assert(!bench.timing);
+    assert(bench.instant_start == null);
     bench.* = undefined;
 }
 
-/// Dual-valued parameter: small for smoke, large for benchmark.
-/// Override in benchmark mode via environment variable: `ops=10000 ./zig/zig build bench`.
 pub fn parameter(
-    bench: *const Bench,
+    b: *const Bench,
     comptime name: []const u8,
     value_smoke: u64,
     value_benchmark: u64,
 ) u64 {
-    assert(value_smoke <= value_benchmark);
+    assert(value_smoke < value_benchmark);
     const value = parameter_fallible(name, value_smoke, value_benchmark) catch |err| switch (err) {
         error.InvalidCharacter, error.Overflow => @panic("invalid benchmark parameter value"),
     };
-    bench.report("{s}={}", .{ name, value });
+    b.report("{s}={}", .{ name, value });
     return value;
 }
 
@@ -64,7 +113,7 @@ fn parameter_fallible(
     value_smoke: u64,
     value_benchmark: u64,
 ) std.fmt.ParseIntError!u64 {
-    assert(value_smoke <= value_benchmark);
+    assert(value_smoke < value_benchmark);
     return switch (mode) {
         .smoke => value_smoke,
         .benchmark => std.process.parseEnvVarInt(name, u64, 10) catch |err| switch (err) {
@@ -75,50 +124,72 @@ fn parameter_fallible(
 }
 
 pub fn start(bench: *Bench) void {
-    assert(!bench.timing);
-    bench.timing = true;
-    bench.timer = std.time.Timer.start() catch unreachable;
+    assert(bench.instant_start == null);
+    defer assert(bench.instant_start != null);
+
+    bench.instant_start = bench.time.time().monotonic();
 }
 
-pub fn stop(bench: *Bench) u64 {
-    assert(bench.timing);
-    bench.timing = false;
-    return bench.timer.lap();
+pub fn stop(bench: *Bench) Duration {
+    assert(bench.instant_start != null);
+    defer assert(bench.instant_start == null);
+
+    const instant_stop = bench.time.time().monotonic();
+    const elapsed = instant_stop.duration_since(bench.instant_start.?);
+    bench.instant_start = null;
+    return elapsed;
 }
 
-/// Sort durations, return 3rd fastest (discard 2 fastest outliers).
-/// See https://lemire.me/blog/2018/01/16/microbenchmarking-calls-for-idealized-conditions/
-pub fn estimate(_: *const Bench, durations: []u64) u64 {
-    assert(durations.len >= 8);
-    std.sort.block(u64, durations, {}, struct {
-        fn order(_: void, a: u64, b: u64) bool {
-            return a < b;
-        }
-    }.order);
+// Sort the durations and return the third-fastest sample (discarding the two fastest outliers)
+// to get a more stable estimate, assuming benchmark timings are roughly log-normal.
+// E.g. see https://lemire.me/blog/2018/01/16/microbenchmarking-calls-for-idealized-conditions/
+pub fn estimate(bench: *const Bench, durations: []Duration) Duration {
+    assert(durations.len >= 8); // Ensure that we have enough samples to get a meaningful result.
+    _ = bench;
+    std.sort.block(stdx.Duration, durations, {}, stdx.Duration.sort.asc);
     return durations[2];
 }
 
-/// Assert that a measured duration is within budget. Smoke mode only —
-/// benchmark mode prints results without asserting.
-/// Catches catastrophic regressions (O(n²), accidental allocations).
-pub fn assert_budget(_: *const Bench, measured_ns: u64, budget_ns: u64, comptime name: []const u8) void {
-    switch (mode) {
-        .smoke => {
-            if (measured_ns > budget_ns) {
-                std.debug.panic(
-                    "budget exceeded: {s}: {d}ns > {d}ns budget",
-                    .{ name, measured_ns, budget_ns },
-                );
-            }
-        },
-        .benchmark => {},
-    }
-}
-
-/// Only prints in benchmark mode. Silent in smoke.
 pub fn report(_: *const Bench, comptime fmt: []const u8, args: anytype) void {
     switch (mode) {
         .smoke => {},
         .benchmark => std.debug.print(fmt ++ "\n", args),
+    }
+}
+
+// =============================================================
+// Tiger Web surgical addition — not in TB
+// =============================================================
+//
+// TB lists "automatic regression detection" as an explicit non-goal
+// (see file header). We diverge on this point because smoke-mode
+// needs to catch catastrophic regressions (10× slowdowns from O(n²)
+// or accidental allocations) inside `zig build unit-test`, which
+// fails the build.
+//
+// This is a principled divergence, not a flaw fix — TB's choice is
+// valid for their workflow (human reviews devhub), ours is valid for
+// ours (unit-test is the tighter feedback loop).
+//
+// Budgets follow the pattern in state_machine_benchmark.zig: 10×
+// expected value, calibrated on the CI runner class. Fires in smoke
+// mode only; benchmark mode prints without asserting.
+
+pub fn assert_budget(
+    _: *const Bench,
+    measured: Duration,
+    budget: Duration,
+    comptime name: []const u8,
+) void {
+    switch (mode) {
+        .smoke => {
+            if (measured.ns > budget.ns) {
+                std.debug.panic(
+                    "budget exceeded: {s}: {} > {} budget",
+                    .{ name, measured, budget },
+                );
+            }
+        },
+        .benchmark => {},
     }
 }

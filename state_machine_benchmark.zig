@@ -16,6 +16,8 @@
 
 const std = @import("std");
 const assert = std.debug.assert;
+const stdx = @import("stdx");
+const Duration = stdx.Duration;
 const Bench = @import("framework/bench.zig");
 const message = @import("message.zig");
 const state_machine = @import("state_machine.zig");
@@ -23,7 +25,7 @@ const App = @import("app.zig");
 const auth = @import("framework/auth.zig");
 const StateMachine = App.SM;
 const fuzz = @import("fuzz.zig");
-const PRNG = @import("stdx").PRNG;
+const PRNG = stdx.PRNG;
 
 /// Budget assertions — catch catastrophic regressions (O(n²) queries,
 /// accidental allocations in the hot path). Set at ~10x expected value
@@ -37,10 +39,12 @@ const PRNG = @import("stdx").PRNG;
 /// To recalibrate: run `./zig/zig build bench`, note the actual durations,
 /// set budgets to ~10x those values.
 const budget = struct {
-    /// Per-operation budget in nanoseconds (smoke mode only).
-    const get_product_ns: u64 = 500_000; // 500us — point read
-    const list_products_ns: u64 = 2_000_000; // 2ms — table scan
-    const update_product_ns: u64 = 1_000_000; // 1ms — read + write
+    /// Per-operation budget (smoke mode only). Each fires if smoke-mode
+    /// measurement exceeds the value. Units via `stdx.Duration` after
+    /// the Phase 0 bench.zig re-port.
+    const get_product: Duration = .{ .ns = 500_000 }; // 500us — point read
+    const list_products: Duration = .{ .ns = 2_000_000 }; // 2ms — table scan
+    const update_product: Duration = .{ .ns = 1_000_000 }; // 1ms — read + write
 };
 
 const bench_test_key: *const [auth.key_length]u8 = "tiger-web-test-key-0123456789ab!";
@@ -100,7 +104,7 @@ test "benchmark: state machine" {
 
     // --- get_product ---
     {
-        var durations: [repetitions]u64 = undefined;
+        var durations: [repetitions]Duration = undefined;
         for (&durations) |*dur| {
             bench.start();
             for (0..ops) |i| {
@@ -108,18 +112,18 @@ test "benchmark: state machine" {
                 const status = pipeline_execute(&sm, msg);
                 checksum +%= @intFromEnum(status);
             }
-            dur.* = bench.stop();
-            dur.* /= ops;
+            const elapsed = bench.stop();
+            dur.* = .{ .ns = elapsed.ns / ops };
         }
         const est = bench.estimate(&durations);
-        bench.report("get_product:    {}/op", .{std.fmt.fmtDuration(est)});
-        bench.assert_budget(est, budget.get_product_ns, "get_product");
+        bench.report("get_product:    {}/op", .{est});
+        bench.assert_budget(est, budget.get_product, "get_product");
     }
 
     // --- list_products ---
     {
         const params = std.mem.zeroes(message.ListParams);
-        var durations: [repetitions]u64 = undefined;
+        var durations: [repetitions]Duration = undefined;
         for (&durations) |*dur| {
             bench.start();
             for (0..ops) |_| {
@@ -127,12 +131,12 @@ test "benchmark: state machine" {
                 const status = pipeline_execute(&sm, msg);
                 checksum +%= @intFromEnum(status);
             }
-            dur.* = bench.stop();
-            dur.* /= ops;
+            const elapsed = bench.stop();
+            dur.* = .{ .ns = elapsed.ns / ops };
         }
         const est = bench.estimate(&durations);
-        bench.report("list_products:  {}/op", .{std.fmt.fmtDuration(est)});
-        bench.assert_budget(est, budget.list_products_ns, "list_products");
+        bench.report("list_products:  {}/op", .{est});
+        bench.assert_budget(est, budget.list_products, "list_products");
     }
 
     // --- update_product ---
@@ -142,7 +146,7 @@ test "benchmark: state machine" {
         var update_payload = fuzz.gen_product(&prng);
         update_payload.version = 0;
 
-        var durations: [repetitions]u64 = undefined;
+        var durations: [repetitions]Duration = undefined;
         for (&durations) |*dur| {
             bench.start();
             for (0..ops) |i| {
@@ -151,12 +155,12 @@ test "benchmark: state machine" {
                 const status = pipeline_execute(&sm, msg);
                 checksum +%= @intFromEnum(status);
             }
-            dur.* = bench.stop();
-            dur.* /= ops;
+            const elapsed = bench.stop();
+            dur.* = .{ .ns = elapsed.ns / ops };
         }
         const est = bench.estimate(&durations);
-        bench.report("update_product: {}/op", .{std.fmt.fmtDuration(est)});
-        bench.assert_budget(est, budget.update_product_ns, "update_product");
+        bench.report("update_product: {}/op", .{est});
+        bench.assert_budget(est, budget.update_product, "update_product");
     }
 
     bench.report("checksum: {}", .{checksum});
