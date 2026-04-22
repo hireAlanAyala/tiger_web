@@ -256,6 +256,28 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
             return false;
         }
 
+        /// True iff some sidecar is in the handshake window: the Unix
+        /// socket has been accepted (`Connection.state == .connected`)
+        /// but the READY frame hasn't been processed yet
+        /// (`!sidecar_connections_ready[i]`).
+        ///
+        /// Distinguishes transient startup races from permanent
+        /// unavailability. A request arriving during this window
+        /// should **suspend**, not 503 — the next tick's
+        /// `tick_connections` drains any pending READY, then
+        /// `resume_suspended` re-dispatches. Reproducibly exercised
+        /// by `sim_sidecar.zig`'s "HTTP before READY → suspend then
+        /// succeed" and "startup race" tests.
+        pub fn sidecar_any_connection_in_handshake(server: *const Server) bool {
+            comptime assert(App.sidecar_count > 0 or !App.sidecar_enabled);
+            if (!App.sidecar_enabled) return false;
+            for (0..App.sidecar_count) |i| {
+                if (server.sidecar_connections_ready[i]) continue;
+                if (server.sidecar_bus.connections[i].state == .connected) return true;
+            }
+            return false;
+        }
+
         /// Compute the IO wait budget for the next tick.
         ///
         /// Sidecar responses arrive over shared memory with no kernel
@@ -361,8 +383,22 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
         fn try_dispatch(server: *Server, conn: *Connection) void {
             assert(conn.state == .ready);
 
-            // Sidecar not connected → 503 immediately.
+            // Sidecar-readiness gating. Three cases:
+            //   a) Any sidecar is READY → fall through to dispatch.
+            //   b) No sidecar is READY but a Unix socket is accepted
+            //      and awaiting READY → suspend. Next tick's
+            //      tick_connections processes the pending READY and
+            //      resume_suspended re-dispatches. Closes the startup
+            //      race exercised by sim_sidecar's "HTTP before READY"
+            //      tests.
+            //   c) No sidecar is READY and none is mid-handshake → 503
+            //      immediately. Sidecar is genuinely unavailable;
+            //      caller should retry after supervisor restart.
             if (App.sidecar_enabled and !server.sidecar_any_ready()) {
+                if (server.sidecar_any_connection_in_handshake()) {
+                    server.suspend_connection(conn);
+                    return;
+                }
                 const resp = sidecar_unavailable_response(conn);
                 conn.keep_alive = false;
                 conn.set_response(resp.offset, resp.len);
