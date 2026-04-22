@@ -385,6 +385,11 @@ Generalize when a second auth strategy is needed.
 - change prefetch from epoll to io_uring to 15x if a user uses a network db as the db interface postgres would go from 2k to 50k req/s (copy linux.zig from og tb, it has everything cleanly isolated)
 - assert the args passed to the sidecar functions are not directly mutated like ctx.something = ""
 - if storage is a network db, commit will probably need to be async, right now it blocks
+- Rust-style error messages for scanner/compiler output: source code front-and-center, underline the problem, suggest the fix. Reference: https://blog.rust-lang.org/2016/08/10/Shape-of-errors-to-come/ — proven adoption/retention factor, especially during the learning curve. Applies to annotation validation, SQL mismatches, status exhaustiveness, type errors.
+- **sim_sidecar startup-race nondeterminism.** Two tests in `sim_sidecar.zig` flake ~7% of runs (2/30 captured 2026-04-22). Both deterministically fail under specific seeds:
+  - `test.sidecar: HTTP before READY → suspend then succeed` under seed `0x648c80c9`
+  - `test.sidecar: startup race — HTTP arrives same tick as READY` under seed `0x57fccd62`
+  Both fail with `expected 200, found 503` at the response-status assert. The 503 suggests a request arriving before the sidecar has transitioned to READY returns an error path instead of suspending/retrying. Root cause is in the startup-race state machine, not benchmark-tracking. Reproduce with `./zig/zig build test-sidecar --seed 0x648c80c9`. This is a real nondeterminism — determinism is a TigerBeetle first principle, so a flaky sim test is a standing bug until fixed.
 
 # clean up
 - ensure we use cli/program defaults very carefully. i like no defaults or few defaults over heavy defaults
