@@ -1,93 +1,51 @@
 //! WAL body-parse primitive benchmark.
 //!
-//! **Port source:** `src/vsr/checksum_benchmark.zig` from TigerBeetle,
-//! cp'd verbatim and trimmed. Every change from TB's original is
-//! named with its bucket — **principled** (TB's answer doesn't fit
-//! our domain), **flaw fix** (TB has a known weakness we can cheaply
-//! improve), or **tracked follow-up** (temporary state with a known
-//! end condition). Anything not listed here is TB's code, unchanged.
+//! **Port:** `cp` of TigerBeetle's `src/vsr/checksum_benchmark.zig`,
+//! trimmed. Diff against TB's file is the audit trail.
 //!
-//! **Transplanted verbatim from template:**
+//! **Edits vs TB's original:**
 //!
-//!   - `const std = @import("std");` — line 1
-//!   - `const stdx = @import("stdx");` — line 6
-//!   - `const repetitions = 35;` — line 13
-//!   - `Bench.init`/`defer deinit` shape — lines 16–17
-//!   - `var duration_samples: [repetitions]stdx.Duration = undefined;` — line 29
-//!   - Sample-loop shape (`bench.start()` / kernel / `duration.* = bench.stop()`) — lines 32–36
-//!   - `bench.estimate(&duration_samples)` — line 38
-//!   - `bench.report("<hash>", ...)` pattern — line 41
+//!   - Import paths rewritten for our layout (principled).
+//!   - Kernel: `checksum(blob)` → `Wal.skip_writes_section` +
+//!     loop of `parse_one_dispatch` (principled — our domain).
+//!   - `cache_line_size` + arena + `alignedAlloc` + `prng.fill`
+//!     removed (principled — body is a stack `[512]u8` built
+//!     deterministically by `build_body`).
+//!   - `blob_size` parameter + `KiB`/`MiB` removed (principled —
+//!     WAL body shape is fixed by the entry layout; parametric
+//!     size would measure a different property).
+//!   - Counter `u128` → `u64` (principled).
+//!   - Report format per DR-2.
+//!   - Pair-assertions added (flaw fix — TIGER_STYLE golden rule):
+//!     positive round-trip recovers the dispatch names we encoded;
+//!     negative truncated-header probe must return null.
+//!   - `bench.assert_budget` call (flaw fix — documented in
+//!     `framework/bench.zig`).
+//!   - `build_body` helper added — ours, not transplanted (WAL
+//!     layout is ours). Off-hot-path, called once at test start.
 //!
-//! **Deletions (all principled):**
+//! **External commitment:** WAL entry body format is on-disk. Every
+//! existing WAL was encoded with this layout; changing the parser
+//! without a migration breaks recovery.
 //!
-//!   - `cache_line_size` import (template line 3) — body is
-//!     stack-allocated; no aligned alloc needed.
-//!   - `checksum` import (template line 4) — replaced by `Wal` +
-//!     `parse_one_dispatch`.
-//!   - `KiB`/`MiB` imports (template lines 8–9) — body shape is
-//!     fixed by the WAL entry layout; parametric size would measure
-//!     a different property (layout cost vs per-entry parse cost).
-//!   - `blob_size = bench.parameter(...)` (template line 19) — same
-//!     reason.
-//!   - `arena_instance` + `defer deinit` + `arena =
-//!     arena_instance.allocator()` (template lines 21–24) — body is
-//!     a stack `[512]u8` constructed by `build_body` (off-hot-path,
-//!     called once at test start).
-//!   - `var prng = stdx.PRNG.from_seed(bench.seed);` (template
-//!     line 25) — body is deterministic by construction; no random
-//!     fill needed.
-//!   - `const blob = try arena.alignedAlloc(...)` +
-//!     `prng.fill(blob)` (template lines 26–27) — replaced by
-//!     `build_body(&body_buffer)`.
+//! **Actionability:** if ns/entry rises >10%, check whether the
+//! entry body format gained fields or parsing loops added
+//! validation. Recovery time scales as entries × ns/entry. If the
+//! positive pair-assertion fires, the on-disk format changed —
+//! coordinate migration. If the *negative* pair-assertion fires,
+//! the parser is accepting malformed entries — correctness
+//! regression. If ns/entry drops sharply, verify a bounds check
+//! wasn't removed (e.g., `worker_name_max` / `worker_args_max`
+//! guards).
 //!
-//! **Path substitutions (principled — file-layout adaptation):**
-//!
-//!   - `@import("../testing/bench.zig")` → `@import("framework/bench.zig")`
-//!
-//! **Additions (flaw fix — TIGER_STYLE alignment):**
-//!
-//!   - Pair-assertion covering positive AND negative space per
-//!     TIGER_STYLE's "golden rule":
-//!       * Positive: round-trip recovers the exact dispatch names
-//!         (`charge_payment`, `send_email`).
-//!       * Negative: a body with a truncated dispatch (declared
-//!         `name_len` exceeds remaining bytes) must return `null`
-//!         from `parse_one_dispatch`. Guards against accepting
-//!         malformed on-disk data.
-//!   - `bench.assert_budget` call (same principled divergence
-//!     documented in `framework/bench.zig`).
-//!   - Substituted report format to `"wal_parse = {d} ns"` per DR-2.
-//!   - `build_body` helper — off-hot-path body construction, kept
-//!     out of the measurement loop so the kernel measurement isn't
-//!     contaminated.
-//!
-//! **External commitment:** the WAL entry body format is on-disk.
-//! Every existing WAL was encoded with this layout; changing the
-//! parser without a migration breaks recovery. This bench protects
-//! the parse throughput of that commitment — recovery time scales
-//! as entries × ns/entry.
-//!
-//! **Actionability:** if ns/entry rises >10%, check whether the WAL
-//! entry body format gained fields or the parsing loops added
-//! validation. If the positive pair-assertion fires, the on-disk
-//! format changed — coordinate migration. If the *negative*
-//! pair-assertion fires, the parser is now accepting malformed
-//! entries — coordinate a fix, this is a correctness regression.
-//! If ns/entry drops sharply without a known optimization, verify
-//! a bounds check wasn't removed (e.g., `worker_name_max` /
-//! `worker_args_max` guards).
-//!
-//! **Budget calibration:** dev-machine Debug, 3 runs. Observed
-//! 139 / 136 / 112 ns → max 139 → 10× = 1_390 → round up to 2_000 ns.
-//! Phase F re-calibrates on `ubuntu-22.04`.
+//! **Budget:** `docs/internal/benchmark-budgets.md#wal_parse_benchmarkzig`
+//! holds the 3-run calibration. Phase F regenerates on `ubuntu-22.04`.
 
 const std = @import("std");
 const assert = std.debug.assert;
 
 const stdx = @import("stdx");
 
-// Path substitution from TB's `../testing/bench.zig` — our layout
-// co-locates the harness under `framework/`.
 const Bench = @import("framework/bench.zig");
 
 const message = @import("message.zig");
@@ -99,9 +57,7 @@ const repetitions = 35;
 const write_count: u8 = 3;
 const dispatch_count: u8 = 2;
 
-// Budget — 10× `max(3 runs)` on dev-machine Debug, rounded up.
-// Observed: 139 / 136 / 112 ns → max 139 → 10× = 1_390 → round up
-// to 2_000. Phase F re-calibrates on CI ubuntu-22.04.
+// Budget — see docs/internal/benchmark-budgets.md.
 const budget_ns_smoke_max: stdx.Duration = .{ .ns = 2_000 };
 
 test "benchmark: wal_parse" {
@@ -112,9 +68,7 @@ test "benchmark: wal_parse" {
     const body_len = build_body(&body_buffer);
     const body = body_buffer[0..body_len];
 
-    // Pair-assertion — positive space: round-trip recovers exactly
-    // the dispatch names we encoded. If this fires the on-disk body
-    // format drifted and recovery is about to break.
+    // Pair-assertion — positive: round-trip recovers the encoded names.
     {
         const dispatch_start = Wal.skip_writes_section(body, write_count) orelse
             std.debug.panic("wal_parse: skip_writes_section rejected known-good body", .{});
@@ -127,15 +81,14 @@ test "benchmark: wal_parse" {
         const second = parse_one_dispatch(body, &pos) orelse
             std.debug.panic("wal_parse: second dispatch missing", .{});
         assert(std.mem.eql(u8, second.name, "send_email"));
-        assert(parse_one_dispatch(body, &pos) == null); // exhausted
+        assert(parse_one_dispatch(body, &pos) == null);
     }
 
-    // Pair-assertion — negative space: a dispatch header declaring
-    // `name_len` longer than remaining bytes must be rejected.
-    // Guards against accepting malformed on-disk data.
+    // Pair-assertion — negative: truncated header (declared name_len
+    // exceeds remaining bytes) must return null.
     {
         var truncated: [3]u8 = undefined;
-        truncated[0] = 200; // declared name_len, but only 2 bytes of payload follow
+        truncated[0] = 200;
         truncated[1] = 'x';
         truncated[2] = 'y';
         var pos: usize = 0;
@@ -159,24 +112,14 @@ test "benchmark: wal_parse" {
 
     const result = bench.estimate(&duration_samples);
 
-    // Hash-of-run — same discipline as TB template line 41.
     bench.report("parsed {d} dispatches", .{parse_counter_sum});
     bench.report("wal_parse = {d} ns", .{result.ns});
     bench.assert_budget(result, budget_ns_smoke_max, "wal_parse");
 }
 
-// ---------------------------------------------------------------------------
-// Off-hot-path body construction. Not called inside the measurement
-// loop; only once at test start. Shape matches
-// `framework/wal.zig:skip_writes_section` + `parse_one_dispatch`:
-//
-//   writes ×3: [u16 BE sql_len][sql][u8 param_count=2]
-//              [u8 tag=0x01][u64 BE int]
-//              [u8 tag=0x03][u16 BE text_len][text]
-//   dispatches ×2: [u8 name_len][name][u16 BE args_len][args]
-//
-// Not transplanted from TB — this is our WAL layout, not TB's.
-// ---------------------------------------------------------------------------
+// Off-hot-path body construction. Body layout per
+// `framework/wal.zig:skip_writes_section` +
+// `framework/pending_dispatch.zig:parse_one_dispatch`.
 fn build_body(buffer: *[512]u8) usize {
     var pos: usize = 0;
 
