@@ -523,6 +523,9 @@ if (workerFns && Object.keys(workerFns).length > 0) {
     const headerBuf: Buffer = shmAddon.mmapShm(shmPath, WORKER_REGION_HEADER_SIZE);
     workerSlotCount = headerBuf.readUInt16LE(0);   // RegionHeader.slot_count @ offset 0
     workerFrameMax = headerBuf.readUInt32LE(4);    // RegionHeader.frame_max @ offset 4
+    // Boundary assertion: external data (mmap'd header) must be sane.
+    if (workerSlotCount === 0 || workerSlotCount > 32) throw new Error(`invalid worker slot_count: ${workerSlotCount}`);
+    if (workerFrameMax === 0 || workerFrameMax > 32 * 1024 * 1024) throw new Error(`invalid worker frame_max: ${workerFrameMax}`);
     const regionSize = 64 + workerSlotCount * (64 + workerFrameMax * 2);
     workerBuf = shmAddon.mmapShm(shmPath, regionSize);
     console.log(`[shm] worker transport: ${workerShmName} (${workerSlotCount} slots, frame_max=${workerFrameMax})`);

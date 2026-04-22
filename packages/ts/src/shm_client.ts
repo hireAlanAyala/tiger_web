@@ -65,8 +65,9 @@ export class ShmClient {
     const headerBuf: Buffer = shmAddon.mmapShm(shmPath, REGION_HEADER_SIZE);
     const slotCount = headerBuf.readUInt16LE(0);   // RegionHeader.slot_count @ offset 0.
     const frameMax = headerBuf.readUInt32LE(4);     // RegionHeader.frame_max @ offset 4.
-    // Unmap the header-only mapping — we'll remap the full region.
-    // (Node Buffer from mmap stays valid; we just need the values.)
+    // Boundary assertion: external data (mmap'd header) must be sane.
+    if (slotCount === 0 || slotCount > 32) throw new Error(`invalid slot_count from SHM header: ${slotCount}`);
+    if (frameMax === 0 || frameMax > 32 * 1024 * 1024) throw new Error(`invalid frame_max from SHM header: ${frameMax}`);
     return new ShmClient({ shmName, slotCount, slotDataSize: frameMax });
   }
 

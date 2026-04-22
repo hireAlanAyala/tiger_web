@@ -76,6 +76,16 @@ static napi_value mmap_shm(napi_env env, napi_callback_info info) {
   int64_t size;
   napi_get_value_int64(env, args[1], &size);
 
+  // Boundary assertions: validate external JS args.
+  if (name_len == 0 || name_len >= sizeof(name)) {
+    napi_throw_error(env, NULL, "shm name empty or too long");
+    return NULL;
+  }
+  if (size <= 0 || size > 256 * 1024 * 1024) {
+    napi_throw_error(env, NULL, "shm size out of range");
+    return NULL;
+  }
+
   // Open shared memory.
   int fd = shm_open(name, O_RDWR, 0600);
   if (fd < 0) {
