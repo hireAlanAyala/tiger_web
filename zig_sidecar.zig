@@ -60,6 +60,9 @@ pub fn main() !void {
     const header_bytes: [*]const u8 = @ptrCast(header_map);
     const slot_count = std.mem.readInt(u16, header_bytes[0..2], .little);
     const frame_max = std.mem.readInt(u32, header_bytes[4..8], .little);
+    // Boundary assertion: external data (mmap'd header) must be sane.
+    assert(slot_count > 0 and slot_count <= 32);
+    assert(frame_max > 0 and frame_max <= 32 * 1024 * 1024);
     const slot_pair_size = SLOT_HEADER_SIZE + frame_max * 2;
     const region_size = REGION_HEADER_SIZE + @as(usize, slot_count) * slot_pair_size;
 

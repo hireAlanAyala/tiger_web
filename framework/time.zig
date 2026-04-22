@@ -278,6 +278,10 @@ pub fn init_time(options: struct {
         .offset_coefficient_C = options.offset_coefficient_C,
         .epoch = options.epoch,
     };
+    // Boundary assertion: periodic and non_ideal divide by coefficient_B.
+    if (result.offset_type == .periodic or result.offset_type == .non_ideal) {
+        assert(result.offset_coefficient_B != 0);
+    }
     return result;
 }
 
