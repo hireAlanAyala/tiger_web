@@ -20,11 +20,11 @@
 // Accepted trade-off for TypeScript language support.
 
 import net from "node:net";
-import { crc32 } from "node:zlib";
 import { createRequire } from "node:module";
 import { ShmClient } from "./shm_client.ts";
 import { matchRoute } from "./routing.ts";
 import { readRowSet } from "./serde.ts";
+import { crcFrame } from "./shm_layout.ts";
 
 // Native addon must use require (Node.js doesn't support import for .node files).
 // Platform detection follows TB's index.ts pattern — same as shm_client.ts.
@@ -60,9 +60,6 @@ const _decoder = new TextDecoder();
 const _encoder = new TextEncoder();
 
 const FRAME_MAX = 256 * 1024;
-
-// Pre-allocated CRC length buffer — reused by writeWorkerResult.
-const _crcLenBuf = Buffer.alloc(4);
 
 // Pre-computed hex lookup — avoids toString(16) + padStart per byte.
 const _hexTable: string[] = new Array(256);
@@ -139,11 +136,13 @@ if (socketPath) {
     payload.writeUInt16BE(PROTOCOL_VERSION, 1);
 
     // Wire frame: [len: u32 BE][crc32: u32 LE][payload]
+    // Note: the control socket frame uses a BE length prefix, while the
+    // CRC is computed over an LE length prefix ++ payload — the
+    // shm_layout.crcFrame convention. The BE prefix is wire framing for
+    // the Unix socket reader; it is not part of the CRC pre-image.
     const frame = Buffer.alloc(8 + payload.length);
     frame.writeUInt32BE(payload.length, 0);
-    const lenBuf = Buffer.alloc(4);
-    lenBuf.writeUInt32BE(payload.length);
-    const crc = crc32(Buffer.concat([lenBuf, payload]));
+    const crc = crcFrame(payload.length, payload);
     frame.writeUInt32LE(crc, 4);
     payload.copy(frame, 8);
 
@@ -504,7 +503,7 @@ function dispatchHandleRender(requestId: number, args: Uint8Array): Uint8Array {
 // JS-level polling (not C addon) — worker names are dynamic.
 // =====================================================================
 
-// shmAddon and crc32 imported at module level above.
+// shmAddon and crcFrame imported at module level above.
 let workerFns: Record<string, { fn: (...args: any[]) => Promise<any>; returns: string }> | null = null;
 if (registry.workerFunctions && Object.keys(registry.workerFunctions).length > 0) {
   workerFns = registry.workerFunctions;
@@ -634,11 +633,8 @@ function writeWorkerResult(buf: Buffer, slot: number, regionHdr: number, slotPai
   // Step 2: Set response_len.
   buf.writeUInt32LE(pos, hdr + 12);
 
-  // Step 3: Compute and write CRC (over len_bytes ++ payload_bytes).
-  // Pre-allocated 4-byte buffer for len — avoids allocation per call.
-  // TODO: expose C addon's compute_crc via N-API for zero-allocation CRC.
-  _crcLenBuf.writeUInt32LE(pos);
-  const crcVal = crc32(Buffer.concat([_crcLenBuf, buf.subarray(respOffset, respOffset + pos)]));
+  // Step 3: Compute and write CRC via the shared helper.
+  const crcVal = crcFrame(pos, buf.subarray(respOffset, respOffset + pos));
   buf.writeUInt32LE(crcVal, hdr + 20); // response_crc
 
   // Step 4: Set slot_state = result_written.
@@ -681,10 +677,7 @@ async function workerQuery(
   // Set response_len + CRC + bump sidecar_seq.
   const queryLen = pos;
   buf.writeUInt32LE(queryLen, hdr + 12); // response_len.
-  const lenBuf = Buffer.alloc(4);
-  lenBuf.writeUInt32LE(queryLen);
-  // crc32 imported at module level from node:zlib.
-  const crcVal = crc32(Buffer.concat([lenBuf, buf.subarray(respOffset, respOffset + queryLen)]));
+  const crcVal = crcFrame(queryLen, buf.subarray(respOffset, respOffset + queryLen));
   buf.writeUInt32LE(crcVal, hdr + 20); // response_crc.
   const curSeq = buf.readUInt32LE(hdr + 4);
   buf.writeUInt32LE(curSeq + 1, hdr + 4);

@@ -5,16 +5,41 @@
 //! workers, and polls for RESULTs when workers complete.
 //!
 //! Same SHM layout as ShmBus (SlotHeader, SlotPair, RegionHeader,
-//! Region), same CRC convention, same seq protocol. Different
-//! lifecycle: unbounded latency, no write ordering, no render buffer.
+//! Region), same CRC convention, same seq protocol. Leading 24 bytes
+//! of SlotHeader and the RegionHeader are the shared substrate — see
+//! framework/shm_layout.zig.
+//!
+//! **Why a separate region, not multiplexed into ShmBus.** The two
+//! transports look identical at the byte layout but diverge on
+//! semantics:
+//!
+//!   - ShmBus: HTTP request dispatch. Bounded latency (handler must
+//!     finish within a request deadline), strict write ordering
+//!     (CALL → RESULT is a pair, no re-use of a slot until RESULT is
+//!     consumed), and the slot is pinned 1:1 to a pipeline slot. The
+//!     SlotHeader carries an explicit `slot_state` enum because the
+//!     lifecycle is short-lived and crash-safety depends on it.
+//!   - Worker dispatch: background work. Unbounded latency (a worker
+//!     may block on an external API for seconds), no write ordering
+//!     requirement, and the slot is pinned 1:1 to a WAL dispatch entry
+//!     so the server knows which pending dispatch a RESULT completes.
+//!     Lifecycle lives in `Entry.State` on the server side; the wire
+//!     format does not need a `slot_state` byte, so the SlotHeader pads
+//!     it out.
+//!
+//! Multiplexing would force one lifecycle model onto the other — the
+//! HTTP path would pay the cost of Entry.State indirection, or the
+//! worker path would pay the cost of slot_state round-trips. Two
+//! regions with a shared substrate (shm_layout) is the right primitive.
 //!
 //! Both sides busy-poll per-slot sequence numbers. No futex dependency.
+//! (See shm_bus.zig header for why busy-poll, not io_uring FUTEX_WAIT.)
 
 const std = @import("std");
 const assert = std.debug.assert;
 const posix = std.posix;
 const constants = @import("constants.zig");
-const Crc32 = std.hash.crc.Crc32;
+const shm_layout = @import("shm_layout.zig");
 
 const wire = @import("wire.zig");
 const log = std.log.scoped(.worker_dispatch);
@@ -36,7 +61,9 @@ pub fn WorkerDispatchType(comptime max_entries: u8) type {
         /// NOTE: No slot_state field — unlike shm_bus.zig's SlotHeader which
         /// has an explicit SlotState enum. Worker dispatch uses Entry.State for
         /// lifecycle tracking (in-flight/completed/free), not a shared-memory
-        /// field. Different SHM region, different protocol.
+        /// field. Different SHM region, different protocol. The shared leading
+        /// 24 bytes are pair-asserted against shm_layout — drift there would
+        /// silently break the TS sidecar reader.
         pub const SlotHeader = extern struct {
             server_seq: u32 = 0,
             sidecar_seq: u32 = 0,
@@ -47,7 +74,7 @@ pub fn WorkerDispatchType(comptime max_entries: u8) type {
             _pad: [40]u8 = [_]u8{0} ** 40,
 
             comptime {
-                assert(@sizeOf(SlotHeader) == 64);
+                shm_layout.assert_slot_header_layout(SlotHeader);
             }
         };
 
@@ -59,16 +86,7 @@ pub fn WorkerDispatchType(comptime max_entries: u8) type {
             response: [slot_data_size]u8,
         };
 
-        pub const RegionHeader = extern struct {
-            slot_count: u16 = max_entries,
-            _reserved: u16 = 0,
-            frame_max: u32 = slot_data_size,
-            _pad: [56]u8 = [_]u8{0} ** 56,
-
-            comptime {
-                assert(@sizeOf(RegionHeader) == 64);
-            }
-        };
+        pub const RegionHeader = shm_layout.RegionHeader;
 
         pub const Region = extern struct {
             header: RegionHeader,
@@ -238,13 +256,10 @@ pub fn WorkerDispatchType(comptime max_entries: u8) type {
                 return false;
             };
 
-            // CRC covers len_bytes ++ payload_bytes.
+            // CRC convention (len ++ payload) is defined in shm_layout.
             const len32: u32 = @intCast(payload_len);
-            var crc = Crc32.init();
-            crc.update(std.mem.asBytes(&len32));
-            crc.update(slot.request[0..payload_len]);
             slot.header.request_len = len32;
-            slot.header.request_crc = crc.final();
+            slot.header.request_crc = shm_layout.crc_frame(len32, &slot.request);
 
             // Bump server_seq (release — visible to worker).
             self.server_seqs[slot_idx] +%= 1;
@@ -296,12 +311,9 @@ pub fn WorkerDispatchType(comptime max_entries: u8) type {
         fn validate_response(slot: *const SlotPair) ?[]const u8 {
             const response_length = slot.header.response_len;
             if (response_length == 0 or response_length > slot_data_size) return null;
-
-            var crc = Crc32.init();
-            crc.update(std.mem.asBytes(&response_length));
-            crc.update(slot.response[0..response_length]);
-            if (crc.final() != slot.header.response_crc) return null;
-
+            if (shm_layout.crc_frame(response_length, &slot.response) != slot.header.response_crc) {
+                return null;
+            }
             return slot.response[0..response_length];
         }
 
@@ -387,12 +399,9 @@ pub fn WorkerDispatchType(comptime max_entries: u8) type {
                 pos += @intCast(rs.len);
             }
 
-            // Write length + CRC.
+            // Write length + CRC (convention defined in shm_layout).
             slot.header.request_len = pos;
-            var crc = Crc32.init();
-            crc.update(std.mem.asBytes(&pos));
-            crc.update(slot.request[0..pos]);
-            slot.header.request_crc = crc.final();
+            slot.header.request_crc = shm_layout.crc_frame(pos, &slot.request);
         }
 
         /// Return the first completed entry, or null.
@@ -608,18 +617,15 @@ test "WorkerDispatch: invariants" {
 }
 
 test "CRC32 cross-language test vector" {
-    // This test vector MUST match the TS worker SHM client.
-    // If this value changes, update adapters/call_runtime_shm.ts test.
+    // This test vector MUST match the TS worker SHM client and the
+    // C SHM addon (shm.c). Calling shm_layout.crc_frame here turns any
+    // silent divergence in the helper into an immediate test failure —
+    // pair-assertion across the cross-language boundary.
     //
     // Convention: CRC32 covers len_bytes(4 LE) ++ payload_bytes.
     // Payload: "hello" (5 bytes). len = 5 (u32 LE = 0x05000000).
     const payload = "hello";
-    const len: u32 = payload.len;
-
-    var crc = Crc32.init();
-    crc.update(std.mem.asBytes(&len)); // [0x05, 0x00, 0x00, 0x00]
-    crc.update(payload);
-    const result = crc.final();
+    const result = shm_layout.crc_frame(payload.len, payload);
 
     // Verified: matches Node zlib.crc32 and shm.c (zlib).
     // Regenerate in Node:
@@ -660,12 +666,7 @@ fn simulate_result(
     // Set response metadata.
     const response_len: u32 = @intCast(pos);
     slot.header.response_len = response_len;
-
-    // CRC: len ++ payload.
-    var crc = std.hash.crc.Crc32.init();
-    crc.update(std.mem.asBytes(&response_len));
-    crc.update(slot.response[0..response_len]);
-    slot.header.response_crc = crc.final();
+    slot.header.response_crc = shm_layout.crc_frame(response_len, &slot.response);
 
     // Bump sidecar_seq to signal response ready.
     @atomicStore(u32, &slot.header.sidecar_seq, wd.server_seqs[slot_idx], .release);

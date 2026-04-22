@@ -305,16 +305,36 @@ static napi_value poll_dispatch(napi_env env, napi_callback_info info) {
   return js_found;
 }
 
-// CRC self-test — pair assertion against Zig's std.hash.crc.Crc32.
-// If this fails, the table is corrupted and all SHM frames will be
-// silently dropped (CRC mismatch on every CALL and RESULT).
+// CRC self-test — three-way pair assertion against Zig and TS.
+//
+// Two checks:
+//   (1) Raw CRC32("hello") — proves the 256-entry crc32_table isn't
+//       corrupted (the failure mode from feedback_crc_table.md).
+//   (2) Framed CRC via compute_crc(payload="hello", len=5) — proves the
+//       length-prefix convention matches the Zig/TS implementations.
+//
+// Identical vector is asserted in:
+//   framework/worker_dispatch.zig  test "CRC32 cross-language test vector"
+//   packages/ts/src/shm_layout.ts  selfTest() at module load
+//
+// If any language's implementation drifts, this three-way check fails
+// loudly instead of silently dropping every SHM frame.
 static void verify_crc_table(void) {
   uint8_t test_input[] = "hello";
-  uint32_t expected = 0x3610A686; // CRC32("hello") — matches zlib + Zig
-  uint32_t actual = crc32_compute(0, test_input, 5);
-  if (actual != expected) {
-    fprintf(stderr, "FATAL: CRC32 table corrupted (got 0x%08X, expected 0x%08X)\n",
-            actual, expected);
+
+  uint32_t raw_expected = 0x3610A686;
+  uint32_t raw_actual = crc32_compute(0, test_input, 5);
+  if (raw_actual != raw_expected) {
+    fprintf(stderr, "FATAL: CRC32 table corrupted (raw got 0x%08X, expected 0x%08X)\n",
+            raw_actual, raw_expected);
+    abort();
+  }
+
+  uint32_t framed_expected = 0x5CAC007A; // CRC(LE-u32(5) ++ "hello")
+  uint32_t framed_actual = compute_crc(test_input, 5);
+  if (framed_actual != framed_expected) {
+    fprintf(stderr, "FATAL: framed CRC convention drift (got 0x%08X, expected 0x%08X)\n",
+            framed_actual, framed_expected);
     abort();
   }
 }

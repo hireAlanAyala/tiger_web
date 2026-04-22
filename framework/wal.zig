@@ -1,9 +1,22 @@
-//! Write-ahead log — SQL-write WAL with worker dispatch support.
+//! Write-ahead log — append-only event log of committed mutations.
 //!
-//! Records committed SQL writes and worker dispatch entries. Each entry
-//! contains operation, timestamp, SQL writes, and optional worker
-//! dispatches. Replay re-executes the SQL — no handlers, no sidecar needed.
-//! Worker dispatches rebuild the in-memory pending index on recovery.
+//! **One role: durable event log.** Each entry records one mutation's
+//! effects — SQL writes plus any worker dispatches it declared — along
+//! with the kind of event (normal / completion / dead_dispatch). Replay
+//! re-executes the SQL; no handlers or sidecar needed.
+//!
+//! Do **not** think of this module as "a WAL plus a dispatch queue" —
+//! it is a log. The pending-dispatch queue is a derived in-memory index
+//! (framework/pending_dispatch.zig) built by filtering this log on
+//! recovery. Separating the log (source of truth) from the queue
+//! (derived state) is deliberate; an earlier framing that called the
+//! WAL a "dispatch queue" conflated the two and hid when dispatches
+//! become durable (at log append) versus observable (at index rebuild).
+//!
+//! Entry kinds (entry_flags):
+//!   - normal        — mutation: SQL writes + optional dispatches
+//!   - completion    — worker finished an earlier dispatch (completes_op set)
+//!   - dead_dispatch — worker deadline elapsed before completion
 //!
 //! Entry header: 64 bytes (extern struct, no padding).
 //!   [u128 checksum]       Aegis128L over everything after checksum
@@ -29,10 +42,15 @@
 //! serde back into the protocol. SQL-write WAL eliminates the body
 //! format question: replay re-executes SQL, no handlers needed.
 //!
-//! **Dual role: diagnostic log + worker dispatch queue.** The WAL
-//! records SQL writes for investigation/replay (diagnostic) AND tracks
-//! worker dispatch/completion/dead entries (operational). SQLite is the
-//! authority for data; the WAL is the authority for dispatch lifecycle.
+//! **Two kinds of consumers, one log.** Two independent views read
+//! these entries, but they share the file:
+//!   - `replay.zig`     — diagnostic: inspect what actually committed.
+//!   - `PendingIndex`   — operational: rebuild the in-flight dispatch
+//!                        set at startup by filtering dispatch and
+//!                        completion entries.
+//! SQLite is the authority for *data*; the WAL is the authority for
+//! *dispatch lifecycle observability*. Neither role makes the WAL
+//! a queue — the queue is reconstructed, not stored.
 //!
 //! **No fsync — dispatch is best-effort.** The kernel flushes on its
 //! own schedule. If the process crashes after SQLite commits but before
@@ -43,7 +61,7 @@
 //!
 //! **Why not input replay?** TigerBeetle stores inputs because replay
 //! IS the replication protocol. We don't replicate. SQLite handles
-//! crash recovery. Our WAL is for diagnostics and dispatch tracking.
+//! crash recovery. This log is for replay/debug and dispatch recovery.
 //!
 //! **Append ordering:** DB first, then WAL. A missing entry is obvious
 //! and safe (detectable gap). A phantom entry is silent and dangerous
@@ -124,6 +142,9 @@ pub fn WalType(comptime Operation: type) type {
             const checksum_offset = @offsetOf(EntryHeader, "checksum") + @sizeOf(u128);
             const bytes = std.mem.asBytes(&hdr);
             hdr.checksum = cs.checksum(bytes[checksum_offset..]);
+            // The root's checksum anchors the parent chain — a zero
+            // checksum would clash with the uninitialized disk region.
+            assert(hdr.checksum != 0);
             return hdr;
         }
 
@@ -142,6 +163,7 @@ pub fn WalType(comptime Operation: type) type {
         /// Initialize a WAL from the given path. If `pending` is non-null,
         /// the recovery scan populates the pending dispatch index.
         pub fn init(path: [:0]const u8, pending: ?*PendingIndex) Wal {
+            assert(path.len > 0);
             const fd = std.posix.open(
                 path,
                 .{ .ACCMODE = .WRONLY, .CREAT = true, .APPEND = true },
@@ -174,12 +196,14 @@ pub fn WalType(comptime Operation: type) type {
 
         /// Create a new WAL file — write the root entry.
         fn create_new(fd: std.posix.fd_t) RecoveryResult {
+            assert(fd > 0);
             const root_hdr = root_entry();
             if (!write_all(fd, std.mem.asBytes(&root_hdr))) {
                 log.err("root write failed", .{});
                 @panic("wal: failed to write root entry");
             }
             log.info("created new WAL", .{});
+            // First user op is 1; op 0 is the root sentinel.
             return .{ .op = 1, .parent = root_hdr.checksum };
         }
 
@@ -190,6 +214,8 @@ pub fn WalType(comptime Operation: type) type {
             file_size: u64,
             pending: ?*PendingIndex,
         ) RecoveryResult {
+            assert(fd > 0);
+            assert(file_size > 0);
             const read_fd = std.posix.open(
                 path,
                 .{ .ACCMODE = .RDONLY },
@@ -212,12 +238,14 @@ pub fn WalType(comptime Operation: type) type {
 
         /// Verify the root entry matches the expected deterministic sentinel.
         fn verify_root(read_fd: std.posix.fd_t) bool {
+            assert(read_fd > 0);
             var root_buf: [@sizeOf(EntryHeader)]u8 align(@alignOf(EntryHeader)) = undefined;
             const root_n = std.posix.pread(read_fd, &root_buf, 0) catch 0;
             if (root_n < @sizeOf(EntryHeader)) return false;
 
             const root_hdr: *const EntryHeader = @ptrCast(@alignCast(&root_buf));
             const expected = root_entry();
+            assert(expected.checksum != 0);
             return root_hdr.checksum == expected.checksum;
         }
 
@@ -229,6 +257,9 @@ pub fn WalType(comptime Operation: type) type {
             file_size: u64,
             pending: ?*PendingIndex,
         ) RecoveryResult {
+            assert(read_fd > 0);
+            assert(write_fd > 0);
+            assert(file_size >= @sizeOf(EntryHeader)); // root entry must fit
             const expected_root = root_entry();
             var scan_offset: u64 = 0;
             var last_valid_checksum: u128 = expected_root.checksum;
@@ -286,6 +317,8 @@ pub fn WalType(comptime Operation: type) type {
             hdr: *const EntryHeader,
             entry_data: []const u8,
         ) void {
+            assert(entry_data.len == hdr.entry_len);
+            assert(entry_data.len >= @sizeOf(EntryHeader));
             // Switch on raw u8 — entry_flags is read from disk (untrusted).
             // Exhaustive enum switch would be UB on corrupt values outside 0/1/2.
             switch (@intFromEnum(hdr.entry_flags)) {
@@ -341,6 +374,9 @@ pub fn WalType(comptime Operation: type) type {
         /// Skip past write_count SQL write entries in the body, returning the
         /// offset where the dispatch section begins. Returns null on malformed data.
         pub fn skip_writes_section(body: []const u8, write_count: u8) ?usize {
+            // A non-zero write_count requires at least one byte to parse;
+            // zero writes return 0 without reading. Either way pos stays ≤ body.len.
+            if (write_count > 0) assert(body.len > 0);
             var pos: usize = 0;
             for (0..write_count) |_| {
                 // sql: [u16 BE sql_len][sql_bytes]
@@ -372,6 +408,7 @@ pub fn WalType(comptime Operation: type) type {
         }
 
         pub fn deinit(wal: *Wal) void {
+            assert(wal.fd > 0);
             std.posix.close(wal.fd);
             wal.* = undefined;
         }
@@ -388,6 +425,9 @@ pub fn WalType(comptime Operation: type) type {
             buf: []u8,
         ) void {
             assert(operation.is_mutation());
+            assert(wal.op > 0);
+            // Buffer must hold the full entry — header plus both body sections.
+            assert(buf.len >= @sizeOf(EntryHeader) + writes_data.len + dispatches_data.len);
             var hdr = EntryHeader{
                 .entry_len = undefined, // set by append_entry
                 .checksum = 0,
@@ -508,6 +548,8 @@ pub fn WalType(comptime Operation: type) type {
         }
 
         fn write_all(fd: std.posix.fd_t, bytes: []const u8) bool {
+            assert(fd > 0);
+            assert(bytes.len > 0);
             var written: usize = 0;
             while (written < bytes.len) {
                 const n = std.posix.write(fd, bytes[written..]) catch return false;

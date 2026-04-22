@@ -247,6 +247,7 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
         /// Read by main.zig for supervisor wiring and by
         /// process_inbox for 503 gating.
         pub fn sidecar_any_ready(server: *const Server) bool {
+            comptime assert(App.sidecar_count > 0 or !App.sidecar_enabled);
             if (!App.sidecar_enabled) return false;
             if (!server.shm_bus.ready) return false;
             for (server.sidecar_connections_ready) |ready| {
@@ -255,14 +256,28 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
             return false;
         }
 
-        /// Returns true if any SHM dispatch entry is waiting for a sidecar response.
-        /// Used by the main loop to busy-poll (run_for_ns=0) when work is in-flight.
-        pub fn has_pending_shm(server: *const Server) bool {
-            if (!App.sidecar_enabled) return false;
+        /// Compute the IO wait budget for the next tick.
+        ///
+        /// Sidecar responses arrive over shared memory with no kernel
+        /// notification, so when any SHM slot is in-flight we must poll
+        /// continuously. Returning 0 turns the next `run_for_ns` into a
+        /// non-blocking drain — this is the same mechanism that achieved
+        /// 57K req/s before it was accidentally removed (see commit
+        /// 98c0b88). When no slot is pending, or when the sidecar is
+        /// disabled at compile time, fall through to `base_ns` to save CPU.
+        ///
+        /// Keeping this decision inside the server prevents `main.zig` from
+        /// needing to reason about SHM pipeline state.
+        pub fn tick_wait_ns(server: *const Server, base_ns: u64) u64 {
+            // A zero base_ns combined with no pending SHM would produce a
+            // zero wait and spin the tick loop — the caller's bug.
+            assert(base_ns > 0);
+
+            if (!App.sidecar_enabled) return base_ns;
             for (&server.shm_dispatch.entries) |*entry| {
-                if (entry.stage != .free) return true;
+                if (entry.stage != .free) return 0;
             }
-            return false;
+            return base_ns;
         }
 
         /// Initialize the server. Allocates the connection pool on the heap.
@@ -280,6 +295,9 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
             wal: ?*Wal,
             pending_index: Wal.PendingIndex,
         ) !Server {
+            assert(listen_fd > 0);
+            comptime assert(max_connections > 0);
+            comptime assert(pipeline_slots_max > 0);
             const connections = try allocator.alloc(Connection, max_connections);
             errdefer allocator.free(connections);
 
@@ -315,6 +333,8 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
         /// Must be called before the first tick. TB pattern: connections
         /// hold a context pointer to the server for callback dispatch.
         pub fn wire_connections(server: *Server) void {
+            assert(server.connections.len == max_connections);
+            assert(server.connections_used == 0);
             for (server.connections) |*conn| {
                 conn.* = Connection.init(
                     server.io,
@@ -331,6 +351,7 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
         /// TB pattern: dispatch immediately, or suspend if no slot.
         fn on_connection_ready(ctx: *anyopaque, conn: *Connection) void {
             const server: *Server = @ptrCast(@alignCast(ctx));
+            assert(conn.state == .ready);
             server.try_dispatch(conn);
         }
 
@@ -421,7 +442,9 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
         /// requests should fast-fail with 503 instead of queueing.
         fn all_slots_stuck(server: *Server) bool {
             if (!App.sidecar_enabled) return false;
+            comptime assert(sidecar_response_timeout_ticks > 1);
             const half_timeout = sidecar_response_timeout_ticks / 2;
+            assert(half_timeout > 0);
             for (&server.shm_dispatch.entries) |*entry| {
                 if (entry.stage == .free) return false; // at least one free slot
                 const elapsed = server.tick_count -% entry.pending_since;
@@ -479,6 +502,8 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
         /// Match HTTP method + path → operation using the compiled route
         /// table. Pure pattern matching — no handler logic.
         fn native_route(method: http.Method, path: []const u8) ?struct { operation: @import("../message.zig").Operation, id: u128 } {
+            assert(path.len > 0);
+            assert(path[0] == '/');
             const parse = @import("parse.zig");
             const gen = @import("../generated/routes.generated.zig");
 
@@ -515,6 +540,7 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
             body: []const u8,
             rows_buf: *[@import("../protocol.zig").frame_max]u8,
         ) struct { rows_len: usize, row_set_count: u8 } {
+            assert(spec.queries.len <= std.math.maxInt(u8));
             var rows_pos: usize = 0;
             const row_set_count: u8 = @intCast(spec.queries.len);
 
@@ -657,6 +683,7 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
         /// Extract a quoted string value starting at a position in JSON.
         /// Skips whitespace, expects opening ", returns content up to closing ".
         fn extract_json_string_value(body: []const u8, start: usize) ?[]const u8 {
+            assert(start <= body.len);
             var vpos = start;
             while (vpos < body.len and body[vpos] == ' ') vpos += 1;
             if (vpos >= body.len or body[vpos] != '"') return null;
@@ -685,72 +712,92 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
                 return;
             }
 
-            var pos: usize = 0;
-            if (pos >= data.len) {
-                server.send_handle_render_for_entry(entry, &.{}, 0);
-                return;
-            }
-
             // Parse: [query_count:1][queries...][key_count:1][keys...]
+            var pos: usize = 0;
             const query_count = data[pos];
             pos += 1;
 
             var rows_buf: [proto.frame_max]u8 = undefined;
             var rows_pos: usize = 0;
-            const sm = server.state_machine;
 
             for (0..query_count) |_| {
-                if (pos >= data.len) break;
-                const mode_byte = data[pos];
-                pos += 1;
-                if (pos + 2 > data.len) break;
-                const sql_len = std.mem.readInt(u16, data[pos..][0..2], .big);
-                pos += 2;
-                if (pos + sql_len > data.len) break;
-                const sql = data[pos..][0..sql_len];
-                pos += sql_len;
-                if (pos >= data.len) break;
-                const param_count = data[pos];
-                pos += 1;
-
-                // Params are already in wire format (same as storage.bind_raw_params expects).
-                const params_start = pos;
-                // Skip params to find the end.
-                for (0..param_count) |_| {
-                    if (pos >= data.len) break;
-                    const tag = std.meta.intToEnum(proto.TypeTag, data[pos]) catch break;
-                    pos += 1;
-                    switch (tag) {
-                        .integer, .float => pos += 8,
-                        .text, .blob => {
-                            if (pos + 2 > data.len) break;
-                            const vlen = std.mem.readInt(u16, data[pos..][0..2], .big);
-                            pos += 2 + vlen;
-                        },
-                        .null => {},
-                    }
-                }
-                const params_buf = data[params_start..pos];
-
-                const mode: proto.QueryMode = if (mode_byte == 0x00) .query else .query_all;
-                // Debug logs removed — SQL execution is validated by bind_raw_params.
-                const result = sm.storage.query_raw(sql, params_buf, param_count, mode, rows_buf[rows_pos..]);
-                if (result) |rows| {
-                    rows_pos += rows.len;
-                } else {
-                    log.warn("prefetch SQL failed: \"{s}\" (params={d}). Check param placeholders (?1, ?2) and table names.", .{ sql, param_count });
-                    // Empty row set.
-                    if (rows_pos + 6 <= rows_buf.len) {
-                        std.mem.writeInt(u16, rows_buf[rows_pos..][0..2], 0, .big);
-                        std.mem.writeInt(u32, rows_buf[rows_pos + 2 ..][0..4], 0, .big);
-                        rows_pos += 6;
-                    }
-                }
+                if (!server.execute_prefetch_query(data, &pos, &rows_buf, &rows_pos)) break;
             }
 
-            // Skip key declarations (consumed by TS sidecar's requests map).
-            // Send handle_render CALL with the row sets.
+            // Key declarations follow the queries; we skip them here — they
+            // are consumed by the TS sidecar's requests map, not by native
+            // prefetch execution.
             server.send_handle_render_for_entry(entry, rows_buf[0..rows_pos], query_count);
+        }
+
+        /// Parse one query declaration from the stream, execute it against
+        /// storage, and append the row set to `rows_buf`. Advances `pos`
+        /// past the consumed bytes and `rows_pos` past the appended rows.
+        /// Returns false if the stream is malformed — caller breaks out.
+        ///
+        /// Wire format of one declaration:
+        ///   [mode:1][sql_len:2 BE][sql][param_count:1][params...]
+        /// Params are already in wire format (matches storage.bind_raw_params).
+        fn execute_prefetch_query(
+            server: *Server,
+            data: []const u8,
+            pos: *usize,
+            rows_buf: []u8,
+            rows_pos: *usize,
+        ) bool {
+            const proto = @import("../protocol.zig");
+
+            if (pos.* >= data.len) return false;
+            const mode_byte = data[pos.*];
+            pos.* += 1;
+            if (pos.* + 2 > data.len) return false;
+            const sql_len = std.mem.readInt(u16, data[pos.*..][0..2], .big);
+            pos.* += 2;
+            if (pos.* + sql_len > data.len) return false;
+            const sql = data[pos.*..][0..sql_len];
+            pos.* += sql_len;
+            if (pos.* >= data.len) return false;
+            const param_count = data[pos.*];
+            pos.* += 1;
+
+            // Skip params to find the end of this declaration.
+            const params_start = pos.*;
+            for (0..param_count) |_| {
+                if (pos.* >= data.len) return false;
+                const tag = std.meta.intToEnum(proto.TypeTag, data[pos.*]) catch return false;
+                pos.* += 1;
+                switch (tag) {
+                    .integer, .float => pos.* += 8,
+                    .text, .blob => {
+                        if (pos.* + 2 > data.len) return false;
+                        const vlen = std.mem.readInt(u16, data[pos.*..][0..2], .big);
+                        pos.* += 2 + vlen;
+                    },
+                    .null => {},
+                }
+            }
+            const params_buf = data[params_start..pos.*];
+            const mode: proto.QueryMode = if (mode_byte == 0x00) .query else .query_all;
+
+            const result = server.state_machine.storage.query_raw(
+                sql,
+                params_buf,
+                param_count,
+                mode,
+                rows_buf[rows_pos.*..],
+            );
+            if (result) |rows| {
+                rows_pos.* += rows.len;
+            } else {
+                log.warn("prefetch SQL failed: \"{s}\" (params={d}). Check param placeholders (?1, ?2) and table names.", .{ sql, param_count });
+                // Empty row set sentinel: u16 column_count=0, u32 row_count=0.
+                if (rows_pos.* + 6 <= rows_buf.len) {
+                    std.mem.writeInt(u16, rows_buf[rows_pos.*..][0..2], 0, .big);
+                    std.mem.writeInt(u32, rows_buf[rows_pos.* + 2 ..][0..4], 0, .big);
+                    rows_pos.* += 6;
+                }
+            }
+            return true;
         }
 
         /// Send handle_render CALL for an entry that completed route+prefetch.
@@ -802,6 +849,7 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
         /// Minimal JSON string field extractor. Finds "field":"value" in body.
         /// No full parser — bounded scan, no allocations.
         fn json_extract_string(body: []const u8, field: []const u8) ?[]const u8 {
+            assert(field.len > 0);
             // Search for "field":" pattern.
             var pos: usize = 0;
             while (pos + field.len + 4 < body.len) : (pos += 1) {
@@ -829,6 +877,10 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
         /// SHM: process completed entries — encode response and send.
         fn process_shm_completions(server: *Server) void {
             if (!App.sidecar_enabled) return;
+            // Post: no stage transition should leave the handle_lock held
+            // across completions — each stage either runs to completion
+            // synchronously or leaves the lock untouched.
+            assert(server.handle_lock == null or server.shm_dispatch.entries.len > 0);
 
             for (&server.shm_dispatch.entries) |*entry| {
                 switch (entry.stage) {
@@ -847,6 +899,7 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
             if (server.handle_lock != null) return;
 
             const entry_idx = (@intFromPtr(entry) - @intFromPtr(&server.shm_dispatch.entries)) / @sizeOf(ShmDispatch.Entry);
+            assert(entry_idx < server.shm_dispatch.entries.len);
             server.handle_lock = @intCast(entry_idx);
 
             const sm = server.state_machine;
@@ -876,6 +929,8 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
         /// Execute SQL writes and append WAL entry. Standalone helper
         /// to keep execute_shm_writes under the 70-line limit.
         fn shm_execute_sql_and_wal(server: *Server, entry: *const ShmDispatch.Entry) void {
+            // Lock must be held — caller took it before calling us.
+            assert(server.handle_lock != null);
             const sm = server.state_machine;
             const use_recording = entry.is_mutation and server.wal != null;
 
@@ -905,11 +960,13 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
             recorded_writes: []const u8,
             record_count: u8,
         ) void {
+            assert(entry.is_mutation);
             const wal = server.wal orelse return;
             if (wal.disabled) return;
             const sm = server.state_machine;
 
             if (entry.worker_completes_op != 0) {
+                assert(entry.worker_completes_op < wal.op); // completing a dispatch that precedes us
                 wal.append_completion(
                     entry.operation, sm.now,
                     recorded_writes, record_count,
@@ -929,6 +986,7 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
         /// Execute parsed write statements from sidecar RESULT data.
         /// Standalone with primitive args for hot-loop extraction (TB pattern).
         fn execute_parsed_writes(write_view: *Storage.WriteView, data: []const u8, write_count: u8) void {
+            if (write_count > 0) assert(data.len > 0);
             const proto = @import("../protocol.zig");
             var dpos: usize = 0;
             for (0..write_count) |_| {
@@ -953,6 +1011,8 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
         /// entries in .render_complete stage.
         fn encode_shm_response(server: *Server, entry: *ShmDispatch.Entry) void {
             assert(entry.stage == .render_complete);
+            // Render has populated the HTML payload.
+            assert(entry.html.len > 0 or entry.handle_status != .ok);
 
             const conn: *Connection = @ptrCast(@alignCast(entry.connection orelse {
                 server.shm_dispatch.release_entry(entry);
@@ -1002,11 +1062,16 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
         fn shm_on_frame(ctx: *anyopaque, _: u8, frame: []const u8) void {
             const server: *Server = @ptrCast(@alignCast(ctx));
             if (!App.sidecar_enabled) return;
+            // Frames arrive only after the bus is wired and a CALL was sent.
+            assert(frame.len > 0);
             server.shm_dispatch.on_frame(frame);
             server.process_shm_completions();
         }
 
         fn suspend_connection(server: *Server, conn: *Connection) void {
+            // A ready connection can be suspended for re-dispatch; a
+            // closed connection would be a use-after-free.
+            assert(conn.state == .ready);
             // Don't add duplicates.
             if (conn.active_next != null) return;
             if (server.suspended_head == conn) return;
@@ -1018,6 +1083,9 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
                 server.suspended_head = conn;
             }
             server.suspended_tail = conn;
+            // Pair: head and tail are either both set or both null.
+            assert(server.suspended_head != null);
+            assert(server.suspended_tail != null);
         }
 
         /// Drain suspended connections — called when a pipeline slot
@@ -1043,6 +1111,8 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
         /// pipeline cleanup.
         fn on_connection_close(ctx: *anyopaque, conn: *Connection) void {
             const server: *Server = @ptrCast(@alignCast(ctx));
+            // Pre: close never runs for a connection we never accepted.
+            assert(server.connections_used > 0);
             server.connections_used -= 1;
 
             // Cancel any pipeline slot using this connection.
@@ -1120,6 +1190,7 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
         }
 
         pub fn deinit(server: *Server, allocator: std.mem.Allocator) void {
+            assert(server.connections.len == max_connections);
             if (App.sidecar_enabled) {
                 server.shm_bus.deinit();
                 server.worker_dispatch.deinit();
@@ -1145,6 +1216,7 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
         /// 5. Sidecar response timeout (scans pipeline_slots_max only)
         /// 6. Metrics emission
         pub fn tick(server: *Server) void {
+            assert(server.listen_fd > 0);
             server.tick_count +%= 1;
             server.time.tick();
             defer server.invariants();
@@ -1177,8 +1249,10 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
         /// accept — same primitive as the sidecar bus. No epoll
         /// registration, no ONESHOT race, deterministic per-tick.
         fn maybe_accept(server: *Server) void {
+            assert(server.connections_used <= server.connections.len);
             while (server.connections_used < server.connections.len) {
                 const accepted_fd = server.io.try_accept(server.listen_fd) orelse return;
+                assert(accepted_fd > 0);
                 IO.set_tcp_options(accepted_fd);
 
                 const conn = for (server.connections) |*conn| {
@@ -1204,10 +1278,12 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
         /// a ready sidecar connection. Native handlers always use slot[0].
         /// Returns null if no slot is free or no connections are ready.
         fn find_free_slot(server: *Server) ?*PipelineSlot {
+            comptime assert(pipeline_slots_max > 0);
             if (!App.sidecar_enabled) {
                 const slot = &server.pipeline_slots[0];
                 return if (slot.stage == .idle) slot else null;
             }
+            assert(server.next_slot < pipeline_slots_max);
             // Round-robin: start from next_slot to distribute evenly.
             var i: u8 = 0;
             while (i < pipeline_slots_max) : (i += 1) {
@@ -1229,6 +1305,9 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
         /// release, continue to render. After each dispatch, the
         /// lock is free for the next waiter.
         fn wake_handle_waiters(server: *Server) void {
+            // Invariant: wake_handle_waiters runs between dispatches, so
+            // no slot should be re-entered while being woken.
+            for (&server.pipeline_slots) |*slot| assert(!slot.dispatch_entered);
             for (&server.pipeline_slots) |*slot| {
                 if (server.handle_lock != null) return;
                 if (slot.stage == .handle_wait) {
@@ -1278,216 +1357,225 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
         /// Each stage either completes (advance to next) or pends (return).
         /// For native handlers, all stages complete in one call. For async
         /// handlers (Phase 2), a stage may return .pending.
+        /// Drive the pipeline state machine for one slot until it either
+        /// completes a stage transition that needs IO (and returns), or
+        /// finishes the request. Each stage is a helper that either
+        /// returns `true` (advanced — loop again) or `false` (suspended /
+        /// done — exit). The switch here is the only place control flow
+        /// lives; the helpers are leaf logic.
+        ///
+        /// TB pattern: bounded loop. 4 advancing stages × 2 iterations
+        /// for safety. `.idle` and `.handle_wait` exit immediately and
+        /// never consume an iteration. If the loop ever exceeds 8 it
+        /// means a helper made a backward jump or an infinite cycle —
+        /// crash (`unreachable`).
         fn commit_dispatch(server: *Server, slot: *PipelineSlot) void {
-            // Re-entrancy guard (TB pattern).
             assert(!slot.dispatch_entered);
             slot.dispatch_entered = true;
             defer slot.dispatch_entered = false;
 
-            const sm = server.state_machine;
-            const conn = slot.connection orelse return;
+            for (0..8) |_| {
+                const advance = switch (slot.stage) {
+                    .idle, .handle_wait => return,
+                    .route => server.commit_route(slot),
+                    .prefetch => server.commit_prefetch(slot),
+                    .handle => server.commit_handle(slot),
+                    .render => server.commit_render(slot),
+                };
+                if (!advance) return;
+            }
+            unreachable; // loop bound exceeded — pipeline bug
+        }
+
+        /// Route: parse HTTP and resolve to a typed Message. On unmapped
+        /// request, synthesize an error response and close. (The 503
+        /// "sidecar not connected" case is handled in process_inbox
+        /// before the pipeline starts.)
+        fn commit_route(server: *Server, slot: *PipelineSlot) bool {
+            const conn = slot.connection orelse return false;
             const idx = server.slot_index(slot);
             const handler = &server.handlers[idx];
 
-            // Bounded loop (TB pattern). 4 advancing stages (route →
-            // prefetch → handle → render) × 2 for safety. .handle_wait
-            // returns immediately (never consumes an iteration). If we
-            // ever loop more than 8 times, a bug caused a backward jump
-            // or infinite cycle — crash immediately.
-            for (0..8) |_| {
-                switch (slot.stage) {
-                    .idle => return,
+            const parsed = switch (http.parse_request(conn.recv_buf[0..conn.recv_pos])) {
+                .complete => |p| p,
+                .incomplete, .invalid => unreachable,
+            };
+            conn.is_datastar_request = parsed.is_datastar_request;
 
-                    .route => {
-                        // Route: parse HTTP and resolve to typed Message.
-                        // Note: 503 (sidecar not connected) is handled in
-                        // process_inbox before the pipeline starts.
-                        const parsed = switch (http.parse_request(conn.recv_buf[0..conn.recv_pos])) {
-                            .complete => |p| p,
-                            .incomplete, .invalid => unreachable,
-                        };
-                        conn.is_datastar_request = parsed.is_datastar_request;
+            var msg = handler.handler_route(parsed.method, parsed.path, parsed.body) orelse {
+                if (handler.is_handler_pending()) return false;
+                log.mark.warn("unmapped request: {s} {s} fd={d}", .{ @tagName(parsed.method), parsed.path, conn.fd });
+                const resp = unmapped_response(conn);
+                conn.keep_alive = false;
+                conn.set_response(resp.offset, resp.len);
+                server.pipeline_reset(slot);
+                return false;
+            };
+            msg.set_credential(parsed.identity_cookie);
 
-                        var msg = handler.handler_route(parsed.method, parsed.path, parsed.body) orelse {
-                            if (handler.is_handler_pending()) return;
-                            log.mark.warn("unmapped request: {s} {s} fd={d}", .{ @tagName(parsed.method), parsed.path, conn.fd });
-                            const resp = unmapped_response(conn);
-                            conn.keep_alive = false;
-                            conn.set_response(resp.offset, resp.len);
-                            server.pipeline_reset(slot);
-                            return;
-                        };
-                        msg.set_credential(parsed.identity_cookie);
+            slot.msg = msg;
+            slot.stage = .prefetch;
+            server.tracer.start(.{ .pipeline_stage = .{ .stage = .prefetch, .slot = idx, .op = @intFromEnum(msg.operation) } });
+            return true;
+        }
 
-                        slot.msg = msg;
-                        slot.stage = .prefetch;
-                        server.tracer.start(.{ .pipeline_stage = .{ .stage = .prefetch, .slot = idx, .op = @intFromEnum(msg.operation) } });
-                        continue;
-                    },
+        /// Prefetch: resolve the credential → identity, then run the
+        /// handler's prefetch. Returns to `.handle` on success. On busy
+        /// (no slot/cache available), reset and suspend the connection;
+        /// resume_suspended will re-dispatch from the tick loop.
+        fn commit_prefetch(server: *Server, slot: *PipelineSlot) bool {
+            const sm = server.state_machine;
+            const idx = server.slot_index(slot);
+            const handler = &server.handlers[idx];
+            const msg = slot.msg.?;
 
-                    .prefetch => {
-                        const msg = slot.msg.?;
+            if (slot.identity == null) {
+                slot.identity = sm.resolve_credential(msg);
+            }
 
-                        // Auth: resolve credential → identity (once per request).
-                        if (slot.identity == null) {
-                            slot.identity = sm.resolve_credential(msg);
-                        }
+            slot.cache = handler.handler_prefetch(sm.storage, &msg);
+            if (slot.cache != null) {
+                server.tracer.stop(.{ .pipeline_stage = .{ .stage = .prefetch, .slot = idx, .op = @intFromEnum(msg.operation) } });
+                server.tracer.start(.{ .pipeline_stage = .{ .stage = .handle, .slot = idx, .op = @intFromEnum(msg.operation) } });
+                slot.stage = .handle;
+                return true;
+            }
 
-                        // Handler prefetch — may return null (busy or pending).
-                        slot.cache = handler.handler_prefetch(sm.storage, &msg);
-                        if (slot.cache != null) {
-                            server.tracer.stop(.{ .pipeline_stage = .{ .stage = .prefetch, .slot = idx, .op = @intFromEnum(msg.operation) } });
-                            server.tracer.start(.{ .pipeline_stage = .{ .stage = .handle, .slot = idx, .op = @intFromEnum(msg.operation) } });
-                            slot.stage = .handle;
-                            continue;
-                        }
+            if (handler.is_handler_pending()) return false; // async IO in-flight
 
-                        if (handler.is_handler_pending()) return; // async IO in-flight
+            // Busy: reset slot + suspend connection. Tick will re-dispatch.
+            server.tracer.cancel_slot(idx);
+            const busy_conn = slot.connection;
+            server.pipeline_reset(slot);
+            if (busy_conn) |bc| {
+                if (bc.state == .ready) server.suspend_connection(bc);
+            }
+            return false;
+        }
 
-                        // Busy — reset slot and suspend connection for
-                        // retry. resume_suspended (called from tick)
-                        // will re-dispatch when a slot is free.
-                        server.tracer.cancel_slot(idx);
-                        const busy_conn = slot.connection;
-                        server.pipeline_reset(slot);
-                        if (busy_conn) |bc| {
-                            if (bc.state == .ready) server.suspend_connection(bc);
-                        }
-                        return;
-                    },
+        /// Handle: run the domain logic inside a transaction, log the
+        /// writes, and build the pipeline response. Mutations serialize
+        /// through `handle_lock` (SQLite WAL allows concurrent readers
+        /// but a single writer); read-only operations skip the lock.
+        fn commit_handle(server: *Server, slot: *PipelineSlot) bool {
+            const sm = server.state_machine;
+            const idx = server.slot_index(slot);
+            const handler = &server.handlers[idx];
+            const msg = slot.msg.?;
 
-                    .handle => {
-                        const msg = slot.msg.?;
-                        assert(slot.cache != null);
-                        assert(slot.identity != null);
-                        // Invariant: handle result not yet produced.
-                        assert(slot.pipeline_resp == null);
+            assert(slot.cache != null);
+            assert(slot.identity != null);
+            assert(slot.pipeline_resp == null);
 
-                        const is_mutation = msg.operation.is_mutation();
-
-                        // Exclusive write lock — SQLite WAL allows
-                        // concurrent reads but one writer at a time.
-                        // Read-only operations skip the lock entirely.
-                        if (is_mutation) {
-                            if (server.handle_lock) |_| {
-                                slot.stage = .handle_wait;
-                                return;
-                            }
-                            server.handle_lock = idx;
-                        }
-
-                        const cache = slot.cache.?;
-                        const identity = slot.identity.?;
-
-                        const fw = Handlers.FwCtx{
-                            .identity = identity,
-                            .now = sm.now,
-                            .is_sse = false, // handle stage; SSE resolved at render
-                        };
-
-                        // Execute handler inside a transaction.
-                        if (is_mutation) sm.begin_batch();
-
-                        var write_view = if (is_mutation and server.wal != null)
-                            Storage.WriteView.init_recording(sm.storage, &server.wal_record_scratch)
-                        else
-                            Storage.WriteView.init(sm.storage);
-
-                        const handle_result = handler.handler_execute(
-                            cache,
-                            msg,
-                            fw,
-                            &write_view,
-                        );
-
-                        // WAL: log SQL writes.
-                        if (is_mutation) {
-                            if (server.wal) |wal| {
-                                if (!wal.disabled) {
-                                    wal.append_writes(
-                                        msg.operation,
-                                        sm.now,
-                                        if (write_view.record_buf) |buf| buf[0..write_view.record_pos] else "",
-                                        write_view.record_count,
-                                        "", // no worker dispatches (native pipeline)
-                                        0,
-                                        &server.wal_scratch,
-                                    );
-                                }
-                            }
-                            sm.commit_batch();
-                        }
-
-                        // Build pipeline response from handler result + auth.
-                        const is_auth = identity.is_authenticated != 0 or
-                            handle_result.session_action == .set_authenticated;
-
-                        slot.pipeline_resp = .{
-                            .status = handle_result.status,
-                            .session_action = handle_result.session_action,
-                            .user_id = identity.user_id,
-                            .is_authenticated = is_auth,
-                            .is_new_visitor = identity.is_new != 0,
-                        };
-
-                        server.tracer.stop(.{ .pipeline_stage = .{ .stage = .handle, .slot = idx, .op = @intFromEnum(msg.operation) } });
-                        server.tracer.count(.{ .requests_by_operation = .{ .operation = msg.operation } }, 1);
-                        server.tracer.count(.{ .requests_by_status = .{ .status = handle_result.status } }, 1);
-
-                        // Release write lock (mutations only).
-                        if (is_mutation) {
-                            assert(server.handle_lock.? == idx);
-                            server.handle_lock = null;
-                        }
-
-                        slot.stage = .render;
-                        server.tracer.start(.{ .pipeline_stage = .{ .stage = .render, .slot = idx, .op = @intFromEnum(msg.operation) } });
-                        continue;
-                    },
-
-                    .handle_wait => {
-                        // Waiting for handle_lock. wake_handle_waiters
-                        // sets stage back to .handle when the lock is free.
-                        return;
-                    },
-
-                    .render => {
-                        const msg = slot.msg.?;
-                        assert(slot.pipeline_resp != null);
-                        assert(slot.identity != null);
-
-                        const pipeline_resp = slot.pipeline_resp.?;
-                        const cache = slot.cache.?;
-                        const identity = slot.identity.?;
-
-                        const fw = Handlers.FwCtx{
-                            .identity = identity,
-                            .now = sm.now,
-                            .is_sse = conn.is_datastar_request,
-                        };
-
-                        const ro = Storage.ReadView.init(sm.storage);
-                        // render_scratch_buf is shared across slots. Safe because
-                        // render completion (write to buf + encode_and_respond) is
-                        // driven by sequential frame callbacks — only one slot
-                        // completes render per frame. Multiple slots can be in
-                        // .render pending simultaneously, but only one writes
-                        // to the buffer at a time.
-                        const html = handler.handler_render(
-                            cache,
-                            msg.operation,
-                            pipeline_resp.status,
-                            fw,
-                            &App.render_scratch_buf,
-                            ro,
-                        ) orelse return; // pending — sidecar render in-flight
-
-                        server.encode_and_respond(slot, conn, msg, pipeline_resp, html);
-                        return;
-                    },
-
+            const is_mutation = msg.operation.is_mutation();
+            if (is_mutation) {
+                if (server.handle_lock) |_| {
+                    slot.stage = .handle_wait;
+                    return false;
                 }
-            } else unreachable; // loop bound exceeded — pipeline bug
+                server.handle_lock = idx;
+            }
+
+            const identity = slot.identity.?;
+            const fw = Handlers.FwCtx{
+                .identity = identity,
+                .now = sm.now,
+                .is_sse = false, // resolved at render
+            };
+
+            if (is_mutation) sm.begin_batch();
+            var write_view = if (is_mutation and server.wal != null)
+                Storage.WriteView.init_recording(sm.storage, &server.wal_record_scratch)
+            else
+                Storage.WriteView.init(sm.storage);
+
+            const handle_result = handler.handler_execute(slot.cache.?, msg, fw, &write_view);
+
+            if (is_mutation) {
+                server.append_writes_to_wal(msg.operation, sm.now, &write_view);
+                sm.commit_batch();
+            }
+
+            slot.pipeline_resp = .{
+                .status = handle_result.status,
+                .session_action = handle_result.session_action,
+                .user_id = identity.user_id,
+                .is_authenticated = identity.is_authenticated != 0 or
+                    handle_result.session_action == .set_authenticated,
+                .is_new_visitor = identity.is_new != 0,
+            };
+
+            server.tracer.stop(.{ .pipeline_stage = .{ .stage = .handle, .slot = idx, .op = @intFromEnum(msg.operation) } });
+            server.tracer.count(.{ .requests_by_operation = .{ .operation = msg.operation } }, 1);
+            server.tracer.count(.{ .requests_by_status = .{ .status = handle_result.status } }, 1);
+
+            if (is_mutation) {
+                assert(server.handle_lock.? == idx);
+                server.handle_lock = null;
+            }
+
+            slot.stage = .render;
+            server.tracer.start(.{ .pipeline_stage = .{ .stage = .render, .slot = idx, .op = @intFromEnum(msg.operation) } });
+            return true;
+        }
+
+        /// Append recorded SQL writes from a mutation handler into the
+        /// WAL. No-op if the WAL is absent or disabled (sim tests).
+        fn append_writes_to_wal(
+            server: *Server,
+            operation: App.Operation,
+            now: i64,
+            write_view: *const Storage.WriteView,
+        ) void {
+            const wal = server.wal orelse return;
+            if (wal.disabled) return;
+            wal.append_writes(
+                operation,
+                now,
+                if (write_view.record_buf) |buf| buf[0..write_view.record_pos] else "",
+                write_view.record_count,
+                "", // no worker dispatches on the native pipeline
+                0,
+                &server.wal_scratch,
+            );
+        }
+
+        /// Render: call the handler's render fn to produce HTML, then
+        /// encode the response and send. Returns false (terminal stage).
+        ///
+        /// `render_scratch_buf` is shared across slots — safe because
+        /// render completion is driven by sequential frame callbacks:
+        /// only one slot writes to the buffer at a time, though many
+        /// may be in `.render` pending simultaneously.
+        fn commit_render(server: *Server, slot: *PipelineSlot) bool {
+            const conn = slot.connection orelse return false;
+            const sm = server.state_machine;
+            const idx = server.slot_index(slot);
+            const handler = &server.handlers[idx];
+            const msg = slot.msg.?;
+
+            assert(slot.pipeline_resp != null);
+            assert(slot.identity != null);
+
+            const pipeline_resp = slot.pipeline_resp.?;
+            const fw = Handlers.FwCtx{
+                .identity = slot.identity.?,
+                .now = sm.now,
+                .is_sse = conn.is_datastar_request,
+            };
+
+            const ro = Storage.ReadView.init(sm.storage);
+            const html = handler.handler_render(
+                slot.cache.?,
+                msg.operation,
+                pipeline_resp.status,
+                fw,
+                &App.render_scratch_buf,
+                ro,
+            ) orelse return false; // sidecar render in-flight
+
+            server.encode_and_respond(slot, conn, msg, pipeline_resp, html);
+            return false;
         }
 
         /// Encode response and send to client.
@@ -1532,12 +1620,20 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
             // A slot holding the write lock can't be externally reset —
             // .handle is synchronous, completes within the tick. If this
             // fires, the event loop model changed and the lock would leak.
+            //
+            // This function IS called from within commit_dispatch (via
+            // encode_and_respond → pipeline_reset), so `dispatch_entered`
+            // is expected to be true during the call. The loop in
+            // commit_dispatch tolerates this because the caller returns
+            // immediately after (the `return false` from commit_render).
             const idx = server.slot_index(slot);
             if (server.handle_lock) |lock_holder| {
                 assert(lock_holder != idx);
             }
             server.handlers[idx].reset_handler_state();
             slot.reset();
+            // Post: the slot is idle and available to find_free_slot.
+            assert(slot.stage == .idle);
 
             // Immediately dispatch the next suspended connection to
             // the freed slot. Without this, the slot idles until the
@@ -1572,6 +1668,8 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
         /// - After handshake: routes to connection's paired handler.
         pub fn sidecar_on_frame(ctx: *anyopaque, connection_index: u8, frame: []const u8) void {
             if (!App.sidecar_enabled) unreachable;
+            assert(connection_index < App.sidecar_count);
+            assert(frame.len > 0);
             const server: *Server = @ptrCast(@alignCast(ctx));
 
             if (!server.sidecar_connections_ready[connection_index]) {
@@ -1618,6 +1716,7 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
         /// poll_shm → on_frame can't trigger sidecar_on_close mid-tick.
         pub fn sidecar_on_close(ctx: *anyopaque, connection_index: u8, reason: SidecarBus.Connection.CloseReason) void {
             if (!App.sidecar_enabled) unreachable;
+            assert(connection_index < App.sidecar_count);
             const server: *Server = @ptrCast(@alignCast(ctx));
             log.info("sidecar: connection {d} disconnected (reason={s})", .{ connection_index, @tagName(reason) });
 
@@ -1665,6 +1764,10 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
         /// HTML with the committed status. Never retry — retrying would
         /// re-execute writes (duplicate mutations).
         fn shm_fallback_response(server: *Server, entry: *ShmDispatch.Entry) void {
+            // Only entries that finished writing but lost their render
+            // should land here — fallback for an earlier stage would
+            // indicate a missed cleanup elsewhere.
+            assert(entry.stage == .write_complete);
             const conn: *Connection = @ptrCast(@alignCast(entry.connection orelse {
                 server.shm_dispatch.release_entry(entry);
                 return;
@@ -1699,6 +1802,7 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
         /// supervisor to restart.
         fn terminate_sidecar_connection(server: *Server, connection_idx: u8) void {
             if (!App.sidecar_enabled) unreachable;
+            assert(connection_idx < App.sidecar_count);
             server.sidecar_bus.terminate_connection(connection_idx);
         }
 
@@ -1738,6 +1842,8 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
         /// `wal_op` is the op of the WAL entry that recorded these dispatches
         /// (captured at append time, not derived from wal.op).
         fn add_dispatches_to_pending(server: *Server, entry: *const ShmDispatch.Entry, wal_op: u64) void {
+            assert(wal_op > 0);
+            assert(entry.handle_dispatch_count > 0);
             const pd = @import("pending_dispatch.zig");
             var dpos: usize = 0;
             for (0..entry.handle_dispatch_count) |_| {
@@ -1771,8 +1877,10 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
         /// Stops when no more pending entries or all SHM slots are full (backpressure).
         fn dispatch_pending_workers(server: *Server) void {
             const idx = &server.pending_index;
+            assert(idx.len <= idx.entries.len);
             for (idx.entries[0..idx.len]) |*pd_entry| {
                 if (pd_entry.state != .pending) continue;
+                assert(pd_entry.op > 0); // 0 is the root entry — never pending
 
                 const slot = server.worker_dispatch.acquire_slot() orelse return; // backpressure
                 if (!server.worker_dispatch.dispatch(
@@ -1804,6 +1912,7 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
 
             while (server.worker_dispatch.take_completed()) |w_entry| {
                 const dispatch_op = w_entry.dispatch_op;
+                assert(dispatch_op > 0); // WAL ops are 1-based; 0 means uninitialized
                 const is_failure = w_entry.result_flag != .success;
 
                 // Look up the completion operation from the pending index.
@@ -1857,8 +1966,10 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
         /// Check for in-flight workers past their deadline. Resolve as dead.
         fn check_worker_deadlines(server: *Server) void {
             const deadline = @import("constants.zig").worker_deadline_ticks;
+            comptime assert(deadline > 0);
             while (server.worker_dispatch.check_deadlines(server.tick_count, deadline)) |entry| {
                 const dispatch_op = entry.dispatch_op;
+                assert(dispatch_op > 0);
 
                 // WAL: record dead-dispatch entry.
                 if (server.wal) |wal| {
@@ -1882,6 +1993,7 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
         }
 
         fn log_metrics(server: *Server) void {
+            comptime assert(metrics_interval_ticks > 0);
             if (server.tick_count % metrics_interval_ticks != 0) return;
 
             // Push connection pool gauges into tracer.
@@ -1899,6 +2011,8 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
                     .closing, .free => {},
                 }
             }
+            // Pair: the sum of by-state counters equals the total active count.
+            assert(connections_receiving + connections_ready + connections_sending <= connections_active);
             server.tracer.gauge(.connections_active, connections_active);
             server.tracer.gauge(.connections_receiving, connections_receiving);
             server.tracer.gauge(.connections_ready, connections_ready);

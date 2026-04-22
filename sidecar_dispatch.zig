@@ -604,23 +604,34 @@ pub fn SidecarDispatchType(comptime Bus: type) type {
         /// Parse combined handle+render RESULT.
         /// Format: [status_len:2 BE][status][session_action:1][write_count:1][writes...][dispatch_count:1][dispatches...][html to end]
         fn parse_combined_result(_: *Self, entry: *Entry, data: []const u8) void {
-            // Stage precondition: only called for combined_pending entries.
             assert(entry.stage == .combined_pending);
 
-            if (data.len < protocol.handle_result_min_size) {
+            const header_end = parse_combined_header(entry, data) orelse {
                 entry.handle_status = .storage_error;
                 entry.stage = .combined_complete;
                 return;
-            }
+            };
+
+            var pos = header_end;
+            var buf_pos: usize = 0;
+            pos += copy_writes_section(entry, data[pos..], &buf_pos);
+            pos += copy_dispatches_section(entry, data[pos..], &buf_pos);
+            copy_html_remainder(entry, data[pos..], buf_pos);
+
+            entry.stage = .combined_complete;
+        }
+
+        /// Parse the fixed-prefix header of a combined RESULT: status,
+        /// session_action, write_count. Populates the corresponding
+        /// `entry.handle_*` fields. Returns the byte offset past the
+        /// header, or null if the frame is too short / malformed.
+        fn parse_combined_header(entry: *Entry, data: []const u8) ?usize {
+            if (data.len < protocol.handle_result_min_size) return null;
 
             var pos: usize = 0;
             const status_len = std.mem.readInt(u16, data[pos..][0..2], .big);
             pos += 2;
-            if (pos + status_len + 3 > data.len) { // +3 for session_action + write_count + dispatch_count
-                entry.handle_status = .storage_error;
-                entry.stage = .combined_complete;
-                return;
-            }
+            if (pos + status_len + 3 > data.len) return null; // +3 for session_action, write_count, dispatch_count
             assert(pos + status_len <= data.len);
 
             entry.handle_status = message.Status.from_string(data[pos..][0..status_len]) orelse blk: {
@@ -640,75 +651,92 @@ pub fn SidecarDispatchType(comptime Bus: type) type {
             entry.handle_write_count = data[pos];
             pos += 1;
             assert(pos <= data.len);
+            return pos;
+        }
 
-            // Skip past writes.
-            var buf_pos: usize = 0;
-            if (entry.handle_write_count > 0) {
-                const write_data = data[pos..];
-                var wpos: usize = 0;
-                for (0..entry.handle_write_count) |_| {
-                    if (wpos + 2 > write_data.len) break;
-                    const sql_len = std.mem.readInt(u16, write_data[wpos..][0..2], .big);
-                    wpos += 2;
-                    if (wpos + sql_len > write_data.len) break;
-                    wpos += sql_len;
-                    if (wpos >= write_data.len) break;
-                    const param_count = write_data[wpos];
-                    wpos += 1;
-                    wpos = @import("protocol.zig").skip_params(write_data, wpos, param_count) orelse break;
-                }
-                const writes_len = wpos;
-                assert(writes_len <= write_data.len);
-                const copy_len = @min(writes_len, entry.handle_buf.len);
-                @memcpy(entry.handle_buf[0..copy_len], write_data[0..copy_len]);
-                entry.handle_writes = entry.handle_buf[0..copy_len];
-                buf_pos = copy_len;
-                pos += writes_len;
-            } else {
+        /// Copy the SQL-writes section from `write_data` into
+        /// `entry.handle_buf`. Returns the number of bytes consumed from
+        /// `write_data` (so the caller can advance its position pointer).
+        /// `buf_pos` is advanced by the number of bytes appended to
+        /// `handle_buf`.
+        ///
+        /// Each write declaration is [sql_len:2 BE][sql][param_count:1][params...].
+        fn copy_writes_section(entry: *Entry, write_data: []const u8, buf_pos: *usize) usize {
+            if (entry.handle_write_count == 0) {
                 entry.handle_writes = "";
+                return 0;
             }
 
-            // Parse dispatch section: [dispatch_count:1][dispatches...]
-            if (pos < data.len) {
-                entry.handle_dispatch_count = data[pos];
-                pos += 1;
+            var wpos: usize = 0;
+            for (0..entry.handle_write_count) |_| {
+                if (wpos + 2 > write_data.len) break;
+                const sql_len = std.mem.readInt(u16, write_data[wpos..][0..2], .big);
+                wpos += 2;
+                if (wpos + sql_len > write_data.len) break;
+                wpos += sql_len;
+                if (wpos >= write_data.len) break;
+                const param_count = write_data[wpos];
+                wpos += 1;
+                wpos = @import("protocol.zig").skip_params(write_data, wpos, param_count) orelse break;
+            }
 
-                if (entry.handle_dispatch_count > 0) {
-                    const pd = @import("framework/pending_dispatch.zig");
-                    const dispatch_data = data[pos..];
-                    var dpos: usize = 0;
-                    for (0..entry.handle_dispatch_count) |_| {
-                        _ = pd.parse_one_dispatch(dispatch_data, &dpos) orelse break;
-                    }
-                    const dispatches_len = dpos;
-                    const dcopy_len = @min(dispatches_len, entry.handle_buf.len - buf_pos);
-                    @memcpy(entry.handle_buf[buf_pos..][0..dcopy_len], dispatch_data[0..dcopy_len]);
-                    entry.handle_dispatches = entry.handle_buf[buf_pos..][0..dcopy_len];
-                    buf_pos += dcopy_len;
-                    pos += dispatches_len;
-                } else {
-                    entry.handle_dispatches = "";
-                }
-            } else {
+            const writes_len = wpos;
+            assert(writes_len <= write_data.len);
+            const copy_len = @min(writes_len, entry.handle_buf.len);
+            @memcpy(entry.handle_buf[0..copy_len], write_data[0..copy_len]);
+            entry.handle_writes = entry.handle_buf[0..copy_len];
+            buf_pos.* = copy_len;
+            return writes_len;
+        }
+
+        /// Copy the dispatch section from `dispatch_data` into
+        /// `entry.handle_buf` after any writes. Returns the number of
+        /// bytes consumed (count byte + dispatch bytes). `buf_pos` is
+        /// advanced by the number of bytes appended to `handle_buf`.
+        ///
+        /// Wire format: [dispatch_count:1][dispatches...].
+        fn copy_dispatches_section(entry: *Entry, dispatch_data: []const u8, buf_pos: *usize) usize {
+            if (dispatch_data.len == 0) {
                 entry.handle_dispatch_count = 0;
                 entry.handle_dispatches = "";
+                return 0;
             }
 
-            // HTML is the remainder. Store in handle_buf after writes + dispatches.
-            const html_data = data[pos..];
-            const html_len = @min(html_data.len, entry.handle_buf.len - @min(buf_pos, entry.handle_buf.len));
-            const html_start = buf_pos;
-            if (html_start + html_len <= entry.handle_buf.len) {
-                @memcpy(entry.handle_buf[html_start..][0..html_len], html_data[0..html_len]);
+            entry.handle_dispatch_count = dispatch_data[0];
+            if (entry.handle_dispatch_count == 0) {
+                entry.handle_dispatches = "";
+                return 1; // just the count byte
             }
-            entry.html_offset = html_start;
+
+            const pd = @import("framework/pending_dispatch.zig");
+            const body = dispatch_data[1..];
+            var dpos: usize = 0;
+            for (0..entry.handle_dispatch_count) |_| {
+                _ = pd.parse_one_dispatch(body, &dpos) orelse break;
+            }
+
+            assert(buf_pos.* <= entry.handle_buf.len);
+            const dispatches_len = dpos;
+            const dcopy_len = @min(dispatches_len, entry.handle_buf.len - buf_pos.*);
+            @memcpy(entry.handle_buf[buf_pos.*..][0..dcopy_len], body[0..dcopy_len]);
+            entry.handle_dispatches = entry.handle_buf[buf_pos.*..][0..dcopy_len];
+            buf_pos.* += dcopy_len;
+            return 1 + dispatches_len;
+        }
+
+        /// Copy the trailing HTML payload into `entry.handle_buf` after
+        /// writes + dispatches. `advance` will later read html_offset +
+        /// html_len to copy the HTML into render_buf — the bounds are
+        /// pair-asserted here at write time.
+        fn copy_html_remainder(entry: *Entry, html_data: []const u8, buf_pos: usize) void {
+            assert(buf_pos <= entry.handle_buf.len);
+            const html_len = @min(html_data.len, entry.handle_buf.len - buf_pos);
+            if (buf_pos + html_len <= entry.handle_buf.len) {
+                @memcpy(entry.handle_buf[buf_pos..][0..html_len], html_data[0..html_len]);
+            }
+            entry.html_offset = buf_pos;
             entry.html_len = html_len;
-
-            // Pair assertion: advance will read html_offset + html_len
-            // to copy HTML to render_buf. Verify bounds now at write time.
-            assert(html_start + html_len <= entry.handle_buf.len);
-
-            entry.stage = .combined_complete;
+            assert(buf_pos + html_len <= entry.handle_buf.len);
         }
 
         /// Parse 2-RT route+prefetch RESULT.
