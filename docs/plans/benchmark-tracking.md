@@ -499,21 +499,25 @@ Effort: 30 min. Dependencies: none. Unblocks E and F.
 
 Tasks:
 
-- [ ] Clone `https://github.com/hireAlanAyala/tiger-web-devhubdb` locally
-- [ ] Verify `fuzzing/` structure intact (`data.json` + `logs/`); do
-  not touch its existing CFO data
-- [ ] Create missing `devhub/` directory:
-  - `devhub/data.json` containing `[]`
-- [ ] Verify/create `fuzzing/totals.json` containing
-  `{"seeds_run": 0}` if absent (CFO's existing data may be
-  inconsistent with this; check before overwriting)
-- [ ] Commit and push
-- [ ] Generate a GitHub PAT with `contents: write` scope on
-  `hireAlanAyala/tiger-web-devhubdb` only
-- [ ] Add the PAT as `DEVHUBDB_PAT` in tiger_web's GitHub Actions
-  secrets
-- [ ] Verify `DEVHUBDB_PAT` is visible to tiger_web's default branch
-  CI context
+- [x] Clone `https://github.com/hireAlanAyala/tiger-web-devhubdb` locally
+- [x] Verified `fuzzing/` intact (`data.json` 39 KB + `logs/`); did
+  not touch existing CFO data
+- [x] Created `devhub/data.json` containing `[]`
+- [x] Created `fuzzing/totals.json` containing `{"seeds_run": 0}`
+  (was absent on remote)
+- [x] Commit + push (commit `d252562` on devhubdb `main`). Remote
+  paths confirmed via API:
+  `repos/hireAlanAyala/tiger-web-devhubdb/contents/devhub/data.json`
+  (3 bytes), `...fuzzing/totals.json` (17 bytes).
+- [ ] **User action:** Generate a GitHub PAT with `contents: write`
+  scope on `hireAlanAyala/tiger-web-devhubdb` only (fine-grained PAT
+  recommended; classic also works). Browser URL:
+  `https://github.com/settings/personal-access-tokens/new`
+- [ ] **User action:** Add the PAT as `DEVHUBDB_PAT` in tiger_web's
+  GitHub Actions secrets. Via CLI (once PAT is in clipboard):
+  `gh secret set DEVHUBDB_PAT --repo hireAlanAyala/tiger_web`
+- [ ] **User action:** Verify `DEVHUBDB_PAT` visible to default
+  branch: `gh secret list --repo hireAlanAyala/tiger_web | grep DEVHUBDB_PAT`
 
 CFO has been targeting this repo. Phase B completes its missing
 `devhub/` half and unblocks the first CI-driven upload from either
