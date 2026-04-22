@@ -521,8 +521,8 @@ if (workerFns && Object.keys(workerFns).length > 0) {
   try {
     const shmPath = "/" + workerShmName;
     const headerBuf: Buffer = shmAddon.mmapShm(shmPath, WORKER_REGION_HEADER_SIZE);
-    workerSlotCount = headerBuf.readUInt16LE(4);
-    workerFrameMax = headerBuf.readUInt32LE(8);
+    workerSlotCount = headerBuf.readUInt16LE(0);   // RegionHeader.slot_count @ offset 0
+    workerFrameMax = headerBuf.readUInt32LE(4);    // RegionHeader.frame_max @ offset 4
     const regionSize = 64 + workerSlotCount * (64 + workerFrameMax * 2);
     workerBuf = shmAddon.mmapShm(shmPath, regionSize);
     console.log(`[shm] worker transport: ${workerShmName} (${workerSlotCount} slots, frame_max=${workerFrameMax})`);

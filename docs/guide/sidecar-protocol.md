@@ -15,17 +15,16 @@ The server creates two SHM regions:
 
 The sidecar receives the request SHM name as CLI arg 1. The worker
 SHM name is `{request_name}-workers`. Both regions are POSIX shared
-memory (`/dev/shm/`).
+memory (POSIX `shm_open` — `/dev/shm/` on Linux, kernel-managed on macOS).
 
 ## SHM Region Layout
 
 ```
 RegionHeader (64 bytes)
-  epoch:      u32 LE @ 0    — global counter, bumped after every server write.
-                               Sidecar futex-waits on this address.
-  slot_count: u16 LE @ 4    — number of slot pairs in this region.
-  frame_max:  u32 LE @ 8    — maximum frame payload size (bytes).
-  _pad:       54 bytes       — zero padding to 64 bytes.
+  slot_count: u16 LE @ 0    — number of slot pairs in this region.
+  _reserved:  u16 LE @ 2    — alignment padding.
+  frame_max:  u32 LE @ 4    — maximum frame payload size (bytes).
+  _pad:       56 bytes       — zero padding to 64 bytes.
 
 SlotPair[slot_count] — one per concurrent dispatch slot:
   SlotHeader (64 bytes)
@@ -35,7 +34,8 @@ SlotPair[slot_count] — one per concurrent dispatch slot:
     response_len: u32 LE @ 12  — payload length in response area.
     request_crc:  u32 LE @ 16  — CRC32 of (le_u32(request_len) ++ request[0..request_len]).
     response_crc: u32 LE @ 20  — CRC32 of (le_u32(response_len) ++ response[0..response_len]).
-    _pad:         40 bytes      — zero.
+    slot_state:   u8     @ 24  — lifecycle: 0=free, 1=call_written, 2=result_written.
+    _pad:         39 bytes      — zero.
 
   request[frame_max]   — server writes CALL frames here.
   response[frame_max]  — sidecar writes RESULT/QUERY frames here.
@@ -57,10 +57,9 @@ than a garbage read).
 
 **Server writes a CALL:**
 1. Write payload to `slot.request[0..len]`.
-2. Set `request_len` and `request_crc`.
+2. Set `request_len`, `request_crc`, `slot_state = call_written`.
 3. Increment `server_seq` with release-store.
-4. Increment `epoch` with release-store.
-5. `futex_wake(&epoch, 1)`.
+Sidecar busy-polls `server_seq` (setImmediate when active, setTimeout 1ms when idle).
 
 **Sidecar detects a CALL:**
 1. Acquire-load `server_seq`.
@@ -70,15 +69,17 @@ than a garbage read).
 
 **Sidecar writes a RESULT:**
 1. Write payload to `slot.response[0..len]`.
-2. Set `response_len` and `response_crc`.
-3. Increment `sidecar_seq` with release-store.
-4. `futex_wake(&sidecar_seq, 1)`.
+2. Set `response_len`, `response_crc`, `slot_state = result_written`.
+3. Release fence (ARM: stores above visible before seq bump).
+4. Increment `sidecar_seq` with release-store.
+Server busy-polls `sidecar_seq` via `run_for_ns(0)` when slots are in-flight.
 
 **Server detects a RESULT:**
 1. Acquire-load `sidecar_seq`.
-2. If `sidecar_seq >= server_seqs[slot]`: response available.
+2. If `sidecar_seq >= server_seqs[slot]` and `slot_state == result_written`: response available.
 3. Validate `response_crc`.
 4. Parse frame from `slot.response[0..response_len]`.
+5. Set `slot_state = free`.
 
 Memory ordering: the release-store on seq guarantees all prior
 payload writes are visible to the other side's acquire-load.
