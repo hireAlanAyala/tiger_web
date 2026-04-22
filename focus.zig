@@ -281,7 +281,9 @@ fn cmd_dev(gpa: std.mem.Allocator, args: DevArgs) !void {
         std.time.sleep(50 * std.time.ns_per_ms);
     }
     if (!ready) {
-        stderr.print("error: server did not start (no SHM region after 5s)\n", .{}) catch {};
+        // Report the last errno from shm_open for diagnostics.
+        const last_errno = std.c._errno().*;
+        stderr.print("error: server did not start (no SHM region after 5s, probe={s}, errno={d})\n", .{ shm_probe_name, last_errno }) catch {};
         std.process.exit(1);
     }
 
