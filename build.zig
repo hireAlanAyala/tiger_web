@@ -548,9 +548,8 @@ fn build_ci(
         // Must run after unit-test which generates the binary vectors.
         build_ci_step(b, step_ci, &.{"test-adapter"});
         // Fuzz smoke — Linux-only for now (replay fuzzer has macOS file IO issues).
-        if (builtin.os.tag == .linux) {
-            build_ci_step(b, step_ci, &.{ "fuzz", "--", "smoke" });
-        }
+        // Fuzz smoke — all fuzzers use SimIO/FuzzIO, no platform-specific syscalls.
+        build_ci_step(b, step_ci, &.{ "fuzz", "--", "smoke" });
         // Scripts help (verifies scripts compile).
         build_ci_script(b, step_ci, scripts, &.{"--help"}, options.zig_exe);
     }
