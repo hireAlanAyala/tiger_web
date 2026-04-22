@@ -745,6 +745,8 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
             rows_buf: []u8,
             rows_pos: *usize,
         ) bool {
+            assert(pos.* <= data.len);
+            assert(rows_pos.* <= rows_buf.len);
             const proto = @import("../protocol.zig");
 
             if (pos.* >= data.len) return false;
@@ -805,6 +807,8 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
         /// set from parse_route_prefetch_result. Just sends the CALL and
         /// transitions to combined_pending.
         fn send_handle_render_for_entry(server: *Server, entry: *ShmDispatch.Entry, rows_data: []const u8, row_set_count: u8) void {
+            assert(entry.stage == .route_prefetch_complete);
+            assert(entry.operation != .root);
             const body = entry.msg.body[0..entry.body_len];
 
             // Build combined CALL args inline (same format as start_combined_request).
@@ -1092,6 +1096,11 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
         /// frees up. TB pattern: resume_receive re-drains suspended
         /// messages when journal/repair slots become available.
         fn resume_suspended(server: *Server) void {
+            // Pair: head/tail are either both set or both null at entry.
+            // A ready connection re-dispatched mid-drain may re-suspend
+            // itself (no free slot), so we can't assert emptiness on exit.
+            assert((server.suspended_head == null) == (server.suspended_tail == null));
+
             var conn = server.suspended_head;
             server.suspended_head = null;
             server.suspended_tail = null;
@@ -1139,6 +1148,9 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
         ///   Null: no listener (sim — test sets listen_fd directly after).
         pub fn wire_sidecar(server: *Server, allocator: std.mem.Allocator, sidecar_path: ?[]const u8) !void {
             if (!App.sidecar_enabled) return;
+            // Pre: wire runs once, after init, before tick. Handlers haven't
+            // been bound to connection indices yet.
+            comptime assert(App.sidecar_count > 0);
             for (&server.handlers, 0..) |*handler, i| {
                 handler.connection_index = @intCast(i % App.sidecar_count);
             }
@@ -1172,6 +1184,7 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
         /// Used by sim_sidecar.zig to avoid filesystem dependencies.
         pub fn wire_sidecar_test(server: *Server, allocator: std.mem.Allocator) !void {
             if (!App.sidecar_enabled) return;
+            comptime assert(App.sidecar_count > 0);
             for (&server.handlers, 0..) |*handler, i| {
                 handler.connection_index = @intCast(i % App.sidecar_count);
             }
@@ -1269,8 +1282,14 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
 
         /// Update wall-clock time when no pipeline is in-flight.
         fn update_time(server: *Server) void {
+            // Only advance wall-clock when the pipeline is idle: mid-
+            // request commits must use the same `now` the request started
+            // with, otherwise ordering-dependent logic (auth, expiry)
+            // could see clock skew within one request.
             if (!server.any_slot_active()) {
-                server.state_machine.set_time(@divTrunc(server.time.realtime(), std.time.ns_per_s));
+                const now_s = @divTrunc(server.time.realtime(), std.time.ns_per_s);
+                assert(now_s >= 0); // wall clock cannot be negative
+                server.state_machine.set_time(now_s);
             }
         }
 
@@ -1321,6 +1340,9 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
         /// Prevents dispatching the same connection to multiple slots
         /// (the connection stays .ready during async dispatch).
         fn connection_dispatched(server: *const Server, conn: *const Connection) bool {
+            // A closed connection should never still appear on a slot —
+            // on_connection_close resets the slot.
+            assert(conn.state != .free);
             for (&server.pipeline_slots) |*slot| {
                 if (slot.stage != .idle and slot.connection == conn) return true;
             }
@@ -1329,6 +1351,7 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
 
         /// Whether any pipeline slot is currently active (non-idle).
         fn any_slot_active(server: *const Server) bool {
+            comptime assert(pipeline_slots_max > 0);
             for (&server.pipeline_slots) |*slot| {
                 if (slot.stage != .idle) return true;
             }
@@ -1392,7 +1415,10 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
         /// "sidecar not connected" case is handled in process_inbox
         /// before the pipeline starts.)
         fn commit_route(server: *Server, slot: *PipelineSlot) bool {
+            assert(slot.stage == .route);
+            assert(slot.msg == null); // route hasn't produced one yet
             const conn = slot.connection orelse return false;
+            assert(conn.state == .ready);
             const idx = server.slot_index(slot);
             const handler = &server.handlers[idx];
 
@@ -1424,6 +1450,8 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
         /// (no slot/cache available), reset and suspend the connection;
         /// resume_suspended will re-dispatch from the tick loop.
         fn commit_prefetch(server: *Server, slot: *PipelineSlot) bool {
+            assert(slot.stage == .prefetch);
+            assert(slot.msg != null); // route produced a message
             const sm = server.state_machine;
             const idx = server.slot_index(slot);
             const handler = &server.handlers[idx];
@@ -1527,6 +1555,8 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
             now: i64,
             write_view: *const Storage.WriteView,
         ) void {
+            assert(operation.is_mutation());
+            assert(now >= 0);
             const wal = server.wal orelse return;
             if (wal.disabled) return;
             wal.append_writes(
@@ -1548,6 +1578,7 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
         /// only one slot writes to the buffer at a time, though many
         /// may be in `.render` pending simultaneously.
         fn commit_render(server: *Server, slot: *PipelineSlot) bool {
+            assert(slot.stage == .render);
             const conn = slot.connection orelse return false;
             const sm = server.state_machine;
             const idx = server.slot_index(slot);
@@ -1587,6 +1618,8 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
             pipeline_resp: PipelineResponse,
             html: []const u8,
         ) void {
+            assert(slot.stage == .render);
+            assert(conn.state == .ready);
             const sm = server.state_machine;
             const commit_result = App.encode_response(
                 pipeline_resp.status,
@@ -1813,6 +1846,7 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
         fn timeout_sidecar_response(server: *Server) void {
             if (!App.sidecar_enabled) return;
             if (!server.sidecar_any_ready()) return;
+            comptime assert(sidecar_response_timeout_ticks > 0);
 
             for (&server.shm_dispatch.entries) |*entry| {
                 // Only timeout entries waiting for sidecar response.
@@ -2031,6 +2065,7 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
                 "Connection: close\r\n" ++
                 "\r\n" ++
                 body;
+            assert(response.len <= conn.send_buf.len);
             @memcpy(conn.send_buf[0..response.len], response);
             return .{ .offset = 0, .len = response.len };
         }
@@ -2045,6 +2080,7 @@ pub fn ServerType(comptime App: type, comptime IO: type, comptime Storage: type)
                 "Connection: close\r\n" ++
                 "\r\n" ++
                 body;
+            assert(response.len <= conn.send_buf.len);
             @memcpy(conn.send_buf[0..response.len], response);
             return .{ .offset = 0, .len = response.len };
         }
