@@ -196,8 +196,8 @@ fn shipped_name(path: []const u8) ?[]const u8 {
     if (std.mem.startsWith(u8, name, "adapters/")) return null;
 
     const skip_suffixes = [_][]const u8{
-        "_test.zig",  "_fuzz.zig",       "fuzz_tests.zig", "fuzz_lib.zig",
-        "sim.zig",    "auditor.zig",     "fuzz.zig",       "state_machine_benchmark.zig",
+        "_test.zig",   "_fuzz.zig",    "fuzz_tests.zig", "fuzz_lib.zig",
+        "sim.zig",     "auditor.zig",  "fuzz.zig",       "_benchmark.zig",
         "sort_test.zig", "snaptest.zig", "low_level_hash_vectors.zig",
     };
     for (skip_suffixes) |suffix| {

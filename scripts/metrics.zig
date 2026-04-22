@@ -209,7 +209,8 @@ const Category = enum { framework, application, testing, tooling };
 fn categorize(path: []const u8) Category {
     // Test files first — naming convention takes priority.
     if (std.mem.endsWith(u8, path, "_test.zig") or
-        std.mem.endsWith(u8, path, "_fuzz.zig"))
+        std.mem.endsWith(u8, path, "_fuzz.zig") or
+        std.mem.endsWith(u8, path, "_benchmark.zig"))
         return .testing;
 
     const basename = std.fs.path.basename(path);
@@ -231,7 +232,8 @@ fn categorize(path: []const u8) Category {
     return .application;
 }
 
-/// Files that are entirely test code but don't follow *_test.zig or *_fuzz.zig naming.
+/// Files that are entirely test code but don't follow *_test.zig /
+/// *_fuzz.zig / *_benchmark.zig suffix conventions.
 const test_basenames = [_][]const u8{
     "fuzz.zig",
     "fuzz_tests.zig",
@@ -241,7 +243,6 @@ const test_basenames = [_][]const u8{
     "sort_test.zig",
     "snaptest.zig",
     "low_level_hash_vectors.zig",
-    "state_machine_benchmark.zig",
 };
 
 /// Files that are build/scripting infrastructure, not shipped code.
