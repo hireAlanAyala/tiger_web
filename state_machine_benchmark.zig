@@ -116,7 +116,7 @@ test "benchmark: state machine" {
             dur.* = .{ .ns = elapsed.ns / ops };
         }
         const est = bench.estimate(&durations);
-        bench.report("get_product:    {}/op", .{est});
+        bench.report("get_product = {d} ns", .{est.ns});
         bench.assert_budget(est, budget.get_product, "get_product");
     }
 
@@ -135,7 +135,7 @@ test "benchmark: state machine" {
             dur.* = .{ .ns = elapsed.ns / ops };
         }
         const est = bench.estimate(&durations);
-        bench.report("list_products:  {}/op", .{est});
+        bench.report("list_products = {d} ns", .{est.ns});
         bench.assert_budget(est, budget.list_products, "list_products");
     }
 
@@ -159,7 +159,7 @@ test "benchmark: state machine" {
             dur.* = .{ .ns = elapsed.ns / ops };
         }
         const est = bench.estimate(&durations);
-        bench.report("update_product: {}/op", .{est});
+        bench.report("update_product = {d} ns", .{est.ns});
         bench.assert_budget(est, budget.update_product, "update_product");
     }
 

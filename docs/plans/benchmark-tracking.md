@@ -52,6 +52,54 @@ stop and read the source. The plan's wording can match TB's idioms
 without the reader recognizing them, and that's exactly the state
 where we reintroduce the drift this discipline is meant to prevent.
 
+## Current state (as of last committed work)
+
+Checkboxes throughout the plan reflect what's done (`[x]`) vs what's
+next (`[ ]`). Short version:
+
+- **Phase 0**: ✅ done. `framework/bench.zig` re-ported from TB,
+  `assert_budget` added as surgical addition, `state_machine_benchmark.zig`
+  updated for `stdx.Duration`. Tests pass.
+- **Phase 0 addendum**: `[ ]` pending. Update
+  `state_machine_benchmark.zig` output format from
+  `"get_product: 9.6us/op"` → `"get_product = 9600 ns"` to match TB's
+  `devhub.zig` parser (per dry-run finding DR-2).
+- **Phase A**: `[ ]` pending. Delete `scripts/loadtest.sh`,
+  `load_driver.zig`, `load_gen.zig`. 30 min.
+- **Phase B**: `[ ]` pending. Bootstrap `devhub/` dir in the
+  existing devhubdb repo. Repo exists; `fuzzing/` has CFO data;
+  `devhub/` dir missing. 30 min.
+- **Phases C, D, E, F, G**: concrete checklists below.
+
+### Known runtime unknowns (can't resolve without execution)
+
+These are unavoidable — they only resolve by running the code:
+
+- **CI-calibrated budgets.** Dev-machine numbers (9.6/63/16 µs) are
+  2-5× faster than GitHub Actions will be. Phase F re-calibrates on
+  actual CI.
+- **Warmup effectiveness.** Claim: ≥20% p50 reduction. Phase D's
+  verification step confirms or refutes.
+- **DEVHUBDB_PAT end-to-end flow.** First CI push is phase F;
+  earlier dry-runs are local only.
+
+### Unknowns resolved by pre-execution dry-runs
+
+These were open in earlier plan drafts; cross-file inspections
+resolved them. Details in "Preflight measurements" below:
+
+- DR-1: `framework/constants.zig` missing `cache_line_size` — phase
+  C.2 gains a prerequisite step.
+- DR-2: TB's devhub parser expects `label = value unit` format;
+  our current bench output uses `label: value/op`. Phase 0 addendum
+  + updated phase C/D format specs.
+- DR-3: Phase D's cp-verbatim-trim-VSR model was wrong;
+  `benchmark_load.zig` is too VSR-entangled. Reframed as
+  pattern-transplant-with-attribution.
+- DR-4: Phase E's `devhub.zig` survival is ~25%, not 75-80%.
+  Reframed: small TB structures transplanted verbatim; `devhub_metrics`
+  orchestrator written fresh.
+
 ---
 
 ## Engineering values
@@ -118,6 +166,72 @@ violates a rule, stop and revise before proceeding.
 
 Pure observations. No code changes. Preflight was run before finalizing
 this plan; results replace earlier conditional language.
+
+### Cross-file dry-run inspections (post-phase-0)
+
+After phase 0 landed, dry-run inspections of the TB files the later
+phases depend on surfaced three real findings that reshape the plan:
+
+**Finding DR-1: `cache_line_size` is missing from our constants.**
+Aegis bench imports `@import("framework/constants.zig").cache_line_size`.
+Our `framework/constants.zig` does not export it. TB's value
+(`src/constants.zig:480`) is `config.cluster.cache_line_size`. Phase
+C.2 gains a prerequisite step: add `cache_line_size: u16 = 64` (or
+whatever TB's resolved value is — check at port time) to
+`framework/constants.zig`.
+
+**Finding DR-2: TB's devhub.zig parses `label = value unit` format;
+our benchmarks emit `label: value/op`.** TB's `get_measurement`
+helper does `stdx.cut(stdout, label ++ " = ")` then
+`stdx.cut(rest, " " ++ unit)`. Any benchmark whose output will be
+parsed by `scripts/devhub.zig` must emit the TB format. Our current
+`state_machine_benchmark.zig` uses `get_product: 9.659us/op` —
+**does not parse**. Phase C and phase D benchmarks must emit
+`get_product = 9659 us` format. Phase 0 addendum task added below
+to update `state_machine_benchmark.zig` before phase E depends on it.
+
+**Finding DR-3: phase D cp-verbatim model is wrong for
+`benchmark_load.zig`.** Reading the file (1069 lines): 26 `vsr.*`
+references, 35 VSR-domain references (`MessagePool`, `MessageBus`,
+`Client`, `Account`, `Transfer`, `Operation`). The top-of-file
+imports are the entire skeleton:
+
+```zig
+const vsr = @import("vsr");
+const tb = vsr.tigerbeetle;
+const IO = vsr.io.IO;
+const Client = vsr.ClientType(tb.Operation, MessageBus);
+```
+
+Deleting those imports leaves almost nothing. The plan's "cp verbatim,
+trim VSR, graft HTTP" framing was optimistic. The realistic framing
+is "**read TB's file for the histogram + percentile + closed-loop
+client-state pattern; write a Tiger Web HTTP version that uses those
+patterns with attribution**." This is closer to a pattern-transplant
+than a file-port. Phase D section rewritten below.
+
+**Finding DR-4: TB's devhub.zig is ~50% survival, not 75-80%.**
+The file is heavy with tigerbeetle-binary-specific commands: builds
+tigerbeetle, runs `tigerbeetle format`, runs `tigerbeetle start`,
+does custom TCP ping, runs `tigerbeetle inspect integrity`, runs
+`tigerbeetle inspect metrics`. None of that applies to us. What
+survives:
+
+- `MetricBatch` struct shape (~15 lines)
+- `get_measurement` parser helper (~15 lines)
+- `upload_run` git-clone-fetch-reset-append-commit-push loop (~30 lines)
+- CLI arg pattern (~10 lines)
+
+Total: ~70 of ~280 lines survive = ~25% survival. The `devhub_metrics`
+function (the 200-line orchestrator that actually runs the
+benchmarks) is entirely Tiger-Web-specific and gets written fresh.
+Plan phase E section rewritten below.
+
+The discipline still holds — every deletion from the cp has a named
+reason (tigerbeetle-binary-specific commands, specific parser labels,
+etc.) — but the survival ratio is worse than estimated. The useful
+lesson for future TB ports: **survival ratio is visible only from
+reading the actual file, not from structural similarity.**
 
 ### `framework/bench.zig` diff against TB's `src/testing/bench.zig`
 
@@ -298,6 +412,21 @@ digits, same suffix). `scripts/devhub.zig` will parse the same shape.
   `std.fmt.fmtDuration` wrapper.
 - [x] Verify `zig build unit-test` and `zig build bench` still pass
 
+### Phase 0 addendum — output format to match TB's parser ✅ DONE
+
+Surfaced by cross-file dry-run DR-2 after phase 0 landed. Needed
+before phase E could parse the output.
+
+- [x] Updated `state_machine_benchmark.zig` report calls from
+  `"get_product: 9.6us/op"` format to TB's
+  `"get_product = 9658 ns"` format.
+- [x] Output verified: `get_product = 9658 ns`, `list_products = 63423 ns`,
+  `update_product = 15894 ns`. All lines match regex
+  `^[a-z_]+ = \d+ \w+$` — exactly the shape
+  `scripts/devhub.zig`'s `get_measurement` parser expects.
+- [x] Budget constants remain `Duration` typed; report-format change
+  is purely string formatting.
+
 Phase 0 is the first invocation of the cp-first rule. If this phase is
 awkward, the rule is wrong; revise the rule, not the phase. If this
 phase is straightforward, the rule is calibrated and subsequent phases
@@ -388,6 +517,7 @@ substitutions we made relative to `checksum_benchmark.zig`.
 - [ ] Substitute: `checksum(blob)` → `shm_layout.crc_frame(len, payload)`
 - [ ] Substitute: `blob_size` parameter → payload sizes 64, 256, 1024, 4096, 65536
 - [ ] Substitute: checksum counter hash-print → CRC counter hash-print
+- [ ] Substitute: `bench.report` format → `"crc_frame = {d} ns"` (TB-parseable per DR-2)
 - [ ] Add: cross-verify `"hello"` (len=5) matches 0x5CAC007A at test
   start (pair-assertion with cross-language vector)
 - [ ] Add: `bench.assert_budget` call. **Budget calibration:** follow
@@ -409,11 +539,29 @@ payload size but not others usually means cache behavior changed."*
 
 ### C.2 `aegis_checksum_benchmark.zig`
 
+**Prerequisite** (surfaced by DR-1): port `cache_line_size` into our
+`framework/constants.zig` first.
+
+- [ ] Check TB's concrete value:
+  `grep cache_line_size /home/walker/Documents/personal/tigerbeetle/src/constants.zig`
+  and the upstream it points to (likely 64 on x86_64).
+- [ ] Add `pub const cache_line_size: u16 = 64;` (or resolved value)
+  to `framework/constants.zig` with a comment citing TB's source line.
+- [ ] Verify `framework/constants.zig` compiles and the existing
+  build passes.
+
+Then the port itself:
+
 - [ ] `cp src/vsr/checksum_benchmark.zig aegis_checksum_benchmark.zig`
-- [ ] Substitute: `@import("checksum.zig")` → `@import("../framework/checksum.zig")`
-- [ ] Substitute: `cache_line_size` import path to our `framework/constants.zig`
-- [ ] Preserve everything else (this is the closest to TB's file —
-  same Aegis primitive, same use case)
+- [ ] Substitute (verified by dry-run — these are the only three
+  imports that need changing):
+  - `@import("../constants.zig")` → `@import("framework/constants.zig")`
+  - `@import("checksum.zig")` → `@import("framework/checksum.zig")`
+  - `@import("../testing/bench.zig")` → `@import("framework/bench.zig")`
+- [ ] Preserve everything else verbatim (43 lines total, 40 survive
+  unchanged = 93% — confirmed by dry-run)
+- [ ] Adjust `bench.report` format from `"{} for whole blob"` to
+  `"aegis_checksum = {d} ns"` to match TB's parser (DR-2)
 - [ ] Add: `bench.assert_budget` call. **Budget calibration:** same
   10×max(observed) pattern as C.1. Record in file header.
 - [ ] Add to `build.zig` under the `bench` step
@@ -432,6 +580,7 @@ bottlenecks on checksum computation."*
   (full path: decode cookie, HMAC verify, timestamp check)
 - [ ] Substitute: `blob_size` parameter → realistic cookie sizes
 - [ ] Substitute: checksum counter → verify-success counter
+- [ ] Substitute: `bench.report` format → `"hmac_session = {d} ns"`
 - [ ] Add: pair-assertion that a known-good cookie succeeds at test start
 - [ ] Preserve (do not modify): Bench scaffold, arena, repetitions,
   estimate, report
@@ -451,8 +600,9 @@ removed; check the auth flow covers time-window enforcement."*
   + `parse_one_dispatch(body, &pos)` sequence
 - [ ] Substitute: `blob` → pre-built WAL body buffer (in-memory, no IO)
 - [ ] Substitute: counter → parsed-entries counter
+- [ ] Substitute: `bench.report` format → `"wal_parse = {d} ns"`
 - [ ] Substitute: hash-of-run print → "parsed N entries" with a
-  content hash
+  content hash (separate from the parseable line)
 - [ ] Add: pair-assertion parse round-trip against a known-good entry
 - [ ] Preserve: Bench scaffold, arena, repetitions, estimate, report
 - [ ] Add to `build.zig` under the `bench` step
@@ -472,7 +622,8 @@ changed — coordinate migration before shipping."*
 - [ ] Substitute: `blob` → mixed input (exact-match routes,
   parameterized routes, unmatched paths)
 - [ ] Substitute: counter → match-count counter
-- [ ] Substitute: hash-of-run print → match-count + hash
+- [ ] Substitute: `bench.report` format → `"route_match = {d} ns"`
+- [ ] Substitute: hash-of-run print → match-count + hash (separate line)
 - [ ] Add: pair-assertion that a known route resolves to expected
   operation at test start
 - [ ] Preserve: Bench scaffold, arena, repetitions, estimate, report
@@ -511,38 +662,50 @@ Effort: 1–2 days. Dependencies: A. Independent of C.
   otherwise human-readable `key = value` to stdout (parseable by
   devhub)
 
-### D.2 `benchmark_load.zig` — cp verbatim, trim VSR, graft HTTP
+### D.2 `benchmark_load.zig` — pattern-transplant with attribution
 
-Copy-first-trim-second per engineering value 2. Start with TB's file
-in its entirety, delete VSR-specific passages with justification,
-graft HTTP adaptations in their place.
+**Reframed from earlier "cp-verbatim, trim-VSR" after DR-3 finding.**
+TB's `benchmark_load.zig` is not cp-able for us: the VSR client is
+the structural skeleton, not a replaceable leaf. Imports like
+`vsr.ClientType(tb.Operation, MessageBus)` are the spine of the file.
+Deleting them leaves almost nothing.
 
-- [ ] `cp /home/walker/Documents/personal/tigerbeetle/src/tigerbeetle/benchmark_load.zig benchmark_load.zig`
-- [ ] **Preserve without change:**
-  - Histogram (10,001 slots, ms granularity)
-  - Percentile walk (p1/p50/p99/p100)
-  - Client state machine (`clients_busy` BitSet, `clients_request_ns`
-    array, `request_complete` unsets + records)
-  - stdout `key = value` output format
-  - PRNG seeding pattern
-  - Stage orchestration scaffold
-- [ ] **Delete with recorded justification** (each deletion names why
-  the TB code doesn't apply to HTTP — not "we didn't need it"):
-  - VSR client instantiation and register/ping logic — TB uses VSR
-    client; we use HTTP. Document the swap.
-  - `create_accounts` / `create_transfers` / `get_account_transfers`
-    stages — specific to TB's ledger domain
-  - `validate_accounts` / `validate_transfers` — TB-domain validation
-  - Batch-size configuration — HTTP doesn't batch like VSR does
-  - Cluster args (`--addresses`, `--cluster`, `--replica`) — we have
-    `--port` instead
-- [ ] **Graft with HTTP adaptations:**
-  - HTTP client over TCP (persistent keep-alive) replaces VSR client
-  - JSON body construction per operation (uses `codec.zig` +
-    `message.zig`) replaces TB's account/transfer packing
-  - Operation-weight mix (`--ops=create_product:80,list_products:20`)
-    replaces TB's fixed register → create → query flow
-- [ ] **Add as flaw fix** (not in TB, explicitly justified):
+Realistic model: **read TB's file as reference, write a Tiger Web
+HTTP version that transplants the specific patterns by name**,
+with file:line citations for every transplanted passage (per
+engineering value 8).
+
+This is still TB-aligned — we're preserving TB's *techniques*, not
+writing fresh from memory — but the cp-first rule doesn't apply at
+the whole-file level because the file is inseparable from VSR. The
+cp-first rule applies at the *passage* level instead.
+
+- [ ] `cp /home/walker/Documents/personal/tigerbeetle/src/tigerbeetle/benchmark_load.zig /tmp/benchmark_load_reference.zig`
+  — kept as reference only, not as starting point
+- [ ] Create `benchmark_load.zig` fresh, with file header documenting
+  the transplanted passages and their sources
+- [ ] **Transplanted passages with citations** (each one is a
+  structural lift from TB's file, not a from-scratch rewrite):
+  - Histogram — `[10_001]u64` (or `[10_001]u32`) lap counters, bucket
+    by `@min(ms, 10_000)`. Cite `benchmark_load.zig:117-118, 876`.
+  - Percentile walk — cumulative sum across buckets, find p1/p50/p99/p100.
+    Cite `benchmark_load.zig:1051-1068`.
+  - Client state machine pattern — BitSet `clients_busy`, array
+    `clients_request_ns`, callback unsets + records latency. Cite
+    `benchmark_load.zig:858-876`.
+  - Output format — `label = value unit` lines, cite
+    `benchmark_load.zig:556-572` (and confirmed by DR-2 to be the
+    format `scripts/devhub.zig` parses).
+  - PRNG seeding — cite `benchmark_load.zig` usage of
+    `stdx.PRNG.from_seed`.
+- [ ] **Written fresh because TB's equivalents are domain-specific:**
+  - HTTP client over TCP (persistent keep-alive). TB has VSR client.
+  - JSON body construction per operation (reuses `codec.zig`/
+    `message.zig`). TB has account/transfer binary packing.
+  - Operation-weight mix (`--ops=create_product:80,list_products:20`).
+    TB has a fixed register → create → query workflow.
+  - Stage orchestration. TB's stages are VSR-specific.
+- [ ] **Surgical addition** (not in TB, explicitly justified as flaw fix):
   - Warmup phase with measure-and-discard semantics. Run load traffic
     for `--warmup-seconds` seconds (default 5) to fill SQLite prepared-
     statement cache, warm TCP connections, populate page cache.
@@ -551,10 +714,10 @@ graft HTTP adaptations in their place.
     only recorded measurements are discarded.** Document as flaw fix
     in the file header.
 
-The header paragraph documents what was preserved from TB's file, what
-was deleted with rationale, what was grafted as HTTP adaptation, and
-what was added as flaw fix. A contributor can diff our file against
-TB's and every difference is accounted for in the header.
+The file header paragraph must enumerate: which passages are
+transplanted (with TB file:line), which are written fresh, and which
+are surgical additions. A future contributor can audit the file by
+cross-referencing with TB's original.
 
 ### D.3 HTTP client loop (new code, not ported)
 
@@ -593,19 +756,45 @@ TB's and every difference is accounted for in the header.
 
 Effort: 1 day. Dependencies: B, C, D.
 
-### E.1 Port from TB
+### E.1 Port from TB — partial cp, ~50% survival (per DR-4)
 
-- [ ] `cp /home/walker/Documents/personal/tigerbeetle/src/scripts/devhub.zig`
-  to `scripts/devhub.zig`
-- [ ] Surgical edits:
-  - Repo URL: `tigerbeetle/devhubdb` → `hireAlanAyala/tiger-web-devhubdb`
-  - Benchmark invocation: `tigerbeetle benchmark` → `tiger-web benchmark`
-  - `MetricBatch` struct: strip VSR-specific fields (batch/commit
-    latencies), add Tiger Web three-tier fields per the metrics
-    table in §Reasonings below
-- [ ] Preserve the push-retry loop structure (32 retries on git push
-  conflicts)
-- [ ] Preserve the commit/branch/timestamp metadata shape
+**Reframed from earlier "cp with surgical edits" after DR-4 finding.**
+TB's `devhub.zig` is heavy with tigerbeetle-binary-specific commands:
+builds `tigerbeetle`, runs `tigerbeetle format`, `start`, `inspect
+integrity`, `inspect metrics`, custom TCP ping for startup timing.
+None of that applies to us. Realistic survival is ~25% of the file;
+the rest gets written fresh for Tiger Web's distinct metrics.
+
+- [ ] `cp /home/walker/Documents/personal/tigerbeetle/src/scripts/devhub.zig /tmp/devhub_reference.zig`
+  as reference
+- [ ] Create `scripts/devhub.zig` with these **structures
+  transplanted verbatim** from TB:
+  - `MetricBatch` struct (~15 lines): preserve `timestamp`,
+    `attributes: { git_repo, branch, git_commit }`, `metrics: []Metric`
+    shape. Swap `git_repo` value for our URL.
+  - `Metric` struct (~5 lines): `name`, `value`, `unit`
+  - `get_measurement` parser helper (~15 lines, verbatim — confirmed
+    by DR-2 this matches the output format we'll emit)
+  - `upload_run` git-clone-fetch-reset-append-commit-push loop
+    (~30 lines). Append-only, not merge. Preserve 32-retry on push
+    conflicts.
+  - `CLIArgs` struct with `sha` field and `--skip-kcov` convention
+    (we probably don't need kcov, but preserve the pattern for
+    `--dry-run` etc.)
+- [ ] **Write fresh for Tiger Web** (no TB equivalent applies):
+  - `devhub_metrics` function body: runs our three tiers, collects
+    our specific metrics
+  - All the tigerbeetle-binary-specific command invocations get
+    dropped (no `tigerbeetle format`, no `inspect metrics`, no
+    custom TCP ping, no changelog parsing, no release flag logic)
+- [ ] Surgical edits on transplanted structures:
+  - `MetricBatch.attributes.git_repo`:
+    `"https://github.com/tigerbeetle/tigerbeetle"` →
+    `"https://github.com/hireAlanAyala/tiger_web"`
+  - `upload_run` clone URL:
+    `github.com/tigerbeetle/devhubdb` →
+    `github.com/hireAlanAyala/tiger-web-devhubdb`
+  - `Metric` list populated with our three-tier metric names
 
 ### E.2 Upload semantics (append-only, not merge)
 
