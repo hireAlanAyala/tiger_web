@@ -38,3 +38,34 @@ jobs:
       - uses: actions/setup-node@v4
         with: { node-version: '${{ matrix.node }}' }
       - run: ./zig/zig build ci -- clients
+
+  # Phase F of docs/plans/benchmark-tracking.md.
+  #
+  # On PRs: exercises the pipeline in --dry-run (no upload). Catches
+  #   parser regressions, missing metrics, compile breaks before they
+  #   hit main. No PAT required.
+  # On main: pushes a MetricBatch entry to hireAlanAyala/tiger-web-devhubdb
+  #   via upload_run. Requires DEVHUBDB_PAT secret registered per
+  #   plan's "Blocking on human" section.
+  #
+  # Failure on main without DEVHUBDB_PAT is loud-but-contained: only
+  # this job fails, test/clients are unaffected. That's the expected
+  # state until the PAT lands.
+  devhub:
+    runs-on: ubuntu-latest
+    # Fetch full history so `git show -s --format=%ct <sha>` resolves.
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - run: sh zig/download.sh
+      - name: devhub (dry-run on PRs, real upload on main)
+        env:
+          DEVHUBDB_PAT: ${{ secrets.DEVHUBDB_PAT }}
+        run: |
+          SHA="${{ github.event.pull_request.head.sha || github.sha }}"
+          if [ "${{ github.ref }}" = "refs/heads/main" ]; then
+            ./zig/zig build scripts -- devhub --sha="$SHA"
+          else
+            ./zig/zig build scripts -- devhub --sha="$SHA" --dry-run
+          fi

@@ -885,7 +885,12 @@ helper consumes directly. No JSON required.
 
 ---
 
-## Phase E — devhub uploader
+## Phase E — devhub uploader ✅ DONE (commit `27f5a51`)
+
+Shipped as a 2-tier uploader (primitive + pipeline) per the
+E-before-D revision. Phase D will extend the metric list when it
+lands. Dry-run verified locally; first real upload blocked on user
+PAT registration (Blocking-on-human at top of plan).
 
 Effort: 1–1.5 days. Dependencies: **B, C** (not D — reordering below).
 
@@ -1000,19 +1005,29 @@ output (`label = value unit` per `get_measurement`), merges into one
 
 ---
 
-## Phase F — CI wiring
+## Phase F — CI wiring ✅ PARTIAL (commit pending below)
+
+The job config ships; the first real upload is blocked on
+`DEVHUBDB_PAT` registration per "Blocking on human" at the top of
+the plan. PRs will exercise `--dry-run` starting immediately (no PAT
+required).
 
 Effort: 1 hour. Dependencies: B, E.
 
-- [ ] Extend existing `.github/workflows/ci.yml` with a `devhub` job
-  (**not** a new workflow file — TB's pattern is one ci.yml with
-  branch-gated jobs)
-- [ ] Gate: `if: github.ref == 'refs/heads/main'`
-- [ ] On PRs: run with `--dry-run` so the benchmark code is exercised
-  but no upload occurs
-- [ ] Secrets: reference `DEVHUBDB_PAT` from phase B
-- [ ] Verification: merge a commit, observe a new entry in
-  `devhubdb/devhub/data.json` within minutes
+- [x] Extended existing `.github/workflows/ci.yml` with a `devhub`
+  job (not a new workflow file — TB's pattern).
+- [x] Branch-aware gating: `if [ ref = main ]; then upload; else
+  --dry-run; fi`. Both paths run the bench pipeline end-to-end; only
+  the upload call differs.
+- [x] PR path: `--dry-run` no-PAT-required. Catches parser
+  regressions, missing metrics, compile breaks before they hit main.
+- [x] Secrets: references `secrets.DEVHUBDB_PAT` via env var.
+- [x] `fetch-depth: 0` on checkout so `git show -s --format=%ct <sha>`
+  resolves in the uploader.
+- [ ] **User action:** register `DEVHUBDB_PAT` secret (see top of plan).
+- [ ] **Verification (post-PAT):** merge a commit, observe a new
+  entry appended to `hireAlanAyala/tiger-web-devhubdb/devhub/data.json`
+  within minutes.
 
 ---
 
