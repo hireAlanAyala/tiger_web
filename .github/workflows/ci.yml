@@ -58,8 +58,7 @@ jobs:
           $FOCUS build src/
           echo 'build = true' > .focus
           echo 'start = sleep 10' >> .focus
-          # Run with --log-debug to see server thread errors
-          $FOCUS dev --timeout=8 --log-debug src/ 2>&1 || true
+          $FOCUS dev --timeout=8 src/ 2>&1 || true
           # Also test shm_open directly
           echo "--- testing shm_open ---"
           python3 -c "
