@@ -271,6 +271,7 @@ fn cmd_dev(gpa: std.mem.Allocator, args: DevArgs) !void {
     var ready = false;
     var shm_probe_buf: [64]u8 = undefined;
     const shm_probe_name = std.fmt.bufPrintZ(&shm_probe_buf, "/{s}", .{shm_name}) catch unreachable;
+    var last_shm_errno: c_int = 0;
     for (0..100) |_| {
         const fd = std.c.shm_open(shm_probe_name.ptr, @bitCast(std.posix.O{ .ACCMODE = .RDWR }), 0);
         if (fd >= 0) {
@@ -278,12 +279,11 @@ fn cmd_dev(gpa: std.mem.Allocator, args: DevArgs) !void {
             ready = true;
             break;
         }
+        last_shm_errno = std.c._errno().*;
         std.time.sleep(50 * std.time.ns_per_ms);
     }
     if (!ready) {
-        // Report the last errno from shm_open for diagnostics.
-        const last_errno = std.c._errno().*;
-        stderr.print("error: server did not start (no SHM region after 5s, probe={s}, errno={d})\n", .{ shm_probe_name, last_errno }) catch {};
+        stderr.print("error: server did not start (no SHM region after 5s, probe={s}, shm_errno={d})\n", .{ shm_probe_name, last_shm_errno }) catch {};
         std.process.exit(1);
     }
 
