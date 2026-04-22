@@ -272,7 +272,7 @@ fn cmd_dev(gpa: std.mem.Allocator, args: DevArgs) !void {
     var shm_probe_buf: [64]u8 = undefined;
     const shm_probe_name = std.fmt.bufPrintZ(&shm_probe_buf, "/{s}", .{shm_name}) catch unreachable;
     for (0..100) |_| {
-        const fd = std.c.shm_open(shm_probe_name.ptr, @bitCast(std.posix.O{ .ACCMODE = .RDONLY }), 0);
+        const fd = std.c.shm_open(shm_probe_name.ptr, @bitCast(std.posix.O{ .ACCMODE = .RDWR }), 0);
         if (fd >= 0) {
             std.posix.close(fd);
             ready = true;
