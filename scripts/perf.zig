@@ -1,19 +1,15 @@
-//! CPU profiling via perf — automated server + load + report.
+//! CPU profiling via perf — currently a stub.
 //!
-//! Spawns the server in release mode, attaches perf record, runs the
-//! load test, stops both, and prints the perf report. One command,
-//! reproducible results. Requires `perf` (Linux perf_events).
-//!
-//! Usage:
-//!   zig build scripts -- perf
-//!   zig build scripts -- perf --connections=128 --requests=200000
+//! The load driver this script used to orchestrate (`tiger-load`) was
+//! removed in benchmark-tracking/phase-A. Its replacement
+//! (`tiger-web benchmark`) lands in phase D, at which point this
+//! script is re-wired to drive it. Until then, invoking the script
+//! fails explicitly rather than breaking at runtime on a missing
+//! binary. Full orchestration (server spawn, perf attach, report) is
+//! in git history at commit 67993e8~1:scripts/perf.zig.
 
 const std = @import("std");
-const posix = std.posix;
-const log = std.log;
-const assert = std.debug.assert;
 
-const stdx = @import("stdx");
 const Shell = @import("../shell.zig");
 
 pub const CLIArgs = struct {
@@ -23,116 +19,14 @@ pub const CLIArgs = struct {
 
 pub fn main(shell: *Shell, gpa: std.mem.Allocator, cli_args: CLIArgs) !void {
     _ = gpa;
-
-    // Check perf is available.
-    shell.exec("perf version", .{}) catch {
-        shell.echo("error: perf is not installed. Install with: sudo pacman -S perf", .{});
-        std.process.exit(1);
-    };
-
-    // Build server and load test in release mode.
-    log.info("building release...", .{});
-    try shell.exec_zig("build -Doptimize=ReleaseSafe", .{});
-
-    // Clean up stale files from previous runs.
-    cleanup(shell);
-
-    // Start server with ephemeral port.
-    log.info("starting server...", .{});
-    var server = try shell.spawn(
-        .{
-            .stdin_behavior = .Pipe,
-            .stdout_behavior = .Pipe,
-            .stderr_behavior = .Inherit,
-        },
-        "zig-out/bin/tiger-web start --port=0 --db=tiger_web_perf.db",
-        .{},
-    );
-
-    // Read port from stdout readiness signal.
-    var port_buf: [6]u8 = undefined;
-    const port_n = server.stdout.?.read(&port_buf) catch {
-        log.err("failed to read port from server", .{});
-        _ = server.kill() catch {};
-        std.process.exit(1);
-    };
-    if (port_n == 0) {
-        log.err("server exited before writing port", .{});
-        std.process.exit(1);
-    }
-    const port_end = if (port_n > 0 and port_buf[port_n - 1] == '\n') port_n - 1 else port_n;
-    const port_str = port_buf[0..port_end];
-
-    log.info("server on port {s}, attaching perf...", .{port_str});
-
-    // Attach perf to the server process.
-    var pid_buf: [10]u8 = undefined;
-    const pid_str = std.fmt.bufPrint(&pid_buf, "{d}", .{server.id}) catch unreachable;
-    var perf = try shell.spawn(
-        .{ .stderr_behavior = .Inherit },
-        "perf record -g --call-graph dwarf -p {pid} -o perf.data",
-        .{ .pid = pid_str },
-    );
-
-    // Small delay to let perf attach before load starts.
-    std.time.sleep(200 * std.time.ns_per_ms);
-
-    // Run load test.
-    log.info("running load test: {d} connections, {d} requests...", .{
-        cli_args.connections,
-        cli_args.requests,
-    });
-    try shell.exec(
-        "zig-out/bin/tiger-load --port={port} --connections={connections} --requests={requests}",
-        .{
-            .port = port_str,
-            .connections = cli_args.connections,
-            .requests = cli_args.requests,
-        },
-    );
-
-    // Stop perf.
-    _ = posix.kill(perf.id, posix.SIG.INT) catch {};
-    _ = perf.wait() catch {};
-
-    // Stop server.
-    if (server.stdin) |stdin| {
-        stdin.close();
-        server.stdin = null;
-    }
-    _ = posix.kill(server.id, posix.SIG.TERM) catch {};
-    _ = server.wait() catch {};
-
-    // Print report. Capture stdout+stderr — perf report writes to both.
-    shell.echo("\n=== CPU by library ===\n", .{});
-    const dso_report = try shell.exec_stdout_stderr(
-        "perf report -i perf.data --stdio --no-children -g none -s dso --percent-limit=1",
-        .{},
-    );
-    if (dso_report[0].len > 0) shell.echo("{s}", .{dso_report[0]});
-    if (dso_report[1].len > 0) shell.echo("{s}", .{dso_report[1]});
-
-    shell.echo("\n=== Top functions ===\n", .{});
-    const sym_report = try shell.exec_stdout_stderr(
-        "perf report -i perf.data --stdio --no-children -g none -s dso,symbol --percent-limit=0.5",
-        .{},
-    );
-    if (sym_report[0].len > 0) shell.echo("{s}", .{sym_report[0]});
-    if (sym_report[1].len > 0) shell.echo("{s}", .{sym_report[1]});
-
-    // Clean up.
-    cleanup(shell);
-}
-
-fn cleanup(shell: *Shell) void {
-    const files = [_][]const u8{
-        "perf.data",
-        "tiger_web_perf.db",
-        "tiger_web_perf.db-wal",
-        "tiger_web_perf.db-shm",
-        "tiger_web.wal",
-    };
-    for (files) |file| {
-        shell.cwd.deleteFile(file) catch {};
-    }
+    _ = cli_args;
+    shell.echo(
+        \\error: `zig build scripts -- perf` is temporarily unavailable.
+        \\
+        \\The load driver (`tiger-load`) was removed in phase A of the
+        \\benchmark-tracking plan. Its replacement (`tiger-web benchmark`)
+        \\ships in phase D. See docs/plans/benchmark-tracking.md.
+        \\
+    , .{});
+    std.process.exit(1);
 }

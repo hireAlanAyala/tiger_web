@@ -471,10 +471,11 @@ Effort: 30 min. Dependencies: none.
 - [x] Verified: `./zig/zig build unit-test`, `./zig/zig build test`,
   `./zig/zig build test-sidecar` all pass
 
-**Note on `scripts/perf.zig`:** still invokes
-`zig-out/bin/tiger-load ...` as a shell string. Compiles fine; fails
-at runtime. Left alone — phase D adds `tiger-web benchmark` and
-updates `scripts/perf.zig` to call it.
+**`scripts/perf.zig` stubbed.** Full orchestration removed (lives in
+git history at `67993e8~1:scripts/perf.zig`). Invoking
+`zig build scripts -- perf` now prints a phase-D pointer and exits 1
+rather than shelling out to a missing binary. Phase D rewires the
+script to drive `tiger-web benchmark`.
 
 No user-visible API change. These were dev tools; their replacement
 (`tiger-web benchmark`) ships in phase D.
@@ -503,12 +504,14 @@ Tasks:
 - [x] Verified `fuzzing/` intact (`data.json` 39 KB + `logs/`); did
   not touch existing CFO data
 - [x] Created `devhub/data.json` containing `[]`
-- [x] Created `fuzzing/totals.json` containing `{"seeds_run": 0}`
-  (was absent on remote)
-- [x] Commit + push (commit `d252562` on devhubdb `main`). Remote
-  paths confirmed via API:
-  `repos/hireAlanAyala/tiger-web-devhubdb/contents/devhub/data.json`
-  (3 bytes), `...fuzzing/totals.json` (17 bytes).
+- [x] Created `fuzzing/totals.json` (was absent on remote). Value
+  aligned to `sum(.count)` across existing `fuzzing/data.json`
+  entries = **184456**, not `0`. CFO's `SeedTotals.read` returns
+  `{seeds_run: 0}` on `FileNotFound`, so `0` wouldn't have crashed —
+  but it would have silently under-reported cumulative seeds by the
+  historical count. Corrected on devhubdb commit `f70fdd8`.
+- [x] Bootstrap pushed on devhubdb `main`: `d252562` (initial) →
+  `f70fdd8` (totals.json fix). Remote paths confirmed via API.
 - [ ] **User action:** Generate a GitHub PAT with `contents: write`
   scope on `hireAlanAyala/tiger-web-devhubdb` only (fine-grained PAT
   recommended; classic also works). Browser URL:

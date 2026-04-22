@@ -106,20 +106,11 @@ npm run dev                 # start sidecar + server on port 3000
 #
 # bench — measure how fast the internals are (per-operation µs/op, budget assertions)
 ./zig/zig build bench           # state machine benchmark (real measurements)
-#
-# benchmark — measure HTTP throughput + latency (SLA tier) [phase D of benchmark-tracking]
-# ./zig-out/bin/tiger-web benchmark --port=3000 --connections=128 --requests=100000
-# (subcommand not yet implemented; tracked in docs/plans/benchmark-tracking.md phase D)
-
-# --- Profiling (requires `perf` — sudo pacman -S perf) ---
-# Note: `tiger-web benchmark` (phase D) will replace the load driver this used.
-./zig/zig build -Doptimize=ReleaseSafe       # build with symbols
-zig-out/bin/tiger-web start --port=0 --db=bench.db >port.txt 2>/dev/null &
-perf record -g --call-graph dwarf -p $! -o perf.data &
-# (load generator invocation to be added here once phase D ships `tiger-web benchmark`)
-kill %2; kill %1                             # stop perf, stop server
-perf report -i perf.data --stdio --no-children -g none -s dso,symbol --percent-limit=0.5
 ```
+
+(SLA-tier HTTP throughput benchmarking and `perf`-based profiling are
+being rebuilt under `docs/plans/benchmark-tracking.md` — Quick
+Reference entries return once phase D lands `tiger-web benchmark`.)
 
 **Benchmarking safety:** Always verify zero orphaned processes before
 AND after each benchmark run. `npx tsx` spawns process trees that
