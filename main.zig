@@ -710,8 +710,7 @@ const Command = union(enum) {
         \\Development commands (via zig build):
         \\  zig build test       Simulation tests (correctness)
         \\  zig build unit-test  Unit tests
-        \\  zig build bench      Micro-benchmark (per-operation µs/op)
-        \\  zig build load       HTTP throughput (req/s under load)
+        \\  zig build bench      Primitive + pipeline benchmarks
         \\  zig build scan       Validate handler annotations
         \\  zig build fuzz       Fuzz testing
         \\

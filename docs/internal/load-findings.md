@@ -1,7 +1,15 @@
 # Load Test Findings
 
-Results from implementing and running `zig build load` against the
-tiger-web server. i7-14700K, single core, SQLite, Linux.
+> **Historical note (2026-04-22):** the `zig build load` tool and
+> `tiger-load` binary referenced below were removed in Phase A of
+> `docs/plans/benchmark-tracking.md`. `tiger-web benchmark` (Phase D)
+> replaces them with better calibration discipline and warmup
+> semantics. Numbers in this doc remain useful as a pre-rebuild
+> baseline but are not reproducible from the current repo.
+
+Results from implementing and running the (now-removed) `zig build
+load` against the tiger-web server. i7-14700K, single core, SQLite,
+Linux.
 
 ## Baseline (before optimizations)
 

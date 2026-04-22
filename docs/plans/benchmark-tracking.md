@@ -77,24 +77,33 @@ stop and read the source. The plan's wording can match TB's idioms
 without the reader recognizing them, and that's exactly the state
 where we reintroduce the drift this discipline is meant to prevent.
 
-## Current state (as of last committed work)
+## Current state (as of 2026-04-22)
 
 Checkboxes throughout the plan reflect what's done (`[x]`) vs what's
 next (`[ ]`). Short version:
 
-- **Phase 0**: ✅ done. `framework/bench.zig` re-ported from TB,
-  `assert_budget` added as surgical addition, `state_machine_benchmark.zig`
-  updated for `stdx.Duration`. Tests pass.
-- **Phase 0 addendum**: `[ ]` pending. Update
-  `state_machine_benchmark.zig` output format from
-  `"get_product: 9.6us/op"` → `"get_product = 9600 ns"` to match TB's
-  `devhub.zig` parser (per dry-run finding DR-2).
-- **Phase A**: `[ ]` pending. Delete `scripts/loadtest.sh`,
-  `load_driver.zig`, `load_gen.zig`. 30 min.
-- **Phase B**: `[ ]` pending. Bootstrap `devhub/` dir in the
-  existing devhubdb repo. Repo exists; `fuzzing/` has CFO data;
-  `devhub/` dir missing. 30 min.
-- **Phases C, D, E, F, G**: concrete checklists below.
+- **Phase 0** ✅ done. Harness re-ported from TB verbatim; `assert_budget`
+  added as surgical principled divergence.
+- **Phase 0 addendum** ✅ done. All bench output conforms to TB's
+  `"label = value unit"` shape; `scripts/devhub.zig`'s
+  `get_measurement` parses it.
+- **Phase A** ✅ done. Load tooling deleted; CLAUDE.md Quick Reference
+  trimmed; `scripts/perf.zig` stubbed (failing loud pending Phase D
+  `tiger-web benchmark`).
+- **Phase B** ✅ done on the repo side (commits `d252562` + `f70fdd8`
+  on devhubdb). PAT registration is user-action — see
+  **Blocking on human** above.
+- **Phase C** ✅ done (5 primitives + state_machine pipeline; strict
+  `cp`-then-trim discipline; `bench-check` + `bench-calibrate`
+  automation wired into `unit-test`).
+- **Phase E** ✅ done (commit `27f5a51`). 2-tier uploader shipped
+  under the E-before-D revision.
+- **Phase F** ✅ config shipped (commit `6c0879f`). PRs dry-run
+  immediately; main-branch upload blocks on DEVHUBDB_PAT
+  registration.
+- **Phase D** ⏳ next. SLA tier adds ~5–10 metrics to the uploader's
+  run-order.
+- **Phase G** deferred until devhubdb has ≥1 week of data.
 
 ### Known runtime unknowns (can't resolve without execution)
 
@@ -537,17 +546,11 @@ Tasks:
   historical count. Corrected on devhubdb commit `f70fdd8`.
 - [x] Bootstrap pushed on devhubdb `main`: `d252562` (initial) →
   `f70fdd8` (totals.json fix). Remote paths confirmed via API.
-- [ ] **User action:** Generate a GitHub PAT with `contents: write`
-  scope on `hireAlanAyala/tiger-web-devhubdb` only (fine-grained PAT
-  recommended; classic also works). Browser URL:
-  `https://github.com/settings/personal-access-tokens/new`
-- [ ] **User action:** Add the PAT as `DEVHUBDB_PAT` in tiger_web's
-  GitHub Actions secrets. Via CLI (once PAT is in clipboard):
-  `gh secret set DEVHUBDB_PAT --repo hireAlanAyala/tiger_web`
-- [ ] **User action:** Verify `DEVHUBDB_PAT` visible to default
-  branch: `gh secret list --repo hireAlanAyala/tiger_web | grep DEVHUBDB_PAT`
+**User actions (PAT generation, secret registration, verification):**
+see **"Blocking on human"** at the top of this plan. The canonical
+copy lives there because Phase F depends on it too.
 
-CFO has been targeting this repo. Phase B completes its missing
+CFO has been targeting this repo. Phase B completed its missing
 `devhub/` half and unblocks the first CI-driven upload from either
 subsystem.
 

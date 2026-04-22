@@ -35,18 +35,21 @@ const runs = 3;
 // state_machine take size parameters; smoke-equivalent inputs must
 // be forced via env var for their rows to calibrate smoke-mode
 // budgets.
+const EnvVar = struct {
+    key: []const u8,
+    value: []const u8,
+};
+
 const Config = struct {
     name: []const u8,
-    env_key: ?[]const u8,
-    env_value: ?[]const u8,
+    env: []const EnvVar,
     measurement_lines: []const []const u8,
 };
 
 const configs = [_]Config{
     .{
         .name = "default (crc_frame, hmac_session, wal_parse, route_match)",
-        .env_key = null,
-        .env_value = null,
+        .env = &.{},
         .measurement_lines = &.{
             "crc_frame_64 = ",
             "crc_frame_256 = ",
@@ -60,19 +63,20 @@ const configs = [_]Config{
     },
     .{
         .name = "aegis_checksum (blob_size=1024, smoke-equivalent)",
-        .env_key = "blob_size",
-        .env_value = "1024",
+        .env = &.{.{ .key = "blob_size", .value = "1024" }},
         .measurement_lines = &.{"aegis_checksum = "},
     },
     .{
         .name = "state_machine (entity_count=10 ops=50, smoke-equivalent)",
-        .env_key = "entity_count",
-        .env_value = "10",
-        // A second env var (ops=50) is also ideally set; we only
-        // pass one via child_env_set. This produces a measurement
-        // for get_product/list_products/update_product at the
-        // reduced entity_count, which is the load-bearing shrink
-        // for smoke-mode budget calibration.
+        // Both env vars required — `entity_count` shrinks the seeded
+        // product count, `ops` shrinks the per-bench inner loop.
+        // Setting only one produced a hybrid (entity_count=10,
+        // ops=5000) that matched neither smoke nor benchmark mode
+        // and skewed state_machine numbers.
+        .env = &.{
+            .{ .key = "entity_count", .value = "10" },
+            .{ .key = "ops", .value = "50" },
+        },
         .measurement_lines = &.{
             "get_product = ",
             "list_products = ",
@@ -113,15 +117,16 @@ pub fn main(shell: *Shell, gpa: std.mem.Allocator, _: CLIArgs) !void {
 }
 
 fn run_bench(shell: *Shell, gpa: std.mem.Allocator, config: Config) !struct { []const u8, []const u8 } {
-    if (config.env_key) |key| {
-        const value = config.env_value.?;
-        const kv = try std.fmt.allocPrint(gpa, "{s}={s}", .{ key, value });
-        defer gpa.free(kv);
-        return shell.exec_stdout_stderr(
-            "env {kv} ./zig/zig build bench",
-            .{ .kv = kv },
-        );
+    _ = gpa;
+    // Shell's child_env_map is shell.env (see shell.zig:531). Putting
+    // overrides there propagates to every subsequent exec. We set
+    // before the build, and clean up after (including on error) so
+    // consecutive configs don't leak overrides.
+    for (config.env) |ev| {
+        try shell.env.put(ev.key, ev.value);
     }
+    defer for (config.env) |ev| shell.env.remove(ev.key);
+
     return shell.exec_stdout_stderr("./zig/zig build bench", .{});
 }
 
