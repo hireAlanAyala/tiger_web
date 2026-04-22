@@ -431,6 +431,7 @@ pub fn build(b: *std.Build) void {
         .{ .path = "aegis_checksum_benchmark.zig", .needs_sqlite = false },
         .{ .path = "crc_frame_benchmark.zig", .needs_sqlite = false },
         .{ .path = "hmac_session_benchmark.zig", .needs_sqlite = false },
+        .{ .path = "wal_parse_benchmark.zig", .needs_sqlite = false },
     };
 
     const bench_smoke_options = b.addOptions();
