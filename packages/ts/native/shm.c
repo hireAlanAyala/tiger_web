@@ -11,6 +11,8 @@
 #include <fcntl.h>
 #include <unistd.h>
 #include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 // Self-contained CRC32 (IEEE 802.3 / ISO-HDLC, polynomial 0xEDB88320).
@@ -293,8 +295,23 @@ static napi_value poll_dispatch(napi_env env, napi_callback_info info) {
   return js_found;
 }
 
+// CRC self-test — pair assertion against Zig's std.hash.crc.Crc32.
+// If this fails, the table is corrupted and all SHM frames will be
+// silently dropped (CRC mismatch on every CALL and RESULT).
+static void verify_crc_table(void) {
+  uint8_t test_input[] = "hello";
+  uint32_t expected = 0x3610A686; // CRC32("hello") — matches zlib + Zig
+  uint32_t actual = crc32_compute(0, test_input, 5);
+  if (actual != expected) {
+    fprintf(stderr, "FATAL: CRC32 table corrupted (got 0x%08X, expected 0x%08X)\n",
+            actual, expected);
+    abort();
+  }
+}
+
 // Module init.
 static napi_value init(napi_env env, napi_value exports) {
+  verify_crc_table();
   napi_value fn;
   napi_create_function(env, "mmapShm", NAPI_AUTO_LENGTH, mmap_shm, NULL, &fn);
   napi_set_named_property(env, exports, "mmapShm", fn);
