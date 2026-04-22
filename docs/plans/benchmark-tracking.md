@@ -138,233 +138,39 @@ resolved them. Details in "Preflight measurements" below:
 
 ## Engineering values
 
-These are the rules every file and every phase is held to. If a step
-violates a rule, stop and revise before proceeding.
+The 9 rules every benchmark file and phase is held to live in
+`docs/internal/decision-benchmark-tracking.md`. They persist past
+this plan's delete-at-Phase-G lifecycle because they're cross-phase
+decisions, not work-to-do.
 
-1. **Benchmark commitments, not guesses.** A benchmark is justified
-   only when the thing it measures is externally committed — a
-   cross-language wire contract, an on-disk format, a user-visible
-   API, or a DX promise. Plastic internal data structures either get
-   benched through their stable API (so implementation swaps produce
-   new numbers without breaking the test) or not at all.
-2. **Copy-first, trim-second at whatever granularity the TB file
-   permits.** The discipline is the same across cases; the granularity
-   adapts to the file.
+Short form (refer to the internal doc for full text):
 
-   - **Self-contained TB files** (e.g., `bench.zig`, `checksum_benchmark.zig`):
-     cp the whole file, trim with justification. Default is "TB's
-     code stays unless we name why it's wrong for us."
-   - **TB files deeply entangled with a subsystem we don't have**
-     (e.g., `benchmark_load.zig` tied to VSR, `devhub.zig` tied to
-     the tigerbeetle binary): cp the transplantable passages
-     verbatim with per-passage attribution (file:line citations).
-     The passages that can't transplant are written fresh because
-     their TB equivalents are domain-specific, not reusable.
-
-   The discipline — every line of TB's code we don't use has a named
-   reason — applies at both granularities. Do **not** write a new
-   version "in the style of" TB and later realign. Every deviation
-   falls into one of three buckets: **principled** (TB's answer
-   doesn't fit our domain), **flaw fix** (TB has a known weakness
-   we can cheaply improve), or **tracked follow-up** (temporary
-   state with a known end condition). Anything else is unprincipled
-   divergence and reverts to TB's original.
-
-   The "80% survival" heuristic is a *signal* about which granularity
-   applies: if whole-file cp would survive at ≥80%, prefer whole-file
-   cp. Below that, per-passage transplant is the right scope. It's
-   never "write fresh with a vague TB inspiration."
-3. **Each benchmark must pass the actionability test.** When the
-   measured number moves, the engineer looking at the dashboard must
-   have a concrete next investigation. "Something changed" is not
-   enough. Every benchmark file's header names the investigation path,
-   and this plan drafts the statement so a contributor copies rather
-   than invents.
-4. **No hard CI thresholds.** Numbers are noisy. A threshold either
-   fires false positives or is set high enough to miss real
-   regressions. The dashboard is the tool; the human is the judge.
-5. **Three tiers, each catching a different regression class.**
-   Primitive tier (single algorithmic kernels), pipeline tier
-   (framework pipeline without transport), SLA tier (end-to-end HTTP).
-   Regressions surface at the finest tier that covers them.
-6. **File-level discipline.** Every new file: functions ≤70 lines,
-   ≥2 assertions per function on average, header paragraph with
-   purpose + port source (if any) + divergences with rationale,
-   `framework/bench.zig` harness, `stdx.PRNG` for randomness.
-7. **Budgets are 10×-calibrated, not guessed.** Every `assert_budget`
-   threshold follows the pattern already in `state_machine_benchmark.zig`:
-   *"Set at ~10× expected value so they pass on slow CI runners but
-   catch real algorithmic regressions."* Measure the expected value
-   (three runs on the CI runner class in smoke mode), round up, multiply
-   by 10. A number picked from the air is rejected — TB's "always
-   motivate, always say why" applies to threshold values too. The 10×
-   headroom is deliberately generous; it catches only order-of-magnitude
-   regressions (10× slowdown from O(n²) or accidental allocations),
-   which is all smoke-mode budgets should catch.
-8. **Transplanted code is cited.** When a passage is lifted from
-   TigerBeetle, the comment names the source file:line so a future
-   reader can see what's ours vs theirs.
-9. **Open-loop mode is a blocking prerequisite for public claims.**
-   We ship closed-loop to match TB. Before quoting any dashboard
-   number externally (README, marketing, competitive comparison),
-   open-loop mode is added.
+1. Benchmark commitments, not guesses
+2. Copy-first, trim-second (granularity adapts to the TB file)
+3. Each benchmark passes the actionability test
+4. No hard CI thresholds
+5. Three tiers, each catching a different regression class
+6. File-level discipline (70-line limit, ≥2 asserts/fn, headers)
+7. Budgets are 10×-calibrated (enforced by `bench-check`)
+8. Transplanted code is cited (file:line)
+9. Open-loop mode is a blocking prerequisite for public claims
 
 ---
 
-## Preflight measurements (observed, decisions baked in)
+## Preflight findings
 
-Pure observations. No code changes. Preflight was run before finalizing
-this plan; results replace earlier conditional language.
+DR-1 through DR-4 (missing `cache_line_size`, output-format mismatch,
+`benchmark_load.zig` VSR entanglement, `devhub.zig` survival ratio)
+plus the pre-phase-0 `framework/bench.zig` drift and
+`checksum_benchmark.zig` template-survival findings all live in
+`docs/internal/decision-benchmark-tracking.md` under "Preflight
+findings (frozen)". They're historical observations that reshaped
+the plan; the work each triggered is already done.
 
-### Cross-file dry-run inspections (post-phase-0)
-
-After phase 0 landed, dry-run inspections of the TB files the later
-phases depend on surfaced three real findings that reshape the plan:
-
-**Finding DR-1: `cache_line_size` is missing from our constants.**
-Aegis bench imports `@import("framework/constants.zig").cache_line_size`.
-Our `framework/constants.zig` does not export it. TB's value
-(`src/constants.zig:480`) is `config.cluster.cache_line_size`. Phase
-C.2 gains a prerequisite step: add `cache_line_size: u16 = 64` (or
-whatever TB's resolved value is — check at port time) to
-`framework/constants.zig`.
-
-**Finding DR-2: TB's devhub.zig parses `label = value unit` format;
-our benchmarks emit `label: value/op`.** TB's `get_measurement`
-helper does `stdx.cut(stdout, label ++ " = ")` then
-`stdx.cut(rest, " " ++ unit)`. Any benchmark whose output will be
-parsed by `scripts/devhub.zig` must emit the TB format. Our current
-`state_machine_benchmark.zig` uses `get_product: 9.659us/op` —
-**does not parse**. Phase C and phase D benchmarks must emit
-`get_product = 9659 us` format. Phase 0 addendum task added below
-to update `state_machine_benchmark.zig` before phase E depends on it.
-
-**Finding DR-3: phase D cp-verbatim model is wrong for
-`benchmark_load.zig`.** Reading the file (1069 lines): 26 `vsr.*`
-references, 35 VSR-domain references (`MessagePool`, `MessageBus`,
-`Client`, `Account`, `Transfer`, `Operation`). The top-of-file
-imports are the entire skeleton:
-
-```zig
-const vsr = @import("vsr");
-const tb = vsr.tigerbeetle;
-const IO = vsr.io.IO;
-const Client = vsr.ClientType(tb.Operation, MessageBus);
-```
-
-Deleting those imports leaves almost nothing. The plan's "cp verbatim,
-trim VSR, graft HTTP" framing was optimistic. The realistic framing
-is "**read TB's file for the histogram + percentile + closed-loop
-client-state pattern; write a Tiger Web HTTP version that uses those
-patterns with attribution**." This is closer to a pattern-transplant
-than a file-port. Phase D section rewritten below.
-
-**Finding DR-4: TB's devhub.zig is ~50% survival, not 75-80%.**
-The file is heavy with tigerbeetle-binary-specific commands: builds
-tigerbeetle, runs `tigerbeetle format`, runs `tigerbeetle start`,
-does custom TCP ping, runs `tigerbeetle inspect integrity`, runs
-`tigerbeetle inspect metrics`. None of that applies to us. What
-survives:
-
-- `MetricBatch` struct shape (~15 lines)
-- `get_measurement` parser helper (~15 lines)
-- `upload_run` git-clone-fetch-reset-append-commit-push loop (~30 lines)
-- CLI arg pattern (~10 lines)
-
-Total: ~70 of ~280 lines survive = ~25% survival. The `devhub_metrics`
-function (the 200-line orchestrator that actually runs the
-benchmarks) is entirely Tiger-Web-specific and gets written fresh.
-Plan phase E section rewritten below.
-
-The discipline still holds — every deletion from the cp has a named
-reason (tigerbeetle-binary-specific commands, specific parser labels,
-etc.) — but the survival ratio is worse than estimated. The useful
-lesson for future TB ports: **survival ratio is visible only from
-reading the actual file, not from structural similarity.**
-
-### `framework/bench.zig` diff against TB's `src/testing/bench.zig`
-
-**Observed drift:** our harness uses `std.time.Timer` and returns `u64`
-nanoseconds, TB uses `TimeOS` + `Duration`. We added `assert_budget`
-that TB doesn't have. The outer shape (`init`, `parameter`, `start`,
-`stop`, `estimate`, `report`, smoke/benchmark mode, `seed_benchmark`)
-matches.
-
-**Decision:** re-port from TB verbatim. Our current file was written
-"in the style of" TB's — the exact pattern we're trying to stop
-doing. TB's `TimeOS` and `stdx.Duration` may encode decisions we
-haven't recognized as load-bearing yet. The re-port itself is code
-work; moved to **Phase 0** below.
-
-### `src/vsr/checksum_benchmark.zig` template survival
-
-**Observed** (actual `cp`-and-measure, not estimated): 43 lines total.
-
-- **Aegis port: 40/43 lines survive verbatim (93%).** Only three
-  import-path changes: `@import("../constants.zig")` →
-  `@import("framework/constants.zig")`, `@import("checksum.zig")` →
-  `@import("framework/checksum.zig")`, `@import("../testing/bench.zig")`
-  → `@import("framework/bench.zig")`. Our `framework/checksum.zig`
-  exports `pub fn checksum(source: []const u8) u128` — same signature
-  as TB's. No body edits required.
-- **Other primitives (CRC, HMAC, WAL parse, route): ~35/43 survive
-  (81%).** Four substitutions each (function call, counter name,
-  parameter range, hash-of-run print format). Same shape, different
-  kernel.
-
-**Decision:** cp-as-template is viable. Primitive benchmarks follow
-this shape verbatim with only kernel-specific parts substituted.
-
-### Local calibration of existing pipeline-tier budgets
-
-Ran `state_machine_benchmark.zig` three times (benchmark mode, not
-smoke — smoke mode is silent) on the development machine to establish
-a calibration baseline:
-
-| Operation | Run 1 | Run 2 | Run 3 | Max | 10× (budget) |
-|---|---|---|---|---|---|
-| `get_product` | 9.654 µs | 9.552 µs | 9.631 µs | 9.654 µs | ~100 µs |
-| `list_products` | 62.811 µs | 63.022 µs | 62.824 µs | 63.022 µs | ~640 µs |
-| `update_product` | 15.789 µs | 15.941 µs | 15.878 µs | 15.941 µs | ~160 µs |
-
-Variance across runs is <1% on a quiescent dev machine.
-
-**Caveats:**
-- Numbers are benchmark-mode (large inputs). Smoke-mode (small
-  inputs) runs in unit-test will show different absolute values;
-  calibration happens in smoke mode.
-- Dev machine ≠ CI runner. When phase F ships, re-calibrate on
-  GitHub Actions ubuntu-22.04 (usually 2-5× slower than local) and
-  update budgets accordingly.
-- The existing `state_machine_benchmark.zig` budgets (500 µs, 2 ms,
-  1 ms) were calibrated for slow CI in smoke mode. Don't blindly
-  tighten them to our benchmark-mode numbers.
-
-**Decision:** the 10× rule is validated as feasible on observed data
-(small variance, reasonable headroom above max). Primitive benches in
-phase C use the same rule; numbers get pinned during CI calibration
-in phase F.
-
-### HTTP latency distribution on the current load tool
-
-**Observed** (`./zig/zig build load -Doptimize=ReleaseSafe --
---connections=128 --requests=50000`):
-
-| Metric | Value |
-|---|---|
-| p1 | 9 ms |
-| p50 | 11 ms |
-| p99 | 12 ms |
-| p100 | 13 ms |
-
-**Observed (Debug, concurrency=32):** p50 = 2 ms, p99 = 3 ms.
-
-Neither mode shows predominantly sub-ms latencies. The earlier claim
-("HTTP latency is sub-ms, µs buckets warranted") was wrong.
-
-**Decision:** keep TB's ms granularity. Remove µs-granularity as a
-divergence. The 10,001-slot ms histogram gives range from 0-10,000ms
-which comfortably contains our distribution.
+Short reference for bisect: DR-1 → `cache_line_size` added.
+DR-2 → output-format fix (Phase 0 addendum). DR-3 → Phase D
+reframed as pattern-transplant. DR-4 → Phase E scoped to ~25%
+survival. Full context in the internal doc.
 
 ---
 
@@ -1138,305 +944,20 @@ phase planning, not only after.
 
 # Reasonings
 
-The rules above are the distilled output. The reasoning that produced
-them is below. A reader who agrees with the rules can stop at the end
-of phase G; a reader who wants to challenge or extend a rule reads on.
+The detailed rationale behind every decision in this plan has moved
+to `docs/internal/decision-benchmark-tracking.md`. That doc covers:
 
-## Why three tiers
+- Why cp-first, trim-second
+- Why three tiers; why this exact set of primitives; primitives
+  considered and rejected
+- Divergences from TigerBeetle (principled / flaw fix / tracked
+  follow-up)
+- Why no hard CI thresholds; why one ci.yml; why append-only upload
+- Phase C retrofit post-mortem (what TIGER_STYLE taught us)
+- What the system does NOT do; what framework users get
+- Honest acknowledgments
 
-Each tier catches a different regression class. Running one tier
-instead of three means some regressions hide under noise from layers
-the benchmark didn't intend to measure.
-
-| Tier | Why it exists |
-|---|---|
-| Primitive | A 20% CRC or HMAC regression is invisible in end-to-end HTTP throughput — the framework portion is only 30-40% of the measurement, so a 20% primitive regression translates to a ~7% HTTP regression, within noise. An isolated primitive bench sees it directly. |
-| Pipeline | Catches framework-code regressions (handler dispatch, prefetch orchestration, commit batching) without contamination from HTTP parsing or kernel TCP. TigerBeetle has no direct equivalent because their VSR client library *is* the framework's core loop; we have more layers, so we have more tiers. |
-| SLA | What customers actually see. Sensitive to kernel, TCP, SQLite, everything — which is exactly right for tracking the customer-facing number, and exactly wrong for isolating a framework change. |
-
-A regression in the primitive tier should cause a proportional
-regression in the pipeline tier, and a smaller (but visible)
-regression in the SLA tier. Disagreements between the three tiers are
-themselves signal — usually pointing at the right layer to investigate.
-
-**Noise-floor caveat.** The proportionality heuristic holds only at
-magnitudes above each tier's noise floor. Primitive tier (small
-samples, high variance) may have ~10% noise; SLA tier (large samples,
-kernel TCP variance) may have ~3%. A 5% framework regression shows
-in SLA but gets lost in primitive noise. Measure each tier's noise
-floor during the first month of devhub data collection; revisit
-actionability thresholds (currently 10% per primitive) against
-observed noise.
-
-## Why no hard CI thresholds
-
-TigerBeetle deliberately does not fail CI on benchmark regressions.
-Benchmark numbers are noisy — kernel scheduling, disk cache state,
-background processes all affect results. A hard threshold either
-fires false positives (blocks valid commits) or is set so high it
-misses real regressions.
-
-The human-in-the-loop approach puts a competent reviewer in front of
-a dashboard that makes regressions visually obvious. That reviewer
-has context the CI system doesn't — they know whether a commit is
-touching the hot path, they know whether the CI runner image changed
-that week, they know whether a dependency bumped.
-
-## Why this exact set of primitives
-
-Five benchmarks, one per subsystem, each measuring a single algorithmic
-kernel on an externally committed boundary:
-
-| File | Subsystem | External commitment that justifies benchmarking |
-|---|---|---|
-| `crc_frame_benchmark.zig` | SHM transport | `packages/vectors/shm_layout.json` wire contract; 0x5CAC007A cross-language test vector; cannot change without simultaneous Zig + C + TS update |
-| `aegis_checksum_benchmark.zig` | WAL | WAL entry format on disk; cannot change without breaking every existing WAL |
-| `hmac_session_benchmark.zig` | Auth | User-visible cookie format; cannot change without breaking every active session |
-| `wal_parse_benchmark.zig` | WAL | WAL entry body format on disk; same constraint as Aegis |
-| `route_match_benchmark.zig` | HTTP dispatch | Scanner → generated-table contract; matcher implementation remains plastic, but the interface is locked |
-
-The right unit is not "per subsystem" but **per distinct committed
-algorithmic kernel**. The distribution:
-
-| Subsystem | Committed kernels benched |
-|---|---|
-| SHM transport | 1 — `crc_frame` |
-| WAL | 2 — Aegis MAC + body parse |
-| Auth | 1 — HMAC session verify |
-| HTTP dispatch | 1 — route match |
-| SQLite storage | 0 — SQLite internals aren't our commitment |
-
-Five benches = five distinct kernels. Adding a future subsystem
-doesn't automatically add a bench; it adds a bench only if it
-introduces a new committed kernel. Adding a kernel to an existing
-subsystem (e.g., a new WAL field parser) does add a bench.
-
-### Primitives considered and rejected
-
-- `wal_recovery_benchmark.zig` — integration test, not a kernel.
-  Parse + IO + hash chain composed. TB wouldn't bench it as a
-  primitive; they'd rely on `wal_parse_benchmark` for the algorithmic
-  signal and accept that recovery throughput is a pipeline-tier
-  concern.
-- `shm_slot_benchmark.zig` — protocol roundtrip, not a kernel. The
-  algorithmic kernel is the CRC (already covered). Slot state
-  transitions are state-machine mechanics. TB has no
-  `vsr_message_roundtrip_benchmark.zig` for the same reason.
-- `pending_index_benchmark.zig`, `ring_buffer_benchmark.zig` —
-  plastic internals. Benchmarking them at the current
-  implementation layer would calcify the data structure choice.
-  Revisit later at the public API boundary if the container choice
-  stabilizes (tracked as follow-up).
-- Substrate utilities (`http.parse_request`, `codec.translate`,
-  `parse_uuid`, `format_u32`, PRNG) — TB doesn't benchmark their
-  equivalent substrate (TCP, memcpy) because they're not Tiger Web
-  domain algorithms. Regressions here show up in the pipeline tier.
-
-## Divergences from TigerBeetle
-
-Each divergence is one of: **principled** (our domain differs),
-**flaw fix** (TB has a known weakness), or **tracked follow-up**
-(temporary state with an end condition).
-
-### Principled divergences
-
-- **HTTP client loop replaces VSR client loop.** Our domain is HTTP;
-  customers never see VSR. The load generator's transport layer has
-  to match what customers use. Shape transplanted from TB; mechanics
-  rewritten.
-- **Pipeline tier exists (TB has no direct equivalent).** TB's
-  architecture is thinner — VSR client library calls directly into
-  the database kernel. Tiger Web has HTTP → SHM → state machine,
-  three layers of framework code between the client and the kernel.
-  A pipeline tier catches regressions that are ours but aren't
-  visible through HTTP. **Retirement criterion:** if the primitive
-  tier + SLA tier together detect every regression caught by the
-  pipeline tier for two consecutive quarters (six months), retire
-  the pipeline tier. Until that signal holds, the tier earns its
-  place.
-- **No LSM-family benchmarks.** SQLite is our storage engine. We
-  don't have LSM primitives to benchmark.
-- **`assert_budget` in the harness.** TB's `bench.zig` lists
-  "automatic regression detection" as an *explicit non-goal*:
-
-  ```
-  //! Non-goals:
-  //! - absolute benchmarking,
-  //! - continuous benchmarking,
-  //! - automatic regression detection.
-  ```
-
-  TB deliberately chose benchmarks-report-humans-decide. We diverge
-  because smoke-mode needs to catch catastrophic regressions (10×
-  slowdowns from accidental O(n²) or allocations) inside `zig build
-  unit-test`, which fails the build. This is not TB being wrong;
-  it's two valid answers to different questions. TB has a human
-  reviewer on their devhub; we want the unit-test run to be a
-  tighter feedback loop. The one surgical addition to the harness
-  during phase 0.
-
-### Flaw fixes
-
-- **Explicit warmup phase.** TB's benchmark measures from
-  `timer.reset()`, including cold-state overhead (SQLite prepared-
-  statement cache fill, TCP connection warmup, page cache
-  population). For a framework where the SLA claim is steady-state
-  throughput, including warmup in the measurement window understates
-  steady state. **Semantics: measure-and-discard.** Traffic runs
-  during warmup; the histogram is zeroed before the real window
-  begins. This is different from sleep-before-measuring.
-
-### Tracked follow-ups
-
-- **Closed-loop load generator only.** TB is pure closed-loop and
-  does not address coordinated omission. HTTP amplifies the failure
-  mode (kernel scheduling can delay request issue, hiding the
-  latency spike that would have occurred). We ship closed-loop to
-  match TB. Open-loop mode is a **blocking prerequisite** before any
-  public performance claim is made off the dashboard — not an
-  open-ended "if regressions start hiding" trigger. The failure mode
-  is invisible by design, so the remediation is time-boxed rather
-  than signal-driven.
-- **No machine fingerprint in the `MetricBatch`.** TB runs on
-  GitHub-hosted `ubuntu-22.04` runners and accepts the consistency
-  of that image class. We run on the same. When GitHub deprecates
-  the image class, both of us get a discontinuity. Remediation:
-  manual dashboard annotation on runner-class changes (tracked as
-  follow-up).
-
-## Preflight observations
-
-Preflight measurements were run before finalizing this plan. Three
-findings, each with a bound decision:
-
-1. **`framework/bench.zig` has drifted from TB in the exact way
-   engineering value 2 prohibits.** Our harness swapped `TimeOS` +
-   `stdx.Duration` for raw `std.time.Timer`; it was written "in the
-   style of" TB's file. **Decision: re-port from TB verbatim** (as a
-   1-hour preflight task, before phase C). `assert_budget` stays as
-   the one justified surgical addition.
-2. **`checksum_benchmark.zig` template survives ~85%.** The outer
-   structure (test scaffold, `Bench` init, parameter, arena alloc,
-   samples loop, estimate call, report) is reusable per primitive
-   with the kernel call and hash-of-run print swapped. **Decision:
-   cp-as-template is viable; primitive benchmarks follow the
-   Substitute/Preserve/Add structure in phase C.**
-3. **HTTP latencies are ms-scale, not sub-ms.** Measured p1=9ms,
-   p50=11ms at ReleaseSafe / 128 connections; p1=1ms, p50=2ms at
-   Debug / 32 connections. The earlier µs-granularity claim was
-   wrong. **Decision: keep TB's ms histogram granularity.** Divergence
-   removed from the plan.
-
-The preflight's role is exactly this: preventing the plan from
-asserting facts it hasn't measured. Findings 1 and 3 reversed
-plan decisions that were based on assumption; finding 2 confirmed
-an assumption that turned out to be correct.
-
-## Why cp-first, trim-second
-
-Previous ports from TB (including our current `framework/bench.zig`)
-were written "in the style of" the TB file — outer shape preserved,
-internals rewritten, simplifications introduced. The cost is not
-immediately visible: we lose specific TB decisions we didn't recognize
-as load-bearing. `framework/bench.zig` swapped `TimeOS` + `Duration`
-for raw `std.time.Timer`. We don't currently feel that loss, but TB's
-choice presumably encodes something (determinism? monotonic-clock
-handling on specific platforms? a type-safety invariant?). Writing
-fresh means we never pay the cost of understanding those decisions —
-we just accumulate silent drift.
-
-The cp-first discipline inverts this:
-
-- Start from TB's file in its entirety
-- Every deletion requires a named justification (principled / flaw
-  fix / tracked follow-up)
-- Every deletion that *can't* be justified reverts to TB's code
-
-This forces the question "why did TB do it this way?" on every line
-we'd otherwise rewrite. The question has to be answered (or deferred
-to follow-up) before code changes, not after.
-
-This is CLAUDE.md's `cp` rule applied consistently: *"Surgical edits
-on the real file produce an auditable diff where every change from
-TB's original is intentional and documented."* The 80% survival
-heuristic is a *signal* that trimming is heavy, not permission to
-write fresh — writing fresh means the diff is against nothing, and
-the TB decisions we dropped are invisible.
-
-## Why one ci.yml, not a separate workflow
-
-TB puts the devhub upload job in their existing `ci.yml`, gated by
-`if: github.ref == 'refs/heads/main'`. A separate workflow file would
-add surface area without adding capability and would drift from TB's
-file layout. One CI workflow with branch-gated jobs is the TB-aligned
-shape.
-
-## Why append-only upload, not merge
-
-TB has two different upload patterns in their repo:
-
-- `cfo.zig` — merge seed records, dedupe, aggregate counts, prune
-- `devhub.zig` — append one row per CI run
-
-Reading `src/scripts/devhub.zig` confirms: devhub upload is simply
-`fetch → reset → read array → append → commit → push` with retry on
-push conflicts. No merge complexity. Every entry is unique by
-`(commit, timestamp)` and there's nothing to merge across runs.
-
-A contributor implementing phase E might look at our already-ported
-`scripts/cfo.zig` and copy its retry-with-merge pattern. **That would
-be wrong for devhub's simpler needs.** Phase E.2 spells this out
-explicitly.
-
-## What this does NOT do
-
-- Does not fail CI on regression (noise > signal for hard thresholds)
-- Does not post PR comments (metrics without context mislead)
-- Does not automatically roll back commits (human judgment required)
-- Does not compare against baseline files (baselines drift with
-  hardware, runner image updates, dependency changes)
-- Does not publish laptop-run numbers as framework properties (tool
-  stdout makes the machine context obvious; separate DX concern from
-  the devhub pipeline, which runs exclusively on CI)
-
-The dashboard is the tool. The developer is the decision-maker.
-
-## What framework users get
-
-Built into the framework, accessible without assembling an external
-toolchain:
-
-- `tiger-web benchmark` — HTTP throughput + latency (SLA tier)
-- `zig build bench` — per-operation µs + algorithmic-kernel throughput
-  (pipeline + primitive tiers)
-- `zig build scripts -- perf` — CPU profiling with `perf` (existing)
-- Public benchmark tracking dashboard at
-  `https://hireAlanAyala.github.io/tiger-web-devhubdb` (phase G)
-
-No other web framework ships all four as first-class commands. The
-value isn't that each tool is novel — it's that they're integrated
-with the framework's metric definitions, so a user measures their
-app, finds bottlenecks, and tracks regressions using one toolbox.
-
-## Honest acknowledgments
-
-Three things this plan does not fully resolve:
-
-1. **Coordinated omission is a known blind spot** until open-loop
-   mode ships. Every performance claim from the dashboard before
-   then carries an implicit "measured closed-loop" caveat that can
-   hide tail-latency regressions. Tracked as follow-up with an
-   explicit blocking trigger (first public claim).
-2. **Runner-image drift detection is manual.** When GitHub
-   deprecates a runner class, our dashboard will show a false
-   regression alongside TB's. We rely on the developer noticing and
-   annotating. Tracked as follow-up; the remediation is cheap (~5
-   min) when the triggering announcement arrives.
-3. **Pipeline tier motivation is load-bearing.** If future
-   framework simplification reduces our layer count to match TB's,
-   the pipeline tier's justification weakens and we'd reconsider
-   whether it's still earning its complexity. As long as we have
-   SHM dispatch and state-machine pipelining, it earns its place.
-
-These are surfaced here rather than buried because readers deserve to
-see the assumptions the plan rests on.
+When reading a rule in this plan and wanting to challenge or extend
+it, the internal doc is where the reasoning lives. This plan holds
+work-to-do (checklists, current state, blocking items); the
+decisions and their justifications live in internal.
