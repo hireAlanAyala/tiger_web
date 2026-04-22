@@ -103,6 +103,17 @@ pub const tick_ms: u32 = 10;
 /// Disk sector size for Direct I/O alignment (TB pattern).
 pub const sector_size: u32 = 4096;
 
+/// CPU cache-line size in bytes. Used for aligned allocations where
+/// false-sharing must be avoided and for benchmark buffers aligned to
+/// a realistic load boundary. Matches TB's
+/// `src/constants.zig:cache_line_size` (= `config.cluster.cache_line_size`
+/// = 64 on x86_64 and arm64 — TB's `src/config.zig:154`).
+pub const cache_line_size: u16 = 64;
+
+comptime {
+    assert(cache_line_size == 64);
+}
+
 /// Sidecar response deadline in ticks. If the pipeline has been pending
 /// for this many ticks, terminate the sidecar connection.
 pub const sidecar_response_timeout_ticks: u32 = 500; // 5 seconds at 10ms/tick

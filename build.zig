@@ -417,38 +417,55 @@ pub fn build(b: *std.Build) void {
     });
 
     // --- Benchmark (smoke mode as part of unit-test, real via bench step) ---
+    //
+    // Each benchmark source file is compiled twice:
+    //   - smoke: small inputs, silent, assert_budget fires. Part of unit-test.
+    //   - real:  large inputs, prints. Part of `zig build bench`.
+    //
+    // Pipeline-tier benches (state_machine) need sqlite; primitive-tier
+    // benches (aegis_checksum, ...) don't. Adding a new bench file:
+    // append to `bench_sources` below.
+    const BenchSrc = struct { path: []const u8, needs_sqlite: bool };
+    const bench_sources = [_]BenchSrc{
+        .{ .path = "state_machine_benchmark.zig", .needs_sqlite = true },
+        .{ .path = "aegis_checksum_benchmark.zig", .needs_sqlite = false },
+    };
+
     const bench_smoke_options = b.addOptions();
     bench_smoke_options.addOption(bool, "benchmark", false);
-
-    const bench_smoke = b.addTest(.{
-        .root_source_file = b.path("state_machine_benchmark.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-    bench_smoke.root_module.addImport("stdx", stdx_module);
-    bench_smoke.root_module.addOptions("build_options", build_options);
-    bench_smoke.root_module.addOptions("test_options", bench_smoke_options);
-    link_sqlite(bench_smoke);
-    const run_bench_smoke = b.addRunArtifact(bench_smoke);
-    run_bench_smoke.setEnvironmentVariable("ZIG_EXE", b.graph.zig_exe);
-    unit_test_step.dependOn(&run_bench_smoke.step);
 
     const bench_real_options = b.addOptions();
     bench_real_options.addOption(bool, "benchmark", true);
 
-    const bench_real = b.addTest(.{
-        .root_source_file = b.path("state_machine_benchmark.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-    bench_real.root_module.addImport("stdx", stdx_module);
-    bench_real.root_module.addOptions("build_options", build_options);
-    bench_real.root_module.addOptions("test_options", bench_real_options);
-    link_sqlite(bench_real);
-    const bench_run = b.addRunArtifact(bench_real);
-    bench_run.has_side_effects = true;
-    const bench_step = b.step("bench", "Run state machine benchmark");
-    bench_step.dependOn(&bench_run.step);
+    const bench_step = b.step("bench", "Run micro-benchmarks (real mode)");
+
+    for (bench_sources) |src| {
+        const bench_smoke = b.addTest(.{
+            .root_source_file = b.path(src.path),
+            .target = target,
+            .optimize = optimize,
+        });
+        bench_smoke.root_module.addImport("stdx", stdx_module);
+        bench_smoke.root_module.addOptions("build_options", build_options);
+        bench_smoke.root_module.addOptions("test_options", bench_smoke_options);
+        if (src.needs_sqlite) link_sqlite(bench_smoke);
+        const run_bench_smoke = b.addRunArtifact(bench_smoke);
+        run_bench_smoke.setEnvironmentVariable("ZIG_EXE", b.graph.zig_exe);
+        unit_test_step.dependOn(&run_bench_smoke.step);
+
+        const bench_real = b.addTest(.{
+            .root_source_file = b.path(src.path),
+            .target = target,
+            .optimize = optimize,
+        });
+        bench_real.root_module.addImport("stdx", stdx_module);
+        bench_real.root_module.addOptions("build_options", build_options);
+        bench_real.root_module.addOptions("test_options", bench_real_options);
+        if (src.needs_sqlite) link_sqlite(bench_real);
+        const bench_run = b.addRunArtifact(bench_real);
+        bench_run.has_side_effects = true;
+        bench_step.dependOn(&bench_run.step);
+    }
 }
 
 /// CI pipeline — ported from TigerBeetle's build.zig build_ci pattern.
