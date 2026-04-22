@@ -1,18 +1,19 @@
-//! State machine benchmark — measures prefetch/commit throughput per operation.
+//! State machine benchmark — pipeline-tier: measures prefetch/commit
+//! throughput per operation.
 //!
-//! Internal tool for framework developers. Detects regressions in core state
-//! machine logic cost. Framework users should use `tiger-web load` instead —
-//! it measures the full stack (HTTP, disk, connections) under realistic load.
+//! Internal tool for framework developers. Detects regressions in core
+//! state machine logic cost. Framework users testing end-to-end
+//! throughput will use `tiger-web benchmark` (Phase D of the
+//! benchmark-tracking plan).
 //!
-//! This benchmark bypasses HTTP, uses in-memory SQLite, and runs single-threaded.
-//! It answers "did the logic get slower?" not "how much can this server handle?"
-//!
-//! Runs against App.Storage with no fault injection, so measurements reflect
-//! pure decision logic cost. Use as a regression detector: if the numbers move,
-//! your code changed — not your environment.
+//! Bypasses HTTP, uses in-memory SQLite, single-threaded. Answers
+//! "did the logic get slower?" not "how much can this server handle?"
 //!
 //! Smoke mode: `zig build unit-test` (small inputs, silent, prevents bitrot)
 //! Benchmark mode: `zig build bench` (large inputs, prints results)
+//!
+//! **Budget:** `docs/internal/benchmark-budgets.md#state_machine_benchmarkzig`
+//! holds the 3-run calibration. Phase F regenerates on `ubuntu-22.04`.
 
 const std = @import("std");
 const assert = std.debug.assert;
@@ -27,24 +28,13 @@ const StateMachine = App.SM;
 const fuzz = @import("fuzz.zig");
 const PRNG = stdx.PRNG;
 
-/// Budget assertions — catch catastrophic regressions (O(n²) queries,
-/// accidental allocations in the hot path). Set at ~10x expected value
-/// so they pass on slow CI runners but catch real algorithmic regressions.
-///
-/// These are NOT continuous benchmarks. TB doesn't run benchmarks in CI
-/// either — they use manual benchmarking on known hardware for gradual
-/// drift detection. Budget assertions only catch order-of-magnitude
-/// regressions. A 20% slowdown won't trigger these; a 10x slowdown will.
-///
-/// To recalibrate: run `./zig/zig build bench`, note the actual durations,
-/// set budgets to ~10x those values.
+// Per-operation smoke-mode budgets. Calibrated 10×max(3 runs) at
+// entity_count=10, ops=50 — see docs/internal/benchmark-budgets.md.
+// Phase F regenerates on ubuntu-22.04.
 const budget = struct {
-    /// Per-operation budget (smoke mode only). Each fires if smoke-mode
-    /// measurement exceeds the value. Units via `stdx.Duration` after
-    /// the Phase 0 bench.zig re-port.
-    const get_product: Duration = .{ .ns = 500_000 }; // 500us — point read
-    const list_products: Duration = .{ .ns = 2_000_000 }; // 2ms — table scan
-    const update_product: Duration = .{ .ns = 1_000_000 }; // 1ms — read + write
+    const get_product: Duration = .{ .ns = 100_000 }; // 100 µs
+    const list_products: Duration = .{ .ns = 500_000 }; // 500 µs
+    const update_product: Duration = .{ .ns = 200_000 }; // 200 µs
 };
 
 const bench_test_key: *const [auth.key_length]u8 = "tiger-web-test-key-0123456789ab!";

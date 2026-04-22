@@ -14,6 +14,7 @@ const std = @import("std");
 const stdx = @import("stdx");
 const Shell = @import("shell.zig");
 
+const bench_calibrate = @import("./scripts/bench_calibrate.zig");
 const bench_check = @import("./scripts/bench_check.zig");
 const cfo = @import("./scripts/cfo.zig");
 const ci = @import("./scripts/ci.zig");
@@ -34,6 +35,7 @@ pub fn log_fn(
 pub const std_options: std.Options = .{ .logFn = log_fn };
 
 const CLIArgs = union(enum) {
+    @"bench-calibrate": bench_calibrate.CLIArgs,
     @"bench-check": bench_check.CLIArgs,
     cfo: cfo.CLIArgs,
     ci: ci.CLIArgs,
@@ -45,6 +47,8 @@ const CLIArgs = union(enum) {
         \\Usage:
         \\
         \\  zig build scripts -- [-h | --help]
+        \\
+        \\  zig build scripts -- bench-calibrate
         \\
         \\  zig build scripts -- bench-check
         \\
@@ -84,6 +88,7 @@ pub fn main() !void {
     const cli_args = stdx.flags(&args, CLIArgs);
 
     switch (cli_args) {
+        .@"bench-calibrate" => |args_bcal| try bench_calibrate.main(shell, gpa, args_bcal),
         .@"bench-check" => |args_bc| try bench_check.main(shell, gpa, args_bc),
         .cfo => |args_cfo| try cfo.main(shell, gpa, args_cfo),
         .ci => |args_ci| try ci.main(shell, gpa, args_ci),

@@ -28,14 +28,13 @@ pub const CLIArgs = struct {};
 
 // Every benchmark file in this list must satisfy the invariants in
 // `check_file`. Keep in sync with `build.zig:bench_sources`.
-// state_machine_benchmark.zig is exempt — it predates phase C and
-// uses an older budget shape; plan phase F rewrites it.
 const bench_files = [_][]const u8{
     "aegis_checksum_benchmark.zig",
     "crc_frame_benchmark.zig",
     "hmac_session_benchmark.zig",
     "wal_parse_benchmark.zig",
     "route_match_benchmark.zig",
+    "state_machine_benchmark.zig",
 };
 
 const required_budgets_doc_ref = "docs/internal/benchmark-budgets.md";

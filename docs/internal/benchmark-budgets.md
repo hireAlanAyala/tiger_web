@@ -108,26 +108,41 @@ pass over the 5-probe fixed set × ~24 routes.
 
 ### state_machine_benchmark.zig (pipeline-tier)
 
-Pre-dates phase C. Original budgets (500 / 2000 / 1000 µs) were
-calibrated on a slow CI runner in smoke mode prior to the 3-run
-discipline. Phase F will recalibrate these alongside the primitives.
+Pipeline-tier. Exercises the state machine's prefetch + commit path
+against in-memory SQLite. Smoke mode uses `entity_count=10, ops=50`;
+benchmark mode uses `1000` / `5000`. Budgets fire on smoke mode only.
+
+Smoke-equivalent inputs forced in benchmark mode via
+`entity_count=10 ops=50 ./zig/zig build bench` for observation.
+
+| Op              | Run 1 | Run 2 | Run 3 |  max  |   10×    | budget    |
+|-----------------|-------|-------|-------|-------|----------|-----------|
+| get_product     |  8871 |  8920 |  8877 |  8920 |   89 200 |  100 000  |
+| list_products   | 44423 | 44567 | 44546 | 44567 |  445 670 |  500 000  |
+| update_product  | 14763 | 14803 | 14804 | 14804 |  148 040 |  200 000  |
+
+Prior budgets (500 / 2000 / 1000 µs, pre-phase-C) were 5-6× looser
+than `10 × max(3 runs)` under the current discipline. Tightened as
+part of the same pass that brought the file under `bench-check`.
 
 ## Regenerating
 
-To refresh these numbers on a new environment (CI runner, new dev
-machine, etc.):
+Single command, automated across all three configurations (default,
+aegis at 1 KiB smoke, state_machine at smoke-equivalent inputs):
 
 ```sh
-# Run three times. For benches with a parameter, force smoke-equivalent
-# input via env var so the numbers apply to smoke mode.
-for i in 1 2 3; do ./zig/zig build bench | grep -E "= .* ns"; done
-for i in 1 2 3; do blob_size=1024 ./zig/zig build bench | grep "aegis_checksum"; done
+./zig/zig build scripts -- bench-calibrate
 ```
 
-Then update this doc and the `budget_ns_smoke_max` constants in each
-`*_benchmark.zig`. The file headers point here for the observation
-tables; only the single budget number lives in the `.zig` file
-itself.
+This runs every bench 3 times per configuration (9 builds total,
+~60–90 s in Debug) and prints per-run measurements in
+markdown-spliceable form. Copy into the tables above; update the
+`budget_ns_smoke_max` constant in each `*_benchmark.zig` to
+`10 × max(runs)` rounded up.
+
+The script does **not** mutate this doc or the bench constants —
+the mutation step stays a deliberate human act so regenerations
+are visible in git diffs and reviewable.
 
 ## Invariants worth preserving when regenerating
 
