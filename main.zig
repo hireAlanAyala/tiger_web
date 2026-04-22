@@ -51,7 +51,16 @@ pub fn main() !void {
         .start => |cli| cmd_start(cli, &args),
         .trace => |cli| cmd_trace(cli),
         .schema => |cli| cmd_schema(cli),
+        .benchmark => |cli| cmd_benchmark(cli),
     }
+}
+
+fn cmd_benchmark(cli: BenchmarkArgs) void {
+    const driver = @import("benchmark_driver.zig");
+    driver.run(gpa.allocator(), cli) catch |err| {
+        log.err("benchmark failed: {}", .{err});
+        std.process.exit(1);
+    };
 }
 
 pub fn cmd_start(cli: StartArgs, args: *std.process.ArgIterator) void {
@@ -695,17 +704,20 @@ const Command = union(enum) {
     start: StartArgs,
     trace: TraceArgs,
     schema: SchemaArgs,
+    benchmark: BenchmarkArgs,
 
     pub const help =
         \\Usage:
-        \\  tiger-web start [options] [-- sidecar-command...]
-        \\  tiger-web trace --max=<size> :<port>
-        \\  tiger-web schema apply <file.sql> [--db=<path>]
+        \\  tiger-web start     [options] [-- sidecar-command...]
+        \\  tiger-web trace     --max=<size> :<port>
+        \\  tiger-web schema    apply <file.sql> [--db=<path>]
+        \\  tiger-web benchmark [options]
         \\
         \\Runtime commands:
-        \\  start   Run the server
-        \\  trace   Attach to a running server, capture a Chrome Tracing file
-        \\  schema  Apply SQL schema to the database
+        \\  start      Run the server
+        \\  trace      Attach to a running server, capture a Chrome Tracing file
+        \\  schema     Apply SQL schema to the database
+        \\  benchmark  Closed-loop HTTP load test; emits latency percentiles + throughput
         \\
         \\Development commands (via zig build):
         \\  zig build test       Simulation tests (correctness)
@@ -735,6 +747,34 @@ const TraceArgs = struct {
     @"--": void,
     /// Positional: ":port" (e.g. ":3000")
     target: []const u8,
+};
+
+/// Closed-loop HTTP load test. Drives N persistent TCP connections
+/// against a running server, issues `--requests` total operations
+/// across them according to `--ops` weights, and prints per-metric
+/// throughput + latency percentiles.
+///
+/// Warmup: requests run for `--warmup-seconds` before measurement
+/// begins. The measurement histogram is zeroed at the warmup
+/// boundary — traffic continues uninterrupted, only *recorded*
+/// samples are discarded. This is the "measure-and-discard" flaw
+/// fix documented in docs/internal/decision-benchmark-tracking.md.
+///
+/// Output shape matches TB's `get_measurement` parser
+/// (`docs/internal/decision-benchmark-tracking.md` DR-2):
+///   `label = value unit`. Fed into `scripts/devhub.zig` when invoked
+/// from CI on main.
+pub const BenchmarkArgs = struct {
+    port: u16 = 3000,
+    connections: u16 = 128,
+    requests: u32 = 100_000,
+    /// Operation-weight mix, e.g. `create_product:80,list_products:20`.
+    /// Weights are relative; PRNG-driven selection per request so
+    /// replay under the same seed is deterministic.
+    ops: []const u8 = "create_product:80,list_products:20",
+    /// Seconds of warmup traffic before measurement window opens.
+    /// 0 skips warmup.
+    @"warmup-seconds": u16 = 5,
 };
 
 pub const SchemaArgs = struct {
