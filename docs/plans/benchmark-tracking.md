@@ -113,18 +113,33 @@ violates a rule, stop and revise before proceeding.
    API, or a DX promise. Plastic internal data structures either get
    benched through their stable API (so implementation swaps produce
    new numbers without breaking the test) or not at all.
-2. **Copy-first, trim-second when porting from TigerBeetle.** The
-   default is: `cp` the whole file, then each deletion is a conscious
-   decision that has to be justified. Do **not** write a new version
-   "in the style of" TB and later realign — we have repeatedly lost
-   specific TB decisions by doing that. Every deviation from the
-   cp'd source falls into one of three buckets: **principled** (TB's
-   answer doesn't fit our domain), **flaw fix** (TB's approach has a
-   known weakness we can cheaply improve), or **tracked follow-up**
-   (temporary state with a known end condition). Anything else is
-   unprincipled divergence and reverts to TB's original. The "80%
-   survival" heuristic is a *signal* that trimming is heavy, not a
-   license to write fresh.
+2. **Copy-first, trim-second at whatever granularity the TB file
+   permits.** The discipline is the same across cases; the granularity
+   adapts to the file.
+
+   - **Self-contained TB files** (e.g., `bench.zig`, `checksum_benchmark.zig`):
+     cp the whole file, trim with justification. Default is "TB's
+     code stays unless we name why it's wrong for us."
+   - **TB files deeply entangled with a subsystem we don't have**
+     (e.g., `benchmark_load.zig` tied to VSR, `devhub.zig` tied to
+     the tigerbeetle binary): cp the transplantable passages
+     verbatim with per-passage attribution (file:line citations).
+     The passages that can't transplant are written fresh because
+     their TB equivalents are domain-specific, not reusable.
+
+   The discipline — every line of TB's code we don't use has a named
+   reason — applies at both granularities. Do **not** write a new
+   version "in the style of" TB and later realign. Every deviation
+   falls into one of three buckets: **principled** (TB's answer
+   doesn't fit our domain), **flaw fix** (TB has a known weakness
+   we can cheaply improve), or **tracked follow-up** (temporary
+   state with a known end condition). Anything else is unprincipled
+   divergence and reverts to TB's original.
+
+   The "80% survival" heuristic is a *signal* about which granularity
+   applies: if whole-file cp would survive at ≥80%, prefer whole-file
+   cp. Below that, per-passage transplant is the right scope. It's
+   never "write fresh with a vague TB inspiration."
 3. **Each benchmark must pass the actionability test.** When the
    measured number moves, the engineer looking at the dashboard must
    have a concrete next investigation. "Something changed" is not
@@ -928,19 +943,33 @@ known end conditions.
 |---|---|---|
 | preflight measurements | done | — |
 | 0 (harness re-port) | done (~30 min actual) | preflight |
+| 0 addendum (output format) | done (~10 min actual) | 0 |
 | A | 30 min | 0 |
 | B | 30 min | nothing |
-| C | 1–2 days | 0, A |
-| D | 1–2 days | A |
-| E | 1 day | B, C, D |
+| C | 1.5–2 days | 0, A |
+| D | **2–3 days** (up from 1-2 after DR-3) | A |
+| E | **1–1.5 days** (up from 1 after DR-4) | B, C, D |
 | F | 1 hour | B, E |
 | G | 1–2 days | F + ≥1 week of data |
 
-Pragmatic sequencing: 0 → A + B in parallel → C + D in parallel → E
-→ F → G.
+**Pragmatic sequencing:** 0 → A + B in parallel → **C, then D**
+→ E → F → G.
 
-Total to phase F (CI uploading on every main merge): ~4 focused days
-+ 1 hour phase 0.
+C before D is the default. C validates the discipline on easy cases
+(~85% survival cp-with-trim); D is the higher-risk pattern-transplant
+with fresh HTTP code. Learning from C first reduces the risk surface
+of D. Parallelizing saves calendar time only if you're confident D
+won't reshape anything in C, which you're not confident of until C
+is done.
+
+Total to phase F (CI uploading on every main merge): **~5-6 focused
+days** (up from ~4 after dry-run findings DR-3 and DR-4).
+
+The 25-50% scope growth is itself a finding: TB's benchmark tooling
+is more domain-entangled than the cp-first rule initially suggested.
+The rule still holds, but its granularity shifted (see engineering
+value 2). Future TB ports should budget an inspection pass before
+phase planning, not only after.
 
 ---
 
