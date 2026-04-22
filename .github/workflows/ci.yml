@@ -65,6 +65,14 @@ jobs:
         run: |
           SHA="${{ github.event.pull_request.head.sha || github.sha }}"
           if [ "${{ github.ref }}" = "refs/heads/main" ]; then
+            if [ -z "$DEVHUBDB_PAT" ]; then
+              # Secret not yet registered (see plan's Blocking-on-human).
+              # Skip cleanly rather than fail — a red devhub job on every
+              # main push trains reviewers to ignore CI red. When the
+              # secret lands this branch disappears automatically.
+              echo "::warning::DEVHUBDB_PAT not registered; skipping upload until the secret is in place."
+              exit 0
+            fi
             ./zig/zig build scripts -- devhub --sha="$SHA"
           else
             ./zig/zig build scripts -- devhub --sha="$SHA" --dry-run
