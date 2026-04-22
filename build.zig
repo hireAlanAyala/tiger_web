@@ -260,6 +260,17 @@ pub fn build(b: *std.Build) void {
     const scripts_step = b.step("scripts", "Run automation scripts");
     scripts_step.dependOn(&scripts_cmd.step);
 
+    // --- Bench discipline check ---
+    // Runs `tiger-scripts bench-check` — asserts every *_benchmark.zig
+    // file has a budget reference pointing at docs/internal/benchmark-budgets.md
+    // and calls bench.assert_budget. Wired into `unit-test` below so
+    // every commit's CI run enforces it. Automation, not discipline.
+    const bench_check_cmd = b.addRunArtifact(scripts_exe);
+    bench_check_cmd.step.dependOn(&b.addInstallArtifact(scripts_exe, .{}).step);
+    bench_check_cmd.addArg("bench-check");
+    const bench_check_step = b.step("bench-check", "Assert benchmark-tracking discipline");
+    bench_check_step.dependOn(&bench_check_cmd.step);
+
     // --- Annotation scanner ---
     const scanner_exe = b.addExecutable(.{
         .name = "annotation-scanner",
@@ -288,6 +299,9 @@ pub fn build(b: *std.Build) void {
         "supervisor.zig",
     };
     const unit_test_step = b.step("unit-test", "Run unit tests");
+    // Benchmark discipline check runs first — a calibration violation
+    // should fail fast, before expensive test suites.
+    unit_test_step.dependOn(&bench_check_cmd.step);
     for (modules) |mod| {
         const unit_test = b.addTest(.{
             .root_source_file = b.path(mod),
