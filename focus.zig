@@ -221,76 +221,24 @@ fn cmd_dev(gpa: std.mem.Allocator, args: DevArgs) !void {
     else
         null;
 
-    // Read .focus hooks.
-    const dot_focus = std.fs.cwd().readFileAlloc(gpa, ".focus", 4096) catch {
-        stderr.print("error: no .focus file — run 'focus new' first\n", .{}) catch {};
-        std.process.exit(1);
-    };
-    defer gpa.free(dot_focus);
-    const start_hook = parse_hook(dot_focus, "start") orelse {
-        stderr.print("error: .focus file missing 'start' hook\n", .{}) catch {};
-        std.process.exit(1);
-    };
-    const db_name = parse_hook(dot_focus, "db") orelse "tiger_web.db";
+    const hooks = try read_dev_hooks(gpa);
+    defer gpa.free(hooks.dot_focus);
 
-    // Step 1: Build (scanner + codegen).
+    // Build codegen before server starts — server imports generated files.
     try cmd_build(gpa, .{ .path = path, .@"--" = {} });
 
-    // Step 2: Apply schema if schema.sql exists.
+    // Schema apply is best-effort — absent schema.sql is fine.
     if (std.fs.cwd().access("schema.sql", .{})) |_| {
-        apply_schema(db_name);
+        apply_schema(hooks.db_name);
     } else |_| {}
 
-    // Step 3: Start server in a background thread (embedded, same process).
-    // PID-scoped socket path avoids collisions between concurrent focus dev sessions.
-    const server_pid = std.c.getpid();
-    var sock_path_buf: [64]u8 = undefined;
-    const sock_path = std.fmt.bufPrint(&sock_path_buf, "/tmp/focus-dev-{d}.sock", .{server_pid}) catch unreachable;
+    const dev = try start_dev_server(gpa, args, hooks.db_name);
 
-    // Atomic signals: server thread stores after init completes.
-    var port_signal = std.atomic.Value(u16).init(0);
-    var ready_signal = std.atomic.Value(bool).init(false);
-
-    const db_z = to_sentinel(db_name);
-
-    const server_config = ServerConfig{
-        .port = args.port,
-        .sock_path = sock_path,
-        .db = &db_z,
-        .port_signal = &port_signal,
-        .ready_signal = &ready_signal,
-    };
-    const server_thread = try std.Thread.spawn(.{}, run_server, .{&server_config});
-    _ = server_thread; // detached — runs until process exits
-
-    // Compute SHM name from server PID.
-    var shm_buf: [32]u8 = undefined;
-    const shm_name = std.fmt.bufPrint(&shm_buf, "tiger-{d}", .{server_pid}) catch unreachable;
-
-    // Wait for the server thread to complete init (SHM created, event loop starting).
-    // Atomic poll — no shm_open probe needed (macOS shm_open has cross-thread issues).
-    try stdout.print("{s}[server]{s}  starting...\n", .{ color("\x1b[36m"), color("\x1b[0m") });
-    var ready = false;
-    for (0..100) |_| {
-        if (ready_signal.load(.acquire)) {
-            ready = true;
-            break;
-        }
-        std.time.sleep(50 * std.time.ns_per_ms);
-    }
-    if (!ready) {
-        stderr.print("error: server did not start (no ready signal after 5s)\n", .{}) catch {};
-        std.process.exit(1);
-    }
-
-    const actual_port = port_signal.load(.acquire);
-
-    // Step 4: Start sidecar.
-    // Bake $SHM and $SOCK into the shell command prefix so the child inherits
-    // the full parent environment (PATH, HOME, etc.) plus our two variables.
+    // Bake $SHM and $SOCK into the shell command prefix so the sidecar
+    // inherits the full parent environment (PATH, HOME, …) plus these two.
     var start_cmd_buf: [1024]u8 = undefined;
     const start_cmd = std.fmt.bufPrint(&start_cmd_buf, "export SHM={s} SOCK={s}; {s}", .{
-        shm_name, sock_path, start_hook,
+        dev.shm_name, dev.sock_path, hooks.start_hook,
     }) catch {
         stderr.print("error: start hook too long\n", .{}) catch {};
         std.process.exit(1);
@@ -301,11 +249,7 @@ fn cmd_dev(gpa: std.mem.Allocator, args: DevArgs) !void {
         std.process.exit(1);
     };
 
-    // Install SIGINT/SIGTERM handler for clean shutdown.
     install_signal_handlers();
-
-    // Track schema.sql mtime — detect changes, advise restart.
-    var schema_mtime: i128 = get_file_mtime("schema.sql");
 
     try stdout.print(
         \\
@@ -313,30 +257,127 @@ fn cmd_dev(gpa: std.mem.Allocator, args: DevArgs) !void {
         \\  Watching {s} for changes...
         \\
         \\
-    , .{ color("\x1b[1m"), actual_port, color("\x1b[0m"), path });
+    , .{ color("\x1b[1m"), dev.port, color("\x1b[0m"), path });
 
-    // Step 5: Watch + reload loop.
-    // Linux: inotify (kernel events, instant detection, recursive).
-    // macOS: stat polling (walks subdirs naturally).
+    try dev_watch_loop(gpa, path, start_cmd, deadline, &sidecar);
+}
+
+/// Hooks read from .focus — the three fields cmd_dev needs, parsed once.
+const DevHooks = struct {
+    dot_focus: []u8, // owned by caller; holds the backing storage
+    start_hook: []const u8,
+    db_name: []const u8,
+};
+
+fn read_dev_hooks(gpa: std.mem.Allocator) !DevHooks {
+    const dot_focus = std.fs.cwd().readFileAlloc(gpa, ".focus", 4096) catch {
+        stderr.print("error: no .focus file — run 'focus new' first\n", .{}) catch {};
+        std.process.exit(1);
+    };
+    const start_hook = parse_hook(dot_focus, "start") orelse {
+        gpa.free(dot_focus);
+        stderr.print("error: .focus file missing 'start' hook\n", .{}) catch {};
+        std.process.exit(1);
+    };
+    const db_name = parse_hook(dot_focus, "db") orelse "tiger_web.db";
+    return .{ .dot_focus = dot_focus, .start_hook = start_hook, .db_name = db_name };
+}
+
+/// Dev server handles: port for the URL banner, sock_path for the
+/// sidecar's control socket, shm_name for the sidecar's mmap. Returned
+/// after the server thread has signalled ready (SHM created, listening).
+const DevServer = struct {
+    port: u16,
+    sock_path: []const u8,
+    shm_name: []const u8,
+};
+
+fn start_dev_server(gpa: std.mem.Allocator, args: DevArgs, db_name: []const u8) !DevServer {
+    const stdout = std.io.getStdOut().writer();
+
+    // PID-scoped paths avoid collisions between concurrent focus dev sessions.
+    const server_pid = std.c.getpid();
+    var sock_path_buf: [64]u8 = undefined;
+    const sock_path = std.fmt.bufPrint(&sock_path_buf, "/tmp/focus-dev-{d}.sock", .{server_pid}) catch unreachable;
+    var shm_buf: [32]u8 = undefined;
+    const shm_name = std.fmt.bufPrint(&shm_buf, "tiger-{d}", .{server_pid}) catch unreachable;
+
+    const db_z = to_sentinel(db_name);
+
+    // Atomic signals: server thread publishes after init completes.
+    // The storage outlives this fn because run_server holds the pointers.
+    const state = try gpa.create(DevServerState);
+    state.* = .{
+        .port_signal = std.atomic.Value(u16).init(0),
+        .ready_signal = std.atomic.Value(bool).init(false),
+        .sock_path_storage = sock_path_buf,
+        .shm_name_storage = shm_buf,
+        .db_z = db_z,
+        .config = undefined, // set below — needs state's address for the pointer fields
+    };
+    state.config = ServerConfig{
+        .port = args.port,
+        .sock_path = state.sock_path_storage[0..sock_path.len],
+        .db = &state.db_z,
+        .port_signal = &state.port_signal,
+        .ready_signal = &state.ready_signal,
+    };
+
+    _ = try std.Thread.spawn(.{}, run_server, .{&state.config});
+
+    // Atomic poll — no shm_open probe needed (macOS shm_open has cross-thread issues).
+    try stdout.print("{s}[server]{s}  starting...\n", .{ color("\x1b[36m"), color("\x1b[0m") });
+    for (0..100) |_| {
+        if (state.ready_signal.load(.acquire)) {
+            return .{
+                .port = state.port_signal.load(.acquire),
+                .sock_path = state.sock_path_storage[0..sock_path.len],
+                .shm_name = state.shm_name_storage[0..shm_name.len],
+            };
+        }
+        std.time.sleep(50 * std.time.ns_per_ms);
+    }
+    stderr.print("error: server did not start (no ready signal after 5s)\n", .{}) catch {};
+    std.process.exit(1);
+}
+
+/// Heap-allocated state for the detached server thread.
+const DevServerState = struct {
+    port_signal: std.atomic.Value(u16),
+    ready_signal: std.atomic.Value(bool),
+    sock_path_storage: [64]u8,
+    shm_name_storage: [32]u8,
+    db_z: [128]u8,
+    config: ServerConfig,
+};
+
+fn dev_watch_loop(
+    gpa: std.mem.Allocator,
+    path: []const u8,
+    start_cmd: []const u8,
+    deadline: ?i128,
+    sidecar: *SidecarChild,
+) !void {
+    const stdout = std.io.getStdOut().writer();
     var watcher = try FileWatcher.init(gpa, path);
+    var schema_mtime: i128 = get_file_mtime("schema.sql");
 
     while (true) {
-        // Check for signal-based shutdown (Ctrl-C).
         if (shutdown_requested.load(.acquire)) {
             try stdout.print("\n{s}[dev]{s}     shutting down...\n", .{ color("\x1b[36m"), color("\x1b[0m") });
             sidecar.kill();
             return;
         }
 
-        // Check if sidecar crashed. Rate-limit restarts to avoid spin loops.
         if (sidecar.check_exited()) |exit_code| {
             try stdout.print("{s}[watch]{s}   sidecar exited (code {d}) — restarting...\n", .{
                 color("\x1b[33m"), color("\x1b[0m"), exit_code,
             });
-            sidecar = try SidecarChild.spawn(gpa, &.{ "sh", "-c", start_cmd });
+            sidecar.* = try SidecarChild.spawn(gpa, &.{ "sh", "-c", start_cmd });
         }
 
-        // Compute poll timeout: 1s intervals (re-check signals, sidecar, deadline).
+        // Poll in 1s slices so we re-check signals, sidecar liveness,
+        // and the optional deadline between waits.
         const poll_ms: i32 = if (deadline) |dl| blk: {
             const remaining_ns = dl - std.time.nanoTimestamp();
             if (remaining_ns <= 0) {
@@ -349,9 +390,8 @@ fn cmd_dev(gpa: std.mem.Allocator, args: DevArgs) !void {
         } else 1000;
 
         if (!watcher.wait(poll_ms)) {
-            // No source file change — check schema.sql separately.
-            // Schema changes can't be hot-applied (server caches prepared statements,
-            // ALTER TABLE would trigger SQLITE_SCHEMA errors). Warn and advise restart.
+            // No source change — check schema separately. Schema edits
+            // can't be hot-applied (prepared-statement cache, SQLITE_SCHEMA).
             const new_schema_mtime = get_file_mtime("schema.sql");
             if (new_schema_mtime != schema_mtime and new_schema_mtime != 0) {
                 schema_mtime = new_schema_mtime;
@@ -361,17 +401,14 @@ fn cmd_dev(gpa: std.mem.Allocator, args: DevArgs) !void {
         }
 
         try stdout.print("{s}[watch]{s}   change detected, rebuilding...\n", .{ color("\x1b[33m"), color("\x1b[0m") });
-
-        // Rebuild.
         cmd_build(gpa, .{ .path = path, .@"--" = {} }) catch {
             try stdout.print("{s}[watch]{s}   build failed — sidecar not restarted\n", .{ color("\x1b[33m"), color("\x1b[0m") });
             continue;
         };
 
-        // Restart sidecar.
         sidecar.kill();
         std.time.sleep(500 * std.time.ns_per_ms); // bus deadline
-        sidecar = try SidecarChild.spawn(gpa, &.{ "sh", "-c", start_cmd });
+        sidecar.* = try SidecarChild.spawn(gpa, &.{ "sh", "-c", start_cmd });
         try stdout.print("{s}[watch]{s}   sidecar restarted\n", .{ color("\x1b[33m"), color("\x1b[0m") });
     }
 }
