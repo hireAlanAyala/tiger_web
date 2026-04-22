@@ -39,39 +39,22 @@ jobs:
         with: { node-version: '${{ matrix.node }}' }
       - run: ./zig/zig build ci -- clients
 
-  # Diagnostic: run focus dev on macOS to capture crash output.
-  # Temporary — remove once the kqueue server runtime is stable.
+  # macOS server runtime test — exercises kqueue IO, SHM, sidecar.
   macos-server:
     runs-on: macos-latest
-    continue-on-error: true
     steps:
       - uses: actions/checkout@v4
       - run: sh zig/download.sh
       - uses: actions/setup-node@v4
         with: { node-version: '22' }
-      - run: ./zig/zig build -Dsidecar=true
-      - name: Run tiger-web server directly (sidecar enabled)
+      - run: ./zig/zig build
+      - name: focus dev (scaffold + server + sidecar)
         run: |
-          TW=$GITHUB_WORKSPACE/zig-out/bin/tiger-web
-          # Run tiger-web with sidecar in background, capture all output.
-          $TW start --port=0 --db=:memory: --sidecar=/tmp/test.sock > /tmp/tw-stdout.txt 2>/tmp/tw-stderr.txt &
-          TW_PID=$!
-          sleep 3
-          echo "--- stdout ---"
-          cat /tmp/tw-stdout.txt || true
-          echo "--- stderr ---"
-          cat /tmp/tw-stderr.txt || true
-          echo "--- process status ---"
-          kill -0 $TW_PID 2>/dev/null && echo "server still running (pid $TW_PID)" || echo "server DEAD"
-          # Check if SHM was created
-          echo "--- shm check ---"
-          python3 -c "
-          import multiprocessing.shared_memory as shm
-          try:
-            s = shm.SharedMemory(name='tiger-$TW_PID', create=False)
-            print(f'SHM tiger-$TW_PID: FOUND ({s.size} bytes)')
-            s.close()
-          except Exception as e:
-            print(f'SHM tiger-$TW_PID: NOT FOUND ({e})')
-          " || true
-          kill $TW_PID 2>/dev/null || true
+          FOCUS=$GITHUB_WORKSPACE/zig-out/bin/focus
+          $FOCUS new --ts /tmp/macos-server-test
+          cd /tmp/macos-server-test
+          npm install
+          $FOCUS build src/
+          echo 'build = true' > .focus
+          echo 'start = sleep 10' >> .focus
+          $FOCUS dev --timeout=5 src/

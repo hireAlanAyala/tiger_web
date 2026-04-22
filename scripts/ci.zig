@@ -129,12 +129,7 @@ fn run_tests(shell: *Shell) !void {
             defer focus_file.close();
             try focus_file.writeAll("build = true\nstart = sleep 10\n");
         }
-        shell.exec("{focus} dev --timeout=3 src/", .{ .focus = focus }) catch |err| {
-            log.err("focus dev failed: {}", .{err});
-            if (builtin.target.os.tag != .linux) {
-                log.warn("non-fatal on macOS — server runtime not yet debugged", .{});
-            } else return err;
-        };
+        try shell.exec("{focus} dev --timeout=3 src/", .{ .focus = focus });
 
         // Cleanup.
         shell.exec("rm -rf {project}", .{ .project = project }) catch {};
