@@ -355,6 +355,29 @@ test "TimeSim realtime with step offset" {
     try testing.expectEqual(monotonic_delta - 1_000_000, after - before);
 }
 
+test "TimeSim periodic offset" {
+    var time_sim = init_time(.{
+        .resolution = 1,
+        .offset_type = .periodic,
+        .offset_coefficient_A = 1000, // amplitude
+        .offset_coefficient_B = 100, // period in ticks
+    });
+    const time = time_sim.time();
+    // At tick 0: sin(0) = 0, offset = 0.
+    try testing.expectEqual(@as(i64, 0), time_sim.offset(0));
+    // At quarter period: sin(pi/2) = 1, offset = amplitude.
+    try testing.expectEqual(@as(i64, 1000), time_sim.offset(25));
+    // Verify realtime includes the offset.
+    for (0..25) |_| time.tick();
+    const rt = time.realtime();
+    const mono: i64 = @intCast(time.monotonic().ns);
+    try testing.expectEqual(time_sim.epoch + mono - 1000, rt);
+}
+
+// NOTE: init_time with periodic/non_ideal and B=0 asserts at init.
+// This is not testable as a "should panic" test — the assertion IS
+// the protection. Same pattern as TB: crash, don't corrupt.
+
 test "TimeSim advance" {
     var time_sim = init_time(.{ .resolution = 10 * std.time.ns_per_ms });
     time_sim.epoch = 1_700_000_000 * std.time.ns_per_s;
