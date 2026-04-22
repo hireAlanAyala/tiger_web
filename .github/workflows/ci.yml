@@ -52,8 +52,26 @@ jobs:
       - run: ./zig/zig build
       - name: Run tiger-web server directly (bypass focus dev)
         run: |
-          cd /tmp
-          # Run tiger-web start directly — focus dev swallows server thread errors.
-          # --sidecar creates the SHM region, --port=0 picks a random port.
-          timeout 5 $GITHUB_WORKSPACE/zig-out/bin/tiger-web start --port=0 --db=:memory: --sidecar=/tmp/test.sock 2>&1 || true
-          echo "exit code: $?"
+          TW=$GITHUB_WORKSPACE/zig-out/bin/tiger-web
+          # Run tiger-web with sidecar in background, capture all output.
+          $TW start --port=0 --db=:memory: --sidecar=/tmp/test.sock > /tmp/tw-stdout.txt 2>/tmp/tw-stderr.txt &
+          TW_PID=$!
+          sleep 3
+          echo "--- stdout ---"
+          cat /tmp/tw-stdout.txt || true
+          echo "--- stderr ---"
+          cat /tmp/tw-stderr.txt || true
+          echo "--- process status ---"
+          kill -0 $TW_PID 2>/dev/null && echo "server still running (pid $TW_PID)" || echo "server DEAD"
+          # Check if SHM was created
+          echo "--- shm check ---"
+          python3 -c "
+          import multiprocessing.shared_memory as shm
+          try:
+            s = shm.SharedMemory(name='tiger-$TW_PID', create=False)
+            print(f'SHM tiger-$TW_PID: FOUND ({s.size} bytes)')
+            s.close()
+          except Exception as e:
+            print(f'SHM tiger-$TW_PID: NOT FOUND ({e})')
+          " || true
+          kill $TW_PID 2>/dev/null || true
