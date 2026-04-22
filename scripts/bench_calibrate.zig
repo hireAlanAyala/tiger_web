@@ -85,7 +85,7 @@ const configs = [_]Config{
     },
 };
 
-pub fn main(shell: *Shell, gpa: std.mem.Allocator, _: CLIArgs) !void {
+pub fn main(shell: *Shell, _: std.mem.Allocator, _: CLIArgs) !void {
     shell.echo("# Benchmark calibration run — {s}", .{@tagName(@import("builtin").os.tag)});
     shell.echo("# Splice the per-line observations into `docs/internal/benchmark-budgets.md`.", .{});
     shell.echo("# Budget constants in each *_benchmark.zig file = 10 x max(runs) rounded up.", .{});
@@ -96,7 +96,7 @@ pub fn main(shell: *Shell, gpa: std.mem.Allocator, _: CLIArgs) !void {
         shell.echo("", .{});
 
         for (0..runs) |i| {
-            const captured = run_bench(shell, gpa, config) catch |err| {
+            const captured = run_bench(shell, config) catch |err| {
                 shell.echo("  run {d}: FAILED ({s})", .{ i + 1, @errorName(err) });
                 continue;
             };
@@ -116,8 +116,7 @@ pub fn main(shell: *Shell, gpa: std.mem.Allocator, _: CLIArgs) !void {
     }
 }
 
-fn run_bench(shell: *Shell, gpa: std.mem.Allocator, config: Config) !struct { []const u8, []const u8 } {
-    _ = gpa;
+fn run_bench(shell: *Shell, config: Config) !struct { []const u8, []const u8 } {
     // Shell's child_env_map is shell.env (see shell.zig:531). Putting
     // overrides there propagates to every subsequent exec. We set
     // before the build, and clean up after (including on error) so
