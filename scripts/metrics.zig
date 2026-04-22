@@ -244,13 +244,11 @@ const test_basenames = [_][]const u8{
     "state_machine_benchmark.zig",
 };
 
-/// Files that are build/scripting/load-testing infrastructure, not shipped code.
+/// Files that are build/scripting infrastructure, not shipped code.
 const tooling_basenames = [_][]const u8{
     "shell.zig",
     "build.zig",
     "scripts.zig",
-    "load_gen.zig",
-    "load_driver.zig",
     "annotation_scanner.zig",
 };
 

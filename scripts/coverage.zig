@@ -206,7 +206,6 @@ fn shipped_name(path: []const u8) ?[]const u8 {
 
     const skip_names = [_][]const u8{
         "shell.zig",            "build.zig",    "scripts.zig",
-        "load_gen.zig",         "load_driver.zig",
         "annotation_scanner.zig",
     };
     for (skip_names) |s| {

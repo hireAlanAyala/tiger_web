@@ -453,17 +453,28 @@ apply the same discipline.
 
 Effort: 30 min. Dependencies: none.
 
-- [ ] `grep -rn "loadtest.sh" .github/ docs/ scripts/ CLAUDE.md` —
-  identify all references before deleting
-- [ ] Delete `scripts/loadtest.sh`
-- [ ] Delete `load_driver.zig` and `load_gen.zig`
-- [ ] Remove the `load` step from `build.zig`
-- [ ] Update `CLAUDE.md` Quick Reference section: replace `zig build load`
-  entries with `tiger-web benchmark` (subcommand lands in phase D)
-- [ ] Update `CLAUDE.md` file table under "Application (root)" to remove
-  deleted files
-- [ ] Verify `./zig/zig build unit-test && ./zig/zig build test &&
-  ./zig/zig build test-sidecar` all pass
+- [x] `grep -rn "loadtest.sh" .github/ docs/ scripts/ CLAUDE.md` —
+  identified references; draft plan + historical internal docs left
+  untouched (descriptive of prior state)
+- [x] Delete `scripts/loadtest.sh`
+- [x] Delete `load_driver.zig` and `load_gen.zig`
+- [x] Remove the `load` step + load_gen unit-test entry from `build.zig`
+- [x] Update `CLAUDE.md` Quick Reference section: replaced `zig build load`
+  + `loadtest.sh` blocks with a phase-D placeholder pointing at
+  `tiger-web benchmark`; profiling block stubs the load invocation
+  line until phase D ships
+- [x] File table under "Application (root)" has no entries for the
+  deleted files (already absent)
+- [x] Dropped `load_gen.zig` / `load_driver.zig` entries from
+  `scripts/coverage.zig` skip list and `scripts/metrics.zig`
+  tooling list (stale after deletion)
+- [x] Verified: `./zig/zig build unit-test`, `./zig/zig build test`,
+  `./zig/zig build test-sidecar` all pass
+
+**Note on `scripts/perf.zig`:** still invokes
+`zig-out/bin/tiger-load ...` as a shell string. Compiles fine; fails
+at runtime. Left alone — phase D adds `tiger-web benchmark` and
+updates `scripts/perf.zig` to call it.
 
 No user-visible API change. These were dev tools; their replacement
 (`tiger-web benchmark`) ships in phase D.
