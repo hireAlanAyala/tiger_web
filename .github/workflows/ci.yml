@@ -49,8 +49,8 @@ jobs:
       - run: sh zig/download.sh
       - uses: actions/setup-node@v4
         with: { node-version: '22' }
-      - run: ./zig/zig build
-      - name: Run tiger-web server directly (bypass focus dev)
+      - run: ./zig/zig build -Dsidecar=true
+      - name: Run tiger-web server directly (sidecar enabled)
         run: |
           TW=$GITHUB_WORKSPACE/zig-out/bin/tiger-web
           # Run tiger-web with sidecar in background, capture all output.
