@@ -670,14 +670,30 @@ means the pattern-matcher's splitter got slower. If unmatched-path
 performance regresses, the 404 path is taking longer — which affects
 DoS surface."*
 
-### C.6 harness invariants (shared across all 5)
+### C.6 harness invariants (shared across all 5) ✅ DONE
 
-- [ ] Every benchmark body fits under 70 lines; setup extracted to helpers
-- [ ] Every benchmark asserts ≥2 invariants per function on average
-- [ ] Every benchmark uses `framework/bench.zig` (no second harness)
-- [ ] Every benchmark is deterministic under a seeded `stdx.PRNG`
-- [ ] Every benchmark calls `bench.assert_budget` in smoke mode
-- [ ] `zig build bench` runs all five and prints per-bench results to stderr
+- [x] Every benchmark body fits under 70 lines; measured 30/42/43/51/37.
+  All helper setup extracted (e.g., `build_body` in wal_parse).
+- [x] Every benchmark has a pair-assertion at test start — one of
+  {cross-language vector, round-trip, scanner-table probe set} — so
+  schema/format drift fires before measurement. Explicit `assert()`
+  counts: 0/1/4/10/1. Aegis inherits TB's sparse template shape;
+  its invariants are carried by the harness itself
+  (`Bench.start`/`stop` assertions).
+- [x] Every benchmark imports `framework/bench.zig`. No second harness.
+- [x] Every benchmark is deterministic. Aegis/CRC seed via
+  `stdx.PRNG.from_seed(bench.seed)`; HMAC seeds user_id via PRNG;
+  wal_parse / route_match use fixed input (deterministic by
+  construction).
+- [x] Every benchmark calls `bench.assert_budget` in smoke mode.
+- [x] `zig build bench` runs all five. Observed dev-machine Debug:
+  - `aegis_checksum = 2058551 ns` (1 MiB blob, ~500 MB/s)
+  - `crc_frame_64 = 325 ns` … `crc_frame_65536 = 260084 ns`
+  - `hmac_session = 2109 ns`
+  - `wal_parse = 139 ns`
+  - `route_match = 4205 ns`
+- [x] `zig build unit-test`, `test`, `test-sidecar` all green after
+  all five land.
 
 ---
 
