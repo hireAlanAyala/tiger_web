@@ -539,6 +539,13 @@ fn build_ci(
         step_ci.dependOn(&freshness.step);
         // Unit tests.
         build_ci_step(b, step_ci, &.{"unit-test"});
+        // Benchmark pipeline probe — runs every primitive + pipeline
+        // bench end-to-end on the CI runner. NOT a regression gate
+        // (assert_budget fires only in smoke mode, inside unit-test);
+        // this confirms the bench pipeline builds and executes on
+        // ubuntu-22.04. Phase F recalibrates budgets against output
+        // from this exact runner class.
+        build_ci_step(b, step_ci, &.{"bench"});
         // Simulation tests.
         build_ci_step(b, step_ci, &.{"test"});
         // Cross-language adapter tests (Level 1: binary protocol boundary).
