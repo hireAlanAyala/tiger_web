@@ -8,6 +8,26 @@ When faced with decisions always take the most correct approach never the simple
 
 **Porting from TigerBeetle:** When adopting a TB primitive (trace, time, bench, constants), `cp` the TB file and make surgical edits — don't rewrite from memory. Copying is more faithful. A from-scratch port accumulates subtle deviations (wrong field order, missing self-tracing, hardcoded values instead of constants, private vs pub). Each deviation is small, but they compound. Surgical edits on the real file produce an auditable diff where every change from TB's original is intentional and documented. Reference repo: `/home/walker/Documents/personal/tigerbeetle`
 
+## Working Habits — Lessons From Past Mistakes
+
+Rules distilled from concrete incidents. Each one cost hours or a commit to revert. Re-read before starting work in the relevant domain.
+
+- **Never rewrite constant tables from memory — generate, then self-test.** Hand-typed CRC/lookup tables get corrupted byte-by-byte and the bug surfaces at runtime under real traffic. Compute the table in code at init and assert a known-good checksum of it, or `comptime`-generate and assert against a fixture. A self-test on the table is non-negotiable.
+
+- **Prebuilt artifacts drift — CI must rebuild from source.** If the repo ships a compiled artifact (native addons, WASM, codegen output) and its source can change, rebuild it every CI run. A stale addon that silently drops responses (→ 503) hides until production load. An integration test that exercises the artifact is the backstop.
+
+- **Bisect before rearchitecting a performance regression.** When throughput drops, `git bisect` or `git log -p` the suspect subsystem and find the commit that regressed it — *before* designing a new mechanism. A regression from a 4-line tick-loop edit is not a reason to add io_uring FUTEX_WAIT. The simplest explanation is almost always a recent unrelated change.
+
+- **For new platforms, diagnose comprehensively in one commit — not iteratively.** Do not push single-flag diagnostic commits (`errno`, `--log-debug`, `O_RDWR` vs `O_RDONLY`) one at a time against CI. In one commit collect: errno at every syscall, environment dump, flag matrix, strace-equivalent, and the timeline of events. One-by-one guessing on CI wastes the feedback loop and pollutes history with 10 diagnostic commits that all get reverted.
+
+- **Don't delete plan files without checking every phase.** "Phase 1 done" ≠ "plan done." Before `rm docs/plans/*.md`, grep for `- [ ]` or Phase markers in the file. Deferred phases are work — deleting the plan loses the roadmap. If a phase was intentionally dropped, move it to `todo.md` with justification.
+
+- **Audit in one deep pass, not in rounds.** If doing a TB/safety audit, produce the full checklist up front — TB's six principles, assertion anatomy, bounded loops, pair assertions, boundary vs inner trust, mark coverage. Walk every file once against the full criteria. Commit messages like "second audit", "deeper audit", "final audit", "remaining audit items" indicate the first pass had no structure — and each round re-reads the same code.
+
+- **Don't ship known-throwaway code.** If a commit message contains "to be replaced by" or "placeholder until", don't commit it — wait for the real implementation in the same session. Shell scripts, Dockerfiles, or CLIs shipped knowing they'll be deleted in hours are pure churn and confuse history.
+
+- **Check memory/ before acting in a domain with prior guidance.** The `memory/` directory holds lessons from previous sessions. If you're about to delete plans, write a CRC table, diagnose CI, or trigger anything in `memory/MEMORY.md`, re-read the relevant entry first. Repeating a mistake that's already documented is worse than making a new one.
+
 ## Design Principles (from TigerBeetle)
 
 TB's design goals, in order: **Safety > Performance > Developer Experience.**
@@ -168,6 +188,12 @@ No framework file imports from the app root except via comptime generics (e.g. `
 | `framework/bench.zig` | Micro benchmarking harness — smoke/benchmark dual mode, matches TB's testing/bench.zig |
 
 ### Application (root) — domain types, handlers, templates
+
+The root-level ecommerce app is the **native Zig reference implementation**. `handlers/*.zig` is its handler set, scanned into `generated/manifest.json` + `generated/routes.generated.zig` by the canonical CI scan. It doubles as the reference for benchmarks and simulation tests.
+
+`examples/ecommerce-ts/handlers/*.ts` is a **parallel implementation of the same domain** over the TypeScript sidecar, used to exercise the 1-RT/2-RT SHM dispatch path. It scans via `focus build` into its own `focus/` directory — it does not touch `generated/`.
+
+Both handler sets implement the same operations and render the same HTML shapes. Keep them in sync when adding operations.
 
 | File | Role |
 |---|---|
