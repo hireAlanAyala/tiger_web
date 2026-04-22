@@ -178,7 +178,9 @@ const SimSidecar = struct {
         self.calls_processed += 1;
     }
 
-    /// Build route RESULT data: [operation: u8][id: 16 bytes LE][body]
+    /// Build route RESULT data matching parse_route_prefetch_result:
+    ///   [operation: u8][id: 16 bytes LE][body_len: u16 BE][body]
+    ///   [sql_declarations...] (empty here — sim has no prefetch SQL)
     fn build_route_result(buf: []u8, args: []const u8) usize {
         // Args: [method: u8][path_len: u16 BE][path][body_len: u16 BE][body]
         assert(args.len >= 5);
@@ -203,10 +205,14 @@ const SimSidecar = struct {
         pos += 1;
         @memset(buf[pos..][0..16], 0); // zero UUID
         pos += 16;
+        // body_len prefix — parse_route_prefetch_result reads this.
+        std.mem.writeInt(u16, buf[pos..][0..2], @intCast(body.len), .big);
+        pos += 2;
         if (body.len > 0) {
             @memcpy(buf[pos..][0..body.len], body);
             pos += body.len;
         }
+        // No SQL declarations — sim renders without prefetch.
         return pos;
     }
 
@@ -775,17 +781,15 @@ test "sidecar: bad CRC in SHM → response ignored, request times out" {
 }
 
 // =====================================================================
-// Hot standby + concurrent dispatch tests
+// Hot standby — deferred
 //
-// SKIPPED: These tests assume dual-sidecar routing (two sidecar
-// connections processing different SHM slots simultaneously). The SHM
-// model has one region processed by one sidecar process. Hot standby
-// means a replacement process opens the same SHM, not two processes
-// sharing it. Concurrent dispatch uses pipeline_slots_max SHM entries,
-// all processed by the same sidecar.
+// Hot standby in the SHM model means a replacement process opens the
+// same SHM region when the active one dies, not two processes sharing
+// it. That's a supervisor-restart test, not an SHM protocol test, and
+// belongs in a supervisor sim that we do not yet have.
 //
-// TODO: rewrite for SHM model — hot standby tests the supervisor
-// restart path, concurrent tests verify pipeline_slots_max > 1.
+// Skipped for the supervisor sim. Concurrent dispatch — exercised by
+// the tests below — covers the multi-slot SHM pipeline.
 // =====================================================================
 
 test "sidecar: hot standby — kill active, standby takes over" {
@@ -866,6 +870,55 @@ test "concurrent: handle_lock serializes writes" {
 
     // handle_lock must be free after all requests complete.
     try std.testing.expectEqual(@as(?u8, null), h.server.handle_lock);
+}
+
+test "2-RT: single request to non-native path succeeds" {
+    // Force 2-RT dispatch by posting to a path NOT in the generated
+    // native route table. try_dispatch_1rt returns false and the server
+    // falls through to start_request_2rt, sending a route_prefetch CALL
+    // to the sidecar. The sim sidecar maps any unknown path to
+    // list_products and returns the operation + id + body_len + body
+    // with no SQL declarations.
+    //
+    // Exercises: route_prefetch_pending → RESULT → route_prefetch_complete
+    // → handle_render CALL → combined_pending → combined_complete.
+    var h: TestHarness = undefined;
+    try h.init();
+    defer h.deinit();
+
+    h.connect_sidecar();
+    h.connect_http();
+
+    const body = "{\"q\":\"anything\"}";
+    h.io.inject_post(TestHarness.http_slot, "/path-forcing-2rt", body);
+
+    const resp = h.wait_response() orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(u16, 200), resp.status_code);
+}
+
+test "2-RT concurrent: two requests via non-native path succeed" {
+    // Two concurrent 2-RT dispatches — paired to different SHM slots
+    // and different sidecar connections. Exercises the pipeline at
+    // pipeline_slots_max > 1 in the 2-RT path (not just 1-RT).
+    var h: TestHarness = undefined;
+    try h.init();
+    defer h.deinit();
+
+    // sidecar_count=2 → slot 1 is paired with connection 1. The standby
+    // sidecar must be connected for concurrent dispatch to fill slot 1.
+    h.connect_sidecar();
+    h.connect_standby();
+    h.connect_http();
+    h.connect_http_b();
+
+    const body_a = "{\"q\":\"A\"}";
+    const body_b = "{\"q\":\"B\"}";
+    h.io.inject_post(TestHarness.http_slot, "/path-forcing-2rt", body_a);
+    h.io.inject_post(TestHarness.http_slot_b, "/path-forcing-2rt", body_b);
+
+    const resps = h.wait_both_responses() orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(u16, 200), resps.a.status_code);
+    try std.testing.expectEqual(@as(u16, 200), resps.b.status_code);
 }
 
 test "concurrent: throughput scales with slot count" {
