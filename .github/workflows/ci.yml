@@ -58,4 +58,20 @@ jobs:
           $FOCUS build src/
           echo 'build = true' > .focus
           echo 'start = sleep 10' >> .focus
-          $FOCUS dev --timeout=5 src/ 2>&1 || true
+          # Run with --log-debug to see server thread errors
+          $FOCUS dev --timeout=8 --log-debug src/ 2>&1 || true
+          # Also test shm_open directly
+          echo "--- testing shm_open ---"
+          python3 -c "
+          import multiprocessing.shared_memory as shm
+          try:
+            s = shm.SharedMemory(name='test-ci-shm', create=True, size=64)
+            print('shm_open: OK (created)')
+            s2 = shm.SharedMemory(name='test-ci-shm', create=False)
+            print('shm_open: OK (opened)')
+            s2.close()
+            s.close()
+            s.unlink()
+          except Exception as e:
+            print(f'shm_open: FAILED ({e})')
+          " || true
