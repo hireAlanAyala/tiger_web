@@ -1,10 +1,8 @@
 # Active plans
 
-1. **Simulation testing** — `docs/plans/simulation-testing.md`
-   User-space domain verification via `[sim:*]` annotations.
-   Reference model, assert callbacks, invariants, shared predicates.
-   Phase 1: bolt onto fuzz.zig (Zig-native). Phase 2: scanner.
-   Phase 3: TS sidecar sim.
+1. **Simulation testing** — DONE
+   sim.zig: 220 tests, SimIO fault injection, PRNG-seeded deterministic replay.
+   sim_sidecar.zig: 11 sidecar sim tests + 4 concurrent dispatch tests.
 
 2. **Worker system** — DONE
    Full worker implementation: WAL dispatch, SHM transport, tick loop,
@@ -339,12 +337,9 @@ fetches periodically, keeps local storage current, state machine
 resolves per-request from local data. Already works for login codes.
 Generalize when a second auth strategy is needed.
 
-# current
-look in the project for illegal posix and other syscalls that are not simulation friendly
-
 # Backlog
 
-- ensure the srver is compatble with http 2/3
+- ensure the server is compatible with http 2/3
 - Component benchmarks: HTTP parser, auth sign+verify, render encoding,
   tracer overhead, frame build/parse, sidecar e2e (µs/op). Add as
   dual-mode in bench.zig when touching those components.
@@ -354,8 +349,6 @@ look in the project for illegal posix and other syscalls that are not simulation
 
 - design a system for deriving docs from the code, and documenting the bible, architecture, and docs separately
 - TS sidecar render: effects array instead of single string
-- Cross-platform support (currently Linux only, epoll)
-- CI: run test-adapter, integration tests against /examples
 - Login code delivery via worker (not server logging)
 - Storage retry cap on busy
 - SDK: assert no panic in prod
