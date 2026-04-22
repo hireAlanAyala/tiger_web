@@ -429,6 +429,7 @@ pub fn build(b: *std.Build) void {
     const bench_sources = [_]BenchSrc{
         .{ .path = "state_machine_benchmark.zig", .needs_sqlite = true },
         .{ .path = "aegis_checksum_benchmark.zig", .needs_sqlite = false },
+        .{ .path = "crc_frame_benchmark.zig", .needs_sqlite = false },
     };
 
     const bench_smoke_options = b.addOptions();
