@@ -1253,3 +1253,75 @@ test "sidecar: HTTP before READY → suspend then succeed" {
     const resp = h.wait_response() orelse return error.TestUnexpectedResult;
     try std.testing.expectEqual(@as(u16, 200), resp.status_code);
 }
+
+test "sidecar: try_dispatch during handshake window suspends (not 503)" {
+    // Deterministic regression for the race where:
+    //   - Sidecar Unix socket has been accepted (Connection.state == .connected)
+    //   - READY frame has NOT yet been processed
+    //     (server.sidecar_connections_ready[0] == false)
+    //   - An HTTP request arrives and reaches try_dispatch.
+    //
+    // Pre-fix, try_dispatch returned 503 because sidecar_any_ready()
+    // conflated "Unix accepted but handshake pending" with "sidecar
+    // genuinely unavailable." Post-fix, server.sidecar_any_connection_in_handshake()
+    // distinguishes the two, and the dispatch path suspends instead.
+    //
+    // Earlier race tests ("startup race" and "HTTP before READY") are
+    // random-seed — they flaked 2/30 runs pre-fix (seeds 0x648c80c9
+    // and 0x57fccd62). Post-fix they pass 30/30. But a revert of the
+    // fix would be caught by those tests only probabilistically. This
+    // one is deterministic by construction: it holds the sidecar in
+    // the handshake window and asserts the response invariant
+    // directly, without depending on the SimIO scheduler's seed-driven
+    // ordering.
+    var h: TestHarness = undefined;
+    try h.init();
+    defer h.deinit();
+
+    // Drive the server to "Unix accepted, READY not sent" — the
+    // handshake window.
+    h.sidecar.connect();
+    h.run_until(TestHarness.sidecar_accepted);
+
+    // HTTP request arrives during the window.
+    h.connect_http();
+    h.inject_post();
+
+    // Tick until try_dispatch has decided one way or the other —
+    // either the response has appeared (bug case: 503 emitted) or
+    // the connection has landed on the suspended queue (fix case).
+    // `suspended_head` is private-by-convention but Zig allows field
+    // access across files; reading it here is the cleanest way to
+    // avoid depending on how many ticks the IO loop takes to parse
+    // the request under a given SimIO ordering.
+    const dispatched = struct {
+        fn check(harness: *TestHarness) bool {
+            if (harness.io.read_response(TestHarness.http_slot) != null) return true;
+            if (harness.io.read_close_response(TestHarness.http_slot) != null) return true;
+            if (harness.server.suspended_head != null) return true;
+            return false;
+        }
+    }.check;
+    h.run_until(dispatched);
+
+    // Invariant: dispatch decision was "suspend", not "503". A
+    // response here means the fix is reverted.
+    if (h.io.read_response(TestHarness.http_slot)) |resp| {
+        std.debug.panic(
+            "handshake-window race: expected no response, got status={d} — fix reverted?",
+            .{resp.status_code},
+        );
+    }
+    if (h.io.read_close_response(TestHarness.http_slot)) |resp| {
+        std.debug.panic(
+            "handshake-window race: expected no response, got status={d} (Connection: close) — fix reverted?",
+            .{resp.status_code},
+        );
+    }
+
+    // Close the handshake window. The suspended request must resume
+    // and succeed with 200.
+    h.sidecar.inject_ready();
+    const resp = h.wait_response() orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(u16, 200), resp.status_code);
+}
