@@ -1,8 +1,10 @@
 # Active plans
 
-1. **Simulation testing** — DONE
-   sim.zig: 220 tests, SimIO fault injection, PRNG-seeded deterministic replay.
-   sim_sidecar.zig: 11 sidecar sim tests + 4 concurrent dispatch tests.
+1. **Simulation testing** — Phase 1 DONE, Phase 2-3 pending
+   Phase 1 (done): sim.zig 220 tests, SimIO fault injection, PRNG-seeded
+   deterministic replay. sim_sidecar.zig: 11 sidecar + 4 concurrent tests.
+   Phase 2 (pending): scanner `[sim:*]` annotations — `docs/plans/simulation-testing.md`
+   Phase 3 (pending): TS sidecar sim — same plan file.
 
 2. **Worker system** — DONE
    Full worker implementation: WAL dispatch, SHM transport, tick loop,
