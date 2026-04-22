@@ -19,6 +19,7 @@ const bench_check = @import("./scripts/bench_check.zig");
 const cfo = @import("./scripts/cfo.zig");
 const ci = @import("./scripts/ci.zig");
 const coverage = @import("./scripts/coverage.zig");
+const devhub = @import("./scripts/devhub.zig");
 const metrics = @import("./scripts/metrics.zig");
 const perf_script = @import("./scripts/perf.zig");
 
@@ -40,6 +41,7 @@ const CLIArgs = union(enum) {
     cfo: cfo.CLIArgs,
     ci: ci.CLIArgs,
     coverage: coverage.CLIArgs,
+    devhub: devhub.CLIArgs,
     metrics: metrics.CLIArgs,
     perf: perf_script.CLIArgs,
 
@@ -57,6 +59,8 @@ const CLIArgs = union(enum) {
         \\  zig build scripts -- ci [--validate-release]
         \\
         \\  zig build scripts -- coverage
+        \\
+        \\  zig build scripts -- devhub --sha=<sha> [--dry-run]
         \\
         \\  zig build scripts -- metrics [--no-fetch]
         \\
@@ -93,6 +97,7 @@ pub fn main() !void {
         .cfo => |args_cfo| try cfo.main(shell, gpa, args_cfo),
         .ci => |args_ci| try ci.main(shell, gpa, args_ci),
         .coverage => |args_cov| try coverage.main(shell, gpa, args_cov),
+        .devhub => |args_devhub| try devhub.main(shell, gpa, args_devhub),
         .metrics => |args_metrics| try metrics.main(shell, gpa, args_metrics),
         .perf => |args_perf| try perf_script.main(shell, gpa, args_perf),
     }
