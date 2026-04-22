@@ -111,7 +111,18 @@ pub const sector_size: u32 = 4096;
 pub const cache_line_size: u16 = 64;
 
 comptime {
-    assert(cache_line_size == 64);
+    // Bounds check against ISA reality — every mainstream cache-line is
+    // between 16 (original ARM) and 256 (some POWER variants). A value
+    // outside this range is a typo, not a port to a real architecture.
+    assert(cache_line_size >= 16);
+    assert(cache_line_size <= 256);
+    // Power-of-two — required by alignedAlloc, and true of every
+    // real-world cache-line size.
+    assert(std.math.isPowerOfTwo(cache_line_size));
+    // Cache-line must be large enough to hold an atomic u64 without
+    // straddling two lines — the use-case that motivates aligning to
+    // it in the first place.
+    assert(cache_line_size >= @alignOf(std.atomic.Value(u64)));
 }
 
 /// Sidecar response deadline in ticks. If the pipeline has been pending
