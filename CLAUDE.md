@@ -6,7 +6,23 @@ Ecommerce HTTP server built in Zig, following TigerBeetle conventions.
 
 When faced with decisions always take the most correct approach never the simplest approach. We are shooting for safety and reliability.
 
-**Porting from TigerBeetle:** When adopting a TB primitive (trace, time, bench, constants), `cp` the TB file and make surgical edits — don't rewrite from memory. Copying is more faithful. A from-scratch port accumulates subtle deviations (wrong field order, missing self-tracing, hardcoded values instead of constants, private vs pub). Each deviation is small, but they compound. Surgical edits on the real file produce an auditable diff where every change from TB's original is intentional and documented. Reference repo: `/home/walker/Documents/personal/tigerbeetle`
+**Porting from TigerBeetle — cp first, trim second.** When adopting any TB primitive or module (trace, time, bench, constants, checksum, scripts), the default is: `cp` the TB file in its entirety, then each deletion or change from the original is a conscious decision that has to be justified. Do **not** write a new version "in the style of" TB's and later realign — that's the anti-pattern this rule exists to prevent.
+
+The cost of writing fresh isn't visible at port time. It shows up later, quietly: TB makes specific decisions we don't recognize as load-bearing, we skip them, then pay for the loss months later when the missing decision would have helped. Concrete example: `framework/bench.zig` was written "in the style of" `src/testing/bench.zig` and swapped `TimeOS` + `stdx.Duration` for raw `std.time.Timer`. TB's choice presumably encoded something (monotonic-clock handling, determinism, type-safety invariant) — we don't currently feel the loss, but we also never paid the cost of understanding it. Writing fresh means we accumulate silent drift.
+
+The discipline:
+
+- Start from TB's file in its entirety
+- Every deletion requires a named justification falling into one of three buckets:
+  - **Principled** — TB's answer doesn't fit our domain (e.g., VSR client loop → HTTP client loop)
+  - **Flaw fix** — TB has a known weakness we can cheaply improve (e.g., adding `assert_budget` where TB prints without enforcement)
+  - **Tracked follow-up** — temporary state with a known end condition
+- Every deletion that *can't* be justified reverts to TB's code
+- Every surgical addition (new function, new field) gets a comment explaining why it's ours and not TB's
+
+The "80% survival" heuristic is a *signal* that trimming is heavy, not a license to write fresh. If trimming would drop more than 80%, that's usually a sign the port is going in the wrong direction — TB's file is shaped for a concern that doesn't apply — and a fresh file is legitimate. But the default is still to start from the cp and ask "what exactly are we keeping vs trimming" before reaching for a fresh buffer.
+
+From-scratch ports accumulate subtle deviations (wrong field order, missing self-tracing, hardcoded values instead of constants, private vs pub). Each deviation is small, but they compound. Surgical edits on the real file produce an auditable diff where every change from TB's original is intentional and documented. Reference repo: `/home/walker/Documents/personal/tigerbeetle`
 
 ## Working Habits — Lessons From Past Mistakes
 
