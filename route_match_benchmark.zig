@@ -1,60 +1,92 @@
 //! HTTP route-match primitive benchmark.
 //!
-//! **Port source:** `src/vsr/checksum_benchmark.zig` from TigerBeetle
-//! (the cp-template for every primitive bench in phase C).
+//! **Port source:** `src/vsr/checksum_benchmark.zig` from TigerBeetle,
+//! cp'd verbatim and trimmed. Every change from TB's original is
+//! named with its bucket — **principled** (TB's answer doesn't fit
+//! our domain), **flaw fix** (TB has a known weakness we can cheaply
+//! improve), or **tracked follow-up** (temporary state with a known
+//! end condition). Anything not listed here is TB's code, unchanged.
 //!
-//! **Survival:** ~20/43 lines of the template carry over (~47%). The
-//! bench harness (Bench init/deinit, sample loop, estimate, hash-of-run
-//! print) is verbatim; kernel, input, and parameter are substituted.
+//! **Transplanted verbatim from template:**
 //!
-//! Substitutions relative to the template:
+//!   - `const std = @import("std");` — line 1
+//!   - `const stdx = @import("stdx");` — line 6
+//!   - `const repetitions = 35;` — line 13
+//!   - `Bench.init`/`defer deinit` shape — lines 16–17
+//!   - `var duration_samples: [repetitions]stdx.Duration = undefined;` — line 29
+//!   - Sample-loop shape (`bench.start()` / kernel / `duration.* = bench.stop()`) — lines 32–36
+//!   - `bench.estimate(&duration_samples)` — line 38
+//!   - `bench.report("<hash>", ...)` pattern — line 41
 //!
-//!   - Kernel: `checksum(blob)` → full iteration over
-//!     `generated/routes.generated.zig` calling `parse.match_route`
-//!     for each. One sample = one pass over all paths × all routes.
-//!   - Input: PRNG-filled blob → mixed canonical path set (exact,
-//!     parameterized, deeper-parameterized, unmatched, root).
-//!   - Parameter: `bench.parameter("blob_size", KiB, MiB)` removed —
-//!     the input set is fixed; varying it would measure a different
-//!     property (e.g. route-table depth).
-//!   - Counter: `u128` checksum accumulator → `u64` match-count
-//!     counter (prevents DCE).
-//!   - Report format: `"{} for whole blob"` →
-//!     `"route_match = {d} ns"` per-path size (DR-2).
+//! **Deletions (all principled):**
 //!
-//! Additions beyond the template (all principled):
+//!   - `cache_line_size` import (template line 3) — probe set is
+//!     compile-time; no aligned alloc.
+//!   - `checksum` import (template line 4) — replaced by `parse` +
+//!     generated route table.
+//!   - `KiB`/`MiB` imports (template lines 8–9) — input is a fixed
+//!     probe set, not a variable-sized blob.
+//!   - `blob_size = bench.parameter(...)` (template line 19) — same
+//!     reason.
+//!   - `arena_instance` + `defer deinit` + `arena =
+//!     arena_instance.allocator()` (template lines 21–24) — probes
+//!     are `comptime` path literals; no heap.
+//!   - `var prng = stdx.PRNG.from_seed(bench.seed);` (template
+//!     line 25) — probes are deterministic; no random fill.
+//!   - `const blob = try arena.alignedAlloc(...)` +
+//!     `prng.fill(blob)` (template lines 26–27) — replaced by the
+//!     `probes` compile-time array.
 //!
-//!   - Pair-assertion at test start: each known-good path must
-//!     resolve to its expected Operation. A drift between the
-//!     generated-route table and the scanner's annotations fires
-//!     here before the throughput number becomes meaningless.
-//!   - `bench.assert_budget` (same principled divergence documented
-//!     in `framework/bench.zig`).
+//! **Path substitutions (principled — file-layout adaptation):**
+//!
+//!   - `@import("../testing/bench.zig")` → `@import("framework/bench.zig")`
+//!
+//! **Additions (flaw fix — TIGER_STYLE alignment):**
+//!
+//!   - `match_any` helper — mirrors `app.zig:handler_route` minus
+//!     the handler-body decode. Not transplanted from TB; this is
+//!     our routing primitive. Kept as a stand-alone function
+//!     (no `self`) per TIGER_STYLE's "extract hot loops" rule.
+//!   - Pair-assertion covering positive AND negative space per
+//!     TIGER_STYLE's "golden rule":
+//!       * Positive: every known-route probe resolves to its
+//!         expected `Operation`.
+//!       * Negative: the unmatched-path probe explicitly returns
+//!         `null`. TB's template has no rejection path to assert;
+//!         our matcher does, and the 404 path is DoS surface — we
+//!         want regressions visible here.
+//!   - `bench.assert_budget` call (same principled divergence
+//!     documented in `framework/bench.zig`).
+//!   - Substituted report format to `"route_match = {d} ns"` per
+//!     DR-2.
 //!
 //! **External commitment:** the scanner → generated-table contract.
 //! Every handler annotation becomes a row in
 //! `generated/routes.generated.zig`; the matcher consumes that row.
 //! The matcher implementation is plastic (could swap for a trie or
-//! regex), but the *interface* (take a path, return an Operation) is
-//! locked by the scanner output.
+//! regex), but the *interface* (take method+path, return an
+//! Operation) is locked by the scanner output.
 //!
-//! **Actionability:** if ns/match rises >10%, check whether the
+//! **Actionability:** if ns/pass rises >10%, check whether the
 //! generated route table grew (more routes = more comparisons) or
-//! the matcher's loop structure changed. A rise on parameterized
-//! routes but not exact-match usually means the pattern-matcher's
-//! splitter got slower. If unmatched-path performance regresses,
-//! the 404 path is taking longer — which affects DoS surface.
+//! `parse.match_route`'s inner loop changed. A rise on parameterized
+//! probes but not exact-match usually means the pattern splitter
+//! got slower. If the *negative* pair-assertion fires, a path that
+//! should 404 is now matching — DoS surface regression, fix before
+//! shipping. If unmatched-probe latency alone regresses (not
+//! matched-probe), the 404 cost path widened — still a DoS concern.
 //!
-//! **Budget calibration:** 50 µs per full-path-set pass. Dev-machine
-//! Debug: a table of ~24 routes × 5 paths with `inline for`
-//! unrolling should be sub-µs; 50× headroom for Debug +
-//! slow CI. Re-calibrate on ubuntu-22.04 in phase F.
+//! **Budget calibration:** dev-machine Debug, 3 runs. Observed
+//! 4083 / 6485 / 5702 ns → max 6485 → 10× = 64_850 → round up to
+//! 70_000 ns. Phase F re-calibrates on `ubuntu-22.04`.
 
 const std = @import("std");
 const assert = std.debug.assert;
 
 const stdx = @import("stdx");
 
+// Path substitution from TB's `../testing/bench.zig` — our layout
+// co-locates the harness under `framework/`.
 const Bench = @import("framework/bench.zig");
 
 const http = @import("framework/http.zig");
@@ -64,15 +96,18 @@ const gen = @import("generated/routes.generated.zig");
 
 const repetitions = 35;
 
-const budget_smoke: stdx.Duration = .{ .ns = 50_000 }; // 50 µs per pass
+// Budget — 10× `max(3 runs)` on dev-machine Debug, rounded up.
+// Observed: 4083 / 6485 / 5702 ns → max 6485 → 10× = 64_850 →
+// round up to 70_000. Phase F re-calibrates on CI ubuntu-22.04.
+const budget_ns_smoke_max: stdx.Duration = .{ .ns = 70_000 };
 
 const Probe = struct {
     method: http.Method,
     path: []const u8,
-    expect: ?message.Operation, // null = expected unmatched
+    expect: ?message.Operation, // `null` = expected unmatched
 };
 
-// Mixed input: exact-match, parameterized, deeper parameterized,
+// Mixed probe set: exact-match, parameterized, deeper parameterized,
 // unmatched (DoS surface), and root.
 const probes = [_]Probe{
     .{ .method = .get, .path = "/products", .expect = .list_products },
@@ -82,9 +117,10 @@ const probes = [_]Probe{
     .{ .method = .get, .path = "/", .expect = .page_load_dashboard },
 };
 
-/// Full iteration over the generated route table. Mirrors the shape of
-/// `handler_route` in `app.zig` minus the handler-body decode, which is
-/// out of scope for the primitive bench.
+/// Full iteration over the generated route table. Mirrors
+/// `app.zig:handler_route` minus the handler-body decode, which is
+/// out of scope for a primitive bench. Stand-alone function with
+/// primitive args (no `self`) per TIGER_STYLE "extract hot loops".
 fn match_any(method: http.Method, path: []const u8) ?message.Operation {
     var result: ?message.Operation = null;
     inline for (gen.routes) |route| {
@@ -101,28 +137,44 @@ test "benchmark: route_match" {
     var bench: Bench = .init();
     defer bench.deinit();
 
-    // Pair-assertion: every probe must resolve to its expected
-    // operation. If this fires, the generated table drifted from the
-    // scanner's annotations — no throughput number from below would
-    // be meaningful.
+    // Pair-assertion — positive space: every known route resolves
+    // to its expected operation. If this fires, the generated table
+    // drifted from the scanner's annotations.
     for (probes) |p| {
-        const got = match_any(p.method, p.path);
-        if (!eql_opt(got, p.expect)) {
-            std.debug.panic(
-                "route_match: probe {s} {s} resolved to {?}, want {?}",
-                .{ @tagName(p.method), p.path, got, p.expect },
-            );
+        if (p.expect) |expected| {
+            const got = match_any(p.method, p.path) orelse
+                std.debug.panic("route_match: probe {s} {s} unmatched", .{ @tagName(p.method), p.path });
+            if (got != expected) {
+                std.debug.panic(
+                    "route_match: probe {s} {s} resolved to {}, want {}",
+                    .{ @tagName(p.method), p.path, got, expected },
+                );
+            }
+        }
+    }
+
+    // Pair-assertion — negative space: the unmatched probe must
+    // resolve to null. If a path that should 404 is matching,
+    // that's a DoS-surface regression.
+    for (probes) |p| {
+        if (p.expect == null) {
+            if (match_any(p.method, p.path) != null) {
+                std.debug.panic(
+                    "route_match: unmatched probe {s} {s} was matched",
+                    .{ @tagName(p.method), p.path },
+                );
+            }
         }
     }
 
     var duration_samples: [repetitions]stdx.Duration = undefined;
-    var match_counter: u64 = 0;
+    var match_counter_sum: u64 = 0;
 
     for (&duration_samples) |*duration| {
         bench.start();
         inline for (probes) |p| {
             if (match_any(p.method, p.path)) |op| {
-                match_counter +%= @intFromEnum(op);
+                match_counter_sum +%= @intFromEnum(op);
             }
         }
         duration.* = bench.stop();
@@ -130,13 +182,8 @@ test "benchmark: route_match" {
 
     const result = bench.estimate(&duration_samples);
 
-    bench.report("match_sum {x:0>16}", .{match_counter});
+    // Hash-of-run — same discipline as TB template line 41.
+    bench.report("match_sum {x:0>16}", .{match_counter_sum});
     bench.report("route_match = {d} ns", .{result.ns});
-    bench.assert_budget(result, budget_smoke, "route_match");
-}
-
-fn eql_opt(a: ?message.Operation, b: ?message.Operation) bool {
-    if (a == null and b == null) return true;
-    if (a == null or b == null) return false;
-    return a.? == b.?;
+    bench.assert_budget(result, budget_ns_smoke_max, "route_match");
 }
