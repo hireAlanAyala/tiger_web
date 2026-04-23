@@ -306,7 +306,7 @@ fn upload_run(shell: *Shell, batch: *const MetricBatch) !void {
     try shell.pushd("./devhubdb");
     defer shell.popd();
 
-    for (0..32) |_| {
+    for (0..32) |attempt| {
         try shell.exec("git fetch origin main", .{});
         try shell.exec("git reset --hard origin/main", .{});
 
@@ -324,16 +324,21 @@ fn upload_run(shell: *Shell, batch: *const MetricBatch) !void {
         try shell.exec("git add ./devhub/data.json", .{});
         try shell.git_env_setup(.{ .use_hostname = false });
         try shell.exec("git commit -m 📈", .{});
+        // `shell.exec` streams stderr to the parent — git's actual
+        // rejection reason lands in the CI log even when we swallow
+        // the Zig error. TB's original "conflict, retrying" message
+        // obscured which failure mode we were hitting (auth vs
+        // protection vs conflict). Numbered attempts + the preceding
+        // git stderr are enough to diagnose in the CI log.
         if (shell.exec("git push", .{})) {
-            log.info("metrics uploaded", .{});
-            break;
-        } else |_| {
-            log.info("conflict, retrying", .{});
+            log.info("metrics uploaded (attempt {d})", .{attempt + 1});
+            return;
+        } else |err| {
+            log.warn("push attempt {d}/32 failed ({s}); retrying", .{ attempt + 1, @errorName(err) });
         }
-    } else {
-        log.err("can't push new data to devhub", .{});
-        return error.CanNotPush;
     }
+    log.err("can't push new data to devhub after 32 attempts — is DEVHUBDB_PAT scoped 'contents: write' on the devhubdb repo?", .{});
+    return error.CanNotPush;
 }
 
 /// Verbatim from TB lines 438–452.
