@@ -865,23 +865,54 @@ exists to preserve them.
 - [ ] `cp` TB's `devhub_coverage` function (TB:58-95) verbatim into
   `scripts/devhub.zig`.
 - [ ] Surgical trims (each with inline bucket tag):
-  - `./zig-out/bin/test-unit` → `./zig-out/bin/tiger-web` unit-test
-    invocation. TB's test binary is built separately via
-    `test:unit:build`; ours runs via `zig build unit-test`. Needs
-    a different binary-target approach — likely add a
-    `unit-test-build` step to `build.zig` that produces a standalone
-    binary kcov can attach to. (Principled — port source differs.)
-  - Drop the two LSM-specific fuzz invocations (`lsm_tree`,
-    `lsm_forest`). We don't have those subsystems. Principled.
-  - Drop the VOPR invocation. We don't have VOPR. Principled.
-  - Add equivalents for our fuzzers — at minimum
-    `./zig-out/bin/tiger-fuzz state_machine 92` to cover the state
-    machine. Expand to codec/render/wal/storage fuzzers over time.
-    Principled — domain substitution.
+  - `./zig-out/bin/test-unit` → our unit-test invocation.
+    **Prerequisite:** TB ships a standalone `test-unit` binary
+    built via `test:unit:build`; our `zig build unit-test` runs
+    tests directly without producing a kcov-attachable binary.
+    Need to add a `unit-test-build` step in `build.zig` that
+    produces `./zig-out/bin/tiger-unit-test` (or similar) with
+    debug info, then kcov runs against it. (Principled — port
+    source differs; also ~20 lines of build.zig work that
+    precedes the kcov wiring itself.)
+  - Drop TB's two LSM-specific fuzz invocations (`lsm_tree`,
+    `lsm_forest`). We have no LSM subsystem. Principled.
+  - Drop TB's VOPR invocation. No VOPR equivalent. Principled.
+  - **Replace with OUR full fuzzer set.** When VOPR is dropped,
+    its coverage contribution must be replaced with our own
+    fuzzers or the coverage report will look thin. Our complete
+    fuzzer inventory (from `fuzz_tests.zig:42-52`): `state_machine`
+    (core pipeline), `replay` (WAL round-trip), `message_bus`
+    (sidecar Unix socket protocol), `row_format` (SHM row wire
+    contract — the cross-language boundary), `worker_dispatch`
+    (CALL/RESULT boundary). Each gets a kcov-wrapped invocation
+    with events-max sized for meaningful path coverage:
+
+    ```
+    {kcov} ./zig-out/bin/tiger-fuzz -- --events-max=100000 state_machine 92
+    {kcov} ./zig-out/bin/tiger-fuzz -- --events-max=100000 replay 92
+    {kcov} ./zig-out/bin/tiger-fuzz -- --events-max=100000 message_bus 92
+    {kcov} ./zig-out/bin/tiger-fuzz -- --events-max=100000 row_format 92
+    {kcov} ./zig-out/bin/tiger-fuzz -- --events-max=100000 worker_dispatch 92
+    ```
+
+    Events-max: TB uses 500_000 for LSM fuzzers. We use 100_000
+    as a middle ground — more than the smoke-mode default (10k)
+    so paths actually get exercised, less than TB's number so
+    coverage CI stays bounded (~1-2 min per fuzzer). Revisit if
+    coverage % stays flat after more events. Seed `92` matches
+    TB's convention — lets us diff coverage across commits with
+    the same inputs.
+
+    **Why all five, not a subset:** a kcov report that covers
+    only `state_machine` would hide gaps in the
+    sidecar/wire-contract surface area (message_bus, row_format,
+    worker_dispatch) — exactly the subsystems where regressions
+    would be most expensive. Covering the full fuzzer set
+    mirrors TB's "cover the main testing surface" intent without
+    inheriting VOPR/LSM specifics.
   - Keep: `kcov` invocation shape, `--include-path=./src`,
-    `./src/devhub/coverage` output directory (adjust path to
-    `./coverage/` on the devhubdb side when we upload), seed `92`
-    convention, symlink cleanup. TB decisions we preserve.
+    output directory convention, seed `92`, symlink cleanup.
+    TB decisions we preserve.
 - [ ] `cp` TB's `--skip-kcov` CLI flag shape into our `CLIArgs`
   (TB:43-46). Default `false` on main, but allow local runs to
   skip to save time.
