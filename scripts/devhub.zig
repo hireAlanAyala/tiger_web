@@ -295,12 +295,6 @@ fn get_measurement(
 /// URL swapped for our devhubdb repo.
 fn upload_run(shell: *Shell, batch: *const MetricBatch) !void {
     const token = try shell.env_get("DEVHUBDB_PAT");
-    // Length sanity, not the value — confirms the secret arrived
-    // intact at the runner. A GitHub fine-grained PAT is 93 chars;
-    // classic PATs are 40. Anything else means the secret got
-    // truncated or set wrong.
-    log.info("DEVHUBDB_PAT length = {d}", .{token.len});
-
     try shell.exec(
         \\git clone --single-branch --depth 1
         \\  https://oauth2:{token}@github.com/hireAlanAyala/tiger-web-devhubdb.git
@@ -312,19 +306,7 @@ fn upload_run(shell: *Shell, batch: *const MetricBatch) !void {
     try shell.pushd("./devhubdb");
     defer shell.popd();
 
-    // Override anything Actions' default runner git config tries to
-    // do with credentials. `actions/checkout@v4` can install an
-    // extraheader or credential helper that submits GITHUB_TOKEN
-    // (ephemeral, scoped to tiger_web only) for all github.com
-    // traffic — GitHub rejects it against devhubdb because the
-    // ephemeral token has no write on that repo. We want our
-    // URL-embedded PAT to be the only auth source. Unset both keys;
-    // ignore "key not found" (exit 5) for the one we weren't going
-    // to have anyway.
-    _ = shell.exec("git config --local --unset-all credential.helper", .{}) catch {};
-    _ = shell.exec("git config --local --unset-all http.https://github.com/.extraheader", .{}) catch {};
-
-    for (0..32) |attempt| {
+    for (0..32) |_| {
         try shell.exec("git fetch origin main", .{});
         try shell.exec("git reset --hard origin/main", .{});
 
@@ -342,28 +324,16 @@ fn upload_run(shell: *Shell, batch: *const MetricBatch) !void {
         try shell.exec("git add ./devhub/data.json", .{});
         try shell.git_env_setup(.{ .use_hostname = false });
         try shell.exec("git commit -m 📈", .{});
-        // Push with URL-embedded credentials PASSED EXPLICITLY on
-        // the command rather than relying on .git/config's stored
-        // remote URL. Git can silently strip embedded credentials
-        // when writing to config under some runner setups; passing
-        // on the command line guarantees the token lands in the
-        // actual HTTP request. Also disable credential helpers
-        // in-process (`-c credential.helper=`) so no helper captures
-        // and rewrites our URL. HEAD:main pushes the current commit
-        // to main without needing tracking refs.
-        if (shell.exec(
-            \\git -c credential.helper=
-            \\  push https://oauth2:{token}@github.com/hireAlanAyala/tiger-web-devhubdb.git
-            \\  HEAD:main
-        , .{ .token = token })) {
-            log.info("metrics uploaded (attempt {d})", .{attempt + 1});
-            return;
-        } else |err| {
-            log.warn("push attempt {d}/32 failed ({s}); retrying", .{ attempt + 1, @errorName(err) });
+        if (shell.exec("git push", .{})) {
+            log.info("metrics uploaded", .{});
+            break;
+        } else |_| {
+            log.info("conflict, retrying", .{});
         }
+    } else {
+        log.err("can't push new data to devhub", .{});
+        return error.CanNotPush;
     }
-    log.err("can't push new data to devhub after 32 attempts — is DEVHUBDB_PAT scoped 'contents: write' on the devhubdb repo?", .{});
-    return error.CanNotPush;
 }
 
 /// Verbatim from TB lines 438–452.
