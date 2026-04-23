@@ -845,33 +845,195 @@ Effort: 1 hour. Dependencies: B, E.
 
 ---
 
-## Phase G — dashboard (deferred)
+## Phase G.0 — coverage pipeline (prerequisite for G.1)
 
-Effort: 1–2 days. Dependencies: F produces data for ≥1 week.
+Effort: 1–2 hours. Dependencies: F uploading on main for ≥1 commit.
 
-- [ ] `cp src/devhub/devhub.js` and `src/devhub/index.html` from TB
-  into the devhubdb repo root. **Survival estimate:** the earlier
-  "~80%" figure was an unverified guess. Metric-name strings, chart
-  configurations, and outlier-detection logic are all TB-specific;
-  actual survival is likely closer to 60% once VSR-domain metric
-  names are swapped for our three tiers. Re-measure during phase G
-  execution; if it's under 50%, revisit whether the cp-first
-  approach applies here or if a fresh dashboard is legitimate.
-- [ ] Surgical edits:
-  - Data source URL: point at
-    `https://raw.githubusercontent.com/hireAlanAyala/tiger-web-devhubdb/main/devhub/data.json`
-  - Metric names to chart: update to our three tiers
-  - Three chart panels (SLA, pipeline, primitive) with tier-level
-    navigation
-  - Week-over-week outlier highlighting (top 3 per panel)
-- [ ] **Enable GitHub Pages** on `hireAlanAyala/tiger-web-devhubdb`
-  (verified 2026-04-22: currently returns 404, i.e. not yet enabled).
-  Repo settings → Pages → Source: `main` branch, root folder.
-  Verification: `curl -sI https://hireAlanAyala.github.io/tiger-web-devhubdb/`
-  should return 200 within a few minutes of activation.
-- [ ] Public URL: `https://hireAlanAyala.github.io/tiger-web-devhubdb`
-- [ ] Commit-link annotations so each data point links to the tiger_web
-  commit that produced it
+The Phase G dashboard (next step) includes a **Coverage** link that
+points at `./coverage/index.html` served from the same GitHub Pages
+origin as `devhub/data.json`. That file needs to exist before G.1
+or the link 404s. G.0 ships the kcov pipeline that produces it.
+
+**Discipline:** `cp` TB's `devhub_coverage()` function from
+`/home/walker/Documents/personal/tigerbeetle/src/scripts/devhub.zig:58-95`
+into our `scripts/devhub.zig`, then trim with bucket tags. Do not
+re-derive the kcov invocation from memory — the binary list,
+events-max count, seed (`92`), and symlink-cleanup step are TB
+decisions we may not fully understand, and the cp-first rule
+exists to preserve them.
+
+- [ ] `cp` TB's `devhub_coverage` function (TB:58-95) verbatim into
+  `scripts/devhub.zig`.
+- [ ] Surgical trims (each with inline bucket tag):
+  - `./zig-out/bin/test-unit` → `./zig-out/bin/tiger-web` unit-test
+    invocation. TB's test binary is built separately via
+    `test:unit:build`; ours runs via `zig build unit-test`. Needs
+    a different binary-target approach — likely add a
+    `unit-test-build` step to `build.zig` that produces a standalone
+    binary kcov can attach to. (Principled — port source differs.)
+  - Drop the two LSM-specific fuzz invocations (`lsm_tree`,
+    `lsm_forest`). We don't have those subsystems. Principled.
+  - Drop the VOPR invocation. We don't have VOPR. Principled.
+  - Add equivalents for our fuzzers — at minimum
+    `./zig-out/bin/tiger-fuzz state_machine 92` to cover the state
+    machine. Expand to codec/render/wal/storage fuzzers over time.
+    Principled — domain substitution.
+  - Keep: `kcov` invocation shape, `--include-path=./src`,
+    `./src/devhub/coverage` output directory (adjust path to
+    `./coverage/` on the devhubdb side when we upload), seed `92`
+    convention, symlink cleanup. TB decisions we preserve.
+- [ ] `cp` TB's `--skip-kcov` CLI flag shape into our `CLIArgs`
+  (TB:43-46). Default `false` on main, but allow local runs to
+  skip to save time.
+- [ ] Add `sudo apt-get install -y kcov` to the devhub CI step in
+  `.github/workflows/ci.yml`. One line, above the `zig/download.sh`
+  step.
+- [ ] Modify the devhub CI step to upload the generated `coverage/`
+  directory to Pages alongside `devhub/data.json`. Either: (a) push
+  coverage into the devhubdb repo's `coverage/` subdir during
+  `upload_run`, (b) use `actions/upload-pages-artifact` +
+  `actions/deploy-pages` with both `devhub/data.json` and
+  `coverage/` in the artifact. TB uses (b); we should match since
+  (a) bloats the git history with HTML diffs.
+- [ ] Verify: after next main merge,
+  `curl -sI https://hirealanayala.github.io/tiger-web-devhubdb/coverage/index.html`
+  returns 200.
+
+## Phase G.1 — dashboard
+
+Effort: 2–3 hours (revised down from 1–2 days). Dependencies: G.0
+complete + F produced data for ≥1 week.
+
+**Discipline:** whole-file `cp` of TB's three dashboard files,
+then surgical remove + change. Minimum edits that make the
+dashboard **honest** (renders our data, attributed to us) without
+any from-memory rewriting. Inert TB code (VOPR branches,
+release-commit detection) stays — keep what doesn't hurt us.
+
+- [ ] `cp /home/walker/Documents/personal/tigerbeetle/src/devhub/devhub.js`
+  into `tiger-web-devhubdb/devhub.js` (or root; TB puts it at
+  `src/devhub/` in source and serves the whole dir).
+- [ ] `cp /home/walker/Documents/personal/tigerbeetle/src/devhub/index.html`
+  into the same location.
+- [ ] `cp /home/walker/Documents/personal/tigerbeetle/src/devhub/style.css`
+  into the same location.
+
+**Remove (2 items):**
+
+- [ ] **Release manager section + rotation logic.** No solo-project
+  analog; hardcoded TB team roster (`batiati`, `cb22`,
+  `chaitanyabhandari`, `fabioarnold`, `lewisdaly`, `matklad`,
+  `sentientwaffle`, `toziegler`, `GeorgKreuzmayr`) renders other
+  people's names as "this week's release manager." Delete:
+  - HTML `<section id="release">` block (index.html:24-40)
+  - JS `main_release_rotation()` + `get_release_manager()`
+    (devhub.js:24-53)
+  - JS top-level invocation of `main_release_rotation()` (remove
+    from the `main()` or equivalent entry point)
+- [ ] **Coverage link** in Links section. Replaced by Phase G.0 —
+  actually wait: G.0 MAKES the coverage link work, so **KEEP** the
+  link. Rename this remove-item to "coverage link stays, G.0
+  ensures the target exists." (Leaving the strikethrough here as
+  a reminder that the list was revised.)
+
+**Change (17 substitutions, group by file):**
+
+`index.html`:
+- [ ] `<title>TigerBeetle DevHub</title>` → `Tiger Web DevHub`
+- [ ] Nav branding: replace `<svg id="logo"><use href="#svg-logo">`
+  (line 17-19) with a plain text wordmark `<h1 class="brand">Tiger
+  Web DevHub</h1>` or equivalent. Structural element stays; SVG
+  contents swap.
+- [ ] SVG template block at bottom (`<svg id="svg-logo">` with the
+  TigerBeetle path data, lines 88-95): replace `<path>` contents
+  with a placeholder `<text>Tiger Web</text>` or a Tiger-Web
+  artwork later. Keep the `<svg id="svg-logo">` shell so the
+  `<use href="#svg-logo">` reference still resolves if any JS
+  accesses it.
+- [ ] "My code review" link → `github.com/hireAlanAyala/tiger_web/pulls/assigned/@me`
+- [ ] "Issue triage" link →
+  `github.com/hireAlanAyala/tiger_web/issues?q=is%3Aissue+is%3Aopen+-label%3Atriaged`
+- [ ] Nyrkiö link in Metrics header: **remove the `<a>` tag** (not
+  the surrounding `<h2>` text), since we don't publish to Nyrkiö.
+  Structural element goes; replacement text is already the "Raw
+  data" link next to it.
+- [ ] "Raw data" link (fuzz section): `tigerbeetle/devhubdb` →
+  `hireAlanAyala/tiger-web-devhubdb`
+- [ ] "Raw data" link (metrics section): same swap.
+
+`devhub.js`:
+- [ ] Metrics data URL (line 218):
+  `raw.githubusercontent.com/tigerbeetle/devhubdb/main/devhub/data.json`
+  → `raw.githubusercontent.com/hireAlanAyala/tiger-web-devhubdb/main/devhub/data.json`
+- [ ] Fuzz data URL (line 57): same pattern.
+- [ ] Logs base URL (line 61):
+  `raw.githubusercontent.com/tigerbeetle/devhubdb/main/` → our equivalent.
+- [ ] Issues API URL (line 59):
+  `api.github.com/repos/tigerbeetle/tigerbeetle/issues` →
+  `api.github.com/repos/hireAlanAyala/tiger_web/issues`
+- [ ] Commit link URL (line 171 and line 378):
+  `github.com/tigerbeetle/tigerbeetle/commit/` →
+  `github.com/hireAlanAyala/tiger_web/commit/`
+- [ ] PR prefix (line 241):
+  `github.com/tigerbeetle/tigerbeetle/pull/` →
+  `github.com/hireAlanAyala/tiger_web/pull/`
+- [ ] Branch-identity check (line 232):
+  `"https://github.com/tigerbeetle/tigerbeetle"` →
+  `"https://github.com/hireAlanAyala/tiger_web"`
+- [ ] Release-tree URL check (line 237):
+  `"https://github.com/tigerbeetle/tigerbeetle/tree/release"` →
+  `"https://github.com/hireAlanAyala/tiger_web/tree/release"`
+  (inert for us — we don't use `/tree/release` — but swap for
+  consistency so a future release-tag convention works.)
+
+**Keep explicitly (even if unused today):**
+
+- VOPR-specific branches (`record.fuzzer === "vopr"`) — inert for
+  our data, zero runtime cost, free if we ever add a VOPR analog.
+- Release-commit detection (`is_release()`) — inert for now;
+  works when we adopt release tagging.
+- Untriaged-issues badge fetcher — useful once URL is swapped
+  (change item above).
+- Fuzz runs table — our CFO seeds in `fuzzing/data.json` (184456
+  historical) use TB's schema; renders correctly.
+- All formatting helpers (`format_bytes`, `format_count`,
+  `format_date_*`, `format_duration`).
+- Entire `style.css` — inherit TB's visual language; restyle later
+  if desired.
+
+**Survival accounting (post-trim):**
+
+- `index.html`: 99 lines → ~85 lines. Mostly release-section
+  deletion + 3 SVG swaps + 7 URL edits.
+- `devhub.js`: 552 lines → ~520 lines. Delete 2 functions + invocation
+  site, edit 10 URLs/strings.
+- `style.css`: 209 lines → 209 lines (no changes).
+- **Net: ~38 lines removed, 17 edits, ~95% literal survival of TB's files.**
+
+**File header in devhub.js must document:**
+
+- Port source: TB `src/devhub/{devhub.js,index.html,style.css}`
+  with commit SHA at cp time.
+- Discipline: whole-file `cp` + surgical remove/change pass. Every
+  change listed above; every line not listed is TB's code
+  unchanged.
+- Deletions bucket-tagged (all principled per engineering value 2).
+- Substitutions grouped by file with line-number references to
+  TB's original.
+
+**Verification:**
+
+- [ ] Load `https://hirealanayala.github.io/tiger-web-devhubdb/` in
+  a browser. Confirm:
+  - `<title>` reads "Tiger Web DevHub"
+  - Metrics section renders 17 charts (our metric names)
+  - Fuzz runs table populated (CFO seeds)
+  - Commit-link on a data point opens our tiger_web commit
+  - Coverage link loads the G.0 artifact (no 404)
+  - No "TigerBeetle" text visible anywhere the user can read
+- [ ] Open browser devtools; confirm no JS errors (release-section
+  deletion must match the JS invocation deletion — otherwise
+  `querySelector` returns null and throws).
 
 ---
 
