@@ -10,13 +10,14 @@ concurrency:
   cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 jobs:
+  # Sim tests, unit tests, and fuzz smoke use SimIO — platform-
+  # independent by construction. Running on macOS cost ~10× Linux
+  # per minute with no additional signal (Zig is the same toolchain,
+  # IO is simulated). macOS coverage for the native-addon path lives
+  # in the `clients` job below, which is where platform-specific
+  # breakage actually surfaces.
   test:
-    strategy:
-      matrix:
-        include:
-          - { os: 'ubuntu-latest' }
-          - { os: 'macos-latest' }
-    runs-on: ${{ matrix.os }}
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - run: sh zig/download.sh
