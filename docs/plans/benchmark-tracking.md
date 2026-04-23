@@ -98,11 +98,14 @@ next (`[ ]`). Short version:
   automation wired into `unit-test`).
 - **Phase E** ✅ done (commit `27f5a51`). 2-tier uploader shipped
   under the E-before-D revision.
-- **Phase F** ✅ config shipped (commit `6c0879f`). PRs dry-run
-  immediately; main-branch upload blocks on DEVHUBDB_PAT
-  registration.
-- **Phase D** ⏳ next. SLA tier adds ~5–10 metrics to the uploader's
-  run-order.
+- **Phase F** ✅ config shipped (commit `6c0879f` + `fc7bb7f`
+  gate). PRs dry-run immediately; main-branch upload blocks on
+  DEVHUBDB_PAT registration.
+- **Phase D** ✅ done (commits `ed4fbff` skeleton, `6ab5e77` load
+  generator, `345418d` devhub integration). `tiger-web benchmark`
+  subcommand ships closed-loop HTTP load with warmup, op-mix,
+  percentile output. devhub uploader now emits 18 metrics across
+  all three tiers.
 - **Phase G** deferred until devhubdb has ≥1 week of data.
 
 ### Known runtime unknowns (can't resolve without execution)
@@ -579,18 +582,26 @@ Post-retrofit invariant audit:
 
 ---
 
-## Phase D — SLA benchmark as `tiger-web` subcommand
+## Phase D — SLA benchmark as `tiger-web` subcommand ✅ DONE
 
-Effort: 2–3 days (post-DR-3). Dependencies: A. Independent of C and E.
+Shipped across three commits:
 
-**Execution order note (2026-04-22 revision):** Phase E now runs
-*before* Phase D. The original "D then E" ordering assumed all three
-tiers would land together. Post-Phase-C, the primitive + pipeline
-tiers already emit TB-parseable output that `devhub.zig`'s
-`get_measurement` parser consumes directly — E can ship against
-those alone, get the dashboard populated in ~1 day, and then D adds
-the SLA tier as a third metric category. Section numbering unchanged
-for commit-history continuity.
+- `ed4fbff` — CLI skeleton (`BenchmarkArgs`, dispatcher, driver stub).
+- `6ab5e77` — `benchmark_load.zig` pattern-transplant (histogram +
+  percentile walk from TB cited; HTTP client + warmup + op-mix
+  fresh).
+- `345418d` — `scripts/devhub.zig` runs SLA tier end-to-end,
+  MetricBatch now carries 18 metrics.
+
+**Warmup finding (D.5 verification):** on a cold database the plan
+claimed the warmup should reduce p50 by ≥20%. Actual: p50 identical
+at 40 ms with or without warmup. Our system hits steady state
+within the first few requests — SQLite prepared-statement cache
+and TCP handshake complete too fast for warmup to shift the
+histogram. Plan's own escape clause applies ("our system has no
+cold-cache penalty worth measuring — investigate before shipping").
+Warmup feature stays (cheap; may matter for larger future
+workloads) but doesn't carry weight today.
 
 ### D.1 CLI integration
 
