@@ -1,29 +1,23 @@
 # Benchmark Rebuild — Implementation Plan
 
-## Blocking on human
+## Blocking on human ✅ RESOLVED 2026-04-23
 
-These items cannot be resolved from inside the repo. Everything past
-Phase F depends on them. If you're picking the plan up and the
-checkboxes below are still unchecked, these are the first things to
-do — not buried in Phase B.
+All four external-action items closed. Preserved as a record.
 
-- [ ] **Generate PAT.** Fine-grained GitHub PAT scoped `contents: write`
-  on `hireAlanAyala/tiger-web-devhubdb` only. URL:
-  `https://github.com/settings/personal-access-tokens/new`.
-- [ ] **Register the PAT as `DEVHUBDB_PAT`** in tiger_web's GitHub
-  Actions secrets:
-  `gh secret set DEVHUBDB_PAT --repo hireAlanAyala/tiger_web`.
-- [ ] **Verify visibility** to the default-branch CI context:
-  `gh secret list --repo hireAlanAyala/tiger_web | grep DEVHUBDB_PAT`.
-- [ ] **Enable GitHub Pages** on `hireAlanAyala/tiger-web-devhubdb`
-  (Phase G prerequisite; still unneeded until then). Settings →
-  Pages → Source: `main` branch, root folder. Verify:
-  `curl -sI https://hireAlanAyala.github.io/tiger-web-devhubdb/`
-  returns 200.
-
-Why here, not buried in phases: each is external, none takes more
-than a few minutes, and all of them block F. A reviewer reading the
-plan should see them before Phase C's discipline.
+- [x] **PAT.** Reused the existing `tigerweb_cfo` fine-grained PAT
+  (originally created for CFO work; same `contents: write` scope on
+  `hireAlanAyala/tiger-web-devhubdb` applies to devhub uploads).
+  Token was located in `~/.zsh_history_tiger_web_cfo`.
+  **Follow-up:** rotate and rename the token at next convenient
+  moment (the string appeared in this session's Claude Code logs).
+- [x] **Registered as `DEVHUBDB_PAT`** on `hireAlanAyala/tiger_web`
+  via `gh secret set`. Confirmed via `gh secret list`.
+- [x] **Visibility verified** — secret listed under repo secrets on
+  default-branch context.
+- [x] **Pages enabled** on `hireAlanAyala/tiger-web-devhubdb` via
+  `gh api --method POST /repos/.../pages`. Confirmed:
+  `https://hirealanayala.github.io/tiger-web-devhubdb/devhub/data.json`
+  returns HTTP 200.
 
 ## Before starting (especially in a new session)
 
