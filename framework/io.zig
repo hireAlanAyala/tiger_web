@@ -38,7 +38,7 @@ pub const IO = struct {
 
         /// Operation state — for assertion compatibility with connection.zig.
         operation: Op = .none,
-        const Op = enum { none, recv, send };
+        const Op = enum { none, recv, send, connect };
     };
 
     pub const CallbackFn = *const fn (*anyopaque, i32) void;
@@ -168,6 +168,55 @@ pub const IO = struct {
         completion.operation = .none;
         const bytes: i32 = if (result) |n| @intCast(n) else |_| -1;
         completion.callback(completion.context, bytes);
+    }
+
+    /// Open a non-blocking TCP client socket. Companion to
+    /// `open_listener` — same shape, just no bind/listen. Caller
+    /// submits `connect()` to bring the socket up through the ring.
+    pub fn open_client_socket(_: *IO, family: u16) !fd_t {
+        const fd = try posix.socket(
+            family,
+            posix.SOCK.STREAM | posix.SOCK.NONBLOCK | posix.SOCK.CLOEXEC,
+            0,
+        );
+        errdefer posix.close(fd);
+        posix.setsockopt(fd, posix.IPPROTO.TCP, posix.TCP.NODELAY, &std.mem.toBytes(@as(c_int, 1))) catch {};
+        return fd;
+    }
+
+    /// Submit an async connect through io_uring / kqueue.
+    /// Callback fires once with result = 0 on success, -1 on error —
+    /// same raw-i32 convention as recv/send. Connect is a
+    /// prerequisite for client-side code paths (benchmark load
+    /// generator, admin-probe CLI, health-check tools); recv/send
+    /// already work for any fd, so exposing connect completes the
+    /// client-shape verb set.
+    pub fn connect(
+        self: *IO,
+        fd: fd_t,
+        address: std.net.Address,
+        completion: *Completion,
+        context: *anyopaque,
+        callback: CallbackFn,
+    ) void {
+        assert(completion.operation == .none);
+        completion.context = context;
+        completion.callback = callback;
+        completion.operation = .connect;
+        self.inner.connect(
+            *Completion,
+            completion,
+            connect_bridge,
+            &completion.inner,
+            @intCast(fd),
+            address,
+        );
+    }
+
+    fn connect_bridge(completion: *Completion, _: *InnerIO.Completion, result: InnerIO.ConnectError!void) void {
+        completion.operation = .none;
+        const code: i32 = if (result) |_| 0 else |_| -1;
+        completion.callback(completion.context, code);
     }
 
     /// Non-blocking send — try to send immediately without the ring.

@@ -5,8 +5,8 @@
 //! is infeasible (DR-3: the file's skeleton is VSR — `vsr.ClientType`,
 //! `MessagePool`, `MessageBus`, etc.). Specific passages are
 //! transplanted verbatim with file:line citations; the domain-specific
-//! machinery (HTTP client, JSON body construction, op-mix parser,
-//! warmup) is written fresh.
+//! machinery (HTTP client, JSON body construction, op-mix parser)
+//! is written fresh.
 //!
 //! **Transplanted verbatim from TB `benchmark_load.zig`:**
 //!
@@ -19,19 +19,31 @@
 //!
 //! **Written fresh (no TB equivalent applies):**
 //!
-//!   - Raw TCP via `std.net.Stream` with a hand-written HTTP/1.1
-//!     response parser (status line, Content-Length, keep-alive,
-//!     partial reads). TB's VSR client doesn't translate. Raw-TCP
-//!     matches TB's style for their manual-ping in `benchmark_driver`.
-//!   - Per-op JSON body construction, PRNG-derived field-by-field for
-//!     deterministic replay under `--seed`.
+//!   - Hand-written HTTP/1.1 response parser (status line,
+//!     Content-Length, keep-alive across requests, partial reads).
+//!     TB's VSR client doesn't translate. Parser is pure — state
+//!     lives on the per-client struct; no I/O mixed in.
+//!   - Per-op JSON body construction, PRNG-derived field-by-field
+//!     for deterministic replay under `--seed`.
 //!   - Operation-weight mix: `--ops=create_product:80,list_products:20`
 //!     parsed once at startup into `BoundedArrayType(OpMix, op_mix_max)`.
 //!     Weighted PRNG pick per request; dispatch via comptime `switch`
 //!     on `Operation`.
-//!   - Thread-per-connection (std.Thread). HTTP sockets are blocking;
-//!     a single-threaded event loop would require epoll/io_uring
-//!     plumbing that duplicates the server.
+//!
+//! **Transport primitive — `framework/io.zig` (io_uring on Linux,
+//! kqueue on macOS).** Single-threaded, async-completion-driven, the
+//! same IO layer the server uses. Per TIGER_STYLE "right primitive":
+//! the project owns one IO abstraction; the benchmark uses it too.
+//! `io.connect`/`io.send`/`io.recv` are the verbs. Fuzzability
+//! (TB principle 4) follows — future sim-tests drop in `SimIO` with
+//! no harness change.
+//!
+//! **Why not thread-per-connection or raw epoll:**
+//! thread-per-connection (the pre-H.4 shape) corrupted tail latencies
+//! with scheduler jitter. Raw epoll (a first-pass attempt at H.4,
+//! reverted) introduced a second IO primitive into a project that
+//! had one — direct violation of right-primitive. `framework/io.zig`
+//! is the correct answer for both concerns.
 //!
 //! **Scope at ship time:** only `create_product` and `list_products`
 //! are supported operations. Other `message.Operation` values
@@ -41,7 +53,7 @@
 //! Silent expansion would leave a future contributor assuming full
 //! domain coverage.
 //!
-//! **Closed-loop caveat:** this harness is closed-loop (each thread
+//! **Closed-loop caveat:** this harness is closed-loop (each client
 //! waits for a response before issuing the next request). Coordinated
 //! omission applies — tail-latency spikes that would have happened
 //! during a slow response are hidden because the load generator
@@ -51,20 +63,22 @@
 //! `docs/internal/decision-benchmark-tracking.md` honest
 //! acknowledgments).
 //!
-//! **Failure semantics:** when a request fails (non-2xx, socket
-//! closed mid-response, parse error), the thread records an error,
-//! reconnects once, and continues. Failures are load-bearing signal
-//! — surfaced as `errors = N count` in output. Bounded: one
-//! reconnect per failure; if the reconnect also fails, the thread
-//! exits early.
+//! **Failure semantics:** a connection that fails at any stage
+//! (connect, send, recv, parse) terminates bounded — one error
+//! recorded, no reconnect, the connection drops out of the active
+//! set. Failures surface as `errors = N count` in output.
 
 const std = @import("std");
+const posix = std.posix;
 const assert = std.debug.assert;
 const log = std.log.scoped(.benchmark);
 
 const stdx = @import("stdx");
 const PRNG = stdx.PRNG;
 const BoundedArrayType = stdx.BoundedArrayType;
+
+const framework_io = @import("framework/io.zig");
+const IO = framework_io.IO;
 
 const BenchmarkArgs = @import("main.zig").BenchmarkArgs;
 const message = @import("message.zig");
@@ -91,25 +105,36 @@ const op_mix_max: u8 = 32;
 /// body. Distinct from `recv_buf_size` below (incoming responses).
 const body_max: u32 = 1024;
 
-/// TCP recv buffer size per connection. Bounds the largest
-/// *incoming* response body we can receive without ResponseTooLarge.
+/// TCP recv buffer size per client. Bounds the largest *incoming*
+/// response body we can receive without dropping the connection.
 ///
 /// Sized 128 KiB because `list_products`' response grows with DB
 /// population: each product renders ~28 bytes of HTML card markup,
 /// so a bench run that creates thousands of products before listing
 /// them can return response bodies in the tens-of-KB range. 128 KiB
-/// comfortably handles 4000+ products; beyond that, ResponseTooLarge
-/// fires and the thread records an error + reconnects.
+/// comfortably handles 4000+ products; beyond that the connection
+/// drops with an error (bounded, not reconnect-looped).
 ///
-/// Per-thread stack cost: ~256 KiB (recv_buf + leftover). Default
-/// thread stack is 8 MiB, leaving ample headroom.
+/// Per-client heap cost: ~128 KiB (read_buf). Write_buf adds ~1.3 KiB.
 const recv_buf_size: u32 = 128 * 1024;
 
-/// Hard upper bound on `--connections`. Beyond this, thread-spawn
-/// pressure and kernel FD limits make the measurement dominate by
-/// OS effects rather than framework behavior. 1024 is generous — TB
-/// itself benchmarks with tens, not thousands.
+/// Hard upper bound on `--connections`. Beyond this, kernel FD
+/// limits and io_uring SQE capacity start dominating. 1024 is
+/// generous — TB itself benchmarks with tens, not thousands.
 const connections_max: u16 = 1024;
+
+/// Maximum outgoing HTTP/1.1 header size. 256 bytes covers method +
+/// path + Host + Content-Length + Connection. Write buffer carries
+/// header + body.
+const write_header_max: u16 = 256;
+const write_buf_size: u32 = write_header_max + body_max;
+
+/// io_uring run-loop slice. The benchmark's main loop calls
+/// `io.run_for_ns(tick_ns)` repeatedly until all clients are
+/// terminal; a short slice keeps terminate-detection responsive
+/// without significant syscall overhead (io_uring's unified wait
+/// completes immediately when there's work).
+const tick_ns: u64 = 1 * std.time.ns_per_ms;
 
 /// Hard upper bound on `--requests`. 10M requests × ~10ms/request
 /// at typical SLA latencies ≈ 100k seconds; anything larger is
@@ -149,8 +174,10 @@ const product_inventory_max: u32 = 9_999;
 const supported_ops = [_]Operation{ .create_product, .list_products };
 
 comptime {
-    // The response parser copies the leftover buffer into `buf`
-    // before reading — body + headers must fit.
+    assert(write_buf_size > write_header_max);
+    assert(write_buf_size > body_max);
+    assert(tick_ns > 0);
+    // Full HTTP request (header + body) must fit in the write buffer.
     assert(body_max <= recv_buf_size);
     // Minimum viable for any HTTP/1.1 response: status line
     // ("HTTP/1.1 200 OK\r\n" = 17 bytes) + one header line + "\r\n\r\n".
@@ -190,42 +217,68 @@ pub fn run(gpa: std.mem.Allocator, cli: BenchmarkArgs) !void {
         .{ cli.port, cli.connections, cli.requests },
     );
 
-    // Quick server reachability probe — connect, send a simple GET,
-    // disconnect. Confirms the server is up before we spawn threads.
     try probe_server(cli.port);
 
     const addr = try std.net.Address.parseIp4("127.0.0.1", cli.port);
-    const thread_count: u32 = cli.connections;
-    assert(thread_count > 0);
-    const requests_per_thread: u32 = cli.requests / thread_count;
-    assert(requests_per_thread > 0);
-    assert(requests_per_thread <= cli.requests);
+    const client_count: u32 = cli.connections;
+    assert(client_count > 0);
+    const requests_per_client: u32 = cli.requests / client_count;
+    assert(requests_per_client > 0);
+    assert(requests_per_client <= cli.requests);
 
-    const threads = try gpa.alloc(std.Thread, thread_count);
-    defer gpa.free(threads);
+    // Single IO instance drives every client. Same primitive as the
+    // server (`framework/io.zig`) — io_uring on Linux, kqueue on macOS.
+    // No epoll, no raw `posix.*` event loops anywhere in this file.
+    var io = try IO.init();
+    defer io.deinit();
 
-    const contexts = try gpa.alloc(ClientContext, thread_count);
-    defer gpa.free(contexts);
-
-    const histograms = try gpa.alloc([histogram_buckets]u64, thread_count);
+    const clients = try gpa.alloc(Client, client_count);
+    defer gpa.free(clients);
+    const histograms = try gpa.alloc([histogram_buckets]u64, client_count);
     defer gpa.free(histograms);
     @memset(histograms, [_]u64{0} ** histogram_buckets);
 
-    const start_instant = std.time.Instant.now() catch @panic("clock unavailable");
+    var runner: Runner = .{ .io = &io, .active = client_count };
 
-    for (threads, contexts, histograms, 0..) |*t, *ctx, *hist, i| {
-        ctx.* = ClientContext{
+    for (clients, histograms, 0..) |*client, *hist, i| {
+        const seed: u64 = seed_base ^ @as(u64, i);
+        const fd = try io.open_client_socket(posix.AF.INET);
+        errdefer io.close(fd);
+
+        client.* = .{
+            .fd = fd,
             .index = @intCast(i),
             .addr = addr,
+            .prng = PRNG.from_seed(seed),
             .op_mix = &op_mix,
-            .requests = requests_per_thread,
             .histogram = hist,
+            .runner = &runner,
+            .completion = .{},
+            .state = .connecting,
+            .remaining = requests_per_client,
             .errors = 0,
+            .write_len = 0,
+            .write_offset = 0,
+            .read_len = 0,
+            .header_end = null,
+            .content_length = null,
+            .request_start = undefined,
+            .write_buf = undefined,
+            .read_buf = undefined,
         };
-        t.* = try std.Thread.spawn(.{}, client_loop, .{ctx});
+
+        io.connect(fd, addr, &client.completion, @ptrCast(client), on_connect);
     }
 
-    for (threads) |t| t.join();
+    const start_instant = std.time.Instant.now() catch @panic("clock unavailable");
+
+    // Drive the ring until every client has reached a terminal state.
+    // `run_for_ns(tick_ns)` blocks in io_uring_enter until there's
+    // either a completion or the slice expires; short slices keep
+    // the active-count check responsive without measurable overhead.
+    while (runner.active > 0) {
+        io.run_for_ns(tick_ns);
+    }
 
     const elapsed_ns = blk: {
         const now = std.time.Instant.now() catch @panic("clock unavailable");
@@ -233,16 +286,16 @@ pub fn run(gpa: std.mem.Allocator, cli: BenchmarkArgs) !void {
     };
     assert(elapsed_ns > 0);
 
-    // Merge per-thread histograms.
+    // Merge per-client histograms.
     var total_hist = [_]u64{0} ** histogram_buckets;
     var total_samples: u64 = 0;
     var total_errors: u64 = 0;
-    for (contexts, histograms) |*ctx, *hist| {
+    for (clients, histograms) |*client, *hist| {
         for (hist, 0..) |count, bucket| {
             total_hist[bucket] += count;
             total_samples += count;
         }
-        total_errors += ctx.errors;
+        total_errors += client.errors;
     }
 
     report(cli, elapsed_ns, total_samples, total_errors, &total_hist);
@@ -332,89 +385,262 @@ fn op_mix_pick(prng: *PRNG, op_mix: *const OpMixArray) Operation {
     unreachable;
 }
 
-// --- Per-thread client ---
+// --- Per-client state machine ---
+//
+// One IO instance drives all N clients. Each client is a little
+// state machine; `framework/io.zig` completion callbacks fire its
+// transitions. No threads, no mutexes, no epoll.
 
-const ClientContext = struct {
-    index: u32,
-    addr: std.net.Address,
-    op_mix: *const OpMixArray,
-    requests: u32,
-    histogram: *[histogram_buckets]u64,
-    // Written only by this thread; read by main after join. No sync.
-    errors: u64,
+const State = enum {
+    connecting,
+    writing,
+    reading,
+    done,
+    failed,
 };
 
-fn client_loop(ctx: *ClientContext) void {
-    assert(ctx.requests > 0);
+const Runner = struct {
+    io: *IO,
+    active: u32,
+};
 
-    // Per-thread PRNG derived from the canonical bench seed + index,
-    // so replay under the same seed is deterministic even with many
-    // threads. Explicit XOR keeps each thread's PRNG independent.
-    const seed: u64 = seed_base ^ @as(u64, ctx.index);
-    var prng = PRNG.from_seed(seed);
+const Client = struct {
+    fd: IO.fd_t,
+    completion: IO.Completion,
+    index: u32,
+    addr: std.net.Address,
+    prng: PRNG,
+    op_mix: *const OpMixArray,
+    histogram: *[histogram_buckets]u64,
+    runner: *Runner,
 
-    var stream = std.net.tcpConnectToAddress(ctx.addr) catch |err| {
-        log.err("client {d}: connect failed: {s}", .{ ctx.index, @errorName(err) });
-        ctx.errors += 1;
+    state: State,
+    remaining: u32,
+    errors: u64,
+
+    // Write path.
+    write_buf: [write_buf_size]u8,
+    write_len: u32,
+    write_offset: u32,
+
+    // Read path.
+    read_buf: [recv_buf_size]u8,
+    read_len: u32,
+    header_end: ?u32,
+    content_length: ?u32,
+
+    // Timing — valid only while state == reading.
+    request_start: std.time.Instant,
+};
+
+fn on_connect(ctx_raw: *anyopaque, result: i32) void {
+    const client: *Client = @alignCast(@ptrCast(ctx_raw));
+    if (client.state == .done or client.state == .failed) return;
+    assert(client.state == .connecting);
+
+    if (result < 0) {
+        terminate(client, .failed);
         return;
-    };
-    defer stream.close();
-
-    var body_buf: [body_max]u8 = undefined;
-    var recv_buf: [recv_buf_size]u8 = undefined;
-    var recv_state: ResponseParser = .{};
-
-    for (0..ctx.requests) |_| {
-        const op = op_mix_pick(&prng, ctx.op_mix);
-        const body = construct_body(&prng, op, &body_buf);
-        assert(body.len <= body_max);
-
-        const req_start = std.time.Instant.now() catch @panic("clock unavailable");
-        send_request(&stream, op, body) catch |err| {
-            log.warn("client {d}: send failed: {s}; reconnecting", .{ ctx.index, @errorName(err) });
-            ctx.errors += 1;
-            reconnect(ctx, &stream, &recv_state) catch return;
-            continue;
-        };
-        const status = recv_response(&stream, &recv_buf, &recv_state) catch |err| {
-            log.warn("client {d}: recv failed: {s}; reconnecting", .{ ctx.index, @errorName(err) });
-            ctx.errors += 1;
-            reconnect(ctx, &stream, &recv_state) catch return;
-            continue;
-        };
-        // Pair-assert the status is in the HTTP-valid range. A value
-        // outside 100..600 means parse_status_line returned garbage.
-        assert(status >= 100);
-        assert(status < 600);
-        if (status < 200 or status >= 300) {
-            ctx.errors += 1;
-            continue;
-        }
-
-        const now = std.time.Instant.now() catch @panic("clock unavailable");
-        const duration_ns: u64 = now.since(req_start);
-        // Transplanted from TB `benchmark_load.zig:876`.
-        const duration_ms: u64 = duration_ns / std.time.ns_per_ms;
-        const bucket: usize = @min(duration_ms, histogram_buckets - 1);
-        assert(bucket < histogram_buckets);
-        ctx.histogram[bucket] += 1;
     }
+    advance_send(client);
 }
 
-/// Close the current stream, reconnect, reset the response-parser
-/// state. Returns `error.Reconnect` on a failed reconnect so the
-/// caller can exit its loop cleanly. Centralizes the
-/// recover-from-failure path per TIGER_STYLE "centralize control
-/// flow."
-fn reconnect(
-    ctx: *ClientContext,
-    stream: *std.net.Stream,
-    recv_state: *ResponseParser,
-) !void {
-    assert(ctx.errors > 0); // caller must have recorded the triggering error
-    stream.close();
-    stream.* = try std.net.tcpConnectToAddress(ctx.addr);
-    recv_state.* = .{};
+fn advance_send(client: *Client) void {
+    // Entered from .connecting (first send) or .reading (next request
+    // after a completed response).
+    assert(client.state == .connecting or client.state == .reading);
+    assert(client.remaining > 0);
+
+    const op = op_mix_pick(&client.prng, client.op_mix);
+    client.write_len = build_request(&client.prng, op, &client.write_buf);
+    assert(client.write_len > 0);
+    assert(client.write_len <= client.write_buf.len);
+    client.write_offset = 0;
+    client.request_start = std.time.Instant.now() catch @panic("clock unavailable");
+    client.state = .writing;
+    submit_send(client);
+}
+
+fn submit_send(client: *Client) void {
+    assert(client.state == .writing);
+    assert(client.write_offset < client.write_len);
+    const slice = client.write_buf[client.write_offset..client.write_len];
+    assert(slice.len > 0);
+    client.runner.io.send(client.fd, slice, &client.completion, @ptrCast(client), on_send);
+}
+
+fn on_send(ctx_raw: *anyopaque, result: i32) void {
+    const client: *Client = @alignCast(@ptrCast(ctx_raw));
+    if (client.state == .done or client.state == .failed) return;
+    assert(client.state == .writing);
+
+    if (result <= 0) {
+        client.errors += 1;
+        terminate(client, .failed);
+        return;
+    }
+    client.write_offset += @intCast(result);
+    assert(client.write_offset <= client.write_len);
+
+    if (client.write_offset < client.write_len) {
+        submit_send(client);
+        return;
+    }
+
+    // Full request sent; transition to reading.
+    client.state = .reading;
+    client.read_len = 0;
+    client.header_end = null;
+    client.content_length = null;
+    submit_recv(client);
+}
+
+fn submit_recv(client: *Client) void {
+    assert(client.state == .reading);
+    const slice = client.read_buf[client.read_len..];
+    assert(slice.len > 0);
+    client.runner.io.recv(client.fd, slice, &client.completion, @ptrCast(client), on_recv);
+}
+
+fn on_recv(ctx_raw: *anyopaque, result: i32) void {
+    const client: *Client = @alignCast(@ptrCast(ctx_raw));
+    if (client.state == .done or client.state == .failed) return;
+    assert(client.state == .reading);
+
+    if (result <= 0) {
+        // 0 = peer closed mid-response; <0 = recv error. Both terminal.
+        client.errors += 1;
+        terminate(client, .failed);
+        return;
+    }
+    client.read_len += @intCast(result);
+    assert(client.read_len <= client.read_buf.len);
+
+    // Try to complete the parse.
+    if (client.header_end == null) {
+        if (std.mem.indexOf(u8, client.read_buf[0..client.read_len], "\r\n\r\n")) |pos| {
+            client.header_end = @intCast(pos);
+        }
+    }
+    if (client.header_end) |header_end| {
+        if (client.content_length == null) {
+            const cl = parse_content_length(client.read_buf[0..header_end]) orelse {
+                client.errors += 1;
+                terminate(client, .failed);
+                return;
+            };
+            // Clamp at recv_buf_size — oversized responses will fall
+            // into the ResponseTooLarge path via the read-buffer-full
+            // check below.
+            client.content_length = @intCast(@min(cl, recv_buf_size));
+        }
+        const body_start: u32 = client.header_end.? + 4;
+        const body_end: u32 = body_start + client.content_length.?;
+        if (client.read_len >= body_end) {
+            const status = parse_status_line(client.read_buf[0..client.header_end.?]) orelse {
+                client.errors += 1;
+                terminate(client, .failed);
+                return;
+            };
+            // Pair-assert: parse_status_line returns null for values
+            // outside 100..600.
+            assert(status >= 100);
+            assert(status < 600);
+
+            const is_success = status >= 200 and status < 300;
+            if (is_success) {
+                const now = std.time.Instant.now() catch @panic("clock unavailable");
+                const duration_ns: u64 = now.since(client.request_start);
+                // Transplanted from TB `benchmark_load.zig:876`.
+                const duration_ms: u64 = duration_ns / std.time.ns_per_ms;
+                const bucket: usize = @min(duration_ms, histogram_buckets - 1);
+                assert(bucket < histogram_buckets);
+                client.histogram[bucket] += 1;
+            } else {
+                client.errors += 1;
+            }
+
+            // Shift any trailing bytes (pipelined response or extra
+            // from an over-eager recv) to the buf head for the next
+            // request.
+            const extra: u32 = client.read_len - body_end;
+            if (extra > 0) {
+                std.mem.copyForwards(
+                    u8,
+                    client.read_buf[0..extra],
+                    client.read_buf[body_end..client.read_len],
+                );
+            }
+            client.read_len = extra;
+            client.header_end = null;
+            client.content_length = null;
+
+            assert(client.remaining > 0);
+            client.remaining -= 1;
+            if (client.remaining == 0) {
+                terminate(client, .done);
+                return;
+            }
+            advance_send(client);
+            return;
+        }
+    }
+
+    // Need more bytes.
+    if (client.read_len == client.read_buf.len) {
+        // Response larger than buf and we still haven't found the
+        // end. Bounded: terminate the connection.
+        client.errors += 1;
+        terminate(client, .failed);
+        return;
+    }
+    submit_recv(client);
+}
+
+/// Mark client terminal, close the fd, decrement active count.
+/// The runner's main loop uses `runner.active == 0` as the exit
+/// signal. No reconnect loop, no unbounded error recovery — bounded
+/// per TIGER_STYLE.
+fn terminate(client: *Client, final: State) void {
+    assert(final == .done or final == .failed);
+    assert(client.state != .done);
+    assert(client.state != .failed);
+    client.state = final;
+    client.runner.io.close(client.fd);
+    client.fd = -1;
+    assert(client.runner.active > 0);
+    client.runner.active -= 1;
+}
+
+fn build_request(prng: *PRNG, op: Operation, buf: *[write_buf_size]u8) u32 {
+    var body_buf: [body_max]u8 = undefined;
+    const body = construct_body(prng, op, &body_buf);
+    assert(body.len <= body_max);
+
+    const method_path: MethodPath = switch (op) {
+        .create_product => .{ .method = "POST", .path = "/products" },
+        .list_products => .{ .method = "GET", .path = "/products" },
+        else => unreachable, // rejected at --ops parse
+    };
+    assert(method_path.method.len > 0);
+    assert(method_path.path.len > 0);
+
+    const header = std.fmt.bufPrint(
+        buf,
+        "{s} {s} HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Length: {d}\r\nConnection: keep-alive\r\n\r\n",
+        .{ method_path.method, method_path.path, body.len },
+    ) catch @panic("write_header_max too small");
+    assert(header.len > 0);
+    assert(header.len <= write_header_max);
+
+    if (body.len > 0) {
+        assert(header.len + body.len <= buf.len);
+        @memcpy(buf[header.len..][0..body.len], body);
+    }
+    const total: u32 = @intCast(header.len + body.len);
+    assert(total > 0);
+    assert(total <= buf.len);
+    return total;
 }
 
 // --- Body construction (PRNG-derived, deterministic under seed) ---
@@ -466,103 +692,13 @@ fn construct_create_product(prng: *PRNG, buf: []u8) []const u8 {
     return written;
 }
 
-// --- HTTP request sender ---
-
-fn send_request(stream: *std.net.Stream, op: Operation, body: []const u8) !void {
-    assert(body.len <= body_max);
-
-    const method_path: MethodPath = switch (op) {
-        .create_product => .{ .method = "POST", .path = "/products" },
-        .list_products => .{ .method = "GET", .path = "/products" },
-        else => unreachable, // rejected at --ops parse
-    };
-    assert(method_path.method.len > 0);
-    assert(method_path.path.len > 0);
-
-    var header_buf: [256]u8 = undefined;
-    const header = try std.fmt.bufPrint(
-        &header_buf,
-        "{s} {s} HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Length: {d}\r\nConnection: keep-alive\r\n\r\n",
-        .{ method_path.method, method_path.path, body.len },
-    );
-    assert(header.len > 0);
-    assert(header.len <= header_buf.len);
-    try stream.writeAll(header);
-    if (body.len > 0) try stream.writeAll(body);
-}
-
 const MethodPath = struct { method: []const u8, path: []const u8 };
 
-// --- HTTP response parser ---
+// --- HTTP response parse helpers ---
 //
-// Minimal HTTP/1.1 response parser. Handles: status line, headers,
-// Content-Length body, keep-alive state across requests, partial
-// reads across multiple recv() calls. Written fresh because
-// std.http.Client's implicit connection pooling would conflate
-// framework-under-load with stdlib-client-under-load.
-
-const ResponseParser = struct {
-    /// Leftover bytes from a previous response (start of next).
-    /// Keep-alive reuses the stream; recv may read into this.
-    leftover: [recv_buf_size]u8 = undefined,
-    leftover_len: usize = 0,
-};
-
-fn recv_response(
-    stream: *std.net.Stream,
-    buf: *[recv_buf_size]u8,
-    state: *ResponseParser,
-) !u16 {
-    assert(state.leftover_len <= state.leftover.len);
-
-    // Merge leftover + read loop until we have full response.
-    var total_len: usize = state.leftover_len;
-    if (state.leftover_len > 0) {
-        @memcpy(buf[0..state.leftover_len], state.leftover[0..state.leftover_len]);
-        state.leftover_len = 0;
-    }
-    assert(total_len <= buf.len);
-
-    // Read until we have headers + the advertised body.
-    var header_end: ?usize = null;
-    var content_length: ?usize = null;
-    while (true) {
-        assert(total_len <= buf.len);
-        if (header_end == null) {
-            header_end = std.mem.indexOf(u8, buf[0..total_len], "\r\n\r\n");
-        }
-        if (header_end) |header_end_pos| {
-            assert(header_end_pos + 4 <= buf.len);
-            if (content_length == null) {
-                content_length = parse_content_length(buf[0..header_end_pos]) orelse
-                    return error.NoContentLength;
-            }
-            // No assert on content_length: unbounded parse at the
-            // parser layer. The read-loop below catches oversized
-            // bodies via ResponseTooLarge when total_len saturates.
-            const body_start = header_end_pos + 4;
-            const body_end = body_start + content_length.?;
-            if (total_len >= body_end) {
-                assert(body_end <= buf.len);
-                // Full response in buf. Stash anything past body_end as leftover.
-                const extra = total_len - body_end;
-                assert(extra <= state.leftover.len);
-                if (extra > 0) {
-                    @memcpy(state.leftover[0..extra], buf[body_end..total_len]);
-                    state.leftover_len = extra;
-                }
-                return parse_status_line(buf[0..header_end_pos]) orelse
-                    return error.BadStatusLine;
-            }
-        }
-        // Need more bytes.
-        if (total_len == buf.len) return error.ResponseTooLarge;
-        const n = try stream.read(buf[total_len..]);
-        if (n == 0) return error.UnexpectedClose;
-        total_len += n;
-        assert(total_len <= buf.len);
-    }
-}
+// Pure functions with no I/O — driven from `on_recv`. Written
+// fresh because `std.http.Client`'s implicit connection pooling
+// would conflate framework-under-load with stdlib-client-under-load.
 
 fn parse_status_line(headers: []const u8) ?u16 {
     // "HTTP/1.1 NNN ...\r\n"
@@ -583,10 +719,10 @@ fn parse_content_length(headers: []const u8) ?usize {
     const val_start = start + marker.len;
     const val_end = std.mem.indexOf(u8, headers[val_start..], "\r\n") orelse return null;
     return std.fmt.parseInt(usize, headers[val_start .. val_start + val_end], 10) catch null;
-    // Upper bound isn't enforced here — the read loop in
-    // `recv_response` returns `ResponseTooLarge` naturally when a
-    // Content-Length exceeds `recv_buf_size`. Adding a bound here
-    // would short-circuit that flow and mask it behind NoContentLength.
+    // Upper bound isn't enforced here — the read loop in `on_recv`
+    // clamps oversized Content-Length to recv_buf_size and falls
+    // into the "response larger than buf" path naturally. Adding a
+    // bound here would short-circuit that flow.
 }
 
 // --- Reachability probe ---
