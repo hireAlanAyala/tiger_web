@@ -342,13 +342,20 @@ fn upload_run(shell: *Shell, batch: *const MetricBatch) !void {
         try shell.exec("git add ./devhub/data.json", .{});
         try shell.git_env_setup(.{ .use_hostname = false });
         try shell.exec("git commit -m 📈", .{});
-        // `shell.exec` streams stderr to the parent — git's actual
-        // rejection reason lands in the CI log even when we swallow
-        // the Zig error. TB's original "conflict, retrying" message
-        // obscured which failure mode we were hitting (auth vs
-        // protection vs conflict). Numbered attempts + the preceding
-        // git stderr are enough to diagnose in the CI log.
-        if (shell.exec("git push", .{})) {
+        // Push with URL-embedded credentials PASSED EXPLICITLY on
+        // the command rather than relying on .git/config's stored
+        // remote URL. Git can silently strip embedded credentials
+        // when writing to config under some runner setups; passing
+        // on the command line guarantees the token lands in the
+        // actual HTTP request. Also disable credential helpers
+        // in-process (`-c credential.helper=`) so no helper captures
+        // and rewrites our URL. HEAD:main pushes the current commit
+        // to main without needing tracking refs.
+        if (shell.exec(
+            \\git -c credential.helper=
+            \\  push https://oauth2:{token}@github.com/hireAlanAyala/tiger-web-devhubdb.git
+            \\  HEAD:main
+        , .{ .token = token })) {
             log.info("metrics uploaded (attempt {d})", .{attempt + 1});
             return;
         } else |err| {
