@@ -1,18 +1,16 @@
-//! `tiger-web benchmark` — closed-loop HTTP load driver.
+//! `tiger-web benchmark` — CLI entry for the SLA-tier load generator.
 //!
-//! **Port source:** pattern-transplant from TigerBeetle's
-//! `src/tigerbeetle/benchmark_driver.zig` + `src/tigerbeetle/benchmark_load.zig`.
-//! Neither is whole-file cp-able — TB's driver spawns a `tigerbeetle`
-//! child process and hands VSR `io/time` refs to the load module; our
-//! driver runs against an already-running server over HTTP, no child
-//! process, no VSR. See DR-3 in
-//! `docs/internal/decision-benchmark-tracking.md`.
+//! Thin orchestrator. CLI arg validation + dispatch to
+//! `benchmark_load.zig`. Kept separate from `benchmark_load.zig` so
+//! the loader is reusable by future sim/replay callers without the
+//! stdout-driver boilerplate.
 //!
-//! D.1 state (this commit): CLI skeleton. Validates args, prints them,
-//! returns an unimplemented error. D.2/D.3 will replace `run` with
-//! the actual load generator (histogram + percentile walk
-//! transplanted from TB with passage citations; HTTP client loop +
-//! warmup written fresh for our domain).
+//! **Port source:** shape from TigerBeetle
+//! `src/tigerbeetle/benchmark_driver.zig`. TB's driver spawns a
+//! `tigerbeetle` child process, hands VSR `io`/`time` refs to
+//! `benchmark_load.command_benchmark`. Our driver is much simpler —
+//! the server is an already-running HTTP process we connect to by
+//! port. No child process, no VSR.
 
 const std = @import("std");
 const assert = std.debug.assert;
@@ -20,17 +18,12 @@ const assert = std.debug.assert;
 const log = std.log.scoped(.benchmark);
 
 const BenchmarkArgs = @import("main.zig").BenchmarkArgs;
+const benchmark_load = @import("benchmark_load.zig");
 
 pub fn run(gpa: std.mem.Allocator, cli: BenchmarkArgs) !void {
-    _ = gpa;
     assert(cli.port > 0);
     assert(cli.connections > 0);
     assert(cli.requests > 0);
 
-    log.info(
-        "benchmark (D.1 skeleton): port={d} connections={d} requests={d} warmup={d}s ops={s}",
-        .{ cli.port, cli.connections, cli.requests, cli.@"warmup-seconds", cli.ops },
-    );
-    log.err("benchmark load generator not yet implemented (Phase D.2/D.3)", .{});
-    return error.NotYetImplemented;
+    try benchmark_load.run(gpa, cli);
 }
