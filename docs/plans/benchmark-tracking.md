@@ -904,6 +904,17 @@ known end conditions.
   test. Until then the pipeline-tier bench covers them implicitly.
 - [ ] **Per-endpoint load shapes.** Default `--ops` mix will need
   tuning as domain grows.
+- [ ] **Single-threaded benchmark client loop.** `benchmark_load.zig`
+  currently uses `std.Thread.spawn` per connection (thread-per-conn
+  model). TIGER_STYLE: *"Your program should run at its own pace;
+  don't do things directly in reaction to external events."* TB's
+  own benchmark loop is single-threaded over their VSR io layer.
+  For ours to match, we'd use `std.posix.epoll_create1` +
+  non-blocking `std.net.Stream` and drive all N "clients" from a
+  single event loop — mirroring our own `framework/io.zig` server.
+  Scope: ~200 lines restructure. Not blocking; thread-per-connection
+  produces defensible numbers. Move when the thread-scheduler
+  variance in tail latencies becomes visible on the dashboard.
 - [ ] **Sidecar-mode SLA bench.** `tiger-web benchmark` currently
   exercises the HTTP → native → SQLite path only. Tiger Web's key
   architectural primitive — the 1-RT SHM sidecar dispatch — isn't
