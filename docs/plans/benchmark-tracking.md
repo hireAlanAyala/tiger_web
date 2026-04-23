@@ -140,38 +140,41 @@ failed connections terminate bounded per TIGER_STYLE.
 
 Parallelizable with H.3 — different files, no shared code paths.
 
-### H.2 — Add five missing metrics [ADDITIVE — AFTER G.0.a]
+### H.2 — Add five missing metrics [ADDITIVE — AFTER G.0.a] ✅ DONE
 
-TB emits these, we dropped them. Each is cheap to compute and
-catches a regression class the current 18 metrics don't see.
+Status (2026-04-23): added all five metrics to `scripts/devhub.zig`.
+Dashboard now carries **23 metrics** across all three tiers + build
++ CI. Ordering constraint honored — G.0.a landed first, so the
+first real `build_time_*` datapoint sits on a stable build graph.
 
-**Ordering note:** `build_time_ms` and `build_time_debug_ms`
-baselines step-change the day G.0.a (unit-test-build) lands. H.2
-must follow G.0.a, or the first week of build-time charts shows a
-discontinuity caused by the build-graph change, not by code under
-test.
+Ported from TB (`src/scripts/devhub.zig`, bucket tags inline):
 
-- [ ] `executable_size_bytes` — `stat --printf=%s zig-out/bin/tiger-web`
-  after a release build. Catches dependency bloat. TB
-  `devhub.zig:109-127`. (Principled keep — we *do* ship a single
-  binary; the previous "doesn't apply" rationale in E's header was
-  wrong.)
-- [ ] `build_time_ms` — wall-clock `./zig/zig build` duration.
-  Catches `build.zig` regressions and compiler-flag misses.
-- [ ] `build_time_debug_ms` — same for debug build. Matches TB's
-  distinction; the debug/release skew itself is a useful signal.
-- [ ] `ci_pipeline_duration_ms` — `gh run list --workflow=ci.yml
-  --limit=1 --json=...` for the current SHA. TB `devhub.zig:311-332`.
-  The "runner-image change detection" tracked follow-up depends on
-  this metric existing.
-- [ ] `bench_log_lines` — count of stderr log lines emitted during
-  the benchmark run at `--log-debug`. Silent spikes = hot-path
-  logging regressions. TB analog: `replica log lines`
-  (`devhub.zig:193, 350`).
-- [ ] Update file header "Deletions" list — move these five from
-  "dropped" to "transplanted".
-- [ ] Wire each into `devhub_metrics` via the `get_measurement` /
-  `MetricBatch` path already in place for the other 18 metrics.
+- `executable_size_bytes` / `build_time_ms` / `build_time_debug_ms` —
+  TB:107-127 verbatim pattern. Debug build timer → cache-clear →
+  release build timer + `statFile("zig-out/bin/tiger-web").size`.
+- `ci_pipeline_duration_s` — TB:311-332. Event name changed
+  (`merge_group` → `push`; our trigger). Falls back to 0 when run
+  locally (no `gh` auth).
+- `bench_log_lines` — `replica log lines` analog (TB:193). Captured
+  from SLA benchmark's stderr via `exec_stdout_stderr`;
+  `std.mem.count(u8, stderr, "\n")`.
+
+Also removed the redundant second release build at line 138 — the
+new build-time measurement already produced `zig-out/bin/tiger-web`
+in release mode, so the SLA bench reuses it.
+
+File header updated: the five metrics moved from "Deletions" to
+"Transplanted" with TB line citations.
+
+Verification (local dry-run of `zig build scripts -- devhub
+--sha=$HEAD --dry-run`):
+- `executable_size_bytes = 10591752` (10.6 MB release).
+- `build_time_ms = 48647` (cold-cache full release build).
+- `build_time_debug_ms = 68` (warm-cache incremental; CI will see
+  cold-cache full debug time).
+- `ci_pipeline_duration_s = 0` (graceful local fallback).
+- `bench_log_lines = 2` (info + warn from current benchmark).
+- All 23 metrics present in the MetricBatch JSON payload.
 
 ### H.1 — Preserve `upload_nyrkio` token-optional [ADDITIVE]
 

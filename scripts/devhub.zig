@@ -29,29 +29,35 @@
 //!   - `upload_run` git-clone/fetch/reset/append/commit/push loop
 //!     with 32-retry on conflict — TB lines 395–436.
 //!
+//! **Transplanted (TB lines verbatim, with path / unit swaps):**
+//!
+//!   - `build_time_debug_ms` + `build_time_ms` + `executable_size_bytes`
+//!     (TB lines 109–127). Debug build → release build (cache
+//!     cleaned between), each wrapped in a `std.time.Timer`. Release
+//!     build's output is stat'd for size. Our binary is
+//!     `zig-out/bin/tiger-web`; TB's is the top-level `tigerbeetle`.
+//!   - `ci_pipeline_duration_s` query via `gh run list` (TB lines
+//!     311–332). Same `startedAt`/`updatedAt` diff; our workflow
+//!     event-name is `push` (vs TB's `merge_group`).
+//!   - `replica log lines` analog — `bench_log_lines`, counted from
+//!     the SLA benchmark's stderr (TB lines 174 / 193 / 350).
+//!
 //! **Deletions (all principled — tigerbeetle-binary-specific):**
 //!
-//!   - `devhub_coverage` + kcov orchestration (TB lines 58–95) — we
-//!     don't ship a kcov-based coverage artifact.
-//!   - `build_time_debug_ms` / `build_time_ms` / `executable_size_bytes`
-//!     (TB lines 109–127) — TB tracks release-build size and time;
-//!     tiger-web doesn't ship a single binary we release against.
-//!     If we ever do, revisit.
+//!   - `devhub_coverage` + kcov orchestration (TB lines 58–95).
+//!     **Revisit under G.0.b** — we're adding kcov back now that
+//!     G.0.a produced the attachable binary; scoped to that phase.
 //!   - Changelog detection + `no_changelog_flag` branching
 //!     (TB lines 129–164) — TB-release-specific.
 //!   - `./tigerbeetle benchmark` stdout parsing for TB-specific
 //!     metrics (TB lines 174–204): `tx/s`, `batch p100`, `query p100`,
-//!     `rss`, `datafile`, `checksum(message_size_max)`. None of these
-//!     apply to our benches.
+//!     `rss`, `datafile`, `checksum(message_size_max)`. None apply
+//!     to our benches.
 //!   - `tigerbeetle inspect integrity` / `format` / `start` + manual
 //!     `Header.PingClient` TCP ping (TB lines 180–309) — tigerbeetle-
 //!     CLI-specific; we have no equivalent binary commands.
-//!   - `gh run list` CI-pipeline-duration query (TB lines 311–332) —
-//!     tracked as follow-up: we could add this to measure our own CI
-//!     pipeline duration once phase F has been running long enough to
-//!     have representative data.
-//!   - `upload_nyrkio` (TB lines 454–466) — TB double-publishes to
-//!     Nyrkiö; we're single-target (devhubdb only).
+//!   - `upload_nyrkio` (TB lines 454–466) — **revisit under H.1**;
+//!     scoped to that phase.
 //!
 //! **Surgical edits on transplanted structures:**
 //!
@@ -112,6 +118,30 @@ fn devhub_metrics(shell: *Shell, cli_args: CLIArgs) !void {
         try shell.exec_stdout("git show -s --format=%ct {sha}", .{ .sha = cli_args.sha });
     const commit_timestamp = try std.fmt.parseInt(u64, commit_timestamp_str, 10);
 
+    // --- Build-time and binary-size metrics ---
+    //
+    // Transplanted from TB lines 107–127. Debug build first, then a
+    // cache-cleared release build. Release build's binary is stat'd
+    // for size. The SLA-tier benchmark later re-uses the release
+    // install, so no wasted build work.
+    var timer = try std.time.Timer.start();
+
+    const build_time_debug_ms = blk: {
+        timer.reset();
+        try shell.exec_zig("build install", .{});
+        break :blk timer.read() / std.time.ns_per_ms;
+    };
+
+    const build_time_ms, const executable_size_bytes = blk: {
+        timer.reset();
+        try shell.project_root.deleteTree(".zig-cache");
+        try shell.exec_zig("build -Doptimize=ReleaseSafe install", .{});
+        break :blk .{
+            timer.read() / std.time.ns_per_ms,
+            (try shell.cwd.statFile("zig-out/bin/tiger-web")).size,
+        };
+    };
+
     // Run the bench pipeline end-to-end once. `bench.report` writes
     // to stderr via `std.debug.print`, so the measurement lines are
     // in the stderr capture.
@@ -132,11 +162,38 @@ fn devhub_metrics(shell: *Shell, cli_args: CLIArgs) !void {
     const update_product_ns = try get_measurement(bench_output, "update_product", "ns");
 
     // SLA tier: start an ephemeral server, run `tiger-web benchmark`,
-    // parse its output, kill the server. Release build so the
-    // numbers reflect production shape. Separate function so the
-    // server's teardown is guaranteed via defer even on parse error.
-    try shell.exec_zig("build -Doptimize=ReleaseSafe", .{});
+    // parse its output, kill the server. The release install above
+    // already produced `zig-out/bin/tiger-web`, so no re-build here.
+    // Separate function so the server's teardown is guaranteed via
+    // defer even on parse error.
     const sla = try run_sla_benchmark(shell);
+
+    // CI pipeline duration. Transplanted from TB lines 311–332.
+    // Event is `push` (our workflow trigger on main merges), vs TB's
+    // `merge_group`. Falls back to 0 when run locally or without a
+    // DEVHUBDB_PAT (the results aren't uploaded in that case; this
+    // lets the surrounding code succeed).
+    const ci_pipeline_duration_s: u64 = blk: {
+        const times_gh = shell.exec_stdout(
+            "gh run list -c {sha} -e push --json startedAt,updatedAt -L 1 --template {template}",
+            .{
+                .sha = cli_args.sha,
+                .template = "{{range .}}{{.startedAt}} {{.updatedAt}}{{end}}",
+            },
+        ) catch {
+            // Local invocation or no gh auth — fall back to 0.
+            break :blk 0;
+        };
+        const parts = stdx.cut(times_gh, " ") orelse break :blk 0;
+        const iso8601_started_at = parts[0];
+        const iso8601_updated_at = parts[1];
+        const epoch_started_at = shell.iso8601_to_timestamp_seconds(iso8601_started_at) catch
+            break :blk 0;
+        const epoch_updated_at = shell.iso8601_to_timestamp_seconds(iso8601_updated_at) catch
+            break :blk 0;
+        assert(epoch_updated_at >= epoch_started_at);
+        break :blk epoch_updated_at - epoch_started_at;
+    };
 
     const batch = MetricBatch{
         .timestamp = commit_timestamp,
@@ -167,6 +224,14 @@ fn devhub_metrics(shell: *Shell, cli_args: CLIArgs) !void {
             .{ .name = "benchmark_latency_p99", .value = sla.p99, .unit = "ms" },
             .{ .name = "benchmark_latency_p100", .value = sla.p100, .unit = "ms" },
             .{ .name = "benchmark_errors", .value = sla.errors, .unit = "count" },
+            // Build + CI signals. Audit 2026-04-23 retrofit (H.2).
+            // TB emits these; we dropped them at E ship time and
+            // re-added under the "don't omit what TB has" bias.
+            .{ .name = "executable_size_bytes", .value = executable_size_bytes, .unit = "bytes" },
+            .{ .name = "build_time_ms", .value = build_time_ms, .unit = "ms" },
+            .{ .name = "build_time_debug_ms", .value = build_time_debug_ms, .unit = "ms" },
+            .{ .name = "ci_pipeline_duration_s", .value = ci_pipeline_duration_s, .unit = "s" },
+            .{ .name = "bench_log_lines", .value = sla.log_lines, .unit = "count" },
         },
     };
 
@@ -206,6 +271,12 @@ const SlaMetrics = struct {
     p99: u64,
     p100: u64,
     errors: u64,
+    /// Count of newlines in the benchmark's stderr. Analog of TB's
+    /// `replica log lines` (TB `devhub.zig:193`). Silent spikes here
+    /// flag hot-path logging regressions — e.g., someone adds a
+    /// `log.debug` inside the send loop and doesn't notice until the
+    /// dashboard's log-line metric steps up. H.2 retrofit.
+    log_lines: u64,
 };
 
 const sla_db_path = "tiger_web_devhub_sla.db";
@@ -249,21 +320,28 @@ fn run_sla_benchmark(shell: *Shell) !SlaMetrics {
 
     log.info("SLA benchmark: server on port {s}, running load...", .{port});
 
-    const bench_out = shell.exec_stdout(
+    // Capture both streams: stdout carries the parsed metric lines,
+    // stderr carries log output. The stderr newline count is our
+    // `bench_log_lines` metric (analog of TB's `replica log lines`).
+    const bench_captured = shell.exec_stdout_stderr(
         "zig-out/bin/tiger-web benchmark --port={port} --connections=64 --requests=50000",
         .{ .port = port },
     ) catch |err| {
         log.err("SLA benchmark: `tiger-web benchmark` failed: {s}", .{@errorName(err)});
         return error.SlaBenchmarkFailed;
     };
+    const bench_stdout = bench_captured[0];
+    const bench_stderr = bench_captured[1];
+    const log_lines: u64 = @intCast(std.mem.count(u8, bench_stderr, "\n"));
 
     return .{
-        .throughput = try get_measurement(bench_out, "benchmark_throughput", "req/s"),
-        .p1 = try get_measurement(bench_out, "benchmark_latency_p1", "ms"),
-        .p50 = try get_measurement(bench_out, "benchmark_latency_p50", "ms"),
-        .p99 = try get_measurement(bench_out, "benchmark_latency_p99", "ms"),
-        .p100 = try get_measurement(bench_out, "benchmark_latency_p100", "ms"),
-        .errors = try get_measurement(bench_out, "benchmark_errors", "count"),
+        .throughput = try get_measurement(bench_stdout, "benchmark_throughput", "req/s"),
+        .p1 = try get_measurement(bench_stdout, "benchmark_latency_p1", "ms"),
+        .p50 = try get_measurement(bench_stdout, "benchmark_latency_p50", "ms"),
+        .p99 = try get_measurement(bench_stdout, "benchmark_latency_p99", "ms"),
+        .p100 = try get_measurement(bench_stdout, "benchmark_latency_p100", "ms"),
+        .errors = try get_measurement(bench_stdout, "benchmark_errors", "count"),
+        .log_lines = log_lines,
     };
 }
 
