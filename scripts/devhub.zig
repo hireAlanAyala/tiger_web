@@ -77,6 +77,7 @@
 //! "Blocking on human" section.
 
 const std = @import("std");
+const posix = std.posix;
 const assert = std.debug.assert;
 
 const stdx = @import("stdx");
@@ -122,6 +123,13 @@ fn devhub_metrics(shell: *Shell, cli_args: CLIArgs) !void {
     const list_products_ns = try get_measurement(bench_output, "list_products", "ns");
     const update_product_ns = try get_measurement(bench_output, "update_product", "ns");
 
+    // SLA tier: start an ephemeral server, run `tiger-web benchmark`,
+    // parse its output, kill the server. Release build so the
+    // numbers reflect production shape. Separate function so the
+    // server's teardown is guaranteed via defer even on parse error.
+    try shell.exec_zig("build -Doptimize=ReleaseSafe", .{});
+    const sla = try run_sla_benchmark(shell);
+
     const batch = MetricBatch{
         .timestamp = commit_timestamp,
         .attributes = .{
@@ -144,7 +152,13 @@ fn devhub_metrics(shell: *Shell, cli_args: CLIArgs) !void {
             .{ .name = "get_product", .value = get_product_ns, .unit = "ns" },
             .{ .name = "list_products", .value = list_products_ns, .unit = "ns" },
             .{ .name = "update_product", .value = update_product_ns, .unit = "ns" },
-            // SLA tier added by Phase D.
+            // SLA tier — closed-loop HTTP throughput + percentiles.
+            .{ .name = "benchmark_throughput", .value = sla.throughput, .unit = "req/s" },
+            .{ .name = "benchmark_latency_p1", .value = sla.p1, .unit = "ms" },
+            .{ .name = "benchmark_latency_p50", .value = sla.p50, .unit = "ms" },
+            .{ .name = "benchmark_latency_p99", .value = sla.p99, .unit = "ms" },
+            .{ .name = "benchmark_latency_p100", .value = sla.p100, .unit = "ms" },
+            .{ .name = "benchmark_errors", .value = sla.errors, .unit = "count" },
         },
     };
 
@@ -162,6 +176,87 @@ fn devhub_metrics(shell: *Shell, cli_args: CLIArgs) !void {
     for (batch.metrics) |metric| {
         std.log.info("{s} = {} {s}", .{ metric.name, metric.value, metric.unit });
     }
+}
+
+// --- SLA benchmark orchestration ---
+//
+// Written fresh (no TB equivalent — TB spawns `tigerbeetle` + runs
+// `tigerbeetle benchmark`; ours spawns `tiger-web start` + runs
+// `tiger-web benchmark`). Shape borrows from the removed
+// `scripts/perf.zig` orchestration at commit `67993e8~1`: start
+// with --port=0, read actual port from stdout, run tool against
+// it, SIGTERM on teardown.
+//
+// Errors during the run return error.SlaBenchmarkFailed rather
+// than partial data; devhub would rather fail loud than upload a
+// bad SLA row.
+
+const SlaMetrics = struct {
+    throughput: u64,
+    p1: u64,
+    p50: u64,
+    p99: u64,
+    p100: u64,
+    errors: u64,
+};
+
+const sla_db_path = "tiger_web_devhub_sla.db";
+
+fn run_sla_benchmark(shell: *Shell) !SlaMetrics {
+    log.info("SLA benchmark: starting ephemeral server...", .{});
+    var server = try shell.spawn(
+        .{
+            .stdin_behavior = .Pipe,
+            .stdout_behavior = .Pipe,
+            .stderr_behavior = .Inherit,
+        },
+        "zig-out/bin/tiger-web start --port=0 --db={db}",
+        .{ .db = sla_db_path },
+    );
+    defer {
+        if (server.stdin) |stdin| {
+            stdin.close();
+            server.stdin = null;
+        }
+        _ = posix.kill(server.id, posix.SIG.TERM) catch {};
+        _ = server.wait() catch {};
+        // Clean up the database files regardless of success.
+        for ([_][]const u8{ sla_db_path, sla_db_path ++ "-wal", sla_db_path ++ "-shm", "tiger_web.wal" }) |path| {
+            shell.cwd.deleteFile(path) catch {};
+        }
+    }
+
+    // Read port from server's readiness signal (stdout line).
+    var port_buf: [6]u8 = undefined;
+    const port_n = server.stdout.?.read(&port_buf) catch |err| {
+        log.err("SLA benchmark: failed to read port from server: {s}", .{@errorName(err)});
+        return error.SlaBenchmarkFailed;
+    };
+    if (port_n == 0) {
+        log.err("SLA benchmark: server exited before writing port", .{});
+        return error.SlaBenchmarkFailed;
+    }
+    const port_end = if (port_n > 0 and port_buf[port_n - 1] == '\n') port_n - 1 else port_n;
+    const port = port_buf[0..port_end];
+
+    log.info("SLA benchmark: server on port {s}, running load...", .{port});
+
+    const bench_out = shell.exec_stdout(
+        "zig-out/bin/tiger-web benchmark --port={port} --connections=64 --requests=50000 --warmup-seconds=3",
+        .{ .port = port },
+    ) catch |err| {
+        log.err("SLA benchmark: `tiger-web benchmark` failed: {s}", .{@errorName(err)});
+        return error.SlaBenchmarkFailed;
+    };
+
+    return .{
+        .throughput = try get_measurement(bench_out, "benchmark_throughput", "req/s"),
+        .p1 = try get_measurement(bench_out, "benchmark_latency_p1", "ms"),
+        .p50 = try get_measurement(bench_out, "benchmark_latency_p50", "ms"),
+        .p99 = try get_measurement(bench_out, "benchmark_latency_p99", "ms"),
+        .p100 = try get_measurement(bench_out, "benchmark_latency_p100", "ms"),
+        .errors = try get_measurement(bench_out, "benchmark_errors", "count"),
+    };
 }
 
 // =============================================================
