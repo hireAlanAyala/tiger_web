@@ -903,13 +903,39 @@ exists to preserve them.
     TB's convention — lets us diff coverage across commits with
     the same inputs.
 
-    **Why all five, not a subset:** a kcov report that covers
-    only `state_machine` would hide gaps in the
-    sidecar/wire-contract surface area (message_bus, row_format,
-    worker_dispatch) — exactly the subsystems where regressions
-    would be most expensive. Covering the full fuzzer set
-    mirrors TB's "cover the main testing surface" intent without
-    inheriting VOPR/LSM specifics.
+    **Fuzzer coverage map** (what each one tests, so a future
+    reader knows what a coverage gap in any one means):
+
+    | Fuzzer | Covers | Regression cost if uncovered |
+    |---|---|---|
+    | `state_machine` | Prefetch + commit pipeline (domain logic hot path; `fuzz.zig`) | Wrong business logic, silently |
+    | `replay` | WAL replay round-trip (on-disk format boundary; `replay_fuzz.zig`) | Every existing WAL un-replayable |
+    | `message_bus` | Sidecar Unix socket protocol (`message_bus_fuzz.zig`) | Sidecar handshake + frame-parse divergence |
+    | `row_format` | SHM row wire contract — cross-language Zig↔C↔TS boundary (`row_format_fuzz.zig`) | Silent cross-language misalignment |
+    | `worker_dispatch` | CALL/RESULT concurrent dispatch protocol (`worker_dispatch_fuzz.zig`) | Races / deadlock in worker path |
+
+    **Why all five, not a subset:** three reasons, in decreasing
+    order of impact:
+
+    - **Cross-language boundaries are where divergence hurts most.**
+      `row_format` and `message_bus` cover the Zig↔C↔TS surface.
+      A coverage gap here means we can't see when one
+      implementation drifts from the other two. These two fuzzers
+      alone justify the "all five" choice.
+    - **Concurrent / async paths need exercised state space.**
+      `worker_dispatch` covers the CALL/RESULT protocol where
+      races and deadlocks hide. Linear unit tests rarely hit
+      these; fuzz with 100k events does.
+    - **Durable-format boundaries compound on failure.**
+      `replay` covers WAL round-trip. A regression here breaks
+      every previously-written WAL — an unrecoverable state that
+      fuzz-level coverage catches before it ships.
+
+    Covering the full set mirrors TB's "cover the main testing
+    surface" intent without inheriting VOPR/LSM specifics. A
+    thin coverage report (e.g., `state_machine` only) would
+    give false confidence — "85% covered" would mean 85% of the
+    pipeline logic but ~0% of the wire contract.
   - Keep: `kcov` invocation shape, `--include-path=./src`,
     output directory convention, seed `92`, symlink cleanup.
     TB decisions we preserve.
