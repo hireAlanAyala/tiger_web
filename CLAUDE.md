@@ -44,6 +44,8 @@ Rules distilled from concrete incidents. Each one cost hours or a commit to reve
 
 - **Check memory/ before acting in a domain with prior guidance.** The `memory/` directory holds lessons from previous sessions. If you're about to delete plans, write a CRC table, diagnose CI, or trigger anything in `memory/MEMORY.md`, re-read the relevant entry first. Repeating a mistake that's already documented is worse than making a new one.
 
+- **Re-read TIGER_STYLE before starting any TB-port phase.** `/home/walker/Documents/personal/tigerbeetle/docs/TIGER_STYLE.md` — end-to-end, ~20 minutes. The single cheapest upstream intervention that reduces the land-then-retrofit round count. The benchmark-tracking plan's Phase C first pass missed multiple TIGER_STYLE rules (written "in the style of" the template, guessed budgets, positive-only pair-assertions) that were all explicit in the doc — details had just faded between phase 0 and phase C. Sections that bite most often: the golden rule of assertions (positive AND negative space), units-last naming (no abbreviations), 70-line function limit, zero technical debt, back-of-the-envelope sketches for budgets. Treat the re-read as a phase prerequisite in the same category as preflight inspection of the TB file being ported.
+
 ## Design Principles (from TigerBeetle)
 
 TB's design goals, in order: **Safety > Performance > Developer Experience.**

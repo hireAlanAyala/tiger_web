@@ -904,6 +904,20 @@ known end conditions.
   test. Until then the pipeline-tier bench covers them implicitly.
 - [ ] **Per-endpoint load shapes.** Default `--ops` mix will need
   tuning as domain grows.
+- [ ] **Sidecar-mode SLA bench.** `tiger-web benchmark` currently
+  exercises the HTTP → native → SQLite path only. Tiger Web's key
+  architectural primitive — the 1-RT SHM sidecar dispatch — isn't
+  covered at the SLA tier. A regression in `framework/shm_dispatch.zig`
+  or the sidecar-handshake path would be invisible to the current
+  bench (only `crc_frame_benchmark.zig` touches the SHM wire, and
+  it's algorithmic-only). Two viable shapes:
+    - `--sidecar=<command>` flag on `tiger-web benchmark` that
+      spawns the sidecar alongside the server before load starts.
+    - Second bench invocation in `scripts/devhub.zig:run_sla_benchmark`
+      with a sidecar attached, emitted as `benchmark_sidecar_*`
+      metrics.
+  Not a blocker for Phase G; add when sidecar-path performance
+  becomes a story we want visible on the dashboard.
 
 ---
 
