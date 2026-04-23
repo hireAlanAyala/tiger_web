@@ -293,6 +293,8 @@ const DevServer = struct {
 };
 
 fn start_dev_server(gpa: std.mem.Allocator, args: DevArgs, db_name: []const u8) !DevServer {
+    _ = gpa; // state is module-static, not heap-allocated (see dev_server_state)
+
     const stdout = std.io.getStdOut().writer();
 
     // PID-scoped paths avoid collisions between concurrent focus dev sessions.
@@ -305,8 +307,15 @@ fn start_dev_server(gpa: std.mem.Allocator, args: DevArgs, db_name: []const u8) 
     const db_z = to_sentinel(db_name);
 
     // Atomic signals: server thread publishes after init completes.
-    // The storage outlives this fn because run_server holds the pointers.
-    const state = try gpa.create(DevServerState);
+    // State is module-scope static (see `dev_server_state` below) —
+    // the detached server thread holds pointers into it for the
+    // lifetime of the process, so heap-alloc + free is infeasible
+    // (thread may still be touching state when we'd free). Static
+    // storage side-steps the leak vs use-after-free dilemma and
+    // matches TIGER_STYLE's "all memory statically allocated at
+    // startup." `focus dev` is a singleton CLI invocation by
+    // construction; one instance per process.
+    const state = &dev_server_state;
     state.* = .{
         .port_signal = std.atomic.Value(u16).init(0),
         .ready_signal = std.atomic.Value(bool).init(false),
@@ -341,7 +350,11 @@ fn start_dev_server(gpa: std.mem.Allocator, args: DevArgs, db_name: []const u8) 
     std.process.exit(1);
 }
 
-/// Heap-allocated state for the detached server thread.
+/// Module-scope state for the detached server thread. Static
+/// allocation — see `start_dev_server` rationale above. Size is
+/// small (~300 bytes) so the BSS cost is trivial; eliminates the
+/// leak-vs-use-after-free bind that heap allocation creates when
+/// the owning fn returns but the thread keeps running.
 const DevServerState = struct {
     port_signal: std.atomic.Value(u16),
     ready_signal: std.atomic.Value(bool),
@@ -350,6 +363,8 @@ const DevServerState = struct {
     db_z: [128]u8,
     config: ServerConfig,
 };
+
+var dev_server_state: DevServerState = undefined;
 
 fn dev_watch_loop(
     gpa: std.mem.Allocator,
