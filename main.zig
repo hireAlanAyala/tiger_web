@@ -754,16 +754,19 @@ const TraceArgs = struct {
 /// across them according to `--ops` weights, and prints per-metric
 /// throughput + latency percentiles.
 ///
-/// Warmup: requests run for `--warmup-seconds` before measurement
-/// begins. The measurement histogram is zeroed at the warmup
-/// boundary — traffic continues uninterrupted, only *recorded*
-/// samples are discarded. This is the "measure-and-discard" flaw
-/// fix documented in docs/internal/decision-benchmark-tracking.md.
-///
 /// Output shape matches TB's `get_measurement` parser
 /// (`docs/internal/decision-benchmark-tracking.md` DR-2):
 ///   `label = value unit`. Fed into `scripts/devhub.zig` when invoked
 /// from CI on main.
+///
+/// **No warmup.** The initial `--warmup-seconds` flag was stripped
+/// after Phase D.5 measured zero p50 delta on a cold DB (plan
+/// speculated ≥20% reduction; actual 0%). Our system hits steady
+/// state within the first few requests — SQLite prepared-statement
+/// cache and TCP handshake complete too fast for warmup to shift the
+/// histogram. Per TIGER_STYLE "don't design for hypothetical future
+/// requirements": if a future workload reveals the need, add it back
+/// then with observed data.
 pub const BenchmarkArgs = struct {
     port: u16 = 3000,
     connections: u16 = 128,
@@ -772,9 +775,6 @@ pub const BenchmarkArgs = struct {
     /// Weights are relative; PRNG-driven selection per request so
     /// replay under the same seed is deterministic.
     ops: []const u8 = "create_product:80,list_products:20",
-    /// Seconds of warmup traffic before measurement window opens.
-    /// 0 skips warmup.
-    @"warmup-seconds": u16 = 5,
 };
 
 pub const SchemaArgs = struct {

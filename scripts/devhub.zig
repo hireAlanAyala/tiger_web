@@ -11,6 +11,14 @@
 //! Survival ~25% (per DR-4). The transplantable structures live here;
 //! tigerbeetle-binary-specific orchestration was dropped.
 //!
+//! **Granularity:** per-passage transplant with file:line citations,
+//! not whole-file `cp`-then-trim. Engineering value 2 ("copy-first,
+//! trim-second at whatever granularity the TB file permits") picks
+//! the granularity from survival ratio: ≥80% → whole-file; below →
+//! per-passage. DR-4 put this file at ~25%, so per-passage is the
+//! correct scope. Transplanted passages below cite TB line numbers;
+//! deletions are grouped by concern with bucket tags.
+//!
 //! **Transplanted verbatim from template:**
 //!
 //!   - `Metric` struct — TB lines 438–442.
@@ -242,7 +250,7 @@ fn run_sla_benchmark(shell: *Shell) !SlaMetrics {
     log.info("SLA benchmark: server on port {s}, running load...", .{port});
 
     const bench_out = shell.exec_stdout(
-        "zig-out/bin/tiger-web benchmark --port={port} --connections=64 --requests=50000 --warmup-seconds=3",
+        "zig-out/bin/tiger-web benchmark --port={port} --connections=64 --requests=50000",
         .{ .port = port },
     ) catch |err| {
         log.err("SLA benchmark: `tiger-web benchmark` failed: {s}", .{@errorName(err)});

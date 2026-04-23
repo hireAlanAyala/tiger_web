@@ -29,10 +29,6 @@
 //!     parsed once at startup into `BoundedArrayType(OpMix, op_mix_max)`.
 //!     Weighted PRNG pick per request; dispatch via comptime `switch`
 //!     on `Operation`.
-//!   - Warmup with measure-and-discard semantics: first
-//!     `--warmup-seconds` of each thread's wall-clock runs requests
-//!     but records nothing. Flaw-fix divergence from TB (TB measures
-//!     from `timer.reset`).
 //!   - Thread-per-connection (std.Thread). HTTP sockets are blocking;
 //!     a single-threaded event loop would require epoll/io_uring
 //!     plumbing that duplicates the server.
@@ -114,8 +110,8 @@ pub fn run(gpa: std.mem.Allocator, cli: BenchmarkArgs) !void {
     assert(op_mix.count() > 0);
 
     log.info(
-        "benchmark: port={d} connections={d} requests={d} warmup={d}s",
-        .{ cli.port, cli.connections, cli.requests, cli.@"warmup-seconds" },
+        "benchmark: port={d} connections={d} requests={d}",
+        .{ cli.port, cli.connections, cli.requests },
     );
 
     // Quick server reachability probe — connect, send a simple GET,
@@ -137,7 +133,6 @@ pub fn run(gpa: std.mem.Allocator, cli: BenchmarkArgs) !void {
     defer gpa.free(histograms);
     @memset(histograms, [_]u64{0} ** histogram_buckets);
 
-    const warmup_ns: u64 = @as(u64, cli.@"warmup-seconds") * std.time.ns_per_s;
     const start_instant = std.time.Instant.now() catch @panic("clock unavailable");
 
     for (threads, contexts, histograms, 0..) |*t, *ctx, *hist, i| {
@@ -146,11 +141,8 @@ pub fn run(gpa: std.mem.Allocator, cli: BenchmarkArgs) !void {
             .addr = addr,
             .op_mix = &op_mix,
             .requests = requests_per_thread,
-            .warmup_ns = warmup_ns,
-            .start_instant = start_instant,
             .histogram = hist,
             .errors = 0,
-            .warmup_samples = 0,
         };
         t.* = try std.Thread.spawn(.{}, client_loop, .{ctx});
     }
@@ -161,24 +153,21 @@ pub fn run(gpa: std.mem.Allocator, cli: BenchmarkArgs) !void {
         const now = std.time.Instant.now() catch @panic("clock unavailable");
         break :blk now.since(start_instant);
     };
-    const measured_ns: u64 = if (elapsed_ns > warmup_ns) elapsed_ns - warmup_ns else 0;
-    assert(measured_ns > 0);
+    assert(elapsed_ns > 0);
 
     // Merge per-thread histograms.
     var total_hist = [_]u64{0} ** histogram_buckets;
     var total_samples: u64 = 0;
     var total_errors: u64 = 0;
-    var total_warmup: u64 = 0;
     for (contexts, histograms) |*ctx, *hist| {
         for (hist, 0..) |count, bucket| {
             total_hist[bucket] += count;
             total_samples += count;
         }
         total_errors += ctx.errors;
-        total_warmup += ctx.warmup_samples;
     }
 
-    report(cli, measured_ns, total_samples, total_errors, total_warmup, &total_hist);
+    report(cli, elapsed_ns, total_samples, total_errors, &total_hist);
 }
 
 // --- `--ops` parser ---
@@ -256,12 +245,9 @@ const ClientContext = struct {
     addr: std.net.Address,
     op_mix: *const OpMixArray,
     requests: u32,
-    warmup_ns: u64,
-    start_instant: std.time.Instant,
     histogram: *[histogram_buckets]u64,
     // Written only by this thread; read by main after join. No sync.
     errors: u64,
-    warmup_samples: u64,
 };
 
 fn client_loop(ctx: *ClientContext) void {
@@ -311,14 +297,9 @@ fn client_loop(ctx: *ClientContext) void {
 
         const now = std.time.Instant.now() catch @panic("clock unavailable");
         const duration_ns: u64 = now.since(req_start);
-        const in_warmup = now.since(ctx.start_instant) < ctx.warmup_ns;
-        if (in_warmup) {
-            ctx.warmup_samples += 1;
-        } else {
-            // Transplanted from TB `benchmark_load.zig:876`.
-            const duration_ms: u64 = duration_ns / std.time.ns_per_ms;
-            ctx.histogram[@min(duration_ms, histogram_buckets - 1)] += 1;
-        }
+        // Transplanted from TB `benchmark_load.zig:876`.
+        const duration_ms: u64 = duration_ns / std.time.ns_per_ms;
+        ctx.histogram[@min(duration_ms, histogram_buckets - 1)] += 1;
     }
 }
 
@@ -462,28 +443,26 @@ fn probe_server(port: u16) !void {
 
 fn report(
     cli: BenchmarkArgs,
-    measured_ns: u64,
+    elapsed_ns: u64,
     samples: u64,
     errors: u64,
-    warmup_samples: u64,
     histogram: *const [histogram_buckets]u64,
 ) void {
     const stdout = std.io.getStdOut().writer();
 
     // Transplanted shape from TB `benchmark_load.zig:556-572`.
-    const rate: u64 = if (measured_ns > 0)
-        @divTrunc(samples * std.time.ns_per_s, measured_ns)
+    const rate: u64 = if (elapsed_ns > 0)
+        @divTrunc(samples * std.time.ns_per_s, elapsed_ns)
     else
         0;
     stdout.print(
         \\benchmark_connections = {d} count
         \\benchmark_requests = {d} count
-        \\benchmark_warmup_samples = {d} count
         \\benchmark_errors = {d} count
         \\benchmark_throughput = {d} req/s
         \\closed_loop = 1 count
         \\
-    , .{ cli.connections, samples, warmup_samples, errors, rate }) catch return;
+    , .{ cli.connections, samples, errors, rate }) catch return;
 
     print_percentiles_histogram(stdout, "benchmark_latency", histogram);
 
