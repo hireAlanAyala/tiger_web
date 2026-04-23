@@ -295,6 +295,12 @@ fn get_measurement(
 /// URL swapped for our devhubdb repo.
 fn upload_run(shell: *Shell, batch: *const MetricBatch) !void {
     const token = try shell.env_get("DEVHUBDB_PAT");
+    // Length sanity, not the value — confirms the secret arrived
+    // intact at the runner. A GitHub fine-grained PAT is 93 chars;
+    // classic PATs are 40. Anything else means the secret got
+    // truncated or set wrong.
+    log.info("DEVHUBDB_PAT length = {d}", .{token.len});
+
     try shell.exec(
         \\git clone --single-branch --depth 1
         \\  https://oauth2:{token}@github.com/hireAlanAyala/tiger-web-devhubdb.git
@@ -305,6 +311,18 @@ fn upload_run(shell: *Shell, batch: *const MetricBatch) !void {
 
     try shell.pushd("./devhubdb");
     defer shell.popd();
+
+    // Override anything Actions' default runner git config tries to
+    // do with credentials. `actions/checkout@v4` can install an
+    // extraheader or credential helper that submits GITHUB_TOKEN
+    // (ephemeral, scoped to tiger_web only) for all github.com
+    // traffic — GitHub rejects it against devhubdb because the
+    // ephemeral token has no write on that repo. We want our
+    // URL-embedded PAT to be the only auth source. Unset both keys;
+    // ignore "key not found" (exit 5) for the one we weren't going
+    // to have anyway.
+    _ = shell.exec("git config --local --unset-all credential.helper", .{}) catch {};
+    _ = shell.exec("git config --local --unset-all http.https://github.com/.extraheader", .{}) catch {};
 
     for (0..32) |attempt| {
         try shell.exec("git fetch origin main", .{});
