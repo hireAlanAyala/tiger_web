@@ -235,32 +235,38 @@ The G.1 dashboard includes a **Coverage** link pointing at
 TB has one at `tigerbeetle.github.io/devhubdb/coverage/index.html`;
 G.0 ships ours.
 
-### G.0.a — `unit-test-build` standalone binary (hard prerequisite)
+### G.0.a — `unit-test-build` standalone binary (hard prerequisite) ✅ DONE
 
-kcov attaches to a compiled binary via ptrace + DWARF. Current
-`zig build unit-test` runs in-process, leaves no binary on disk.
-TB splits `test:unit` (runs) from `test:unit:build` (produces
-`./zig-out/bin/test-unit`). We need the analogous split.
+Status (2026-04-23): added `tiger_unit_tests.zig` aggregator (mirrors
+TB's `src/unit_tests.zig` — `comptime { _ = @import(...); }` per
+test-carrying file, OS-gated for Linux-only modules) plus a
+`unit-test-build` step in `build.zig` that installs the artifact to
+`./zig-out/bin/tiger-unit-test`.
 
-**Preflight before estimating:** read TB's `build.zig` block that
-implements `test:unit:build` end-to-end. TB's split is coupled to
-their whole build-system shape (options, filters, artifact
-layout). The "~20 lines" estimate is a guess until TB's block is
-read; revise after preflight.
+Ported verbatim from TB:
+- `addTest(.{ .name, .root_source_file, ... })` → `addInstallArtifact(...)` →
+  `step.dependOn(...)` shape (`tigerbeetle/build.zig:904-918`).
+- `comptime { _ = @import(...); }` aggregator pattern
+  (`tigerbeetle/src/unit_tests.zig`).
 
-- [ ] Preflight: read
-  `/home/walker/Documents/personal/tigerbeetle/build.zig`
-  `test:unit:build` invocation + any helpers it depends on.
-  Record in the commit message which lines are ported verbatim,
-  which are tiger-web-specific.
-- [ ] Add `unit-test-build` step in `build.zig` that produces
-  `./zig-out/bin/tiger-unit-test` with debug info. Mirror TB's
-  `test:unit:build` (exact line count TBD post-preflight).
-- [ ] Keep `zig build unit-test` running tests directly
-  (backward-compat for local dev). Wire kcov to invoke the new
-  binary explicitly.
-- [ ] Outcome: unlocks kcov, `perf record` on unit tests, `gdb`
-  attach for a specific test failure.
+Tiger-web-specific: `link_sqlite(binary)` + `linkLibC()` on the
+aggregated test artifact (our per-module test step applies these
+per-module; the single binary needs both). OS-gated imports via
+`builtin.target.os.tag == .linux` for io_uring / unix-socket / SHM
+modules.
+
+Verification:
+- `zig build unit-test-build` → `zig-out/bin/tiger-unit-test`
+  (18 MB ELF, `with debug_info, not stripped`).
+- Direct run: 345/345 tests pass.
+- `kcov --include-path=./ /tmp/kcov-test ./zig-out/bin/tiger-unit-test`
+  → runs all 345 tests under ptrace, writes `index.html`. Coverage
+  pipeline (G.0.b) can now attach.
+- `zig build unit-test` unchanged — still runs tests in-process
+  (backward-compat preserved).
+
+Scope: `build.zig` +31 lines, `tiger_unit_tests.zig` new (60 lines).
+Net ~90 lines, within the post-preflight estimate.
 
 ### G.0.b — kcov wiring
 

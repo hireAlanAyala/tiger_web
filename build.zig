@@ -408,6 +408,33 @@ pub fn build(b: *std.Build) void {
     run_scripts_test.setEnvironmentVariable("ZIG_EXE", b.graph.zig_exe);
     unit_test_step.dependOn(&run_scripts_test.step);
 
+    // --- unit-test-build: kcov-attachable aggregated test binary ---
+    //
+    // Plan Phase G.0.a. Produces `./zig-out/bin/tiger-unit-test` —
+    // a single binary with every test block imported via
+    // `tiger_unit_tests.zig`. Needed because `zig build unit-test`
+    // runs tests in-process and leaves no on-disk artifact for kcov
+    // to attach to. Mirrors TigerBeetle's `test:unit:build`:
+    //   - `tigerbeetle/build.zig:895-918` creates `test-unit`,
+    //     installs the artifact; our version does the same with
+    //     link_sqlite + linkLibC applied (our aggregator imports
+    //     modules that need both).
+    //
+    // Usage: `zig build unit-test-build` → binary appears in
+    // `zig-out/bin/`. Running it executes all tests sequentially.
+    const unit_test_binary = b.addTest(.{
+        .name = "tiger-unit-test",
+        .root_source_file = b.path("tiger_unit_tests.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    unit_test_binary.root_module.addImport("stdx", stdx_module);
+    unit_test_binary.root_module.addOptions("build_options", build_options);
+    link_sqlite(unit_test_binary);
+    unit_test_binary.linkLibC();
+    const unit_test_build_step = b.step("unit-test-build", "Build unit tests as ./zig-out/bin/tiger-unit-test");
+    unit_test_build_step.dependOn(&b.addInstallArtifact(unit_test_binary, .{}).step);
+
     // --- Cross-language adapter tests (requires npx tsx) ---
     // Protocol vectors + round-trip tests validate TS serde against committed vectors.
     {
