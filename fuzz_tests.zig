@@ -39,6 +39,12 @@ fn fuzz_log(
     }
 }
 
+// When adding a real fuzzer below, also add it to the inline-for
+// list in `scripts/devhub.zig:devhub_coverage`. The coverage
+// pipeline hardcodes the fuzzer set; a new entry here that's
+// missing there silently drops its coverage from the kcov report.
+// `canary` and `smoke` are excluded by design (canary always fails,
+// smoke is the aggregate).
 const Fuzzers = .{
     .state_machine = @import("fuzz.zig"),
     .replay = @import("replay_fuzz.zig"),

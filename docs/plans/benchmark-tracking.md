@@ -360,6 +360,35 @@ happens on first CI run after this commit lands.
 Effort: 3 hours. Dependencies: G.0 complete + ≥1 week of data in
 devhubdb.
 
+### Prerequisite decisions before G.1 ships
+
+Two dashboard links will 404 unless their targets exist. Decide
+before the cp lands so G.1 doesn't ship with broken links.
+
+- **Nyrkiö account registered + `NYRKIO_TOKEN` secret set.**
+  Dashboard's Metrics section links to Nyrkiö's public view. H.1
+  preserved `upload_nyrkio` token-optional, but we haven't
+  registered an account. If G.1 ships the link before
+  registration, every click from the dashboard lands on a 404.
+  Either (a) register before G.1, or (b) replace the Nyrkiö
+  `<a>` with placeholder text until registration lands.
+- **Coverage-link target URL decided.** G.0.b archives
+  `coverage/` as a CI build artifact (downloadable per run, not a
+  stable URL). The dashboard's Coverage link needs a stable
+  target. Three options:
+  - Enable GitHub Pages on `hireAlanAyala/tiger_web` and deploy
+    `coverage/` via `actions/upload-pages-artifact` +
+    `actions/deploy-pages`. Separate Pages origin from devhubdb.
+  - Push `coverage/` into `tiger-web-devhubdb` alongside
+    `devhub/data.json` via the `upload_run` loop. Unified Pages
+    origin; bloats devhubdb git history with HTML diffs.
+  - Point the dashboard's Coverage link at the Actions UI's
+    latest run artifacts page. Lowest-effort; requires viewer
+    repo access.
+
+  Option 1 matches TB's pattern most closely. Decide and wire
+  before G.1's link swap.
+
 **Discipline:** whole-file `cp` of TB's three dashboard files,
 then surgical remove + change. Minimum edits for **honesty**
 (renders our data, attributed to us). Inert TB code stays —

@@ -238,6 +238,15 @@ fn devhub_metrics(shell: *Shell, cli_args: CLIArgs) !void {
             .{ .name = "list_products", .value = list_products_ns, .unit = "ns" },
             .{ .name = "update_product", .value = update_product_ns, .unit = "ns" },
             // SLA tier — closed-loop HTTP throughput + percentiles.
+            //
+            // `benchmark_load` also emits `closed_loop = 1 count`
+            // as stdout metadata. Not forwarded here: it's a
+            // constant-1 signal (we're always closed-loop until the
+            // open-loop follow-up lands), so it has no time-series
+            // value for the dashboard. Documented so a reader
+            // grepping the bench output against the dashboard's
+            // metric list finds the principle (don't forward
+            // constant-valued signals).
             .{ .name = "benchmark_throughput", .value = sla.throughput, .unit = "req/s" },
             .{ .name = "benchmark_latency_p1", .value = sla.p1, .unit = "ms" },
             .{ .name = "benchmark_latency_p50", .value = sla.p50, .unit = "ms" },
@@ -568,13 +577,24 @@ fn devhub_coverage(shell: *Shell) !void {
     log.info("kcov version {s}", .{kcov_version});
 
     try shell.exec_zig("build unit-test-build", .{});
-    try shell.exec_zig("build install", .{}); // produces tiger-fuzz
+    // `-Doptimize=ReleaseSafe` matches the release build from
+    // `devhub_metrics` above — without it, the default (debug)
+    // optimize mode rebuilds tiger-web + tiger-fuzz from scratch
+    // (~48s wasted) AND overwrites the release tiger-web that the
+    // SLA benchmark already exercised, leaving a debug binary as
+    // the final state. Passing release here cache-hits on
+    // tiger-web and just builds tiger-fuzz at release mode too.
+    try shell.exec_zig("build -Doptimize=ReleaseSafe install", .{}); // produces tiger-fuzz
 
     // Clean output dir — kcov aggregates across runs if we don't.
     try shell.project_root.deleteTree("./coverage");
     try shell.project_root.makePath("./coverage");
 
     const kcov: []const []const u8 = &.{ "kcov", "--include-path=./", "./coverage" };
+    // KEEP IN SYNC with `fuzz_tests.zig:Fuzzers`. Adding a 6th
+    // real fuzzer there requires a matching entry here; otherwise
+    // its coverage contribution is silently absent from the report.
+    // The mirror comment at `Fuzzers` points back here.
     inline for (.{
         "{kcov} ./zig-out/bin/tiger-unit-test",
         "{kcov} ./zig-out/bin/tiger-fuzz --events-max=100000 state_machine 92",

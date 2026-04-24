@@ -73,6 +73,12 @@ jobs:
           # user's git credential helpers. Belt-and-suspenders against
           # future runner-image regressions that re-intercept URL
           # credentials.
+          #
+          # WARNING: do NOT copy this invocation into a local
+          # developer flow. Running `sudo -E zig build` locally leaves
+          # zig-out/ and .zig-cache/ root-owned, breaking subsequent
+          # non-sudo `zig build` with permission-denied. Safe on CI
+          # (ephemeral runner); unsafe on a persistent dev machine.
           if [ "${{ github.ref }}" = "refs/heads/main" ]; then
             if [ -z "$DEVHUBDB_PAT" ]; then
               # Secret not yet registered (see plan's Blocking-on-human).
