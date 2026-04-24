@@ -261,12 +261,33 @@ fn devhub_metrics(shell: *Shell, cli_args: CLIArgs) !void {
         // does change-point detection on the same batches. A
         // transient push failure to devhubdb shouldn't forfeit the
         // Nyrkiö datapoint for that commit.
-        upload_run(shell, &batch) catch |err| {
+        //
+        // Surgical addition on top of TB's shape: we track which
+        // destination actually succeeded so we can fail the CI job
+        // if both silently no-op'd. TB doesn't need this because
+        // they treat devhubdb + Nyrkiö as independent-but-parallel
+        // destinations and accept rare simultaneous failures. Our
+        // Nyrkiö token isn't set yet, so "Nyrkiö ok" under our
+        // current state means "skipped because unconfigured" — not
+        // a real data point. Without this check, a transient
+        // devhubdb failure would silently drop a commit's row from
+        // the dashboard, green CI included.
+        const devhubdb_ok = if (upload_run(shell, &batch)) |_| true else |err| blk: {
             log.err("failed to upload devhubdb metrics: {}", .{err});
+            break :blk false;
         };
-        upload_nyrkio(shell, &batch) catch |err| {
+        const nyrkio_uploaded = upload_nyrkio(shell, &batch) catch |err| blk: {
             log.err("failed to upload Nyrkiö metrics: {}", .{err});
+            break :blk false;
         };
+        if (!devhubdb_ok and !nyrkio_uploaded) {
+            log.err(
+                "all upload destinations failed or unconfigured — " ++
+                    "dashboard will miss this commit",
+                .{},
+            );
+            return error.AllUploadsFailed;
+        }
     }
 
     for (batch.metrics) |metric| {
@@ -437,14 +458,21 @@ fn upload_run(shell: *Shell, batch: *const MetricBatch) !void {
     }
 }
 
-/// Near-verbatim from TB lines 454–466. One principled divergence:
-/// `env_get` → `env_get_option` so a missing `NYRKIO_TOKEN` returns
-/// null (graceful skip) rather than propagating an error.
+/// Near-verbatim from TB lines 454–466. Two principled divergences:
 ///
-/// TB's call site catches and logs the error without aborting, so
-/// functionally both shapes produce the same end-to-end behavior;
-/// using `env_get_option` makes the intent (optional destination)
-/// explicit at the call, not inferable only from the outer catch.
+/// 1. `env_get` → `env_get_option` so a missing `NYRKIO_TOKEN` returns
+///    null (graceful skip) rather than propagating an error. TB's
+///    call site catches and logs without aborting; end-to-end
+///    behavior matches, but the intent (optional destination) is
+///    visible at the call.
+///
+/// 2. Return type `!void` → `!bool` where `true = actually uploaded,
+///    `false = skipped because unconfigured`. Enables the caller to
+///    distinguish "Nyrkiö is off by design" from "Nyrkiö uploaded a
+///    real datapoint" — load-bearing for the at-least-one-destination
+///    assertion at the call site. TB doesn't need this distinction
+///    because their Nyrkiö is always configured; our secret isn't
+///    set yet, so the no-op state is the current default.
 ///
 /// Nyrkiö is a hosted change-point detection service: POSTing
 /// `MetricBatch` arrays on every commit lets it flag the exact SHA
@@ -456,14 +484,14 @@ fn upload_run(shell: *Shell, batch: *const MetricBatch) !void {
 /// merge with `NYRKIO_TOKEN` unset, which is the current state. A
 /// unit test would require either process-env manipulation (fragile)
 /// or refactoring to accept the token as a parameter (TB divergence).
-fn upload_nyrkio(shell: *Shell, batch: *const MetricBatch) !void {
+fn upload_nyrkio(shell: *Shell, batch: *const MetricBatch) !bool {
     const token = shell.env_get_option("NYRKIO_TOKEN") orelse {
         // log.debug not log.info: this fires on every build until
         // the secret lands. Surfacing it once in a reviewer's terminal
         // is useful, but per-run `info` output is noise until the
         // change-point destination is wired up.
         log.debug("NYRKIO_TOKEN not set; skipping Nyrkiö upload", .{});
-        return;
+        return false;
     };
     const url = "https://nyrkio.com/api/v0/result/devhub";
     const payload = try std.json.stringifyAlloc(
@@ -476,6 +504,7 @@ fn upload_nyrkio(shell: *Shell, batch: *const MetricBatch) !void {
         .authorization = try shell.fmt("Bearer {s}", .{token}),
     });
     log.info("Nyrkiö metrics uploaded", .{});
+    return true;
 }
 
 /// Verbatim from TB lines 438–452.
