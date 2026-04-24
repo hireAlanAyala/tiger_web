@@ -45,13 +45,17 @@
 //!     no-op rather than an error routed through the outer catch.
 //!     Semantically identical to TB's end-to-end behavior, but the
 //!     intent (optional destination) is explicit at the call site.
+//!   - `devhub_coverage` (TB lines 58–95). kcov orchestration:
+//!     build → run tests under ptrace → write HTML report →
+//!     symlink-cleanup for Pages upload. Principled divergences:
+//!     binary names (tiger-*), flat source layout (no `src/`),
+//!     fuzzer set (five tiger-web fuzzers replacing TB's
+//!     lsm_tree/lsm_forest/vopr), events-max 100k vs 500k. Full
+//!     per-line citations on the function's docblock.
 //!
 //! **Deletions (all principled — tigerbeetle-binary-specific or
 //! scoped to a later phase):**
 //!
-//!   - `devhub_coverage` + kcov orchestration (TB lines 58–95).
-//!     **Revisit under G.0.b** — adding kcov back now that G.0.a
-//!     produced the attachable binary.
 //!   - Changelog detection + `no_changelog_flag` branching
 //!     (TB lines 129–164) — TB-release-specific.
 //!   - `./tigerbeetle benchmark` stdout parsing for TB-specific
@@ -116,15 +120,24 @@ pub const CLIArgs = struct {
     /// which branches on `github.event_name`); TB's pipeline only
     /// invokes devhub on merged commits. The `--dry-run` branch
     /// prints the `MetricBatch` JSON to stdout instead of cloning
-    /// devhubdb + pushing. TB's `CLIArgs` carries only `sha` and
-    /// `skip_kcov`; we don't carry `skip_kcov` because kcov
-    /// orchestration lands in Phase G.0.b as its own code path, not
-    /// as a flag inside this file.
+    /// devhubdb + pushing.
     dry_run: bool = false,
+    /// Verbatim from TB `CLIArgs` (TB:45). Gates the expensive kcov
+    /// pass so local invocations can skip it; CI leaves the default
+    /// (runs coverage). Name + default + semantics all match TB.
+    skip_kcov: bool = false,
 };
 
 pub fn main(shell: *Shell, _: std.mem.Allocator, cli_args: CLIArgs) !void {
     try devhub_metrics(shell, cli_args);
+
+    // TB lines 51–55 verbatim: coverage follows the metrics pass;
+    // `--skip-kcov` short-circuits it for local runs.
+    if (!cli_args.skip_kcov) {
+        try devhub_coverage(shell);
+    } else {
+        log.info("--skip-kcov enabled, not computing coverage.", .{});
+    }
 }
 
 fn devhub_metrics(shell: *Shell, cli_args: CLIArgs) !void {
@@ -508,6 +521,82 @@ fn upload_nyrkio(shell: *Shell, batch: *const MetricBatch) !bool {
     });
     log.info("Nyrkiö metrics uploaded", .{});
     return true;
+}
+
+/// Near-verbatim from TB lines 58–95. Surgical edits bucket-tagged
+/// inline. The kcov invocation shape, symlink-cleanup, seed `92`,
+/// and `exec_stdout("kcov --version")` probe are preserved verbatim.
+///
+/// Divergences, all principled (our repo differs from TB's in layout
+/// and binary names):
+///
+///   - `zig-out/bin/test-unit` → `zig-out/bin/tiger-unit-test` (our
+///     binary, produced by Phase G.0.a's `unit-test-build` step).
+///   - `zig-out/bin/fuzz` → `zig-out/bin/tiger-fuzz` (our binary,
+///     produced by `zig build install`).
+///   - TB's `build vopr:build` + VOPR invocation dropped — no VOPR
+///     analog in tiger-web. Its coverage contribution is replaced
+///     by our full fuzzer set (5 fuzzers) below.
+///   - TB's `build fuzz:build` step → `build install` — our
+///     `tiger-fuzz` is a regular executable, not a separate
+///     test-artifact install.
+///   - TB's LSM fuzz invocations (`lsm_tree`, `lsm_forest`) dropped
+///     — no LSM subsystem. Replaced with our 5 fuzzers (rationale
+///     in the benchmark-tracking plan's G.0.b discussion:
+///     cross-language + concurrent + durable-format boundaries).
+///   - `events-max=500000` → `events-max=100000`. Middle ground
+///     between smoke-mode (10k) and TB's LSM-sized run (500k);
+///     keeps coverage CI bounded at ~1–2 min per fuzzer. Revisit
+///     if coverage % stays flat after more events.
+///   - `--include-path=./src` → `--include-path=./`. Our source is
+///     flat from repo root (no `src/` subdirectory). kcov reports
+///     on everything in the tree including tests and vendored
+///     code; acceptable — the alternative of listing every source
+///     dir (`./framework`, `./scripts`, `./packages`, etc.) would
+///     silently drop coverage for new directories.
+///   - `./src/devhub/coverage` → `./coverage`. Output lives at the
+///     repo root; CI uploads it to Pages via
+///     `actions/upload-pages-artifact` alongside `devhub/data.json`
+///     (see `.github/workflows/ci.yml`).
+fn devhub_coverage(shell: *Shell) !void {
+    var section = try shell.open_section("coverage");
+    defer section.close();
+
+    const kcov_version = shell.exec_stdout("kcov --version", .{}) catch {
+        return error.NoKcov;
+    };
+    log.info("kcov version {s}", .{kcov_version});
+
+    try shell.exec_zig("build unit-test-build", .{});
+    try shell.exec_zig("build install", .{}); // produces tiger-fuzz
+
+    // Clean output dir — kcov aggregates across runs if we don't.
+    try shell.project_root.deleteTree("./coverage");
+    try shell.project_root.makePath("./coverage");
+
+    const kcov: []const []const u8 = &.{ "kcov", "--include-path=./", "./coverage" };
+    inline for (.{
+        "{kcov} ./zig-out/bin/tiger-unit-test",
+        "{kcov} ./zig-out/bin/tiger-fuzz --events-max=100000 state_machine 92",
+        "{kcov} ./zig-out/bin/tiger-fuzz --events-max=100000 replay 92",
+        "{kcov} ./zig-out/bin/tiger-fuzz --events-max=100000 message_bus 92",
+        "{kcov} ./zig-out/bin/tiger-fuzz --events-max=100000 row_format 92",
+        "{kcov} ./zig-out/bin/tiger-fuzz --events-max=100000 worker_dispatch 92",
+    }) |command| {
+        try shell.exec(command, .{ .kcov = kcov });
+    }
+
+    var coverage_dir = try shell.cwd.openDir("./coverage", .{ .iterate = true });
+    defer coverage_dir.close();
+
+    // kcov adds some symlinks to the output, which prevents upload to
+    // GitHub actions from working. Verbatim from TB:88-93.
+    var it = coverage_dir.iterate();
+    while (try it.next()) |entry| {
+        if (entry.kind == .sym_link) {
+            try coverage_dir.deleteFile(entry.name);
+        }
+    }
 }
 
 /// Verbatim from TB lines 438–452.

@@ -278,54 +278,61 @@ Verification:
 Scope: `build.zig` +31 lines, `tiger_unit_tests.zig` new (60 lines).
 Net ~90 lines, within the post-preflight estimate.
 
-### G.0.b — kcov wiring
+### G.0.b — kcov wiring ✅ DONE
 
-**Discipline:** `cp` TB's `devhub_coverage()` function from
-`/home/walker/Documents/personal/tigerbeetle/src/scripts/devhub.zig:58-95`
-into our `scripts/devhub.zig`, then trim with bucket tags. Do
-not re-derive from memory — the binary list, events-max, seed
-(`92`), symlink-cleanup are TB decisions we may not fully
-understand, and cp-first preserves them.
+Status (2026-04-24): ported TB's `devhub_coverage()` from
+`tigerbeetle/src/scripts/devhub.zig:58-95` into our
+`scripts/devhub.zig`. `--skip-kcov` flag added (TB:45 verbatim).
+CI workflow installs kcov + runs with `sudo -E`. Coverage artifact
+archived via `actions/upload-artifact`.
 
-- [ ] `cp` TB's `devhub_coverage` (TB:58-95) verbatim.
-- [ ] Surgical trims (each inline bucket-tagged):
-  - `./zig-out/bin/test-unit` → `./zig-out/bin/tiger-unit-test`
-    (principled — our binary name).
-  - Drop TB's LSM fuzz invocations (`lsm_tree`, `lsm_forest`).
-    Principled — no LSM subsystem.
-  - Drop TB's VOPR invocation. Principled — no VOPR.
-  - **Replace with our full fuzzer set**, seed `92`, events-max
-    100_000 each:
-    ```
-    {kcov} ./zig-out/bin/tiger-fuzz -- --events-max=100000 state_machine 92
-    {kcov} ./zig-out/bin/tiger-fuzz -- --events-max=100000 replay 92
-    {kcov} ./zig-out/bin/tiger-fuzz -- --events-max=100000 message_bus 92
-    {kcov} ./zig-out/bin/tiger-fuzz -- --events-max=100000 row_format 92
-    {kcov} ./zig-out/bin/tiger-fuzz -- --events-max=100000 worker_dispatch 92
-    ```
-    Rationale for all five: cross-language boundaries
-    (`row_format`, `message_bus`) > concurrent paths
-    (`worker_dispatch`) > durable-format boundaries (`replay`) >
-    pipeline logic (`state_machine`). A subset gives false
-    confidence.
-  - Keep: `kcov` invocation shape, `--include-path=./src`, output
-    directory, seed `92`, symlink cleanup.
-- [ ] `cp` TB's `--skip-kcov` CLI flag shape (TB:43-46). Default
-  `false` on main.
-- [ ] Add `sudo apt-get install -y kcov` to the devhub CI step
-  above `zig/download.sh`.
-- [ ] Change devhub job's run line from
-  `./zig/zig build scripts -- devhub --sha="$SHA"` to
-  `sudo -E ./zig/zig build scripts -- devhub --sha="$SHA"` (and
-  dry-run variant). Belt-and-suspenders against runner-image
-  credential-helper regressions. Matches TB.
-- [ ] Upload `coverage/` directory to Pages alongside
-  `devhub/data.json` via `actions/upload-pages-artifact` +
-  `actions/deploy-pages` (TB pattern; (a)-option of git-diffing
-  HTML bloats history).
-- [ ] Verify: after next main merge,
-  `curl -sI https://hirealanayala.github.io/tiger-web-devhubdb/coverage/index.html`
-  returns 200.
+Preflight applied per the consumer-shape memory: discovered
+tiger-fuzz's CLI takes positional args directly, no `--` separator
+(unlike my initial guess). Caught before CI — the initial inline
+`-- --events-max=...` would have failed on the first main merge.
+Also confirmed 100k events is sufficient for `state_machine`'s
+feature-coverage check (smaller values panic
+`assert_full_coverage`).
+
+Ported verbatim (bucket tags inline on the function docblock):
+
+- `kcov --version` probe with `error.NoKcov` fallback.
+- `open_section("coverage")` log grouping.
+- `--include-path=./` (principled: flat layout, no `src/`).
+- Symlink-cleanup loop for Pages compatibility (TB:88-93).
+- Seed `92` across all 5 fuzzers; events-max 100_000.
+
+Principled divergences:
+
+- Binary names `test-unit` → `tiger-unit-test`, `fuzz` →
+  `tiger-fuzz` (our prefix).
+- Build steps `test:unit:build` → `unit-test-build` (G.0.a),
+  `fuzz:build` → `install` (our fuzz is a regular exe).
+- Dropped VOPR + LSM invocations; replaced with our 5 fuzzers
+  (state_machine, replay, message_bus, row_format, worker_dispatch).
+- `events-max=500000` → `100000` (middle ground between
+  smoke-mode and TB's LSM run; ~1-2 min per fuzzer).
+- Output dir `./src/devhub/coverage` → `./coverage` (flat root).
+
+CI workflow changes:
+
+- `sudo apt-get install -y kcov` added before zig download.
+- `sudo -E` prefix on the devhub invocation (TB's pattern;
+  belt-and-suspenders against credential-helper regressions).
+- `NYRKIO_TOKEN` added to env (H.1 landed the uploader; CI just
+  needs to pass the secret through — currently unset, graceful
+  skip fires).
+- `actions/upload-artifact@v4` archives `coverage/` as
+  `coverage-$SHA`, retained 30 days. Build-artifact (not Pages) —
+  unified Pages serving with `devhub/data.json` needs an
+  architectural decision (separate Pages-origin for tiger_web vs
+  devhubdb); tracked as G.1 Coverage-link follow-up.
+
+Verification (local): built unit-test-build + install, ran
+`tiger-fuzz --events-max=100000 state_machine 92` — passes in ~1s.
+`kcov --include-path=./ /tmp/kcov-smoke ./zig-out/bin/tiger-fuzz ...`
+produced `index.html`. End-to-end run of `devhub_coverage()`
+happens on first main merge after this commit lands.
 
 ---
 

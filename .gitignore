@@ -19,3 +19,5 @@ package-lock.json
 addons/shm/build/
 .focus/
 .tiger-web/
+# kcov output from scripts/devhub.zig devhub_coverage (Phase G.0.b)
+coverage/
