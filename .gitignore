@@ -21,3 +21,8 @@ addons/shm/build/
 .tiger-web/
 # kcov output from scripts/devhub.zig devhub_coverage (Phase G.0.b)
 coverage/
+# Native addon binaries — rebuilt on-demand via `zig build native-addon`.
+# Tracked-in-git addons silently drifted vs source (tb-alignment.md 7a).
+# focus_exe.step.dependOn(native_addon_step) in build.zig auto-rebuilds;
+# any other consumer must run `zig build native-addon` first.
+packages/ts/native/dist/**/shm.node
