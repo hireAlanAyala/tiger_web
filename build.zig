@@ -271,6 +271,18 @@ pub fn build(b: *std.Build) void {
     const bench_check_step = b.step("bench-check", "Assert benchmark-tracking discipline");
     bench_check_step.dependOn(&bench_check_cmd.step);
 
+    // --- Style check ---
+    // Runs `tiger-scripts style-check` — mechanical TIGER_STYLE
+    // enforcement on hot-path files (function-length, assertion
+    // density, known-throwaway markers). Same rationale as
+    // bench-check: converts prose rules into build gates so
+    // discipline that keeps slipping stops slipping.
+    const style_check_cmd = b.addRunArtifact(scripts_exe);
+    style_check_cmd.step.dependOn(&b.addInstallArtifact(scripts_exe, .{}).step);
+    style_check_cmd.addArg("style-check");
+    const style_check_step = b.step("style-check", "Assert TIGER_STYLE hot-path discipline");
+    style_check_step.dependOn(&style_check_cmd.step);
+
     // --- Annotation scanner ---
     const scanner_exe = b.addExecutable(.{
         .name = "annotation-scanner",
@@ -302,6 +314,7 @@ pub fn build(b: *std.Build) void {
     // Benchmark discipline check runs first — a calibration violation
     // should fail fast, before expensive test suites.
     unit_test_step.dependOn(&bench_check_cmd.step);
+    unit_test_step.dependOn(&style_check_cmd.step);
     for (modules) |mod| {
         const unit_test = b.addTest(.{
             .root_source_file = b.path(mod),

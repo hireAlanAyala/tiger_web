@@ -22,6 +22,7 @@ const coverage = @import("./scripts/coverage.zig");
 const devhub = @import("./scripts/devhub.zig");
 const metrics = @import("./scripts/metrics.zig");
 const perf_script = @import("./scripts/perf.zig");
+const style_check = @import("./scripts/style_check.zig");
 
 pub fn log_fn(
     comptime message_level: std.log.Level,
@@ -44,6 +45,7 @@ const CLIArgs = union(enum) {
     devhub: devhub.CLIArgs,
     metrics: metrics.CLIArgs,
     perf: perf_script.CLIArgs,
+    @"style-check": style_check.CLIArgs,
 
     pub const help =
         \\Usage:
@@ -65,6 +67,8 @@ const CLIArgs = union(enum) {
         \\  zig build scripts -- metrics [--no-fetch]
         \\
         \\  zig build scripts -- perf [--connections=<n>] [--requests=<n>]
+        \\
+        \\  zig build scripts -- style-check
         \\
         \\Options:
         \\
@@ -100,5 +104,6 @@ pub fn main() !void {
         .devhub => |args_devhub| try devhub.main(shell, gpa, args_devhub),
         .metrics => |args_metrics| try metrics.main(shell, gpa, args_metrics),
         .perf => |args_perf| try perf_script.main(shell, gpa, args_perf),
+        .@"style-check" => |args_sc| try style_check.main(shell, gpa, args_sc),
     }
 }
