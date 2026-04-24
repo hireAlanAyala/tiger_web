@@ -90,6 +90,35 @@ Effort: ~1 hour (cp + trim + skeleton).
 Blocks: nothing. Useful as an anchor when release story is
 designed.
 
+### 7a. Native-addon deterministic rebuilds
+
+- [ ] `zig build native-addon` currently produces
+  `packages/ts/native/dist/{aarch64,x86_64}-macos/shm.node` with
+  different binary content on every invocation — likely the Mach-O
+  `LC_UUID` load command (randomized per link by default), but
+  verify with `otool -l` or `diff` before picking a fix. Since
+  these binaries are tracked in git, any unrelated build that
+  happens to re-run the addon step leaves a dirty working tree.
+  Per CLAUDE.md: *"prebuilt artifacts drift — CI must rebuild
+  from source."*
+- [ ] Two remediation paths:
+  - **(a) Force byte-deterministic output.** Add
+    `SOURCE_DATE_EPOCH=0` + `-Wl,-no_uuid`-equivalent to the
+    addon build step in `build.zig`. Cheap if the toolchain
+    cooperates.
+  - **(b) Un-track the binaries; have CI build fresh.** Move
+    `packages/ts/native/dist/*` into `.gitignore`; CI runs
+    `zig build native-addon` before any step that needs the
+    addon. More aligned with the "CI rebuilds" principle.
+- [ ] Outcome: no more phantom dirty-tree every build; fewer
+  "why is my `git status` dirty" surprises; addon bytes can't
+  silently drift out of sync with source.
+
+Effort: ~30 min (a) or ~1 h (b).
+Blocks: nothing; orthogonal to benchmark-tracking. Filed here
+(not in `benchmark-tracking.md`) because it's TB-alignment
+concerning prebuilt artifacts, not benchmark infrastructure.
+
 ## Tier 3 — architectural, high cost
 
 Load-bearing investments. Don't do unless the correctness story

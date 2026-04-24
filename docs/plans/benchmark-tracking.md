@@ -499,20 +499,6 @@ conditions.
   `scripts/devhub.zig:run_sla_benchmark` emitting
   `benchmark_sidecar_*` metrics. Not a G blocker; add when
   sidecar-path performance becomes a dashboard story.
-- [ ] **Native addon non-deterministic rebuilds.** Running
-  `zig build native-addon` produces
-  `packages/ts/native/dist/{aarch64,x86_64}-macos/shm.node` with
-  different binary content on every invocation (timestamps
-  embedded). Since these are tracked in git, every unrelated
-  build that rebuilds them leaves a dirty working tree. Per
-  CLAUDE.md "prebuilt artifacts drift — CI must rebuild from
-  source." Two possible fixes: (a) add `SOURCE_DATE_EPOCH` or
-  `-Wl,-no_uuid`-equivalent flags to force byte-deterministic
-  output, (b) un-track the binaries and have CI always build
-  fresh via `zig build native-addon` before `npm run build`.
-  (a) is cheaper if the tooling cooperates; (b) is more aligned
-  with the "CI rebuilds" principle. Not a benchmark-tracking
-  dependency; orthogonal TB-alignment item.
 
 ---
 

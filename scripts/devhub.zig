@@ -470,7 +470,10 @@ fn upload_run(shell: *Shell, batch: *const MetricBatch) !void {
 ///    `false = skipped because unconfigured`. Enables the caller to
 ///    distinguish "Nyrkiö is off by design" from "Nyrkiö uploaded a
 ///    real datapoint" — load-bearing for the at-least-one-destination
-///    assertion at the call site. TB doesn't need this distinction
+///    check at the call site (returns `error.AllUploadsFailed`, not
+///    a TIGER_STYLE `assert()`-style panic — CI needs a loud
+///    non-zero exit, not a crashed process). TB doesn't need this
+///    distinction
 ///    because their Nyrkiö is always configured; our secret isn't
 ///    set yet, so the no-op state is the current default.
 ///
