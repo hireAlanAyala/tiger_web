@@ -39,20 +39,12 @@
 //!   - `replica log lines` analog — `bench_log_lines`, counted from
 //!     the SLA benchmark's stderr (TB lines 174 / 193 / 350).
 //!
-//! **Deferred — `ci_pipeline_duration_s`.** TB queries
-//! `gh run list -e merge_group`; that event completes before the
-//! main-branch devhub run, so `updatedAt - startedAt` is a valid
-//! whole-pipeline duration. Our `push` trigger runs devhub *inside*
-//! the workflow it would measure, making the query return a partial
-//! duration that doesn't match the metric's name. Deferred until we
-//! split devhub onto a `workflow_run` trigger (see header comment
-//! at the metric's removed call site).
-//!
-//! **Deletions (all principled — tigerbeetle-binary-specific):**
+//! **Deletions (all principled — tigerbeetle-binary-specific or
+//! scoped to a later phase):**
 //!
 //!   - `devhub_coverage` + kcov orchestration (TB lines 58–95).
-//!     **Revisit under G.0.b** — we're adding kcov back now that
-//!     G.0.a produced the attachable binary; scoped to that phase.
+//!     **Revisit under G.0.b** — adding kcov back now that G.0.a
+//!     produced the attachable binary.
 //!   - Changelog detection + `no_changelog_flag` branching
 //!     (TB lines 129–164) — TB-release-specific.
 //!   - `./tigerbeetle benchmark` stdout parsing for TB-specific
@@ -61,9 +53,14 @@
 //!     to our benches.
 //!   - `tigerbeetle inspect integrity` / `format` / `start` + manual
 //!     `Header.PingClient` TCP ping (TB lines 180–309) — tigerbeetle-
-//!     CLI-specific; we have no equivalent binary commands.
-//!   - `upload_nyrkio` (TB lines 454–466) — **revisit under H.1**;
-//!     scoped to that phase.
+//!     CLI-specific.
+//!   - `ci_pipeline_duration_s` query (TB lines 311–332).
+//!     **Revisit after `workflow_run` split** — TB uses `merge_group`
+//!     (a completed prior workflow); our `push` trigger runs devhub
+//!     inside the workflow it would measure, so `updatedAt -
+//!     startedAt` is a partial duration that doesn't match the
+//!     metric's name. See `devhub_metrics` body for full context.
+//!   - `upload_nyrkio` (TB lines 454–466) — **revisit under H.1**.
 //!
 //! **Surgical edits on transplanted structures:**
 //!
@@ -182,24 +179,12 @@ fn devhub_metrics(shell: *Shell, cli_args: CLIArgs) !void {
     // defer even on parse error.
     const sla = try run_sla_benchmark(shell);
 
-    // NOTE: `ci_pipeline_duration_s` is deliberately NOT emitted.
-    //
-    // TB queries this via `gh run list -c $SHA -e merge_group`, which
-    // returns a completed prior workflow run (`merge_group` fires
-    // before main). Our workflow triggers on `push: branches: [main]`
-    // with devhub as a step *inside* that same run — so
-    // `updatedAt - startedAt` would measure "time until we queried
-    // gh," not the pipeline duration. Shipping that metric produces
-    // a value that doesn't match its name, which is worse than
-    // a gap: per CLAUDE.md, "far better to stop operating than
-    // continue operating in an incorrect state."
-    //
-    // Tracked follow-up: split devhub into a separate workflow
-    // triggered by `workflow_run: workflows: [CI], types:
-    // [completed]`. The completed-workflow record carries
-    // `updatedAt` == end-of-pipeline, and the metric becomes
-    // meaningful. Revisit before G.1 ships if we want runner-image
-    // change detection (which was the original justification).
+    // `ci_pipeline_duration_s` deliberately not emitted here — see
+    // file header "Deletions" entry for full context. Short version:
+    // our `push` trigger runs devhub inside the workflow it would
+    // measure, so `gh run list`'s `updatedAt - startedAt` is a
+    // partial duration that doesn't match the metric's name.
+    // Revisit after `workflow_run` split (tracked follow-up).
 
     const batch = MetricBatch{
         .timestamp = commit_timestamp,
@@ -235,6 +220,13 @@ fn devhub_metrics(shell: *Shell, cli_args: CLIArgs) !void {
             // and re-added under the "don't omit what TB has" bias.
             // `ci_pipeline_duration_s` intentionally omitted — see
             // the note in `devhub_metrics` above.
+            //
+            // `bench_log_lines` baseline is tight: the current
+            // `benchmark_load` emits exactly two lines (`log.info`
+            // at startup + `log.warn` trailer about closed-loop
+            // omission). A flat line at 2 on the dashboard is the
+            // "no regression" state — any bump means a hot-path
+            // logging call landed.
             .{ .name = "executable_size_bytes", .value = executable_size_bytes, .unit = "bytes" },
             .{ .name = "build_time_ms", .value = build_time_ms, .unit = "ms" },
             .{ .name = "build_time_debug_ms", .value = build_time_debug_ms, .unit = "ms" },

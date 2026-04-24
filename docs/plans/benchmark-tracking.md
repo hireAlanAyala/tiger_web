@@ -464,20 +464,23 @@ conditions.
   by design; remediation is time-boxed to "before first public
   claim," not signal-driven. H.4's single-threaded client loop is
   a prerequisite shape.
-- [ ] **Runner-image change detection.** When GitHub deprecates a
-  runner class, annotate the dashboard with the switch date so the
-  discontinuity is visible rather than misread as regression.
-  Subscribe to GitHub Actions deprecation announcements; annotate
-  within 24h. Depends on `ci_pipeline_duration_s` below landing first.
-- [ ] **`ci_pipeline_duration_s` metric (requires workflow split).**
-  H.2 dropped this on TB-lens review: our `push`-triggered CI runs
-  devhub *inside* the workflow it would measure, so
-  `gh run list`'s `updatedAt - startedAt` is a partial, not a
-  whole-pipeline duration. Determinism + explicit-naming violations.
-  Fix: split devhub into a separate workflow triggered by
-  `workflow_run: workflows: [CI], types: [completed]`; the completed
-  record carries `updatedAt = end-of-pipeline`. Then restore the
-  metric with TB's exact shape (TB:311-332). ~1 hour.
+- [ ] **CI observability pipeline (single bundled follow-up).**
+  Three related items land together; separating them produced a
+  stale dependency chain in an earlier plan draft, so they're
+  consolidated here.
+  1. Split devhub onto its own workflow triggered by
+     `workflow_run: workflows: [CI], types: [completed]`. Unblocks
+     a meaningful `ci_pipeline_duration_s` (the completed-run
+     record carries `updatedAt = end-of-pipeline`).
+  2. Restore `ci_pipeline_duration_s` metric to `scripts/devhub.zig`
+     with TB's exact shape (TB:311-332). H.2 dropped it on TB-lens
+     review — our `push` trigger ran devhub inside the workflow it
+     would measure, making the metric misleading.
+  3. Subscribe to GitHub Actions runner-image deprecation
+     announcements; annotate the dashboard within 24h of any switch
+     so the resulting discontinuity is explicit rather than misread
+     as a regression. Depends on (2) for the underlying trend line.
+  Estimated effort: ~1.5h total.
 - [ ] **Register Nyrkiö account + set `NYRKIO_TOKEN`.** Flips H.1's
   token-optional upload from "no-op" to "active change-point
   detection." Zero code change.
