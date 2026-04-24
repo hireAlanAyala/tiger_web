@@ -123,9 +123,19 @@ right-primitive violation — the project had one IO primitive
 been a second. Reverted (commit `b62d3ac`); replaced with an
 extension of `framework/io.zig` that exposes the client-side
 verbs (`open_client_socket`, `connect`) the server didn't need.
-Net result: one IO abstraction across the project, and the benchmark
-becomes simulation-testable the day we want that (drop in `SimIO`
-with no harness change).
+Net result: one IO abstraction across the project.
+
+**Correction (deep audit 2026-04-24):** the original claim was that
+the benchmark becomes "simulation-testable the day we want that
+(drop in `SimIO` with no harness change)." Verified false. `SimIO`
+in `sim_io.zig` exposes `connect_client(self, client_index,
+target_listen_fd)` — a different signature from
+`framework/io.zig`'s new `connect(fd, address, completion, context,
+callback)`. Swapping SimIO for IO in `benchmark_load.zig` wouldn't
+compile. Accurate claim: "simulation-testable once SimIO gains a
+matching `connect` verb" — an extension in the same shape as the
+framework/io.zig → framework/io/linux.zig pattern. Tracked as a
+follow-up if/when we want sim-tested benchmark fault injection.
 
 Smoke-test results (64 conns, 10k requests, local server):
 - 9984 requests, 0 errors, 12.5k req/s
