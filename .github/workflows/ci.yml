@@ -53,12 +53,19 @@ jobs:
   # this job fails, test/clients are unaffected. That's the expected
   # state until the PAT lands.
   devhub:
-    runs-on: ubuntu-latest
+    # Pinned to 22.04 to match `docs/internal/benchmark-budgets.md`
+    # calibration. TB's devhub job pins the same way (their
+    # `.github/workflows/ci.yml:133`); `ubuntu-latest` drifts runner
+    # versions from under our budgets silently.
+    runs-on: ubuntu-22.04
     # Fetch full history so `git show -s --format=%ct <sha>` resolves.
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+      # Verbatim from TB `.github/workflows/ci.yml:143`. Free up disk
+      # space for benchmarking — SLA bench + kcov both land artifacts.
+      - run: sudo rm -rf /usr/local/lib/android # Free up disk space for benchmarking.
       # kcov — for Phase G.0.b coverage. Runner default lacks it.
       - run: sudo apt-get update && sudo apt-get install -y kcov
       - run: sh zig/download.sh
