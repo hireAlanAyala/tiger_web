@@ -36,7 +36,13 @@ pub const IO = struct {
         /// Intrusive linked list for deferred callback queue.
         next: ?*Completion = null,
 
-        /// Operation state — for assertion compatibility with connection.zig.
+        /// Operation state — for assertion compatibility with
+        /// connection.zig. **Principled addition to TB's shape:**
+        /// TB's `src/io/linux.zig:Completion` tracks operation kind
+        /// internally via a tagged union; our wrapper's raw-i32
+        /// callback shape lost that invariant, so we replay it here
+        /// as a minimal enum used only by `assert(.operation == .none)`
+        /// preconditions. Variant names match the public verbs.
         operation: Op = .none,
         const Op = enum { none, recv, send, connect };
     };
@@ -56,7 +62,14 @@ pub const IO = struct {
         self.inner.deinit();
     }
 
-    /// Create a non-blocking TCP listening socket bound to the given address.
+    /// Create a non-blocking TCP listening socket bound to the given
+    /// address. **Principled addition to TB's IO surface:** TB's
+    /// `io/linux.zig` exposes `open_socket_tcp` + `listen` as separate
+    /// verbs (their server.zig composes them); our wrapper fuses the
+    /// pair into one synchronous helper because we only need the
+    /// composed shape (socket → bind → listen). Callers that ever
+    /// need them decomposed can use `posix.socket` + `posix.bind`
+    /// + `posix.listen` directly.
     pub fn open_listener(_: *IO, address: std.net.Address) !fd_t {
         const fd = try posix.socket(
             address.any.family,
@@ -75,7 +88,11 @@ pub const IO = struct {
         return fd;
     }
 
-    /// Create a unix socket listener.
+    /// Create a unix socket listener. **Principled addition to TB's
+    /// IO surface:** TB has no unix-socket listener analog because
+    /// their VSR cluster is TCP-only; our sidecar uses a unix socket
+    /// (`framework/message_bus.zig`) so this verb exists here to
+    /// keep the server-setup shape symmetric with `open_listener`.
     pub fn open_unix_listener(_: *IO, path: []const u8) !fd_t {
         assert(path.len > 0);
         assert(path.len < 108);
@@ -116,9 +133,13 @@ pub const IO = struct {
         }
     }
 
-    /// Synchronous non-blocking accept. Direct syscall, not through the ring.
-    /// SQLite is the bottleneck, not syscall overhead. Async accept adds
-    /// complexity with no gain at our scale.
+    /// Synchronous non-blocking accept. Direct syscall, not through
+    /// the ring. **Principled divergence from TB:** TB uses
+    /// `io.accept` as an async ring op matching their per-connection
+    /// VSR lifecycle. For our shape (SQLite is the bottleneck, not
+    /// syscall overhead) the async accept adds complexity with no
+    /// latency gain; the synchronous variant matches our server
+    /// tick model cleanly.
     pub fn try_accept(_: *IO, listen_fd: fd_t) ?fd_t {
         const fd = posix.accept(listen_fd, null, null, posix.SOCK.NONBLOCK | posix.SOCK.CLOEXEC) catch return null;
         return fd;
@@ -173,6 +194,15 @@ pub const IO = struct {
     /// Open a non-blocking TCP client socket. Companion to
     /// `open_listener` — same shape, just no bind/listen. Caller
     /// submits `connect()` to bring the socket up through the ring.
+    ///
+    /// **Principled addition (H.4):** TB has no client-socket helper
+    /// on their IO wrapper because their VSR clients talk to replicas
+    /// over a pre-established pool via `MessageBus`. Our benchmark
+    /// load generator (and any future client-shape tool) needs
+    /// `socket(2)` with the same NONBLOCK/CLOEXEC/NODELAY defaults
+    /// `open_listener` applies. Exposing the helper here rather than
+    /// open-coding it per-caller keeps the client-socket setup
+    /// shape consistent across the project.
     pub fn open_client_socket(_: *IO, family: u16) !fd_t {
         const fd = try posix.socket(
             family,
@@ -186,11 +216,16 @@ pub const IO = struct {
 
     /// Submit an async connect through io_uring / kqueue.
     /// Callback fires once with result = 0 on success, -1 on error —
-    /// same raw-i32 convention as recv/send. Connect is a
-    /// prerequisite for client-side code paths (benchmark load
-    /// generator, admin-probe CLI, health-check tools); recv/send
-    /// already work for any fd, so exposing connect completes the
-    /// client-shape verb set.
+    /// same raw-i32 convention as recv/send.
+    ///
+    /// **Principled addition (H.4):** TB's `io/linux.zig` and
+    /// `io/darwin.zig` already expose `connect` with typed callbacks
+    /// (TB:965). We bridge that to our raw-i32 callback shape here,
+    /// matching the `recv_bridge`/`send_bridge` pattern. Connect is
+    /// a prerequisite for client-side code paths (benchmark load
+    /// generator in benchmark_load.zig, plus any future admin-probe
+    /// or health-check tool); recv/send already work for any fd, so
+    /// exposing connect completes the client-shape verb set.
     pub fn connect(
         self: *IO,
         fd: fd_t,
@@ -220,11 +255,24 @@ pub const IO = struct {
     }
 
     /// Non-blocking send — try to send immediately without the ring.
+    /// **Principled fast-path addition:** TB's `io/linux.zig` exposes
+    /// `send_now` as an internal synchronous syscall to avoid ring
+    /// overhead on small payloads; we forward it through the wrapper
+    /// because `connection.zig`'s response-send path uses it for the
+    /// common "fits in one write" case before falling back to
+    /// async `send()`. TB's equivalent pattern lives in their
+    /// `io.SendBuffer` fast-path logic.
     pub fn send_now(self: *IO, fd: fd_t, buffer: []const u8) ?usize {
         return self.inner.send_now(@intCast(fd), buffer);
     }
 
-    /// Initiate graceful shutdown of a socket.
+    /// Initiate graceful shutdown of a socket. **Principled
+    /// addition:** thin forward to TB's `io.shutdown`; our callers
+    /// (`connection.zig` on peer-close, `server.zig` on teardown)
+    /// need the verb exposed at the wrapper level because they
+    /// otherwise deal only in our `CallbackFn` shape. Error is
+    /// swallowed — shutdown is best-effort; the fd is closed
+    /// regardless.
     pub fn shutdown(self: *IO, fd: fd_t, how: posix.ShutdownHow) void {
         self.inner.shutdown(@intCast(fd), how) catch {};
     }
