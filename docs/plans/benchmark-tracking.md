@@ -140,31 +140,37 @@ failed connections terminate bounded per TIGER_STYLE.
 
 Parallelizable with H.3 — different files, no shared code paths.
 
-### H.2 — Add five missing metrics [ADDITIVE — AFTER G.0.a] ✅ DONE
+### H.2 — Add four missing metrics [ADDITIVE — AFTER G.0.a] ✅ DONE
 
-Status (2026-04-23): added all five metrics to `scripts/devhub.zig`.
-Dashboard now carries **23 metrics** across all three tiers + build
-+ CI. Ordering constraint honored — G.0.a landed first, so the
-first real `build_time_*` datapoint sits on a stable build graph.
+Status (2026-04-23): added four of the originally-planned five
+metrics to `scripts/devhub.zig`. Fifth (`ci_pipeline_duration_s`)
+deferred on TB-lens review — see tracked follow-ups. Dashboard now
+carries **22 metrics** across all three tiers + build-signals +
+log-volume.
 
 Ported from TB (`src/scripts/devhub.zig`, bucket tags inline):
 
 - `executable_size_bytes` / `build_time_ms` / `build_time_debug_ms` —
   TB:107-127 verbatim pattern. Debug build timer → cache-clear →
   release build timer + `statFile("zig-out/bin/tiger-web").size`.
-- `ci_pipeline_duration_s` — TB:311-332. Event name changed
-  (`merge_group` → `push`; our trigger). Falls back to 0 when run
-  locally (no `gh` auth).
+  Principled divergence (documented inline): dropped TB's
+  `defer deleteFile("tigerbeetle")` — Zig's `addInstallArtifact`
+  overwrites atomically, no stale-state risk.
 - `bench_log_lines` — `replica log lines` analog (TB:193). Captured
   from SLA benchmark's stderr via `exec_stdout_stderr`;
   `std.mem.count(u8, stderr, "\n")`.
 
-Also removed the redundant second release build at line 138 — the
-new build-time measurement already produced `zig-out/bin/tiger-web`
-in release mode, so the SLA bench reuses it.
+**Deferred: `ci_pipeline_duration_s`.** TB queries
+`gh run list -e merge_group` which returns a completed prior run.
+Our `push`-triggered CI runs devhub *inside* the workflow it would
+measure, so `updatedAt - startedAt` is a partial duration, not the
+whole pipeline. Shipping a metric whose value doesn't match its
+name violates TIGER_STYLE's determinism + explicit principles —
+deferred until we split devhub onto a `workflow_run` trigger.
 
-File header updated: the five metrics moved from "Deletions" to
-"Transplanted" with TB line citations.
+Also removed the redundant second release build — the new
+build-time measurement already produces `zig-out/bin/tiger-web` in
+release mode, so the SLA bench reuses it.
 
 Verification (local dry-run of `zig build scripts -- devhub
 --sha=$HEAD --dry-run`):
@@ -172,9 +178,8 @@ Verification (local dry-run of `zig build scripts -- devhub
 - `build_time_ms = 48647` (cold-cache full release build).
 - `build_time_debug_ms = 68` (warm-cache incremental; CI will see
   cold-cache full debug time).
-- `ci_pipeline_duration_s = 0` (graceful local fallback).
 - `bench_log_lines = 2` (info + warn from current benchmark).
-- All 23 metrics present in the MetricBatch JSON payload.
+- All 22 metrics present in the MetricBatch JSON payload.
 
 ### H.1 — Preserve `upload_nyrkio` token-optional [ADDITIVE]
 
@@ -463,7 +468,16 @@ conditions.
   runner class, annotate the dashboard with the switch date so the
   discontinuity is visible rather than misread as regression.
   Subscribe to GitHub Actions deprecation announcements; annotate
-  within 24h. Depends on H.2's `ci_pipeline_duration_ms` metric.
+  within 24h. Depends on `ci_pipeline_duration_s` below landing first.
+- [ ] **`ci_pipeline_duration_s` metric (requires workflow split).**
+  H.2 dropped this on TB-lens review: our `push`-triggered CI runs
+  devhub *inside* the workflow it would measure, so
+  `gh run list`'s `updatedAt - startedAt` is a partial, not a
+  whole-pipeline duration. Determinism + explicit-naming violations.
+  Fix: split devhub into a separate workflow triggered by
+  `workflow_run: workflows: [CI], types: [completed]`; the completed
+  record carries `updatedAt = end-of-pipeline`. Then restore the
+  metric with TB's exact shape (TB:311-332). ~1 hour.
 - [ ] **Register Nyrkiö account + set `NYRKIO_TOKEN`.** Flips H.1's
   token-optional upload from "no-op" to "active change-point
   detection." Zero code change.

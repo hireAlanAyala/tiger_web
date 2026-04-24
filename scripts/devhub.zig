@@ -36,11 +36,17 @@
 //!     cleaned between), each wrapped in a `std.time.Timer`. Release
 //!     build's output is stat'd for size. Our binary is
 //!     `zig-out/bin/tiger-web`; TB's is the top-level `tigerbeetle`.
-//!   - `ci_pipeline_duration_s` query via `gh run list` (TB lines
-//!     311–332). Same `startedAt`/`updatedAt` diff; our workflow
-//!     event-name is `push` (vs TB's `merge_group`).
 //!   - `replica log lines` analog — `bench_log_lines`, counted from
 //!     the SLA benchmark's stderr (TB lines 174 / 193 / 350).
+//!
+//! **Deferred — `ci_pipeline_duration_s`.** TB queries
+//! `gh run list -e merge_group`; that event completes before the
+//! main-branch devhub run, so `updatedAt - startedAt` is a valid
+//! whole-pipeline duration. Our `push` trigger runs devhub *inside*
+//! the workflow it would measure, making the query return a partial
+//! duration that doesn't match the metric's name. Deferred until we
+//! split devhub onto a `workflow_run` trigger (see header comment
+//! at the metric's removed call site).
 //!
 //! **Deletions (all principled — tigerbeetle-binary-specific):**
 //!
@@ -124,6 +130,14 @@ fn devhub_metrics(shell: *Shell, cli_args: CLIArgs) !void {
     // cache-cleared release build. Release build's binary is stat'd
     // for size. The SLA-tier benchmark later re-uses the release
     // install, so no wasted build work.
+    //
+    // Principled divergence from TB: TB wraps each build in a
+    // `defer shell.project_root.deleteFile("tigerbeetle")` to avoid
+    // stale-binary state between builds. We skip the delete — Zig's
+    // `addInstallArtifact` step overwrites `zig-out/bin/tiger-web`
+    // atomically on each `build install`, so there's no stale-state
+    // risk. Also keeps the release binary on disk for the SLA bench
+    // below (TB deletes theirs and unzips from `zig-out/dist/`).
     var timer = try std.time.Timer.start();
 
     const build_time_debug_ms = blk: {
@@ -168,32 +182,24 @@ fn devhub_metrics(shell: *Shell, cli_args: CLIArgs) !void {
     // defer even on parse error.
     const sla = try run_sla_benchmark(shell);
 
-    // CI pipeline duration. Transplanted from TB lines 311–332.
-    // Event is `push` (our workflow trigger on main merges), vs TB's
-    // `merge_group`. Falls back to 0 when run locally or without a
-    // DEVHUBDB_PAT (the results aren't uploaded in that case; this
-    // lets the surrounding code succeed).
-    const ci_pipeline_duration_s: u64 = blk: {
-        const times_gh = shell.exec_stdout(
-            "gh run list -c {sha} -e push --json startedAt,updatedAt -L 1 --template {template}",
-            .{
-                .sha = cli_args.sha,
-                .template = "{{range .}}{{.startedAt}} {{.updatedAt}}{{end}}",
-            },
-        ) catch {
-            // Local invocation or no gh auth — fall back to 0.
-            break :blk 0;
-        };
-        const parts = stdx.cut(times_gh, " ") orelse break :blk 0;
-        const iso8601_started_at = parts[0];
-        const iso8601_updated_at = parts[1];
-        const epoch_started_at = shell.iso8601_to_timestamp_seconds(iso8601_started_at) catch
-            break :blk 0;
-        const epoch_updated_at = shell.iso8601_to_timestamp_seconds(iso8601_updated_at) catch
-            break :blk 0;
-        assert(epoch_updated_at >= epoch_started_at);
-        break :blk epoch_updated_at - epoch_started_at;
-    };
+    // NOTE: `ci_pipeline_duration_s` is deliberately NOT emitted.
+    //
+    // TB queries this via `gh run list -c $SHA -e merge_group`, which
+    // returns a completed prior workflow run (`merge_group` fires
+    // before main). Our workflow triggers on `push: branches: [main]`
+    // with devhub as a step *inside* that same run — so
+    // `updatedAt - startedAt` would measure "time until we queried
+    // gh," not the pipeline duration. Shipping that metric produces
+    // a value that doesn't match its name, which is worse than
+    // a gap: per CLAUDE.md, "far better to stop operating than
+    // continue operating in an incorrect state."
+    //
+    // Tracked follow-up: split devhub into a separate workflow
+    // triggered by `workflow_run: workflows: [CI], types:
+    // [completed]`. The completed-workflow record carries
+    // `updatedAt` == end-of-pipeline, and the metric becomes
+    // meaningful. Revisit before G.1 ships if we want runner-image
+    // change detection (which was the original justification).
 
     const batch = MetricBatch{
         .timestamp = commit_timestamp,
@@ -224,13 +230,14 @@ fn devhub_metrics(shell: *Shell, cli_args: CLIArgs) !void {
             .{ .name = "benchmark_latency_p99", .value = sla.p99, .unit = "ms" },
             .{ .name = "benchmark_latency_p100", .value = sla.p100, .unit = "ms" },
             .{ .name = "benchmark_errors", .value = sla.errors, .unit = "count" },
-            // Build + CI signals. Audit 2026-04-23 retrofit (H.2).
-            // TB emits these; we dropped them at E ship time and
-            // re-added under the "don't omit what TB has" bias.
+            // Build signals + log-volume. Audit 2026-04-23 retrofit
+            // (H.2). TB emits these; we dropped them at E ship time
+            // and re-added under the "don't omit what TB has" bias.
+            // `ci_pipeline_duration_s` intentionally omitted — see
+            // the note in `devhub_metrics` above.
             .{ .name = "executable_size_bytes", .value = executable_size_bytes, .unit = "bytes" },
             .{ .name = "build_time_ms", .value = build_time_ms, .unit = "ms" },
             .{ .name = "build_time_debug_ms", .value = build_time_debug_ms, .unit = "ms" },
-            .{ .name = "ci_pipeline_duration_s", .value = ci_pipeline_duration_s, .unit = "s" },
             .{ .name = "bench_log_lines", .value = sla.log_lines, .unit = "count" },
         },
     };
