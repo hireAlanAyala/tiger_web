@@ -97,13 +97,15 @@ designed.
   native-addon` run back-to-back produces *byte-identical*
   binaries — so there's no non-determinism to fix. The drift
   that prompted this follow-up is **source-to-binary drift**:
-  toolchain or environment changes between the last time the
-  binaries were committed (commit `c06ccf1`, weeks ago) and now
-  produce a different binary from the same unchanged source.
-  Currently nothing catches this — no CI step fails when the
-  committed addon diverges from what the source would build.
-  Per CLAUDE.md: *"prebuilt artifacts drift — CI must rebuild
-  from source."*
+  something between the last commit of these binaries
+  (`c06ccf1`, weeks ago) and now produces a different binary
+  from the same unchanged source. Root cause not yet
+  investigated — candidates include toolchain version, OS, or
+  a non-determinism source not caught by the back-to-back test.
+  Verify before prescribing a fix. Currently nothing catches
+  this — no CI step fails when the committed addon diverges
+  from what the source would build. Per CLAUDE.md: *"prebuilt
+  artifacts drift — CI must rebuild from source."*
 - [ ] Remediation: move `packages/ts/native/dist/*` into
   `.gitignore`. CI runs `zig build native-addon` before any step
   that consumes the addon (`npm run build` in
@@ -175,7 +177,7 @@ Blocks: nothing; subset of VOPR work; can be done independently.
 - **If goal is "dashboard feels like TB's":** covered by
   `benchmark-tracking.md` Phase G (items 1–5 were moved there).
 - **If goal is "infrastructure that future TB-matches land on":**
-  items 6 + 7 + 7a (~3 hours total).
+  items 6 + 7 + 7a (~3-4 hours total).
 - **If goal is "correctness story matches TB":** item 8 alone is
   the load-bearing one. Item 9 is a stepping-stone.
 
