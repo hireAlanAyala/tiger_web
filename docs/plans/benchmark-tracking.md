@@ -218,14 +218,15 @@ the moment the secret lands.
 Status (2026-04-24):
 
 - [x] `CLIArgs.dry_run` bucket-tagged as tiger-web-specific with
-  rationale inline (PR path needs no-push mode; TB's CLIArgs
-  carries only `sha` + `skip_kcov`; we don't carry `skip_kcov`
-  because kcov landed under G.0.a's own step, not this file).
+  rationale inline (PR path needs no-push mode per
+  `.github/workflows/ci.yml`'s "devhub" job; TB's CLIArgs carries
+  only `sha` + `skip_kcov`; we don't carry `skip_kcov` because
+  kcov orchestration lands as its own step in G.0.b, not as a
+  flag inside this file).
 - [x] `shell.git_env_setup(.{ .use_hostname = false })` verified
-  preserved at `scripts/devhub.zig:415` (line number shifted post
-  H.1/H.2 retrofits).
-- [x] `shell.open_section("metrics")` verified preserved at
-  `scripts/devhub.zig:121`.
+  preserved in `upload_run`.
+- [x] `shell.open_section("metrics")` verified preserved at the
+  top of `devhub_metrics`.
 - [x] `feedback_revisit_decisions_when_justifications_expire.md`
   gained a "Part 4 — 'we don't need X' deletion rationale is
   almost always wrong" section covering the generalizable lesson

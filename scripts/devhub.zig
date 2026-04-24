@@ -112,11 +112,14 @@ pub const CLIArgs = struct {
     sha: []const u8,
     /// Tiger-web addition, not in TB. **Principled divergence:** our
     /// CI invokes this script on PR builds too (for end-to-end dry
-    /// verification); TB's pipeline only invokes devhub on merged
-    /// commits. The `--dry-run` branch prints the `MetricBatch` JSON
-    /// to stdout instead of cloning devhubdb + pushing. TB's
-    /// `CLIArgs` carries only `sha` and `skip_kcov`; we don't carry
-    /// `skip_kcov` (kcov landed under G.0.a's own step, not here).
+    /// verification — see `.github/workflows/ci.yml` "devhub" job,
+    /// which branches on `github.event_name`); TB's pipeline only
+    /// invokes devhub on merged commits. The `--dry-run` branch
+    /// prints the `MetricBatch` JSON to stdout instead of cloning
+    /// devhubdb + pushing. TB's `CLIArgs` carries only `sha` and
+    /// `skip_kcov`; we don't carry `skip_kcov` because kcov
+    /// orchestration lands in Phase G.0.b as its own code path, not
+    /// as a flag inside this file.
     dry_run: bool = false,
 };
 
@@ -252,14 +255,15 @@ fn devhub_metrics(shell: *Shell, cli_args: CLIArgs) !void {
         const payload = try std.json.stringifyAlloc(shell.arena.allocator(), batch, .{ .whitespace = .indent_2 });
         shell.echo("{s}", .{payload});
     } else {
+        // TB lines 366–372 — two *independent* upload destinations.
+        // Failure of one doesn't block the other: both catches log
+        // and continue. devhubdb holds the raw time series; Nyrkiö
+        // does change-point detection on the same batches. A
+        // transient push failure to devhubdb shouldn't forfeit the
+        // Nyrkiö datapoint for that commit.
         upload_run(shell, &batch) catch |err| {
             log.err("failed to upload devhubdb metrics: {}", .{err});
-            return err;
         };
-        // TB lines 370–372 shape: a second upload destination,
-        // errors are logged but non-fatal. Our upload_nyrkio
-        // returns cleanly when NYRKIO_TOKEN is unset (token-optional
-        // divergence); if set and the POST fails, catch logs it.
         upload_nyrkio(shell, &batch) catch |err| {
             log.err("failed to upload Nyrkiö metrics: {}", .{err});
         };
@@ -446,9 +450,19 @@ fn upload_run(shell: *Shell, batch: *const MetricBatch) !void {
 /// `MetricBatch` arrays on every commit lets it flag the exact SHA
 /// where a metric's distribution shifts. Until we register an
 /// account and set `NYRKIO_TOKEN` in CI, this function is a no-op.
+///
+/// **No unit test.** TB doesn't unit-test `upload_nyrkio`; the skip
+/// path (3 lines of trivial logic) is exercised on the first main
+/// merge with `NYRKIO_TOKEN` unset, which is the current state. A
+/// unit test would require either process-env manipulation (fragile)
+/// or refactoring to accept the token as a parameter (TB divergence).
 fn upload_nyrkio(shell: *Shell, batch: *const MetricBatch) !void {
     const token = shell.env_get_option("NYRKIO_TOKEN") orelse {
-        log.info("NYRKIO_TOKEN not set; skipping Nyrkiö upload", .{});
+        // log.debug not log.info: this fires on every build until
+        // the secret lands. Surfacing it once in a reviewer's terminal
+        // is useful, but per-run `info` output is noise until the
+        // change-point destination is wired up.
+        log.debug("NYRKIO_TOKEN not set; skipping Nyrkiö upload", .{});
         return;
     };
     const url = "https://nyrkio.com/api/v0/result/devhub";
