@@ -272,7 +272,7 @@ fn devhub_metrics(shell: *Shell, cli_args: CLIArgs) !void {
         // a real data point. Without this check, a transient
         // devhubdb failure would silently drop a commit's row from
         // the dashboard, green CI included.
-        const devhubdb_ok = if (upload_run(shell, &batch)) |_| true else |err| blk: {
+        const devhubdb_uploaded = if (upload_run(shell, &batch)) |_| true else |err| blk: {
             log.err("failed to upload devhubdb metrics: {}", .{err});
             break :blk false;
         };
@@ -280,7 +280,7 @@ fn devhub_metrics(shell: *Shell, cli_args: CLIArgs) !void {
             log.err("failed to upload Nyrkiö metrics: {}", .{err});
             break :blk false;
         };
-        if (!devhubdb_ok and !nyrkio_uploaded) {
+        if (!devhubdb_uploaded and !nyrkio_uploaded) {
             log.err(
                 "all upload destinations failed or unconfigured — " ++
                     "dashboard will miss this commit",

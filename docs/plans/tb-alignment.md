@@ -90,31 +90,32 @@ Effort: ~1 hour (cp + trim + skeleton).
 Blocks: nothing. Useful as an anchor when release story is
 designed.
 
-### 7a. Native-addon deterministic rebuilds
+### 7a. Untrack native-addon binaries; CI rebuilds on every run
 
-- [ ] `zig build native-addon` currently produces
-  `packages/ts/native/dist/{aarch64,x86_64}-macos/shm.node` with
-  different binary content on every invocation — likely the Mach-O
-  `LC_UUID` load command (randomized per link by default), but
-  verify with `otool -l` or `diff` before picking a fix. Since
-  these binaries are tracked in git, any unrelated build that
-  happens to re-run the addon step leaves a dirty working tree.
+- [ ] `packages/ts/native/dist/{aarch64,x86_64}-{linux,macos}/shm.node`
+  are checked into git. Verified (2026-04-24) that `zig build
+  native-addon` run back-to-back produces *byte-identical*
+  binaries — so there's no non-determinism to fix. The drift
+  that prompted this follow-up is **source-to-binary drift**:
+  toolchain or environment changes between the last time the
+  binaries were committed (commit `c06ccf1`, weeks ago) and now
+  produce a different binary from the same unchanged source.
+  Currently nothing catches this — no CI step fails when the
+  committed addon diverges from what the source would build.
   Per CLAUDE.md: *"prebuilt artifacts drift — CI must rebuild
   from source."*
-- [ ] Two remediation paths:
-  - **(a) Force byte-deterministic output.** Add
-    `SOURCE_DATE_EPOCH=0` + `-Wl,-no_uuid`-equivalent to the
-    addon build step in `build.zig`. Cheap if the toolchain
-    cooperates.
-  - **(b) Un-track the binaries; have CI build fresh.** Move
-    `packages/ts/native/dist/*` into `.gitignore`; CI runs
-    `zig build native-addon` before any step that needs the
-    addon. More aligned with the "CI rebuilds" principle.
-- [ ] Outcome: no more phantom dirty-tree every build; fewer
-  "why is my `git status` dirty" surprises; addon bytes can't
-  silently drift out of sync with source.
+- [ ] Remediation: move `packages/ts/native/dist/*` into
+  `.gitignore`. CI runs `zig build native-addon` before any step
+  that consumes the addon (`npm run build` in
+  `examples/ecommerce-ts`, sim-tests that load the addon, etc.).
+  Source-to-binary drift becomes impossible by construction.
+- [ ] Outcome: no tracked-binary-vs-source-drift class of bug;
+  no phantom dirty-tree from unrelated `zig build native-addon`
+  invocations; the addon is regenerated deterministically on
+  every CI run from the source in that commit.
 
-Effort: ~30 min (a) or ~1 h (b).
+Effort: ~1 h (.gitignore + CI wiring + verify every consumer
+rebuilds first).
 Blocks: nothing; orthogonal to benchmark-tracking. Filed here
 (not in `benchmark-tracking.md`) because it's TB-alignment
 concerning prebuilt artifacts, not benchmark infrastructure.
@@ -174,7 +175,7 @@ Blocks: nothing; subset of VOPR work; can be done independently.
 - **If goal is "dashboard feels like TB's":** covered by
   `benchmark-tracking.md` Phase G (items 1–5 were moved there).
 - **If goal is "infrastructure that future TB-matches land on":**
-  items 6 + 7 (~2.5 hours total).
+  items 6 + 7 + 7a (~3 hours total).
 - **If goal is "correctness story matches TB":** item 8 alone is
   the load-bearing one. Item 9 is a stepping-stone.
 
