@@ -92,11 +92,19 @@ jobs:
       # serving needs its own architectural decision (tracked as
       # G.1 dashboard-Coverage-link follow-up). For now, upload as a
       # standalone build artifact so reviewers can download and
-      # inspect it per PR; Pages hosting lands when G.1 ships.
+      # inspect it on every run (PR and main) — PR coverage lets
+      # reviewers verify coverage-affecting changes. Pages hosting
+      # lands when G.1 ships.
+      #
+      # Retention 30 days: arbitrary starting point. Adjust after a
+      # few weeks once we see typical artifact size × merge rate.
+      # Storage is cheap; premature tightening costs a scroll back
+      # to tune.
       - name: Archive coverage report
-        if: always() && github.ref == 'refs/heads/main'
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: coverage-${{ github.sha }}
           path: coverage/
           retention-days: 30
+          if-no-files-found: ignore

@@ -278,13 +278,23 @@ Verification:
 Scope: `build.zig` +31 lines, `tiger_unit_tests.zig` new (60 lines).
 Net ~90 lines, within the post-preflight estimate.
 
-### G.0.b — kcov wiring ✅ DONE
+### G.0.b — kcov wiring ✅ DONE (coverage runs + is downloadable; not yet linkable)
 
 Status (2026-04-24): ported TB's `devhub_coverage()` from
 `tigerbeetle/src/scripts/devhub.zig:58-95` into our
 `scripts/devhub.zig`. `--skip-kcov` flag added (TB:45 verbatim).
 CI workflow installs kcov + runs with `sudo -E`. Coverage artifact
-archived via `actions/upload-artifact`.
+archived via `actions/upload-artifact@v4` on every run (PR and
+main), 30-day retention.
+
+**Honest scope note:** the original plan framed G.0.b as producing
+"the coverage link G.1 points at." What shipped is narrower —
+coverage **runs** in CI and is **downloadable** as a per-run
+build artifact, but not yet **linkable** from a stable URL. The
+Pages-URL target requires deciding how to unify serving with
+devhubdb (different repo, different Pages origin); tracked as the
+G.1 Coverage-link follow-up. Viewers with repo access can download
+coverage-$SHA from the Actions UI in the meantime.
 
 Preflight applied per the consumer-shape memory: discovered
 tiger-fuzz's CLI takes positional args directly, no `--` separator
@@ -328,11 +338,20 @@ CI workflow changes:
   architectural decision (separate Pages-origin for tiger_web vs
   devhubdb); tracked as G.1 Coverage-link follow-up.
 
-Verification (local): built unit-test-build + install, ran
-`tiger-fuzz --events-max=100000 state_machine 92` — passes in ~1s.
-`kcov --include-path=./ /tmp/kcov-smoke ./zig-out/bin/tiger-fuzz ...`
-produced `index.html`. End-to-end run of `devhub_coverage()`
-happens on first main merge after this commit lands.
+Verification (local):
+
+- Built `unit-test-build` + `install` via `zig build`.
+- All 5 fuzzers run cleanly at `--events-max=100000` seed `92`:
+  `state_machine` (220ms), `replay` (135ms), `message_bus`
+  (153µs), `row_format` (3.9s), `worker_dispatch` (20ms). Each
+  exits 0 with no feature-coverage or assertion panics.
+- `kcov --include-path=./ /tmp/kcov-smoke ./zig-out/bin/tiger-fuzz
+  --events-max=100000 state_machine 92` produced `index.html`.
+  Attach path confirmed.
+
+End-to-end run of the full `devhub_coverage()` (install kcov +
+build both binaries + 6 kcov passes + symlink-cleanup + upload)
+happens on first CI run after this commit lands.
 
 ---
 
