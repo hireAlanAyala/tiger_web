@@ -571,6 +571,27 @@ conditions.
   `actions/deploy-pages` to the devhub CI job so `coverage/` is
   served at `https://hirealanayala.github.io/tiger_web/`. G.1's
   Coverage link (locked at this target) activates automatically.
+- [ ] **Tiger-unit-test aggregator exclusions to rescue.** Phase
+  G.0.a + the quine self-test landed, but three categories of
+  test-carrying files remain in `tiger_unit_tests.zig`'s
+  `excluded_files` list with rationales:
+  - `framework/stdx/*` (all 12 files): wired as a module via
+    `addImport("stdx", ...)`; Zig rejects direct file imports
+    alongside a module path pointing at the same file. Fix: add a
+    separate test target rooted at `framework/stdx/stdx.zig` with
+    its own `addTest` in build.zig. Stdx tests currently run only
+    when downstream consumers' tests exercise them.
+  - `framework/bench.zig` + `framework/app.zig`: need
+    `test_options` module wired on the aggregator's build target
+    (TB's pattern for smoke-vs-benchmark run-mode switching).
+    Extend `build.zig`'s `unit_test_binary` config with
+    `addOptions("test_options", ...)` then re-add both files.
+  - `handler_test.zig`: stale — compiles against an old
+    `route(params, body)` API that's since changed to
+    `route(method, path, body)`. Refresh test calls, re-add.
+  Catching these required porting TB's quine self-test (audit
+  finding 2026-04-24); resolving them completes the TB-alignment
+  intent of "unit-test binary contains every test block."
 - [ ] **`pending_index_benchmark.zig` and `ring_buffer_benchmark.zig`
   at API boundary.** Add if container-choice stabilizes and we
   want regression detection. Until then, pipeline-tier bench
