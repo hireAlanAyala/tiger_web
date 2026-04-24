@@ -181,54 +181,55 @@ Verification (local dry-run of `zig build scripts -- devhub
 - `bench_log_lines = 2` (info + warn from current benchmark).
 - All 22 metrics present in the MetricBatch JSON payload.
 
-### H.1 — Preserve `upload_nyrkio` token-optional [ADDITIVE]
+### H.1 — Preserve `upload_nyrkio` token-optional [ADDITIVE] ✅ DONE
 
-TB double-publishes every `MetricBatch` to Nyrkiö
-(`nyrkio.com/api/v0/result/devhub`) — a hosted change-point
-detection service. Raw dashboard data is human-eyeballed; Nyrkiö
-flags the exact commit where a metric's distribution shifts. We
-dropped the uploader in E ("single-target"). First p99 drift we
-fail to notice by eye, we'll regret it.
+Status (2026-04-24): ported `upload_nyrkio` from
+`tigerbeetle/src/scripts/devhub.zig:454-466` into our
+`scripts/devhub.zig`. Near-verbatim — one principled divergence:
 
-- [ ] `cp` TB's `upload_nyrkio` function verbatim from
-  `/home/walker/Documents/personal/tigerbeetle/src/scripts/devhub.zig:454-466`
-  into our `scripts/devhub.zig`.
-- [ ] `cp` TB's call site from `devhub.zig:370-372` (invoked per
-  run; errors logged but not fatal).
-- [ ] Make token-optional: wrap `shell.env_get("NYRKIO_TOKEN")`
-  with a graceful skip when missing (TB's own pattern tolerates
-  this implicitly via the `catch |err|` at line 370). Log one
-  line at info level: `"NYRKIO_TOKEN not set; skipping Nyrkiö
-  upload"`. No error, no CI failure.
-- [ ] Update the file header's "Deletions" list: move Nyrkiö from
-  "dropped" to "transplanted verbatim, token-optional".
-- [ ] Tracked follow-up (separate from this phase): register a
-  Nyrkiö account at
-  `https://nyrkio.com/public/https%3A%2F%2Fgithub.com%2FhireAlanAyala%2Ftiger_web/main/devhub`,
-  set `NYRKIO_TOKEN` in CI. When we want automated drift
-  detection, flip the secret on — no code change needed.
+- **`env_get` → `env_get_option`.** TB's `shell.env_get` errors on
+  a missing env var; the outer `catch |err|` at TB:370-372 catches
+  + logs. We use `env_get_option` (returns null) so the skip is
+  explicit at the call site: `orelse { log.info("...skipping..."); return; }`.
+  End-to-end behavior identical to TB; intent (optional
+  destination) visible locally instead of only in the caller's
+  catch.
 
-### H.5 — Silent divergence cleanup [ADDITIVE]
+Call site added alongside `upload_run` with the same non-fatal
+catch shape (TB:370-372). Dry-run branch untouched.
 
-Small items, each is one-line or one-comment.
+File header: `upload_nyrkio` moved from "Deletions" to
+"Transplanted" with TB line citations + divergence note.
 
-- [ ] `scripts/devhub.zig` — bucket-tag the `--dry-run` CLI field
-  as a tiger-web addition, not TB's pattern. Add a comment above
-  `CLIArgs`: `// dry_run is tiger-web-specific (principled — PR
-  path needs a no-push mode). TB's CLIArgs carries only sha +
-  skip_kcov.`
-- [ ] Confirm `shell.git_env_setup(.{ .use_hostname = false })` is
-  preserved in `upload_run` (audit noted as risk; grep confirms
-  line 325 has it — verify no future edit removes it).
-- [ ] Confirm `shell.open_section("metrics")` is preserved (line
-  106 has it).
-- [ ] Audit memory note: add a line to
-  `feedback_revisit_decisions_when_justifications_expire.md`:
-  "E's header 'we don't need X' deletions re-audited 2026-04-23;
-  five metrics + `upload_nyrkio` retrofitted. Generalizable: any
-  deletion rationale of the shape 'we don't ship a binary / don't
-  publish / don't need yet' requires a named failure mode within
-  days-to-weeks, not months."
+Preflight applied (new memory
+`feedback_preflight_consumer_shape_before_porting.md`): confirmed
+`shell.http_post`, `shell.fmt`, `shell.arena.allocator()`,
+`env_get_option` all present verbatim from TB; URL + env-var name
+carry no tiger-web conflicts; dashboard link already kept in G.1
+plan. No consumer shape mismatch surfaced — port is clean.
+
+**Tracked follow-up (already in the list):** register a Nyrkiö
+account and set `NYRKIO_TOKEN` in CI. Zero code change; the metric
+destination goes from "no-op" to "active change-point detection"
+the moment the secret lands.
+
+### H.5 — Silent divergence cleanup [ADDITIVE] ✅ DONE
+
+Status (2026-04-24):
+
+- [x] `CLIArgs.dry_run` bucket-tagged as tiger-web-specific with
+  rationale inline (PR path needs no-push mode; TB's CLIArgs
+  carries only `sha` + `skip_kcov`; we don't carry `skip_kcov`
+  because kcov landed under G.0.a's own step, not this file).
+- [x] `shell.git_env_setup(.{ .use_hostname = false })` verified
+  preserved at `scripts/devhub.zig:415` (line number shifted post
+  H.1/H.2 retrofits).
+- [x] `shell.open_section("metrics")` verified preserved at
+  `scripts/devhub.zig:121`.
+- [x] `feedback_revisit_decisions_when_justifications_expire.md`
+  gained a "Part 4 — 'we don't need X' deletion rationale is
+  almost always wrong" section covering the generalizable lesson
+  from the H.1 + H.2 audit cycle.
 
 ---
 

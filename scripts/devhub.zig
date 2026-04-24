@@ -38,6 +38,13 @@
 //!     `zig-out/bin/tiger-web`; TB's is the top-level `tigerbeetle`.
 //!   - `replica log lines` analog — `bench_log_lines`, counted from
 //!     the SLA benchmark's stderr (TB lines 174 / 193 / 350).
+//!   - `upload_nyrkio` (TB lines 454–466). POSTs each `MetricBatch`
+//!     to Nyrkiö's change-point detection service alongside the
+//!     devhubdb git-push. One principled divergence: `env_get` →
+//!     `env_get_option` so a missing `NYRKIO_TOKEN` is a graceful
+//!     no-op rather than an error routed through the outer catch.
+//!     Semantically identical to TB's end-to-end behavior, but the
+//!     intent (optional destination) is explicit at the call site.
 //!
 //! **Deletions (all principled — tigerbeetle-binary-specific or
 //! scoped to a later phase):**
@@ -60,7 +67,6 @@
 //!     inside the workflow it would measure, so `updatedAt -
 //!     startedAt` is a partial duration that doesn't match the
 //!     metric's name. See `devhub_metrics` body for full context.
-//!   - `upload_nyrkio` (TB lines 454–466) — **revisit under H.1**.
 //!
 //! **Surgical edits on transplanted structures:**
 //!
@@ -104,6 +110,13 @@ const log = std.log;
 
 pub const CLIArgs = struct {
     sha: []const u8,
+    /// Tiger-web addition, not in TB. **Principled divergence:** our
+    /// CI invokes this script on PR builds too (for end-to-end dry
+    /// verification); TB's pipeline only invokes devhub on merged
+    /// commits. The `--dry-run` branch prints the `MetricBatch` JSON
+    /// to stdout instead of cloning devhubdb + pushing. TB's
+    /// `CLIArgs` carries only `sha` and `skip_kcov`; we don't carry
+    /// `skip_kcov` (kcov landed under G.0.a's own step, not here).
     dry_run: bool = false,
 };
 
@@ -242,6 +255,13 @@ fn devhub_metrics(shell: *Shell, cli_args: CLIArgs) !void {
         upload_run(shell, &batch) catch |err| {
             log.err("failed to upload devhubdb metrics: {}", .{err});
             return err;
+        };
+        // TB lines 370–372 shape: a second upload destination,
+        // errors are logged but non-fatal. Our upload_nyrkio
+        // returns cleanly when NYRKIO_TOKEN is unset (token-optional
+        // divergence); if set and the POST fails, catch logs it.
+        upload_nyrkio(shell, &batch) catch |err| {
+            log.err("failed to upload Nyrkiö metrics: {}", .{err});
         };
     }
 
@@ -411,6 +431,37 @@ fn upload_run(shell: *Shell, batch: *const MetricBatch) !void {
         log.err("can't push new data to devhub", .{});
         return error.CanNotPush;
     }
+}
+
+/// Near-verbatim from TB lines 454–466. One principled divergence:
+/// `env_get` → `env_get_option` so a missing `NYRKIO_TOKEN` returns
+/// null (graceful skip) rather than propagating an error.
+///
+/// TB's call site catches and logs the error without aborting, so
+/// functionally both shapes produce the same end-to-end behavior;
+/// using `env_get_option` makes the intent (optional destination)
+/// explicit at the call, not inferable only from the outer catch.
+///
+/// Nyrkiö is a hosted change-point detection service: POSTing
+/// `MetricBatch` arrays on every commit lets it flag the exact SHA
+/// where a metric's distribution shifts. Until we register an
+/// account and set `NYRKIO_TOKEN` in CI, this function is a no-op.
+fn upload_nyrkio(shell: *Shell, batch: *const MetricBatch) !void {
+    const token = shell.env_get_option("NYRKIO_TOKEN") orelse {
+        log.info("NYRKIO_TOKEN not set; skipping Nyrkiö upload", .{});
+        return;
+    };
+    const url = "https://nyrkio.com/api/v0/result/devhub";
+    const payload = try std.json.stringifyAlloc(
+        shell.arena.allocator(),
+        [_]*const MetricBatch{batch}, // Nyrkiö needs an _array_ of batches.
+        .{},
+    );
+    _ = try shell.http_post(url, payload, .{
+        .content_type = .json,
+        .authorization = try shell.fmt("Bearer {s}", .{token}),
+    });
+    log.info("Nyrkiö metrics uploaded", .{});
 }
 
 /// Verbatim from TB lines 438–452.
