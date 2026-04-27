@@ -94,5 +94,5 @@ required. See `docs/plans/cfo-as-service.md` and `docs/plans/framework-fuzzer.md
 
 ## Decisions
 
-- [Annotation routing](../decisions/annotation-routing.md) — `// match` + `// query`
-- [Import strategy](../decisions/import-strategy.md) — stdx as build module
+- [Annotation routing](../internal/decision-annotation-routing.md) — `// match` + `// query`
+- [Import strategy](../internal/decision-import-strategy.md) — stdx as build module

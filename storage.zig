@@ -10,7 +10,7 @@
 //!
 //! NOT responsibilities:
 //!   - Verifying SQL correctness against a reference model. We trust SQLite
-//!     to execute SQL correctly. See decisions/storage-ownership.md.
+//!     to execute SQL correctly. See docs/internal/decision-storage-ownership.md.
 //!   - Domain logic. This file knows table schemas, not business rules.
 //!     Whether an inventory transfer preserves totals is the handler's
 //!     concern, not storage's.
@@ -735,7 +735,7 @@ pub const SqliteStorage = struct {
     ///   reordered. Name-based matching crashes immediately.
     /// - Handlers define flat row types shaped by their query (not by the
     ///   wire format). The SQL and the struct are the contract — the
-    ///   framework matches them. See decisions/storage-ownership.md.
+    ///   framework matches them. See docs/internal/decision-storage-ownership.md.
     /// - This is sidecar-language-agnostic: every language maps query
     ///   results to structs by column name. The Zig framework does the same.
     fn build_column_mapping(comptime T: type, stmt: *c.sqlite3_stmt) ColumnMapping(T) {
@@ -982,7 +982,7 @@ pub const SqliteStorage = struct {
     /// Set to a migration function when the next deploy needs a schema change.
     /// After deploying, clear it back to null and update storage/schema.sql from prod.
     /// Additive only — no drops, no renames, no type changes.
-    /// See decisions/database.md.
+    /// See docs/internal/decision-database.md.
     const next_migration: ?*const fn (*c.sqlite3) void = migrate_v3_collection_active;
 
     fn ensure_schema(db: *c.sqlite3) void {
