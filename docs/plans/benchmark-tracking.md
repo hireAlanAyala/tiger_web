@@ -365,7 +365,36 @@ happens on first CI run after this commit lands.
 
 ---
 
-## Phase G.1 — dashboard
+## Phase G.1 — dashboard ✅ DONE (2026-04-27)
+
+**Live at:** `https://hirealanayala.github.io/tiger-web-devhubdb/`
+(HTTP 200, `<title>Tiger Web DevHub</title>`, branded heading
+rendered).
+
+**Shipped via:** commit `f6594d6` on `hireAlanAyala/tiger-web-devhubdb`.
+Source: TB commit `58b48aa9d` (`src/devhub/{devhub.js,index.html,
+style.css}`), whole-file cp + surgical remove + change pass.
+
+**Survival:** 836 lines total (TB had ~860). 99→79 in index.html,
+552→548 in devhub.js, 209→209 in style.css.
+
+**Removes (1):** release-manager rotation section + `main_release_rotation()` +
+`get_release_manager()`. `get_week()` retained as a free primitive.
+
+**Surgical changes:** 15 URL swaps (devhubdb / tiger_web), 2 brand
+swaps (title + nav heading), 1 Coverage-link target swap (per
+locked option-1 decision).
+
+**Preserved verbatim even when inert:** VOPR branches, `is_release()`,
+`outlier_score()` red-highlighting, untriaged-issues badge, full
+SVG template block.
+
+**Two user-actions activate the unfinished pieces:**
+1. Register Nyrkiö account, set `NYRKIO_TOKEN` in tiger_web repo
+   secrets → Nyrkiö link + change-point detection both activate.
+2. Enable Pages on `hireAlanAyala/tiger_web` with source "GitHub
+   Actions"; subsequent PR adds `actions/upload-pages-artifact` +
+   `actions/deploy-pages` to devhub job → Coverage link activates.
 
 Effort: 3 hours. Dependencies: G.0 complete + ≥1 week of data in
 devhubdb.
