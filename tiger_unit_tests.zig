@@ -82,6 +82,19 @@ comptime {
     _ = @import("scripts.zig");
     _ = @import("scripts/cfo.zig");
 
+    // tidy.zig (TB src/tidy.zig port at 8977868dd) is intentionally
+    // NOT imported here. The architectural file is in place — it's
+    // the discipline-as-tests primitive that should eventually
+    // replace scripts/style_check.zig — but the codebase has 1001
+    // accumulated violations across 100 files (long lines, defer
+    // newlines, banned patterns, dead code, type-function naming).
+    // Wiring tidy into the aggregator now would block all CI red
+    // until cleanup converges (~days of focused work). Run tidy
+    // standalone via `zig build tidy` for incremental cleanup; add
+    // `_ = @import("tidy.zig");` here once `zig build tidy` returns
+    // green. Tracked as a follow-up in
+    // `docs/plans/benchmark-tracking.md`.
+
     // Linux-only (io_uring, unix sockets, SHM).
     if (builtin.target.os.tag == .linux) {
         _ = @import("framework/message_bus.zig");

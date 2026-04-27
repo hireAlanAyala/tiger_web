@@ -610,6 +610,33 @@ conditions.
   covers them implicitly.
 - [ ] **Per-endpoint load shapes.** Default `--ops` mix will need
   tuning as domain grows.
+- [ ] **tidy.zig codebase cleanup → CI-gating.** `tidy.zig`
+  ported 1:1 from TigerBeetle (`src/tidy.zig` at commit `8977868dd`).
+  Shipped as a standalone `zig build tidy` target with all surgical
+  edits documented inline (vendor/ skip, sqlite blob exception,
+  symlink-mode allowance, extension allowlist). 13/14 internal
+  tests pass; the main `test "tidy"` fails on 1001 accumulated
+  violations across ~100 files:
+  - 661 long lines (>100 cols)
+  - 156 defer-without-blank-line
+  -  45 `@memcpy(` banned (use stdx.copy_disjoint)
+  -  40+ dead-code imports (`std`, `assert`, `log`, `stdx`, etc.)
+  -   6 `Self = @This()` banned (use proper type name)
+  -   3 `mem.copyForwards` banned
+  -  many "file never imported" / "imported file untracked"
+  Until cleanup converges, tidy.zig is NOT in the
+  `tiger_unit_tests.zig` aggregator (CI stays green).
+  `scripts/style_check.zig` remains the active discipline gate.
+  Cleanup path:
+    1. Run `zig build tidy` to see current violations.
+    2. Fix one category at a time (long lines first — mostly
+       mechanical reflows).
+    3. Once `zig build tidy` returns green, add
+       `_ = @import("tidy.zig");` to `tiger_unit_tests.zig`
+       (one-line edit), making tidy CI-gating.
+    4. Delete `scripts/style_check.zig` (tidy subsumes its
+       checks via TB's AST-based + comprehensive shape).
+  This is the deepest TB-1:1 alignment work remaining.
 - [ ] **Sidecar-mode SLA bench.** `tiger-web benchmark` exercises
   the HTTP → native → SQLite path only; the 1-RT SHM sidecar
   dispatch isn't covered at SLA tier. Two shapes: `--sidecar=<cmd>`

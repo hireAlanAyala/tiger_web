@@ -494,6 +494,25 @@ pub fn build(b: *std.Build) void {
     run_stdx_tests.setEnvironmentVariable("ZIG_EXE", b.graph.zig_exe);
     unit_test_step.dependOn(&run_stdx_tests.step);
 
+    // --- tidy: discipline-as-tests (TB src/tidy.zig port) ---
+    //
+    // Standalone test target rooted at tidy.zig. Not currently in
+    // unit_test_step because the codebase has accumulated TIGER_STYLE
+    // drift that tidy surfaces (long lines, defer newlines, banned
+    // patterns, dead code). Run via `zig build tidy` for incremental
+    // cleanup work; once `zig build tidy` returns green, add tidy.zig
+    // to tiger_unit_tests.zig's comptime imports to make it CI-gating.
+    const tidy_tests = b.addTest(.{
+        .name = "tiger-tidy-test",
+        .root_source_file = b.path("tidy.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    tidy_tests.root_module.addImport("stdx", stdx_module);
+    const run_tidy_tests = b.addRunArtifact(tidy_tests);
+    const tidy_step = b.step("tidy", "Run tidy.zig discipline checks");
+    tidy_step.dependOn(&run_tidy_tests.step);
+
     // --- Cross-language adapter tests (requires npx tsx) ---
     // Protocol vectors + round-trip tests validate TS serde against committed vectors.
     {
