@@ -447,9 +447,20 @@ pub fn build(b: *std.Build) void {
     // pattern: a build-time module that exposes a `benchmark: bool`
     // toggle. `framework/bench.zig` reads it at line 77 to switch
     // between smoke (small inputs, silent) and benchmark (real
-    // inputs, prints) modes when invoked as a test target. The
-    // aggregator carries `framework/bench.zig` so it has to provide
-    // the option module too.
+    // inputs, prints) modes. The aggregator carries
+    // `framework/bench.zig` so it has to provide the option module.
+    //
+    // **Intent: aggregator runs in smoke mode.** TB's `b.args`
+    // populates from `zig build test -- "benchmark: name"`-style
+    // invocations; ours doesn't because `unit_test_binary` is an
+    // install-only step (`addInstallArtifact`, not `addRunArtifact`),
+    // so `b.args` is empty here regardless of how `zig build` was
+    // invoked. Result: `test_options.benchmark` is always false,
+    // bench files always run their smoke variant inside
+    // `tiger-unit-test` — the desired behavior. The TB-style
+    // `b.args` parser is preserved verbatim in case our invocation
+    // shape ever grows to match TB's, so this expression doesn't
+    // need to be rewritten when that happens.
     const test_options = b.addOptions();
     test_options.addOption(bool, "benchmark", for (b.args orelse &.{}) |arg| {
         if (std.mem.indexOf(u8, arg, "benchmark") != null) break true;
