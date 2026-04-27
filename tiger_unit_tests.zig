@@ -46,10 +46,9 @@ comptime {
     _ = @import("replay.zig");
     _ = @import("state_machine_test.zig");
 
-    // Framework tests. framework/app.zig and framework/bench.zig
-    // excluded below — they need extra build-options modules wired
-    // that our aggregator doesn't currently provide. Tracked
-    // follow-up: wire test_options + revisit framework/app.zig.
+    // Framework tests.
+    _ = @import("framework/app.zig");
+    _ = @import("framework/bench.zig");
     _ = @import("framework/handler.zig");
     _ = @import("framework/http.zig");
     _ = @import("framework/list.zig");
@@ -176,15 +175,6 @@ const excluded_files = [_][]const u8{
     "framework/stdx/time_units.zig",
     "framework/stdx/zipfian.zig",
     "framework/stdx/testing/snaptest.zig",
-    // Needs `test_options` build-options module wired for the
-    // aggregator target. Follow-up: extend build.zig's
-    // unit_test_binary config then re-add.
-    "framework/bench.zig",
-    // framework/app.zig has a transitive compilation issue when
-    // rooted at the aggregator; the per-module test target compiles
-    // it fine because it's scoped narrower. Investigate separately;
-    // aggregator-level inclusion is a follow-up.
-    "framework/app.zig",
 };
 
 fn should_skip_dir(name: []const u8) bool {

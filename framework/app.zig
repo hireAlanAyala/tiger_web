@@ -250,6 +250,7 @@ const TestApp = AppType(.{
         .{ .operation = TestOperation.create_thing, .handler = CreateThingHandler },
     },
     .Message = TestMessage,
+    .MessageResponse = TestResponse,
     .Operation = TestOperation,
     .Status = TestStatus,
     .Identity = TestIdentity,

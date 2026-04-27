@@ -443,6 +443,18 @@ pub fn build(b: *std.Build) void {
     });
     unit_test_binary.root_module.addImport("stdx", stdx_module);
     unit_test_binary.root_module.addOptions("build_options", build_options);
+    // `test_options` matches TB's `tigerbeetle/build.zig:885-893,915`
+    // pattern: a build-time module that exposes a `benchmark: bool`
+    // toggle. `framework/bench.zig` reads it at line 77 to switch
+    // between smoke (small inputs, silent) and benchmark (real
+    // inputs, prints) modes when invoked as a test target. The
+    // aggregator carries `framework/bench.zig` so it has to provide
+    // the option module too.
+    const test_options = b.addOptions();
+    test_options.addOption(bool, "benchmark", for (b.args orelse &.{}) |arg| {
+        if (std.mem.indexOf(u8, arg, "benchmark") != null) break true;
+    } else false);
+    unit_test_binary.root_module.addOptions("test_options", test_options);
     link_sqlite(unit_test_binary);
     unit_test_binary.linkLibC();
     const unit_test_build_step = b.step("unit-test-build", "Build unit tests as ./zig-out/bin/tiger-unit-test");

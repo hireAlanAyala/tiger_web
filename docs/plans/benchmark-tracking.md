@@ -589,11 +589,12 @@ conditions.
     separate test target rooted at `framework/stdx/stdx.zig` with
     its own `addTest` in build.zig. Stdx tests currently run only
     when downstream consumers' tests exercise them.
-  - `framework/bench.zig` + `framework/app.zig`: need
-    `test_options` module wired on the aggregator's build target
-    (TB's pattern for smoke-vs-benchmark run-mode switching).
-    Extend `build.zig`'s `unit_test_binary` config with
-    `addOptions("test_options", ...)` then re-add both files.
+  - ~~`framework/bench.zig` + `framework/app.zig`~~ ✅ done
+    2026-04-27: wired `test_options` build-options module on
+    `unit_test_binary` (TB's pattern, `tigerbeetle/build.zig:885-893`).
+    Re-added both files; framework/app.zig's stale TestApp config
+    needed `.MessageResponse = TestResponse` to match the current
+    AppType field requirements. 365 → 370 tests in the aggregator.
   Catching these required porting TB's quine self-test (audit
   finding 2026-04-24); resolving them completes the TB-alignment
   intent of "unit-test binary contains every test block."
