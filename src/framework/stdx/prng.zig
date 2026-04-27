@@ -19,7 +19,7 @@ const stdx = @import("stdx.zig");
 const assert = std.debug.assert;
 const math = std.math;
 const Snap = stdx.Snap;
-const module_path = "framework/stdx";
+const module_path = "src/framework/stdx";
 const snap = Snap.snap_fn(module_path);
 const KiB = stdx.KiB;
 

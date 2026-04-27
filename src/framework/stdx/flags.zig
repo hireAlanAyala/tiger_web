@@ -706,7 +706,7 @@ pub const main =
 
 test "flags" {
     const Snap = stdx.Snap;
-    const module_path = "framework/stdx";
+    const module_path = "src/framework/stdx";
     const snap = Snap.snap_fn(module_path);
 
     const T = struct {

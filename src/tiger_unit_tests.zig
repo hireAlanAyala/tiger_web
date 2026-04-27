@@ -120,7 +120,6 @@ const skip_dirs = [_][]const u8{
     ".zig-cache",
     "zig-out",
     "node_modules",
-    "vendor",
     "coverage",
     "docs",
     "adapters",
@@ -129,65 +128,63 @@ const skip_dirs = [_][]const u8{
     ".tiger-web",
     // Zig toolchain — vendored stdlib, ~960 .zig files not ours.
     "zig",
-    // Examples + generated code carry their own tests not aggregated here.
+    // Examples carry their own tests not aggregated here.
     "examples",
+    // Vendored / generated under src/ are name-matched anywhere
+    // in the path; this catches src/vendor/, src/generated/,
+    // src/framework/stdx/vendored/.
+    "vendor",
     "generated",
+    "vendored",
     // TypeScript packages ship JS tests, not Zig.
     "packages",
     // Template dir is not source.
     "templates",
-    // TB stdx vendored copy — we import it via `@import("stdx")` module;
-    // its tests run in TB's own test suite.
-    "vendored",
 };
 
 // Files with `test ` lines that are deliberately excluded from the
 // aggregator: fuzz_tests.zig is its own `tiger-fuzz` binary (not a
 // unit-test target), tiger_unit_tests.zig IS this file.
 const excluded_files = [_][]const u8{
-    "tiger_unit_tests.zig",
-    "fuzz_tests.zig",
-    "fuzz_lib.zig",
+    "src/tiger_unit_tests.zig",
+    "src/fuzz_tests.zig",
+    "src/fuzz_lib.zig",
     // Fuzzer entry points — their tests run under tiger-fuzz, not
     // tiger-unit-test.
-    "fuzz.zig",
-    "replay_fuzz.zig",
-    "message_bus_fuzz.zig",
-    "row_format_fuzz.zig",
-    "worker_dispatch_fuzz.zig",
-    "codec_fuzz.zig",
-    "render_fuzz.zig",
-    "storage_fuzz.zig",
-    "replay_fuzz.zig",
+    "src/fuzz.zig",
+    "src/replay_fuzz.zig",
+    "src/message_bus_fuzz.zig",
+    "src/row_format_fuzz.zig",
+    "src/worker_dispatch_fuzz.zig",
     // Simulation entry (sim.zig imports its own deps).
-    "sim.zig",
-    "sim_sidecar.zig",
-    "sim_io.zig",
+    "src/sim.zig",
+    "src/sim_sidecar.zig",
+    "src/sim_io.zig",
     // Benchmark files — compiled as separate binaries by build.zig.
-    "aegis_checksum_benchmark.zig",
-    "crc_frame_benchmark.zig",
-    "hmac_session_benchmark.zig",
-    "wal_parse_benchmark.zig",
-    "route_match_benchmark.zig",
-    "state_machine_benchmark.zig",
+    "src/aegis_checksum_benchmark.zig",
+    "src/crc_frame_benchmark.zig",
+    "src/hmac_session_benchmark.zig",
+    "src/wal_parse_benchmark.zig",
+    "src/route_match_benchmark.zig",
+    "src/state_machine_benchmark.zig",
     // Build-script entry points.
     "build.zig",
     // stdx — wired as a module via build.zig's addImport("stdx").
     // Importing stdx files directly here conflicts with the module
     // path. Stdx tests need their own root test target (tracked
     // follow-up, not a new gap).
-    "framework/stdx/stdx.zig",
-    "framework/stdx/bit_set.zig",
-    "framework/stdx/bounded_array.zig",
-    "framework/stdx/flags.zig",
-    "framework/stdx/prng.zig",
-    "framework/stdx/radix.zig",
-    "framework/stdx/ring_buffer.zig",
-    "framework/stdx/sort_test.zig",
-    "framework/stdx/stack.zig",
-    "framework/stdx/time_units.zig",
-    "framework/stdx/zipfian.zig",
-    "framework/stdx/testing/snaptest.zig",
+    "src/framework/stdx/stdx.zig",
+    "src/framework/stdx/bit_set.zig",
+    "src/framework/stdx/bounded_array.zig",
+    "src/framework/stdx/flags.zig",
+    "src/framework/stdx/prng.zig",
+    "src/framework/stdx/radix.zig",
+    "src/framework/stdx/ring_buffer.zig",
+    "src/framework/stdx/sort_test.zig",
+    "src/framework/stdx/stack.zig",
+    "src/framework/stdx/time_units.zig",
+    "src/framework/stdx/zipfian.zig",
+    "src/framework/stdx/testing/snaptest.zig",
 };
 
 fn should_skip_dir(name: []const u8) bool {
@@ -235,7 +232,7 @@ test "unit_tests_aggregator_is_complete" {
     defer root.close();
 
     // Load this file's contents once so we can substring-check imports.
-    const self_contents = try root.readFileAlloc(allocator, "tiger_unit_tests.zig", 1 * 1024 * 1024);
+    const self_contents = try root.readFileAlloc(allocator, "src/tiger_unit_tests.zig", 1 * 1024 * 1024);
 
     var walker = try root.walk(allocator);
     defer walker.deinit();
@@ -270,10 +267,16 @@ test "unit_tests_aggregator_is_complete" {
     }
 
     // For each test-carrying file, assert `@import("<path>")` appears
-    // in this file's source.
+    // in this file's source. The @import strings are relative to this
+    // file's directory (src/), so strip the leading "src/" from the
+    // walker-collected path before building the needle.
     var missing = std.ArrayList([]const u8).init(allocator);
     for (test_files.items) |path| {
-        const needle = try std.fmt.allocPrint(allocator, "@import(\"{s}\")", .{path});
+        const import_path = if (std.mem.startsWith(u8, path, "src/"))
+            path["src/".len..]
+        else
+            path;
+        const needle = try std.fmt.allocPrint(allocator, "@import(\"{s}\")", .{import_path});
         if (std.mem.indexOf(u8, self_contents, needle) == null) {
             try missing.append(path);
         }

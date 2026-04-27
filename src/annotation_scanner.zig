@@ -3121,7 +3121,7 @@ test "integration: extracted handle statuses match declared Status enum" {
     const allocator = std.testing.allocator;
 
     // Read handler directory.
-    var dir = try std.fs.cwd().openDir("handlers", .{ .iterate = true });
+    var dir = try std.fs.cwd().openDir("src/handlers", .{ .iterate = true });
     defer dir.close();
 
     var walker = try dir.walk(allocator);

@@ -47,17 +47,17 @@ pub const CLIArgs = struct {};
 // Hot-path files. Framework + server core. Anywhere a `log.debug`
 // in a tick loop or an unbounded loop could ship undetected.
 const hot_path_files = [_][]const u8{
-    "framework/server.zig",
-    "framework/connection.zig",
-    "framework/http.zig",
-    "framework/io.zig",
-    "framework/wal.zig",
-    "framework/worker_dispatch.zig",
-    "framework/shm_bus.zig",
-    "framework/pending_dispatch.zig",
-    "framework/message_bus.zig",
-    "state_machine.zig",
-    "app.zig",
+    "src/framework/server.zig",
+    "src/framework/connection.zig",
+    "src/framework/http.zig",
+    "src/framework/io.zig",
+    "src/framework/wal.zig",
+    "src/framework/worker_dispatch.zig",
+    "src/framework/shm_bus.zig",
+    "src/framework/pending_dispatch.zig",
+    "src/framework/message_bus.zig",
+    "src/state_machine.zig",
+    "src/app.zig",
 };
 
 // Substrings that flag known-throwaway code. CLAUDE.md:

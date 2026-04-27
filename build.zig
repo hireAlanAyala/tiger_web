@@ -5,15 +5,15 @@ const builtin = @import("builtin");
 fn link_sqlite(step: *std.Build.Step.Compile) void {
     const sqlite_flags: []const []const u8 = &.{ "-DSQLITE_THREADSAFE=1", "-DSQLITE_DQS=0", "-DSQLITE_DEFAULT_WAL_SYNCHRONOUS=1" };
     step.addCSourceFile(.{
-        .file = step.step.owner.path("vendor/sqlite3/sqlite3.c"),
+        .file = step.step.owner.path("src/vendor/sqlite3/sqlite3.c"),
         .flags = sqlite_flags,
     });
     // Zig shim: compiled wrappers for SQLITE_TRANSIENT (see sqlite3_zig.h).
     step.addCSourceFile(.{
-        .file = step.step.owner.path("vendor/sqlite3/sqlite3_zig.c"),
+        .file = step.step.owner.path("src/vendor/sqlite3/sqlite3_zig.c"),
         .flags = sqlite_flags,
     });
-    step.addIncludePath(step.step.owner.path("vendor/sqlite3"));
+    step.addIncludePath(step.step.owner.path("src/vendor/sqlite3"));
     step.linkLibC();
 }
 
@@ -62,7 +62,7 @@ fn build_native_addon(b: *std.Build) *std.Build.Step {
             .flags = &.{"-fPIC"},
         });
 
-        lib.root_module.addSystemIncludePath(b.path("vendor/node-api-headers"));
+        lib.root_module.addSystemIncludePath(b.path("src/vendor/node-api-headers"));
         lib.linkLibC();
         lib.linker_allow_shlib_undefined = true;
 
@@ -87,7 +87,7 @@ pub fn build(b: *std.Build) void {
     // Each compilation unit has its own std_options (root owns log config), but stdx
     // is shared via module wiring so @src().file paths resolve correctly for Snap tests.
     const stdx_module = b.addModule("stdx", .{
-        .root_source_file = b.path("framework/stdx/stdx.zig"),
+        .root_source_file = b.path("src/framework/stdx/stdx.zig"),
     });
 
     // --- Build options ---
@@ -103,7 +103,7 @@ pub fn build(b: *std.Build) void {
     // --- Main executable ---
     const exe = b.addExecutable(.{
         .name = "tiger-web",
-        .root_source_file = b.path("main.zig"),
+        .root_source_file = b.path("src/main.zig"),
         .target = target,
         .optimize = optimize,
     });
@@ -122,7 +122,7 @@ pub fn build(b: *std.Build) void {
     // --- Replay tool ---
     const replay_exe = b.addExecutable(.{
         .name = "tiger-replay",
-        .root_source_file = b.path("replay.zig"),
+        .root_source_file = b.path("src/replay.zig"),
         .target = target,
         .optimize = optimize,
     });
@@ -139,7 +139,7 @@ pub fn build(b: *std.Build) void {
 
     // --- Simulation tests ---
     const sim_tests = b.addTest(.{
-        .root_source_file = b.path("sim.zig"),
+        .root_source_file = b.path("src/sim.zig"),
         .target = target,
         .optimize = optimize,
     });
@@ -163,7 +163,7 @@ pub fn build(b: *std.Build) void {
     sidecar_sim_options.addOption(u8, "pipeline_slots", 2);
 
     const sidecar_sim = b.addTest(.{
-        .root_source_file = b.path("sim_sidecar.zig"),
+        .root_source_file = b.path("src/sim_sidecar.zig"),
         .target = target,
         .optimize = optimize,
     });
@@ -178,7 +178,7 @@ pub fn build(b: *std.Build) void {
     // --- Fuzz test dispatcher ---
     const fuzz_exe = b.addExecutable(.{
         .name = "tiger-fuzz",
-        .root_source_file = b.path("fuzz_tests.zig"),
+        .root_source_file = b.path("src/fuzz_tests.zig"),
         .target = target,
         .optimize = optimize,
     });
@@ -234,7 +234,7 @@ pub fn build(b: *std.Build) void {
     // --- Zig sidecar benchmark tool ---
     const zig_sidecar_exe = b.addExecutable(.{
         .name = "zig-sidecar",
-        .root_source_file = b.path("zig_sidecar.zig"),
+        .root_source_file = b.path("src/zig_sidecar.zig"),
         .target = target,
         .optimize = optimize,
     });
@@ -246,7 +246,7 @@ pub fn build(b: *std.Build) void {
     // --- Scripts executable (CFO and other automation) ---
     const scripts_exe = b.addExecutable(.{
         .name = "tiger-scripts",
-        .root_source_file = b.path("scripts.zig"),
+        .root_source_file = b.path("src/scripts.zig"),
         .target = target,
         .optimize = .Debug,
     });
@@ -286,7 +286,7 @@ pub fn build(b: *std.Build) void {
     // --- Annotation scanner ---
     const scanner_exe = b.addExecutable(.{
         .name = "annotation-scanner",
-        .root_source_file = b.path("annotation_scanner.zig"),
+        .root_source_file = b.path("src/annotation_scanner.zig"),
         .target = target,
         .optimize = optimize,
     });
@@ -297,18 +297,18 @@ pub fn build(b: *std.Build) void {
     if (b.args) |args| {
         scanner_cmd.addArgs(args);
     } else {
-        scanner_cmd.addArg("handlers/");
+        scanner_cmd.addArg("src/handlers/");
     }
     const scanner_step = b.step("scan", "Scan handlers for annotation and status exhaustiveness");
     scanner_step.dependOn(&scanner_cmd.step);
 
     // --- Unit tests for individual modules ---
     const modules = [_][]const u8{
-        "message.zig",
-        "framework/message_pool.zig",
-        "wal_test.zig",
-        "annotation_scanner.zig",
-        "supervisor.zig",
+        "src/message.zig",
+        "src/framework/message_pool.zig",
+        "src/wal_test.zig",
+        "src/annotation_scanner.zig",
+        "src/supervisor.zig",
     };
     const unit_test_step = b.step("unit-test", "Run unit tests");
     // Benchmark discipline check runs first — a calibration violation
@@ -332,7 +332,7 @@ pub fn build(b: *std.Build) void {
     // Linux-only: io/linux.zig (io_uring), message_bus.zig (unix sockets),
     // worker_dispatch.zig (SHM), worker_integration_test.zig.
     if (target.result.os.tag == .linux) {
-        for ([_][]const u8{ "framework/message_bus.zig", "framework/io/linux.zig", "framework/worker_dispatch.zig", "worker_integration_test.zig" }) |mod| {
+        for ([_][]const u8{ "src/framework/message_bus.zig", "src/framework/io/linux.zig", "src/framework/worker_dispatch.zig", "src/worker_integration_test.zig" }) |mod| {
             const unit_test = b.addTest(.{
                 .root_source_file = b.path(mod),
                 .target = target,
@@ -348,7 +348,7 @@ pub fn build(b: *std.Build) void {
     }
 
     // Modules that need sqlite3 + libc.
-    for ([_][]const u8{ "storage.zig", "replay.zig", "state_machine_test.zig" }) |mod| {
+    for ([_][]const u8{ "src/storage.zig", "src/replay.zig", "src/state_machine_test.zig" }) |mod| {
         const unit_test = b.addTest(.{
             .root_source_file = b.path(mod),
             .target = target,
@@ -364,12 +364,12 @@ pub fn build(b: *std.Build) void {
 
     // Framework unit tests.
     const fw_test_modules = [_][]const u8{
-        "framework/http.zig",
-        "framework/marks.zig",
-        "framework/time.zig",
-        "framework/auth.zig",
-        "framework/checksum.zig",
-        "framework/parse.zig",
+        "src/framework/http.zig",
+        "src/framework/marks.zig",
+        "src/framework/time.zig",
+        "src/framework/auth.zig",
+        "src/framework/checksum.zig",
+        "src/framework/parse.zig",
     };
     for (fw_test_modules) |mod| {
         const unit_test = b.addTest(.{
@@ -385,7 +385,7 @@ pub fn build(b: *std.Build) void {
     }
 
     // Trace engine + event tests.
-    for ([_][]const u8{ "trace_event.zig", "trace.zig" }) |trace_file| {
+    for ([_][]const u8{ "src/trace_event.zig", "src/trace.zig" }) |trace_file| {
         const trace_test = b.addTest(.{
             .root_source_file = b.path(trace_file),
             .target = target,
@@ -400,7 +400,7 @@ pub fn build(b: *std.Build) void {
 
     // Shell + scripts tests.
     const shell_test = b.addTest(.{
-        .root_source_file = b.path("shell.zig"),
+        .root_source_file = b.path("src/shell.zig"),
         .target = target,
         .optimize = optimize,
     });
@@ -411,7 +411,7 @@ pub fn build(b: *std.Build) void {
     unit_test_step.dependOn(&run_shell_test.step);
 
     const scripts_test = b.addTest(.{
-        .root_source_file = b.path("scripts.zig"),
+        .root_source_file = b.path("src/scripts.zig"),
         .target = target,
         .optimize = optimize,
     });
@@ -437,7 +437,7 @@ pub fn build(b: *std.Build) void {
     // `zig-out/bin/`. Running it executes all tests sequentially.
     const unit_test_binary = b.addTest(.{
         .name = "tiger-unit-test",
-        .root_source_file = b.path("tiger_unit_tests.zig"),
+        .root_source_file = b.path("src/tiger_unit_tests.zig"),
         .target = target,
         .optimize = optimize,
     });
@@ -485,7 +485,7 @@ pub fn build(b: *std.Build) void {
     // artifact, both wired into the unit-test pipeline.
     const stdx_test_binary = b.addTest(.{
         .name = "tiger-stdx-test",
-        .root_source_file = b.path("framework/stdx/stdx.zig"),
+        .root_source_file = b.path("src/framework/stdx/stdx.zig"),
         .target = target,
         .optimize = optimize,
     });
@@ -504,7 +504,7 @@ pub fn build(b: *std.Build) void {
     // to tiger_unit_tests.zig's comptime imports to make it CI-gating.
     const tidy_tests = b.addTest(.{
         .name = "tiger-tidy-test",
-        .root_source_file = b.path("tidy.zig"),
+        .root_source_file = b.path("src/tidy.zig"),
         .target = target,
         .optimize = optimize,
     });
@@ -546,12 +546,12 @@ pub fn build(b: *std.Build) void {
     // append to `bench_sources` below.
     const BenchSrc = struct { path: []const u8, needs_sqlite: bool };
     const bench_sources = [_]BenchSrc{
-        .{ .path = "state_machine_benchmark.zig", .needs_sqlite = true },
-        .{ .path = "aegis_checksum_benchmark.zig", .needs_sqlite = false },
-        .{ .path = "crc_frame_benchmark.zig", .needs_sqlite = false },
-        .{ .path = "hmac_session_benchmark.zig", .needs_sqlite = false },
-        .{ .path = "wal_parse_benchmark.zig", .needs_sqlite = false },
-        .{ .path = "route_match_benchmark.zig", .needs_sqlite = false },
+        .{ .path = "src/state_machine_benchmark.zig", .needs_sqlite = true },
+        .{ .path = "src/aegis_checksum_benchmark.zig", .needs_sqlite = false },
+        .{ .path = "src/crc_frame_benchmark.zig", .needs_sqlite = false },
+        .{ .path = "src/hmac_session_benchmark.zig", .needs_sqlite = false },
+        .{ .path = "src/wal_parse_benchmark.zig", .needs_sqlite = false },
+        .{ .path = "src/route_match_benchmark.zig", .needs_sqlite = false },
     };
 
     const bench_smoke_options = b.addOptions();
@@ -626,7 +626,7 @@ fn build_ci(
 
     if (default or mode == .@"test") {
         // Scan annotations — regenerate routes + manifest.
-        build_ci_step(b, step_ci, &.{ "scan", "--", "handlers/",
+        build_ci_step(b, step_ci, &.{ "scan", "--", "src/handlers/",
             "--routes-zig=generated/routes.generated.zig",
             "--manifest=generated/manifest.json",
         });
@@ -638,7 +638,7 @@ fn build_ci(
         // non-canonical source dir will now fail CI loudly.
         const freshness = b.addSystemCommand(&.{
             "git",                "diff",                            "--exit-code",
-            "generated/routes.generated.zig", "generated/manifest.json",
+            "src/generated/routes.generated.zig", "src/generated/manifest.json",
         });
         freshness.setName("freshness check: generated/");
         step_ci.dependOn(&freshness.step);

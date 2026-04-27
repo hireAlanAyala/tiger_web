@@ -43,7 +43,7 @@ test "tidy" {
         // imported third-party code anyway. TB doesn't have an
         // analogous skip because they don't vendor anything at this
         // scale; LSM is theirs, all under their style discipline.
-        if (std.mem.startsWith(u8, file_path, "vendor/")) continue;
+        if (std.mem.startsWith(u8, file_path, "src/vendor/")) continue;
 
         const source_file = try SourceFile.read(file_path, file_buffer);
         try tidy_file(gpa, &counter, source_file, &errors);
@@ -309,7 +309,7 @@ test tidy_control_characters {
 
 fn tidy_banned(file: SourceFile, errors: *Errors) void {
     // Vendored code is exempt from bans.
-    if (std.mem.eql(u8, file.path, "src/stdx/vendored/aegis.zig")) return;
+    if (std.mem.eql(u8, file.path, "src/framework/stdx/vendored/aegis.zig")) return;
     // Don't ban ourselves!
     if (std.mem.eql(u8, file.path, "src/tidy.zig")) return;
 
@@ -1333,8 +1333,8 @@ test "tidy no large blobs" {
         // Principled — vendored SQLite amalgamation. Single-file
         // C distribution, intentionally large. Same justification
         // shape as TB's :-( for their package-lock.
-        if (std.mem.eql(u8, path, "vendor/sqlite3/sqlite3.c")) continue;
-        if (std.mem.eql(u8, path, "vendor/sqlite3/sqlite3.h")) continue;
+        if (std.mem.eql(u8, path, "src/vendor/sqlite3/sqlite3.c")) continue;
+        if (std.mem.eql(u8, path, "src/vendor/sqlite3/sqlite3.h")) continue;
         // Historical blobs in git history (untracked from current
         // tree but still in past commits). Rewriting history would
         // be destructive on a shared public repo; accept the past.

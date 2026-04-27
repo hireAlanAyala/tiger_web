@@ -19,8 +19,8 @@
 
 const std = @import("std");
 const stdx = @import("stdx");
-const scanner = @import("annotation_scanner.zig");
-const server_main = @import("main.zig");
+const scanner = @import("src/annotation_scanner.zig");
+const server_main = @import("src/main.zig");
 const builtin = @import("builtin");
 
 pub const std_options: std.Options = .{
