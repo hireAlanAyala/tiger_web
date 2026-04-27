@@ -460,6 +460,29 @@ pub fn build(b: *std.Build) void {
     const unit_test_build_step = b.step("unit-test-build", "Build unit tests as ./zig-out/bin/tiger-unit-test");
     unit_test_build_step.dependOn(&b.addInstallArtifact(unit_test_binary, .{}).step);
 
+    // --- stdx tests as a separate target (TB pattern) ---
+    //
+    // stdx is wired as a module via `addImport("stdx", ...)`; tests
+    // inside framework/stdx/* can't be run from the main aggregator
+    // because Zig rejects importing the same file via both a module
+    // path and a direct filesystem path. Solution: a separate test
+    // target rooted at framework/stdx/stdx.zig with no stdx-as-module
+    // wiring.
+    //
+    // Mirrors TigerBeetle's `test-stdx` at `tigerbeetle/build.zig:895-903`:
+    // separate `b.addTest`, separate install artifact, separate run
+    // artifact, both wired into the unit-test pipeline.
+    const stdx_test_binary = b.addTest(.{
+        .name = "tiger-stdx-test",
+        .root_source_file = b.path("framework/stdx/stdx.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    unit_test_build_step.dependOn(&b.addInstallArtifact(stdx_test_binary, .{}).step);
+    const run_stdx_tests = b.addRunArtifact(stdx_test_binary);
+    run_stdx_tests.setEnvironmentVariable("ZIG_EXE", b.graph.zig_exe);
+    unit_test_step.dependOn(&run_stdx_tests.step);
+
     // --- Cross-language adapter tests (requires npx tsx) ---
     // Protocol vectors + round-trip tests validate TS serde against committed vectors.
     {

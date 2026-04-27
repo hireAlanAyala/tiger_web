@@ -595,8 +595,23 @@ fn devhub_coverage(shell: *Shell) !void {
     // real fuzzer there requires a matching entry here; otherwise
     // its coverage contribution is silently absent from the report.
     // The mirror comment at `Fuzzers` points back here.
+    // tiger-stdx-test's flags-test fixture reads ZIG_EXE (matches
+    // TB's stdx test, which TB wires via `setEnvironmentVariable`
+    // on the test run-artifact). Subprocesses inherit our env, so
+    // ZIG_EXE flows through to kcov → tiger-stdx-test as long as
+    // it's set in our env. Assert presence here with a clear
+    // error rather than letting one stdx test fail cryptically
+    // with EnvironmentVariableNotFound mid-coverage-run.
+    _ = shell.env_get("ZIG_EXE") catch {
+        log.err("ZIG_EXE not set; tiger-stdx-test will fail. " ++
+            "Run via `zig build scripts -- devhub` so ZIG_EXE " ++
+            "is propagated.", .{});
+        return error.MissingZigExe;
+    };
+
     inline for (.{
         "{kcov} ./zig-out/bin/tiger-unit-test",
+        "{kcov} ./zig-out/bin/tiger-stdx-test",
         "{kcov} ./zig-out/bin/tiger-fuzz --events-max=100000 state_machine 92",
         "{kcov} ./zig-out/bin/tiger-fuzz --events-max=100000 replay 92",
         "{kcov} ./zig-out/bin/tiger-fuzz --events-max=100000 message_bus 92",

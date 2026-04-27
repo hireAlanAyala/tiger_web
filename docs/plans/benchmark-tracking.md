@@ -579,30 +579,31 @@ conditions.
   (after GitHub Pro upgrade unblocked private-repo Pages). CI
   workflow now publishes `devhub/` + `coverage/` to
   `https://hirealanayala.github.io/tiger_web/` on every main merge.
-- [ ] **Tiger-unit-test aggregator exclusions to rescue.** Phase
-  G.0.a + the quine self-test landed, but three categories of
-  test-carrying files remain in `tiger_unit_tests.zig`'s
-  `excluded_files` list with rationales:
-  - `framework/stdx/*` (all 12 files): wired as a module via
-    `addImport("stdx", ...)`; Zig rejects direct file imports
-    alongside a module path pointing at the same file. Fix: add a
-    separate test target rooted at `framework/stdx/stdx.zig` with
-    its own `addTest` in build.zig. Stdx tests currently run only
-    when downstream consumers' tests exercise them.
-  - ~~`framework/bench.zig` + `framework/app.zig`~~ ✅ done
-    2026-04-27: wired `test_options` build-options module on
-    `unit_test_binary` (TB's pattern, `tigerbeetle/build.zig:885-893`).
-    Re-added both files; framework/app.zig's stale TestApp config
-    needed `.MessageResponse = TestResponse` to match the current
-    AppType field requirements. 365 → 370 tests in the aggregator.
-  Catching these required porting TB's quine self-test (audit
-  finding 2026-04-24); resolving them completes the TB-alignment
-  intent of "unit-test binary contains every test block."
+- [x] **Tiger-unit-test aggregator exclusions to rescue.** ✅ DONE
+  2026-04-27. Three categories all addressed:
+  - **`framework/stdx/*`** — added a separate `tiger-stdx-test`
+    target in `build.zig` rooted at `framework/stdx/stdx.zig`,
+    matching TB's pattern (`tigerbeetle/build.zig:895-903`). Wired
+    into `unit-test-build` (kcov-attachable) and `unit-test` step.
+    `scripts/devhub.zig:devhub_coverage` adds it to the kcov pass
+    with explicit ZIG_EXE-presence check (one stdx test reads it).
+    Brings stdx's 67 tests into the unit-test pipeline + coverage
+    report.
+  - **`framework/bench.zig` + `framework/app.zig`** — wired
+    `test_options` build-options module on `unit_test_binary` (TB's
+    pattern, `tigerbeetle/build.zig:885-893`). Re-added both files;
+    framework/app.zig's stale TestApp config needed
+    `.MessageResponse = TestResponse` to match current AppType field
+    requirements. Aggregator: 365 → 370 tests.
+  - **`handler_test.zig`** — deleted (commit `ec16398`); the file
+    tested an outdated 3-arg `route()` API plus an `EffectList`
+    render shape neither of which exist in the current
+    architecture. Integration is covered by `sim.zig` +
+    `state_machine_test.zig`.
 
-  (`handler_test.zig` was deleted 2026-04-27 — the file tested an
-  outdated 3-arg `route()` API plus an `EffectList` render shape
-  neither of which exist in the current architecture; integration
-  is covered by `sim.zig` + `state_machine_test.zig`.)
+  TB-alignment intent of "unit-test binary contains every test
+  block" now fulfilled. Catching these required porting TB's quine
+  self-test (audit finding 2026-04-24).
 - [ ] **`pending_index_benchmark.zig` and `ring_buffer_benchmark.zig`
   at API boundary.** Add if container-choice stabilizes and we
   want regression detection. Until then, pipeline-tier bench
