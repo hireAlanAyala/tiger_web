@@ -87,20 +87,12 @@ that measurably does nothing is "don't ship known-throwaway
 code" (CLAUDE.md). It's also a determinism hazard — warmup that
 discards measurements hides cold-path cost by design.
 
-- [ ] Delete `--warmup-seconds` flag, warmup loop, and warmup
-  time-window logic from `benchmark_load.zig`.
-- [ ] Update `benchmark_load.zig` header to remove the
+- [x] Deleted `--warmup-seconds` flag, warmup loop, and warmup
+  time-window logic from `benchmark_load.zig` (pre-H.3 strip).
+- [x] Updated `benchmark_load.zig` header to remove the
   "principled flaw fix: warmup" claim.
-- [ ] Update `docs/internal/decision-benchmark-tracking.md` Phase
-  D.5 section with: "Warmup shipped, measured 0% effect, removed
-  in H.3. Lesson: D.5 measurement should have gated D shipping,
-  not followed it."
-- [ ] Alternative (if the team disagrees with deletion): gate
-  behind `--warmup-seconds=0` default AND add a comment in
-  `benchmark_load.zig` above the warmup block: `// Warmup is
-  off-by-default; D.5 measured 0% p50 impact. Kept for future
-  cold-cache scenarios where first-request cost matters.` But
-  default must be 0, not 5.
+- [x] `main.zig:762-769` documents the decision and the 0% D.5
+  measurement.
 
 Verify: next CI run on main pushes a benchmark datapoint with no
 warmup-masking. This datapoint is **t=0 for the ≥1-week clock**
@@ -432,25 +424,25 @@ then surgical remove + change. Minimum edits for **honesty**
 (renders our data, attributed to us). Inert TB code stays —
 keep what doesn't hurt us.
 
-- [ ] `cp /home/walker/Documents/personal/tigerbeetle/src/devhub/devhub.js`
+- [x] `cp /home/walker/Documents/personal/tigerbeetle/src/devhub/devhub.js`
   → `tiger-web-devhubdb/devhub.js`.
-- [ ] `cp .../index.html` → `tiger-web-devhubdb/index.html`.
-- [ ] `cp .../style.css` → `tiger-web-devhubdb/style.css`.
-- [ ] **Preserve the `devhub.js` header comment verbatim** (lines
+- [x] `cp .../index.html` → `tiger-web-devhubdb/index.html`.
+- [x] `cp .../style.css` → `tiger-web-devhubdb/style.css`.
+- [x] **Preserve the `devhub.js` header comment verbatim** (lines
   1-8 — "no TypeScript, no build step, snake_case, `deno fmt`").
   Documents why the file looks un-TB-like; prevents future
   "rewrite in TS" impulse.
 
 ### One-time repo setup
 
-- [ ] Create a `triaged` label on `hireAlanAyala/tiger_web` and
+- [x] Create a `triaged` label on `hireAlanAyala/tiger_web` and
   apply it to every reviewed open issue. New issues get the
   label when triaged. Without this, the "Issue triage N" badge
   counts every open issue as untriaged.
 
 ### Remove (1 item)
 
-- [ ] **Release manager section + rotation logic.** Solo project;
+- [x] **Release manager section + rotation logic.** Solo project;
   TB's hardcoded roster (`batiati`, `cb22`, `chaitanyabhandari`,
   `fabioarnold`, `lewisdaly`, `matklad`, `sentientwaffle`,
   `toziegler`, `GeorgKreuzmayr`) renders other people's names as
@@ -467,38 +459,38 @@ keep what doesn't hurt us.
 
 `index.html`:
 
-- [ ] `<title>TigerBeetle DevHub</title>` → `Tiger Web DevHub`.
-- [ ] Nav branding (line 17-19): replace `<svg id="logo"><use
+- [x] `<title>TigerBeetle DevHub</title>` → `Tiger Web DevHub`.
+- [x] Nav branding (line 17-19): replace `<svg id="logo"><use
   href="#svg-logo">` with plain `<h1 class="brand">Tiger Web
   DevHub</h1>`.
-- [ ] **SVG template block (`<svg id="svg-logo">` lines 88-95):
+- [x] **SVG template block (`<svg id="svg-logo">` lines 88-95):
   leave verbatim**, do not hand-edit `<path>` contents. The block
   is referenced by `#svg-logo`; leaving it intact costs nothing
   and avoids hand-SVG drift. The visible nav `<svg id="logo">`
   swap above is what the user sees.
-- [ ] "My code review" link →
+- [x] "My code review" link →
   `github.com/hireAlanAyala/tiger_web/pulls/assigned/@me`.
-- [ ] "Issue triage" link →
+- [x] "Issue triage" link →
   `github.com/hireAlanAyala/tiger_web/issues?q=is%3Aissue+is%3Aopen+-label%3Atriaged`.
-- [ ] **Keep the Nyrkiö link** in Metrics header — point it at our
+- [x] **Keep the Nyrkiö link** in Metrics header — point it at our
   Nyrkiö URL (`nyrkio.com/public/https%3A%2F%2Fgithub.com%2FhireAlanAyala%2Ftiger_web/main/devhub`).
   H.1 preserves the uploader; link lets the dashboard surface
   Nyrkiö's change-point view.
-- [ ] "Raw data" link (fuzz + metrics sections):
+- [x] "Raw data" link (fuzz + metrics sections):
   `tigerbeetle/devhubdb` → `hireAlanAyala/tiger-web-devhubdb`.
 
 `devhub.js` (each is a literal string replacement):
 
-- [ ] Metrics data URL (line 218).
-- [ ] Fuzz data URL (line 57).
-- [ ] Logs base URL (line 61).
-- [ ] Issues API URL (line 59):
+- [x] Metrics data URL (line 218).
+- [x] Fuzz data URL (line 57).
+- [x] Logs base URL (line 61).
+- [x] Issues API URL (line 59):
   `api.github.com/repos/tigerbeetle/tigerbeetle/issues` →
   `api.github.com/repos/hireAlanAyala/tiger_web/issues`.
-- [ ] Commit link URL (lines 171, 378).
-- [ ] PR prefix (line 241).
-- [ ] Branch-identity check (line 232).
-- [ ] Release-tree URL check (line 237). Inert until we adopt the
+- [x] Commit link URL (lines 171, 378).
+- [x] PR prefix (line 241).
+- [x] Branch-identity check (line 232).
+- [x] Release-tree URL check (line 237). Inert until we adopt the
   `release/vN.N` tag convention; when we ship our first release,
   push the tag and `is_release()` starts annotating.
 
@@ -530,7 +522,7 @@ Named so no future "tidy up" pass deletes them:
 
 ### Verification
 
-- [ ] Load `https://hirealanayala.github.io/tiger-web-devhubdb/`
+- [x] Load `https://hirealanayala.github.io/tiger-web-devhubdb/`
   in a browser. Confirm:
   - `<title>` reads "Tiger Web DevHub".
   - Metrics section renders all charts (23 metrics post-H.2:
@@ -542,7 +534,7 @@ Named so no future "tidy up" pass deletes them:
   - `outlier_score` red-highlighting visible on any metric with
     variance.
   - No "TigerBeetle" text visible anywhere the user can read.
-- [ ] Open browser devtools; confirm no JS errors (release-section
+- [x] Open browser devtools; confirm no JS errors (release-section
   HTML deletion must match JS invocation deletion — otherwise
   `querySelector` returns null and throws).
 
@@ -576,7 +568,10 @@ conditions.
      so the resulting discontinuity is explicit rather than misread
      as a regression. Depends on (2) for the underlying trend line.
   Estimated effort: ~1.5h total.
-- [ ] **Register Nyrkiö account + set `NYRKIO_TOKEN`.** Flips H.1's
+- [x] **Register Nyrkiö account + set `NYRKIO_TOKEN`.** Done
+  2026-04-27 (token registered in `hireAlanAyala/tiger_web` Actions
+  secrets). Next main-merge CI run uploads to Nyrkiö; dashboard
+  link starts resolving to live change-point view. Flips H.1's
   token-optional upload from "no-op" to "active change-point
   detection." Zero code change.
 - [x] **Enable GitHub Pages on `hireAlanAyala/tiger_web`** —

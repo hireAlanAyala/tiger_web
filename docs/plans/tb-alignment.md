@@ -50,7 +50,17 @@ benchmark-tracking.
 Worthwhile once the dashboard is shipped and stable. Unlock more
 developer-experience capabilities.
 
-### 6. Style-check script beyond `bench-check`
+### 6. Style-check script beyond `bench-check` ✅ DONE (2026-04-27)
+
+Shipped as `scripts/style_check.zig` (commit `fffbc0a`). Three
+mechanical checks on hot-path files: throwaway markers (FAIL),
+70-line function limit (WARN; skips comptime type-constructor
+sigs), assertion density ≥2/fn (WARN). Wired into `zig build
+unit-test` alongside `bench-check`. First run found 12 real
+discipline gaps in existing code — exactly the class of issue
+that prose rules in CLAUDE.md kept missing.
+
+(Original tier-2 description follows for historical record.)
 
 - [ ] Add `scripts/style_check.zig` that walks the tree and asserts:
   - No function body exceeds 70 lines (TIGER_STYLE hard limit)
@@ -90,7 +100,16 @@ Effort: ~1 hour (cp + trim + skeleton).
 Blocks: nothing. Useful as an anchor when release story is
 designed.
 
-### 7a. Untrack native-addon binaries; CI rebuilds on every run
+### 7a. Untrack native-addon binaries; CI rebuilds on every run ✅ DONE (2026-04-27)
+
+Shipped as commit `d83003d`. Moved
+`packages/ts/native/dist/**/shm.node` into `.gitignore`. `focus_exe.step.dependOn(native_addon_step)`
+in `build.zig` already auto-rebuilds; verified by `rm -rf
+packages/ts/native/dist/` followed by `zig build` reproducing all
+four platform addons from source. Source-to-binary drift is now
+mechanically impossible.
+
+(Original tier-2 description follows for historical record.)
 
 - [ ] `packages/ts/native/dist/{aarch64,x86_64}-{linux,macos}/shm.node`
   are checked into git. Verified (2026-04-24) that `zig build
