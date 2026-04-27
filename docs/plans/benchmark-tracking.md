@@ -594,12 +594,14 @@ conditions.
     (TB's pattern for smoke-vs-benchmark run-mode switching).
     Extend `build.zig`'s `unit_test_binary` config with
     `addOptions("test_options", ...)` then re-add both files.
-  - `handler_test.zig`: stale — compiles against an old
-    `route(params, body)` API that's since changed to
-    `route(method, path, body)`. Refresh test calls, re-add.
   Catching these required porting TB's quine self-test (audit
   finding 2026-04-24); resolving them completes the TB-alignment
   intent of "unit-test binary contains every test block."
+
+  (`handler_test.zig` was deleted 2026-04-27 — the file tested an
+  outdated 3-arg `route()` API plus an `EffectList` render shape
+  neither of which exist in the current architecture; integration
+  is covered by `sim.zig` + `state_machine_test.zig`.)
 - [ ] **`pending_index_benchmark.zig` and `ring_buffer_benchmark.zig`
   at API boundary.** Add if container-choice stabilizes and we
   want regression detection. Until then, pipeline-tier bench

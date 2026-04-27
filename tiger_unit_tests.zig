@@ -37,9 +37,6 @@ comptime {
     _ = @import("message.zig");
     _ = @import("protocol.zig");
     _ = @import("html.zig");
-    // handler_test.zig excluded below — compiles against a stale
-    // `route(params, body)` API that's since changed to
-    // `route(method, path, body)`. Tracked follow-up to refresh.
     _ = @import("wal_test.zig");
     _ = @import("annotation_scanner.zig");
     _ = @import("supervisor.zig");
@@ -179,11 +176,6 @@ const excluded_files = [_][]const u8{
     "framework/stdx/time_units.zig",
     "framework/stdx/zipfian.zig",
     "framework/stdx/testing/snaptest.zig",
-    // Stale — compiles against an old `route(params, body)` API that
-    // no longer exists. Tracked follow-up in benchmark-tracking.md:
-    // refresh handler_test.zig against the current route signature
-    // then re-add here.
-    "handler_test.zig",
     // Needs `test_options` build-options module wired for the
     // aggregator target. Follow-up: extend build.zig's
     // unit_test_binary config then re-add.
