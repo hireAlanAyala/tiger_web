@@ -58,6 +58,19 @@ jobs:
     # `.github/workflows/ci.yml:133`); `ubuntu-latest` drifts runner
     # versions from under our budgets silently.
     runs-on: ubuntu-22.04
+    # Pages deploy needs `pages: write` + `id-token: write`. Concurrency
+    # group "pages" prevents two main-branch deploys racing each other
+    # (only one Pages site per repo; concurrent deploys would conflict).
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
+    concurrency:
+      group: pages
+      cancel-in-progress: false
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
     # Fetch full history so `git show -s --format=%ct <sha>` resolves.
     steps:
       - uses: actions/checkout@v4
@@ -99,20 +112,10 @@ jobs:
           else
             sudo -E ./zig/zig build scripts -- devhub --sha="$SHA" --dry-run
           fi
-      # Archive the coverage/ artifact produced by devhub_coverage.
-      # TB deploys theirs to GitHub Pages from their main repo; our
-      # devhubdb is a separate repo with its own Pages, so unified
-      # serving needs its own architectural decision (tracked as
-      # G.1 dashboard-Coverage-link follow-up). For now, upload as a
-      # standalone build artifact so reviewers can download and
-      # inspect it on every run (PR and main) — PR coverage lets
-      # reviewers verify coverage-affecting changes. Pages hosting
-      # lands when G.1 ships.
-      #
-      # Retention 30 days: arbitrary starting point. Adjust after a
-      # few weeks once we see typical artifact size × merge rate.
-      # Storage is cheap; premature tightening costs a scroll back
-      # to tune.
+      # Archive the coverage/ artifact produced by devhub_coverage as
+      # a per-run build artifact (downloadable on every PR + main run).
+      # Independent of Pages; useful for reviewers comparing coverage
+      # on a PR before merge.
       - name: Archive coverage report
         if: always()
         uses: actions/upload-artifact@v4
@@ -121,3 +124,26 @@ jobs:
           path: coverage/
           retention-days: 30
           if-no-files-found: ignore
+
+      # Stage devhub/ + coverage/ into a single Pages publish dir.
+      # TB-aligned single-origin Pages: dashboard at the Pages root,
+      # coverage at /coverage/. Matches TB's `src/devhub/` layout
+      # (their main repo serves dashboard + coverage together;
+      # devhubdb is data-only).
+      - name: Stage Pages publish directory
+        if: github.ref == 'refs/heads/main'
+        run: |
+          mkdir -p _site
+          cp -r devhub/* _site/
+          if [ -d coverage ]; then
+            cp -r coverage _site/coverage
+          fi
+      - name: Upload Pages artifact
+        if: github.ref == 'refs/heads/main'
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: _site/
+      - name: Deploy to GitHub Pages
+        if: github.ref == 'refs/heads/main'
+        id: deployment
+        uses: actions/deploy-pages@v4

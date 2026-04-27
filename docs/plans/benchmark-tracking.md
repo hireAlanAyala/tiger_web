@@ -365,15 +365,23 @@ happens on first CI run after this commit lands.
 
 ---
 
-## Phase G.1 — dashboard ✅ DONE (2026-04-27)
+## Phase G.1 — dashboard ✅ DONE (2026-04-27, restructured to TB-aligned single-origin)
 
-**Live at:** `https://hirealanayala.github.io/tiger-web-devhubdb/`
-(HTTP 200, `<title>Tiger Web DevHub</title>`, branded heading
-rendered).
+**Live at:** `https://hirealanayala.github.io/tiger_web/` (TB-aligned
+single-origin Pages on the main repo, matching TB's `src/devhub/`
+layout). Coverage colocates at `./coverage/`.
 
-**Shipped via:** commit `f6594d6` on `hireAlanAyala/tiger-web-devhubdb`.
-Source: TB commit `58b48aa9d` (`src/devhub/{devhub.js,index.html,
-style.css}`), whole-file cp + surgical remove + change pass.
+**Architectural history:** initial G.1 ship (commit `f6594d6` on
+devhubdb) put dashboard files in the data repo — a structural
+divergence from TB's pattern (TB hosts dashboard in main repo, uses
+devhubdb for data only). Restructured to single-origin Pages on
+`hireAlanAyala/tiger_web` once private-repo Pages was unblocked
+(GitHub Pro upgrade). Devhubdb reverts to data-only role.
+
+**Shipped via:** dashboard files in `tiger_web/devhub/{devhub.js,
+index.html,style.css}`; CI publishes to Pages via
+`actions/upload-pages-artifact` + `actions/deploy-pages`.
+Source: TB commit `58b48aa9d`, whole-file cp + surgical edits.
 
 **Survival:** 836 lines total (TB had ~860). 99→79 in index.html,
 552→548 in devhub.js, 209→209 in style.css.
@@ -399,48 +407,25 @@ SVG template block.
 Effort: 3 hours. Dependencies: G.0 complete + ≥1 week of data in
 devhubdb.
 
-### Prerequisite decisions — LOCKED (2026-04-24)
+### Prerequisite decisions — LOCKED (2026-04-24, RESOLVED 2026-04-27)
 
-Two dashboard links resolved. Each decision is deliberately made
-without requiring user-action before G.1 ships; both activate
-automatically when the dependent resource lands.
+**Coverage link: ✅ resolved via TB-aligned single-origin restructure.**
+Dashboard moved from devhubdb to `tiger_web/devhub/`; CI publishes
+both `devhub/` and `coverage/` to tiger_web's Pages. Coverage link
+is now relative `./coverage/index.html` — same origin as dashboard,
+matches TB's exact pattern.
 
-**Nyrkiö link: option (c) — leave `<a>` pointing at the future
-public URL; 404s until account registration, auto-activates when
-registration lands.**
+**Nyrkiö link: option (c) — `<a>` points at the future public URL;
+404s until account registration, auto-activates when registration
+lands.**
 
 `<a href="https://nyrkio.com/public/https%3A%2F%2Fgithub.com%2FhireAlanAyala%2Ftiger_web/main/devhub">`
-— same URL shape TB uses for their public view. No dashboard code
-churn when registration completes; only cost is the intervening
-404. Tracked follow-up: register account + set `NYRKIO_TOKEN`
-(existing entry in tracked follow-ups below).
+— same URL shape TB uses. No dashboard code churn when registration
+completes. Tracked follow-up below.
 
-**Coverage link: option (1) — Pages on `hireAlanAyala/tiger_web`
-via `actions/deploy-pages`. TB-aligned (matches their `src/devhub/`
-Pages pattern modulo per-repo origin).**
-
-Why not (2): kcov HTML is ~50MB × N commits; devhubdb bloats fast.
-Why not (3): breaks public-dashboard intent (Actions UI requires
-repo read access).
-
-Dashboard's Coverage link points at
-`https://hirealanayala.github.io/tiger_web/` (tiger_web's Pages
-origin). Active the moment Pages is enabled with source "GitHub
-Actions" in repo settings — a one-time user-action, tracked below.
-
-CI wiring for (1) is deferred until Pages is enabled — adding a
-`deploy-pages` step that's guaranteed to fail until a separate
-user-action flips the repo-settings toggle violates "don't ship
-known-throwaway code." `actions/upload-artifact` remains the
-per-run-inspectable fallback until the deploy step lands.
-
-**Two user-actions tracked in the follow-ups below unblock
-activation:**
+**Outstanding user-action:**
 - Register Nyrkiö account + set `NYRKIO_TOKEN` → Nyrkiö link
-  activates.
-- Enable GitHub Pages on `hireAlanAyala/tiger_web` with source
-  "GitHub Actions" → Coverage link target becomes reachable; PR
-  to add `deploy-pages` step follows immediately.
+  activates + change-point detection turns on.
 
 **Discipline:** whole-file `cp` of TB's three dashboard files,
 then surgical remove + change. Minimum edits for **honesty**
@@ -594,12 +579,11 @@ conditions.
 - [ ] **Register Nyrkiö account + set `NYRKIO_TOKEN`.** Flips H.1's
   token-optional upload from "no-op" to "active change-point
   detection." Zero code change.
-- [ ] **Enable GitHub Pages on `hireAlanAyala/tiger_web`** with
-  source "GitHub Actions" in repo settings. Once enabled, follow
-  up with a PR adding `actions/upload-pages-artifact` +
-  `actions/deploy-pages` to the devhub CI job so `coverage/` is
-  served at `https://hirealanayala.github.io/tiger_web/`. G.1's
-  Coverage link (locked at this target) activates automatically.
+- [x] **Enable GitHub Pages on `hireAlanAyala/tiger_web`** —
+  done 2026-04-27 via `gh api ... pages -f build_type=workflow`
+  (after GitHub Pro upgrade unblocked private-repo Pages). CI
+  workflow now publishes `devhub/` + `coverage/` to
+  `https://hirealanayala.github.io/tiger_web/` on every main merge.
 - [ ] **Tiger-unit-test aggregator exclusions to rescue.** Phase
   G.0.a + the quine self-test landed, but three categories of
   test-carrying files remain in `tiger_unit_tests.zig`'s
