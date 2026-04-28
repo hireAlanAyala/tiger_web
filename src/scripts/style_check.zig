@@ -37,8 +37,6 @@
 //! regressions" not "perfect coverage."
 
 const std = @import("std");
-const log = std.log;
-const assert = std.debug.assert;
 
 const Shell = @import("../shell.zig");
 

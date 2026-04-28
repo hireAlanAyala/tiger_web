@@ -139,7 +139,7 @@
 
 ---
 
-# Tickets
+## Tickets
 
 ## 1: JSON parser rejects whitespace around colons
 
@@ -193,7 +193,7 @@ a dashboard. Document the output format so translators are trivial.
 
 ---
 
-# Storage boundary gaps (from audit)
+## Storage boundary gaps (from audit)
 
 High priority:
 - Assert bind parameter count matches SQL placeholders (1 line)
@@ -339,7 +339,7 @@ fetches periodically, keeps local storage current, state machine
 resolves per-request from local data. Already works for login codes.
 Generalize when a second auth strategy is needed.
 
-# Cross-platform gaps (from macOS port audit)
+## Cross-platform gaps (from macOS port audit)
 
 - musl Linux variants: NativePlatform has glibc only. Alpine/Docker
   containers need x86_64-linux-musl + aarch64-linux-musl. TS platform
@@ -352,7 +352,7 @@ Generalize when a second auth strategy is needed.
   it). Different SHM regions, different protocols — correct but needs a
   comment explaining why the layouts differ.
 
-# Backlog
+## Backlog
 
 - ensure the server is compatible with http 2/3
 - Component benchmarks: HTTP parser, auth sign+verify, render encoding,
@@ -386,11 +386,11 @@ Generalize when a second auth strategy is needed.
 - assert the args passed to the sidecar functions are not directly mutated like ctx.something = ""
 - if storage is a network db, commit will probably need to be async, right now it blocks
 - Rust-style error messages for scanner/compiler output: source code front-and-center, underline the problem, suggest the fix. Reference: https://blog.rust-lang.org/2016/08/10/Shape-of-errors-to-come/ — proven adoption/retention factor, especially during the learning curve. Applies to annotation validation, SQL mismatches, status exhaustiveness, type errors.
-# clean up
+## clean up
 - ensure we use cli/program defaults very carefully. i like no defaults or few defaults over heavy defaults
 - think about 10 years from now, what parts of the user space would have likely been violated? we should pull back a primitive for these.
 
-# plugins
+## plugins
 potential pulled at runtime? or compiled with the server's binary?
 should they not allocate after init?
 I think for sure zig only as the language
@@ -423,7 +423,7 @@ Claude said:
   The irony: the "microservice architecture done right" looks like a monolith with async workers. Which is what Tiger is. The industry spent a decade distributing systems that should have    
   stayed on one machine, then spent another decade building tools to cope with the distribution. Tiger skips both decades.                                                                     
 
-# industries capped by language speed
+## industries capped by language speed
 shopify liquid
 wordpress websites
 jamstack tooling

@@ -24,7 +24,6 @@ const assert = std.debug.assert;
 const message = @import("message.zig");
 const state_machine = @import("state_machine.zig");
 const auth = @import("framework/auth.zig");
-const stdx = @import("stdx");
 const App = @import("app.zig");
 const TestStateMachine = App.SM;
 const PRNG = @import("stdx").PRNG;

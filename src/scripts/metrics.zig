@@ -9,7 +9,6 @@
 
 const std = @import("std");
 const log = std.log.scoped(.metrics);
-const assert = std.debug.assert;
 
 const stdx = @import("stdx");
 const Shell = @import("../shell.zig");
@@ -185,7 +184,7 @@ fn count_fuzzers(shell: *Shell, arena: std.mem.Allocator) u32 {
     var lines = std.mem.splitScalar(u8, content, '\n');
     while (lines.next()) |line| {
         const trimmed = std.mem.trimLeft(u8, line, " ");
-        // Real fuzzers have .name = @import("file.zig"), skip smoke and canary.
+        // Real fuzzers have a `.name` line with an @import call; skip smoke and canary.
         if (std.mem.startsWith(u8, trimmed, ".") and
             contains(trimmed, "@import("))
         {

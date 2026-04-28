@@ -1,5 +1,4 @@
 const std = @import("std");
-const assert = std.debug.assert;
 const auth = @import("auth.zig");
 
 /// Maximum HTTP header size. Requests with headers exceeding this are rejected.

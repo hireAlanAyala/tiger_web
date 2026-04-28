@@ -12,7 +12,6 @@
 
 const std = @import("std");
 const posix = std.posix;
-const assert = std.debug.assert;
 const stdx = @import("stdx");
 const PRNG = stdx.PRNG;
 const Ratio = PRNG.Ratio;

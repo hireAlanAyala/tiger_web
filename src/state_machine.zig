@@ -1,6 +1,5 @@
 const std = @import("std");
 const assert = std.debug.assert;
-const stdx = @import("stdx");
 const message = @import("message.zig");
 const auth = @import("framework/auth.zig");
 // Tracer removed from SM — owned by server. See framework/trace.zig.

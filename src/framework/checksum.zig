@@ -6,7 +6,6 @@
 //! Used by the WAL to detect bitrot and hash-chain entries.
 
 const std = @import("std");
-const assert = std.debug.assert;
 
 const Aegis128LMac_128 = std.crypto.auth.aegis.Aegis128LMac_128;
 

@@ -1,3 +1,4 @@
+# TB-style debugging
 
 tiger beetle's diagnostic is seed+git_commit.
 the seed is specfically for replaying the events in debug mode

@@ -1,5 +1,4 @@
 const std = @import("std");
-const assert = std.debug.assert;
 const t = @import("../prelude.zig");
 const fuzz_lib = @import("../fuzz_lib.zig");
 const PRNG = @import("stdx").PRNG;

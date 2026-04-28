@@ -1,4 +1,3 @@
-const std = @import("std");
 const t = @import("../prelude.zig");
 const fuzz_lib = @import("../fuzz_lib.zig");
 const PRNG = @import("stdx").PRNG;

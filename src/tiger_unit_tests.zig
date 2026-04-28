@@ -9,7 +9,7 @@
 //! `./zig-out/bin/tiger-unit-test` — the kcov-attachable artifact
 //! the coverage pipeline (plan Phase G.0.b) needs.
 //!
-//! **When to update:** add a `_ = @import("X.zig");` line whenever
+//! **When to update:** add an `_ = @import` line for the new file whenever
 //! a new file gains a `test { ... }` block. The `unit_tests_aggregator_is_complete`
 //! test at the bottom catches silent omissions — walks the tree and
 //! asserts every test-carrying file is imported here.

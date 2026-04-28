@@ -239,7 +239,17 @@ fn tidy_file(
         var tree = try std.zig.Ast.parse(gpa, file.text, .zig);
         defer tree.deinit(gpa);
 
-        tidy_dead_declarations(file, &tree, counter, errors);
+        // Generated files: skip dead-declaration check. The handler
+        // imports in src/generated/handlers.generated.zig are accessed
+        // via @field(handler_imports, @tagName(op)) reflection — the
+        // lexer-only heuristic doesn't see those usages and reports
+        // every handler as dead. Principled skip — generated files
+        // should not be linted with whole-program-aware rules.
+        const is_generated = std.mem.indexOf(u8, file.path, "/generated/") != null or
+            std.mem.startsWith(u8, file.path, "generated/");
+        if (!is_generated) {
+            tidy_dead_declarations(file, &tree, counter, errors);
+        }
         tidy_ast(file, &tree, errors);
     }
     if (file.has_extension(".md")) {
@@ -1224,32 +1234,36 @@ const DeadFilesDetector = struct {
     }
 
     fn is_entry_point(file: FileName) bool {
+        // Tiger-web entry points. Departs from TB's list — we don't
+        // ship multiversion/jni/node bindings, but we do have:
+        //   - focus.zig at repo root (CLI shell)
+        //   - tiger_web.zig vsr-style module hub (re-export only)
+        //   - sim.zig / sim_sidecar.zig / fuzz_tests.zig (test entry points
+        //     run via `zig build test`, not @import'd)
+        //   - tiger_unit_tests.zig (aggregator, run via `zig build unit-test-build`)
+        //   - *_benchmark.zig (each is a build.addExecutable root)
+        //   - zig_sidecar.zig / adapters/zig_adapter.zig (separate build targets)
+        //   - scripts.zig (script dispatcher root)
+        //   - build.zig (Zig build script convention).
         const entry_points: []const []const u8 = &.{
-            "build_multiversion.zig",
             "build.zig",
-            "dotnet_bindings.zig",
-            "file_checker.zig",
-            "fuzz_tests.zig",
-            "go_bindings.zig",
-            "integration_tests.zig",
-            "java_bindings.zig",
-            "jni_tests.zig",
-            "libtb_client.zig",
+            "focus.zig",
+            "tiger_web.zig",
+            "tiger_unit_tests.zig",
             "main.zig",
-            "node_bindings.zig",
-            "node.zig",
-            "page_writer.zig",
-            "python_bindings.zig",
+            "sim.zig",
+            "sim_sidecar.zig",
+            "fuzz_tests.zig",
             "scripts.zig",
-            "search_index_writer.zig",
-            "service_worker_writer.zig",
-            "rust_bindings.zig",
-            "single_page_writer.zig",
-            "tb_client_header.zig",
-            "unit_tests.zig",
-            "vopr.zig",
-            "vortex.zig",
-            "zig_driver.zig",
+            "zig_sidecar.zig",
+            "zig_adapter.zig",
+            // Benchmark binaries — each is its own build.addExecutable root.
+            "aegis_checksum_benchmark.zig",
+            "crc_frame_benchmark.zig",
+            "hmac_session_benchmark.zig",
+            "route_match_benchmark.zig",
+            "state_machine_benchmark.zig",
+            "wal_parse_benchmark.zig",
         };
         for (entry_points) |entry_point| {
             if (std.mem.startsWith(u8, &file, entry_point)) return true;

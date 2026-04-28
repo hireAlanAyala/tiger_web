@@ -1,5 +1,4 @@
 const std = @import("std");
-const assert = std.debug.assert;
 
 /// Handler interface types — comptime-generated per operation.
 ///

@@ -42,7 +42,6 @@
 //! holds the 3-run calibration. Phase F regenerates on `ubuntu-22.04`.
 
 const std = @import("std");
-const assert = std.debug.assert;
 
 const stdx = @import("stdx");
 

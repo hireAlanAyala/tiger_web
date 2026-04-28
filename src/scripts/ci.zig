@@ -13,10 +13,7 @@
 //! sidecar runs user-space business logic, not just protocol wrapping.
 
 const std = @import("std");
-const log = std.log;
-const assert = std.debug.assert;
 
-const stdx = @import("stdx");
 const Shell = @import("../shell.zig");
 
 // Example projects — our equivalent of TB's LanguageCI.

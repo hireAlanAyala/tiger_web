@@ -15,8 +15,6 @@
 const std = @import("std");
 const assert = std.debug.assert;
 
-const log = std.log.scoped(.benchmark);
-
 const BenchmarkArgs = @import("main.zig").BenchmarkArgs;
 const benchmark_load = @import("benchmark_load.zig");
 

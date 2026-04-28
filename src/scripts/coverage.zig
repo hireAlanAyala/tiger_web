@@ -8,7 +8,6 @@
 
 const std = @import("std");
 const log = std.log.scoped(.coverage);
-const assert = std.debug.assert;
 
 const stdx = @import("stdx");
 const Shell = @import("../shell.zig");

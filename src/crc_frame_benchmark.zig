@@ -42,7 +42,6 @@
 //! on `ubuntu-22.04`.
 
 const std = @import("std");
-const assert = std.debug.assert;
 
 const cache_line_size = @import("framework/constants.zig").cache_line_size;
 const shm_layout = @import("framework/shm_layout.zig");
