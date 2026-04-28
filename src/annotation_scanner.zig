@@ -1997,8 +1997,14 @@ fn emit_routes_zig(
             if (qi > 0) try w.writeAll(", ");
             try w.print("\"{s}\"", .{name});
         }
-        // Handler module import — relative to generated/ directory.
-        try w.print("}}, .handler = @import(\"../{s}\") }},\n", .{route.file});
+        // Handler module import — relative to src/generated/ directory.
+        // route.file is repo-root-relative (e.g. "src/handlers/X.zig");
+        // strip the leading "src/" so the import resolves as "../handlers/X.zig".
+        const handler_rel = if (std.mem.startsWith(u8, route.file, "src/"))
+            route.file["src/".len..]
+        else
+            route.file;
+        try w.print("}}, .handler = @import(\"../{s}\") }},\n", .{handler_rel});
     }
 
     try w.writeAll(

@@ -648,8 +648,8 @@ fn build_ci(
     if (default or mode == .@"test") {
         // Scan annotations — regenerate routes + manifest.
         build_ci_step(b, step_ci, &.{ "scan", "--", "src/handlers/",
-            "--routes-zig=generated/routes.generated.zig",
-            "--manifest=generated/manifest.json",
+            "--routes-zig=src/generated/routes.generated.zig",
+            "--manifest=src/generated/manifest.json",
         });
         // Freshness check — committed codegen outputs must match the scanner.
         // The manifest no longer embeds source line numbers (they polluted
