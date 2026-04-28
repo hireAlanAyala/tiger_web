@@ -1,5 +1,17 @@
 # Benchmark Tracking — Remaining Work
 
+**STATUS (2026-04-28): all phases shipped — A through F, H corrective
++ additive, G.0 coverage, G.1 dashboard.** Live at
+`https://hirealanayala.github.io/tiger_web/`. Only tracked follow-ups
+remain (see bottom). Plan kept as a reference; safe to delete once
+the follow-ups graduate to either roadmap items or todo.md tickets.
+
+Post-shipping note (2026-04-28): the src/ migration moved generated
+files to `src/generated/`; CI scan args + scanner relative-import
+emission + `test-adapter` paths all needed updating
+(commits `0bda43d`, `8163e64`). Codegen-freshness gate now mechanizes
+the catch — see `feedback_post_migration_grep_old_paths.md` in memory.
+
 All phases through F are shipped (commits up to `345418d`). Primitive
 + pipeline + SLA tiers emit `devhub.zig`-parseable output; CI uploads
 to `hireAlanAyala/tiger-web-devhubdb` on every main merge;
