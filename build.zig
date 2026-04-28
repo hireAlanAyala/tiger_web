@@ -221,6 +221,27 @@ pub fn build(b: *std.Build) void {
     });
     focus_exe.root_module.addImport("stdx", stdx_module);
     focus_exe.root_module.addOptions("build_options", focus_build_options);
+    // tiger_web module — public API root for binaries that live
+    // outside src/ (focus.zig at repo root, because @embedFile of
+    // packages/* + templates/* requires it inside Zig's package
+    // boundary). Same pattern as TigerBeetle's `vsr` module rooted
+    // at `src/vsr.zig`: a single re-export hub that holds the
+    // public surface; cross-tree binaries reach in via
+    // `@import("tiger_web").X` rather than relative paths.
+    const tiger_web_module = b.createModule(.{
+        .root_source_file = b.path("src/tiger_web.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    tiger_web_module.addImport("stdx", stdx_module);
+    tiger_web_module.addOptions("build_options", focus_build_options);
+    // tiger_web re-exports storage.zig which @cImports sqlite3_zig.h;
+    // the module compiles separately from focus_exe so it needs its
+    // own include path + libc link.
+    tiger_web_module.addIncludePath(b.path("src/vendor/sqlite3"));
+    tiger_web_module.link_libc = true;
+    focus_exe.root_module.addImport("tiger_web", tiger_web_module);
+
     focus_exe.step.dependOn(native_addon_step);
     link_sqlite(focus_exe);
     b.installArtifact(focus_exe);

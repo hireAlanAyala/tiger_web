@@ -19,6 +19,10 @@ const stdx = @import("stdx.zig");
 const assert = std.debug.assert;
 const math = std.math;
 const Snap = stdx.Snap;
+// Principled divergence from TB: TB's stdx lives at src/stdx/; we
+// vendor it nested at src/framework/stdx/. Snap snapshot tests +
+// the floating-point self-test (`no floating point please`) use
+// this path to locate the source file, so it has to match our layout.
 const module_path = "src/framework/stdx";
 const snap = Snap.snap_fn(module_path);
 const KiB = stdx.KiB;

@@ -706,6 +706,8 @@ pub const main =
 
 test "flags" {
     const Snap = stdx.Snap;
+    // Principled divergence from TB: TB's stdx lives at src/stdx/;
+    // we vendor it at src/framework/stdx/. Snap path matches layout.
     const module_path = "src/framework/stdx";
     const snap = Snap.snap_fn(module_path);
 

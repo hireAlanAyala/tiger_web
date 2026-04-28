@@ -56,6 +56,9 @@ const assert = std.debug.assert;
 const Random = std.Random;
 const math = std.math;
 const Snap = stdx.Snap;
+// Principled divergence from TB: TB's stdx lives at src/stdx/; we
+// vendor it nested at src/framework/stdx/. Snap snapshot tests use
+// this path to locate fixtures, so it has to match our layout.
 const module_path = "src/framework/stdx";
 const snap = Snap.snap_fn(module_path);
 

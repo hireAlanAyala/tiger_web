@@ -1255,7 +1255,11 @@ pub inline fn branchless_select(comptime T: type, flag: bool, a: T, b: T) T {
     return if (flag) a else b;
 }
 
-const snap = Snap.snap_fn("framework/stdx");
+// Principled divergence from TB: stdx nested at src/framework/stdx/.
+// (This site uses the bare relative form for historical consistency
+// with TB's pattern; the absolute-path form lives in
+// prng.zig/zipfian.zig/flags.zig.)
+const snap = Snap.snap_fn("src/framework/stdx");
 
 test fastrange {
     var prng = PRNG.from_seed(42);

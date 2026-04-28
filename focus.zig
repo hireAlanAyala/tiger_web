@@ -19,8 +19,14 @@
 
 const std = @import("std");
 const stdx = @import("stdx");
-const scanner = @import("src/annotation_scanner.zig");
-const server_main = @import("src/main.zig");
+// TB-aligned module imports (build.zig wires these). focus.zig
+// lives at root because @embedFile("packages/...") + ("templates/...")
+// requires it inside Zig's package boundary; the src/ entry points
+// it references go through modules rather than `@import("src/X.zig")`
+// relative paths. Matches TB's pattern of `vsr`, `stdx` as modules.
+const tiger_web = @import("tiger_web");
+const scanner = tiger_web.scanner;
+const server_main = tiger_web.main;
 const builtin = @import("builtin");
 
 pub const std_options: std.Options = .{
