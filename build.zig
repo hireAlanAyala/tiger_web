@@ -539,7 +539,7 @@ pub fn build(b: *std.Build) void {
     {
         const adapter_test_step = b.step("test-adapter", "Run TypeScript cross-language tests");
         for ([_][]const u8{
-            "generated/routing_test.ts",
+            "src/generated/routing_test.ts",
             "packages/ts/test/protocol_test.ts",
             "packages/ts/test/round_trip_test.ts",
             "packages/ts/test/fuzz_test.ts",
