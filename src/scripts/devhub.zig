@@ -616,6 +616,8 @@ fn devhub_coverage(shell: *Shell) !void {
         "{kcov} ./zig-out/bin/tiger-fuzz --events-max=100000 message_bus 92",
         "{kcov} ./zig-out/bin/tiger-fuzz --events-max=100000 row_format 92",
         "{kcov} ./zig-out/bin/tiger-fuzz --events-max=100000 worker_dispatch 92",
+        "{kcov} ./zig-out/bin/tiger-fuzz --events-max=100000 codec 92",
+        "{kcov} ./zig-out/bin/tiger-fuzz --events-max=100000 render 92",
     }) |command| {
         try shell.exec(command, .{ .kcov = kcov });
     }

@@ -51,6 +51,8 @@ const Fuzzers = .{
     .message_bus = @import("message_bus_fuzz.zig"),
     .row_format = @import("row_format_fuzz.zig"),
     .worker_dispatch = @import("worker_dispatch_fuzz.zig"),
+    .codec = @import("codec_fuzz.zig"),
+    .render = @import("render_fuzz.zig"),
     // A fuzzer that intentionally fails, to test fuzzing infrastructure itself
     .canary = {},
     // Quickly run all fuzzers as a smoke test
@@ -101,6 +103,8 @@ fn main_smoke(gpa: std.mem.Allocator) !void {
             .message_bus => 10_000,
             .row_format => 10_000,
             .worker_dispatch => 10_000,
+            .codec => 10_000,
+            .render => 10_000,
         };
 
         var timer_single = try std.time.Timer.start();
