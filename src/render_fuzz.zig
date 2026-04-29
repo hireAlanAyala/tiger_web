@@ -98,7 +98,9 @@ pub fn main(_: std.mem.Allocator, args: FuzzArgs) !void {
         assert(result.response.len > 0);
         assert(@as(usize, result.response.offset) + result.response.len <= send_buf.len);
 
-        const wire = send_buf[result.response.offset .. @as(usize, result.response.offset) + result.response.len];
+        const wire_start: usize = result.response.offset;
+        const wire_end: usize = wire_start + result.response.len;
+        const wire = send_buf[wire_start..wire_end];
 
         if (is_datastar) {
             // SSE writes from offset 0 (Connection: close, no
@@ -118,6 +120,12 @@ pub fn main(_: std.mem.Allocator, args: FuzzArgs) !void {
             };
             const body = wire[term + 4 ..];
             assert(body.len == html_len);
+            // Byte-equality: the body region must contain exactly the
+            // html we passed in, not just bytes-of-the-right-length.
+            // Catches an encoder that writes a same-length-but-wrong
+            // sequence into the body (e.g., reads from the wrong
+            // offset of html_buf).
+            assert(std.mem.eql(u8, body, html_buf[0..html_len]));
             // Content-Length header must agree with the body length.
             const cl_value = find_header(wire[0..term], "Content-Length") orelse {
                 @panic("render_fuzz: full-page response missing Content-Length");

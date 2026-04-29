@@ -369,6 +369,15 @@ Generalize when a second auth strategy is needed.
   exercises single-shot. Trigger: real partial-recv lands on a hot
   path, OR a recv-state bug ships. Pattern: TB's `message_buffer`
   fuzzes both shot modes — match it.
+- **Fuzzer main length refactor.** TIGER_STYLE limits functions to
+  ~70 lines; `replay_fuzz.main` is 241 (pre-existing, made longer
+  this session) and `render_fuzz.main` is 124 (created in round 1
+  over the limit). Natural split for replay: `phase1_write_entries`,
+  `phase2_replay_writes`, `phase3_verify_pending_index`, with shared
+  state in a struct. Render's split: `iteration_full_page`,
+  `iteration_datastar`, helpers `random_status`/`random_session_action`
+  already exist as separate fns. Real refactor; do alongside the
+  next fuzz extension.
 - **Replay fuzz: per-op `(name, args_len)` model match.** Today
   `assert_pending_matches_model` compares ops as a set + asserts
   payload-shape sanity (every recovered entry's name == "fuzz_worker"

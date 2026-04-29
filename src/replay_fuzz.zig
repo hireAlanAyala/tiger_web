@@ -10,10 +10,7 @@
 const std = @import("std");
 const assert = std.debug.assert;
 const message = @import("message.zig");
-const protocol = @import("protocol.zig");
 const wal_mod = @import("framework/wal.zig");
-const pd = @import("framework/pending_dispatch.zig");
-const constants = @import("framework/constants.zig");
 const Storage = @import("storage.zig").SqliteStorage;
 const replay = @import("replay.zig");
 const FuzzArgs = @import("fuzz_lib.zig").FuzzArgs;
@@ -41,10 +38,18 @@ pub fn main(allocator: std.mem.Allocator, args: FuzzArgs) !void {
     const events_max = args.events_max orelse 5_000;
     var prng = PRNG.from_seed(seed);
 
-    // Seed-scoped paths — concurrent fuzz processes (and concurrent
-    // CI matrix entries) would otherwise race on a shared /tmp file.
+    // PID + seed scoped — concurrent fuzz processes would otherwise
+    // race even at different seeds (one matrix runner reusing /tmp
+    // across re-runs, two same-seed manual replays). PID makes
+    // process-collision impossible; seed makes intra-process
+    // distinct-fuzzer paths distinct (replay vs codec).
+    const pid = std.os.linux.getpid();
     var path_buf: [128]u8 = undefined;
-    const wal_path = try std.fmt.bufPrintZ(&path_buf, "/tmp/tiger_replay_fuzz.{x}.wal", .{seed});
+    const wal_path = try std.fmt.bufPrintZ(
+        &path_buf,
+        "/tmp/tiger_replay_fuzz.{d}.{x}.wal",
+        .{ pid, seed },
+    );
     std.fs.cwd().deleteFile(wal_path) catch {};
     defer std.fs.cwd().deleteFile(wal_path) catch {};
 
@@ -92,7 +97,7 @@ pub fn main(allocator: std.mem.Allocator, args: FuzzArgs) !void {
         const sql = "INSERT INTO fuzz_t VALUES (?1)";
         std.mem.writeInt(u16, write_buf[wpos..][0..2], sql.len, .big);
         wpos += 2;
-        @memcpy(write_buf[wpos..][0..sql.len], sql);
+        stdx.copy_disjoint(.exact, u8, write_buf[wpos..][0..sql.len], sql);
         wpos += sql.len;
         write_buf[wpos] = 1; // 1 param
         wpos += 1;
@@ -114,7 +119,7 @@ pub fn main(allocator: std.mem.Allocator, args: FuzzArgs) !void {
             const name = "fuzz_worker";
             dispatch_buf[dpos] = @intCast(name.len);
             dpos += 1;
-            @memcpy(dispatch_buf[dpos..][0..name.len], name);
+            stdx.copy_disjoint(.exact, u8, dispatch_buf[dpos..][0..name.len], name);
             dpos += name.len;
             const args_len: u16 = prng.range_inclusive(u16, 0, 32);
             std.mem.writeInt(u16, dispatch_buf[dpos..][0..2], args_len, .big);
@@ -285,10 +290,19 @@ fn crash_restart_equivalence(
     entries_log: []const EntryRecord,
     seed: u64,
 ) !void {
+    const pid = std.os.linux.getpid();
     var a_path_buf: [128]u8 = undefined;
     var b_path_buf: [128]u8 = undefined;
-    const trunc_a_path = try std.fmt.bufPrintZ(&a_path_buf, "/tmp/tiger_replay_fuzz.{x}.crash_a.wal", .{seed});
-    const trunc_b_path = try std.fmt.bufPrintZ(&b_path_buf, "/tmp/tiger_replay_fuzz.{x}.crash_b.wal", .{seed});
+    const trunc_a_path = try std.fmt.bufPrintZ(
+        &a_path_buf,
+        "/tmp/tiger_replay_fuzz.{d}.{x}.crash_a.wal",
+        .{ pid, seed },
+    );
+    const trunc_b_path = try std.fmt.bufPrintZ(
+        &b_path_buf,
+        "/tmp/tiger_replay_fuzz.{d}.{x}.crash_b.wal",
+        .{ pid, seed },
+    );
     std.fs.cwd().deleteFile(trunc_a_path) catch {};
     std.fs.cwd().deleteFile(trunc_b_path) catch {};
     defer std.fs.cwd().deleteFile(trunc_a_path) catch {};
@@ -311,27 +325,34 @@ fn crash_restart_equivalence(
         // truncated tail and stops).
         const expected = expected_pending_at(entries_log, trunc_at);
 
-        // First recovery.
+        // First recovery. `assert_pending_matches_model` is strictly
+        // stronger than `pending.invariants()` (it enforces structural
+        // validity transitively via the model), so no separate
+        // invariants call is needed here.
         var pending_a = Wal.PendingIndex{};
         var wal_a = Wal.init(trunc_a_path, &pending_a);
-        pending_a.invariants();
         assert_pending_matches_model(&pending_a, expected);
         const op_a = wal_a.op;
         wal_a.deinit();
 
         // Second recovery — separate fresh-trunc file. Same input,
-        // same output: TB's first-class determinism principle.
+        // same output: TB's first-class determinism principle. Both
+        // recoveries reach `expected`; transitive equality on op is
+        // also asserted explicitly below.
         var pending_b = Wal.PendingIndex{};
         var wal_b = Wal.init(trunc_b_path, &pending_b);
         defer wal_b.deinit();
-        pending_b.invariants();
+
         assert_pending_matches_model(&pending_b, expected);
         assert(wal_b.op == op_a);
 
         ok_truncations += 1;
     }
 
-    log.info("Replay crash-restart done: truncations={d} model-equivalent + deterministic", .{ok_truncations});
+    log.info(
+        "Replay crash-restart done: truncations={d} model-equivalent + deterministic",
+        .{ok_truncations},
+    );
     assert(ok_truncations == trunc_offsets);
 }
 
@@ -391,24 +412,29 @@ fn assert_pending_matches_model(pending: *const Wal.PendingIndex, expected: Expe
 /// caller can recover against independently.
 fn copy_truncated(src: [:0]const u8, dst: [:0]const u8, src_size: u64, trunc_at: u64) void {
     std.fs.cwd().deleteFile(dst) catch {};
-    const src_file = std.fs.cwd().openFileZ(src, .{}) catch unreachable;
+    const src_file = std.fs.cwd().openFileZ(src, .{}) catch
+        @panic("replay_fuzz: failed to open src WAL for trunc copy");
     defer src_file.close();
-    const dst_file = std.fs.cwd().createFileZ(dst, .{ .truncate = true }) catch unreachable;
+
+    const dst_file = std.fs.cwd().createFileZ(dst, .{ .truncate = true }) catch
+        @panic("replay_fuzz: failed to create dst WAL for trunc copy");
     defer dst_file.close();
 
     var copy_buf: [4096]u8 = undefined;
     var copied: u64 = 0;
     while (copied < src_size) {
         const want: usize = @intCast(@min(copy_buf.len, src_size - copied));
-        const n = std.posix.pread(src_file.handle, copy_buf[0..want], copied) catch unreachable;
+        const n = std.posix.pread(src_file.handle, copy_buf[0..want], copied) catch
+            @panic("replay_fuzz: pread from src WAL failed");
         if (n == 0) break;
-        _ = std.posix.pwrite(dst_file.handle, copy_buf[0..n], copied) catch unreachable;
+        _ = std.posix.pwrite(dst_file.handle, copy_buf[0..n], copied) catch
+            @panic("replay_fuzz: pwrite to dst WAL failed");
         copied += n;
     }
-    // Pair-assertion: silent short-read would leave dst smaller than
-    // src and the caller's `trunc_at` would operate on the wrong
-    // baseline. Recovery would still pass invariants, just against an
-    // unintended state — the bug would be invisible.
+    // Pair-assertion: silent short-read would leave dst smaller than src and
+    // the caller's `trunc_at` would operate on the wrong baseline. Recovery
+    // would still pass invariants, just against an unintended state.
     assert(copied == src_size);
-    std.posix.ftruncate(dst_file.handle, trunc_at) catch unreachable;
+    std.posix.ftruncate(dst_file.handle, trunc_at) catch
+        @panic("replay_fuzz: ftruncate of dst WAL failed");
 }

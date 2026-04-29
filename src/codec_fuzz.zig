@@ -29,7 +29,8 @@ const assert = std.debug.assert;
 const http = @import("framework/http.zig");
 const app = @import("app.zig");
 const FuzzArgs = @import("fuzz_lib.zig").FuzzArgs;
-const PRNG = @import("stdx").PRNG;
+const stdx = @import("stdx");
+const PRNG = stdx.PRNG;
 
 const log = std.log.scoped(.fuzz);
 
@@ -97,9 +98,10 @@ pub fn main(allocator: std.mem.Allocator, args: FuzzArgs) !void {
         iterations += 1;
     }
 
-    log.info("Codec fuzz done: iterations={d} complete={d} invalid={d} incomplete={d} translated={d}", .{
-        iterations, completes, invalids, incompletes, translates_ok,
-    });
+    log.info(
+        "Codec fuzz done: iters={d} complete={d} invalid={d} incomplete={d} translated={d}",
+        .{ iterations, completes, invalids, incompletes, translates_ok },
+    );
     assert(iterations > 0);
     // Sanity — at least some inputs should reach .complete and some
     // should be rejected. If 100% are .invalid, the generator is broken.
@@ -130,7 +132,11 @@ fn generate(_: std.mem.Allocator, prng: *PRNG, mode: Mode, out: []u8) usize {
             pos += writeAll(out[pos..], " HTTP/1.1\r\n");
             if (body_len > 0) {
                 var lenbuf: [32]u8 = undefined;
-                const lenstr = std.fmt.bufPrint(&lenbuf, "Content-Length: {d}\r\n", .{body_len}) catch unreachable;
+                const lenstr = std.fmt.bufPrint(
+                    &lenbuf,
+                    "Content-Length: {d}\r\n",
+                    .{body_len},
+                ) catch unreachable;
                 pos += writeAll(out[pos..], lenstr);
             }
             pos += writeAll(out[pos..], "\r\n");
@@ -174,7 +180,7 @@ fn generate(_: std.mem.Allocator, prng: *PRNG, mode: Mode, out: []u8) usize {
             };
             const fixture = fixtures[shape];
             const n = @min(fixture.len, out.len);
-            @memcpy(out[0..n], fixture[0..n]);
+            stdx.copy_disjoint(.exact, u8, out[0..n], fixture[0..n]);
             return n;
         },
     }
@@ -182,6 +188,6 @@ fn generate(_: std.mem.Allocator, prng: *PRNG, mode: Mode, out: []u8) usize {
 
 fn writeAll(dst: []u8, src: []const u8) usize {
     const n = @min(dst.len, src.len);
-    @memcpy(dst[0..n], src[0..n]);
+    stdx.copy_disjoint(.exact, u8, dst[0..n], src[0..n]);
     return n;
 }
