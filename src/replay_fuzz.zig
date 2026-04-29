@@ -191,30 +191,42 @@ pub fn main(allocator: std.mem.Allocator, args: FuzzArgs) !void {
     assert(entries_written > 0);
     assert(entries_replayed > 0);
 
-    // Phase 4: Crash-restart equivalence. The previous phases prove
-    // that a clean WAL round-trips. The contract that actually matters
-    // for durability is: "the process can crash at any byte, and on
-    // restart we recover a consistent state without panicking." TB
-    // exercises this through their journal_checker; for us the same
-    // property is enforced by truncating the WAL at random offsets and
-    // re-running recovery.
-    //
-    // Property: after truncation, recovery never panics, never crashes,
-    // and the rebuilt pending index is self-consistent. Stronger
-    // property — pending_count is non-increasing relative to the
-    // untruncated tail — is obvious-by-construction (truncating bytes
-    // can only drop entries, never invent them).
-    try crash_restart_equivalence(wal_path, &prng, file_size);
+    // Phase 4: Crash-restart equivalence. Phase 1-3 prove a clean
+    // WAL round-trips. The contract durability actually rests on is
+    // "the process can crash at any byte, restart, and recover a
+    // consistent state — deterministically, without losing committed
+    // work or inventing pending work that was never on disk." TB's
+    // journal_checker enforces the equivalent property; we approximate
+    // it by truncating the WAL at random offsets and re-running
+    // recovery against a stronger ladder of assertions.
+    try crash_restart_equivalence(wal_path, &prng, file_size, entries_written);
 }
 
-/// Truncate the WAL at random offsets and verify recovery is graceful.
+/// Truncate the WAL at random offsets and assert recovery is
+/// well-formed AND deterministic. Each iteration copies the WAL,
+/// truncates, and runs:
 ///
-/// This isn't a clean re-run of phase 1: we copy the existing WAL to
-/// a side path, truncate it, and run init+invariants. We do this for
-/// many offsets including pathological ones (mid-header, mid-body,
-/// at EOF, at offset 0) to make sure each shape lands on the
-/// "incomplete tail entry" branch rather than a panic.
-fn crash_restart_equivalence(src_path: [:0]const u8, prng: *PRNG, file_size: u64) !void {
+///   1. `pending.invariants()` — structural validity (no duplicate
+///      ops, no entries beyond max_in_flight).
+///   2. Bound check — `pending_count <= entries_written`. The
+///      negative-space pair: truncation can only drop entries, never
+///      invent them. A recovered pending count exceeding what was
+///      ever written would mean the parser fabricated entries from
+///      garbage tail bytes.
+///   3. Op cap — every pending entry's `op` is ≤ the recovered WAL
+///      op counter. Catches "pending references an op the WAL
+///      doesn't know about" — the corruption shape that a stale
+///      mmap or torn write would produce.
+///   4. Determinism — re-init from the same truncated file gives the
+///      same pending state. TB's first-class principle: same input,
+///      same output. A recovery whose output drifts between cold
+///      starts is broken even when each individual run looks fine.
+fn crash_restart_equivalence(
+    src_path: [:0]const u8,
+    prng: *PRNG,
+    file_size: u64,
+    entries_written: u64,
+) !void {
     const trunc_path: [:0]const u8 = "/tmp/tiger_replay_fuzz.crash.wal";
     std.fs.cwd().deleteFile(trunc_path) catch {};
     defer std.fs.cwd().deleteFile(trunc_path) catch {};
@@ -222,9 +234,7 @@ fn crash_restart_equivalence(src_path: [:0]const u8, prng: *PRNG, file_size: u64
     const trunc_offsets = 16;
     var ok_truncations: u32 = 0;
     for (0..trunc_offsets) |_| {
-        // Copy the WAL bytes 1:1 and truncate at a random point. The
-        // copy each iteration is cheap relative to fsync; we do it
-        // fresh so each truncation operates on the full tail.
+        // Copy the WAL bytes 1:1 and truncate at a random point.
         const src = std.fs.cwd().openFileZ(src_path, .{}) catch unreachable;
         defer src.close();
         const dst = std.fs.cwd().createFileZ(trunc_path, .{ .truncate = true }) catch unreachable;
@@ -239,22 +249,45 @@ fn crash_restart_equivalence(src_path: [:0]const u8, prng: *PRNG, file_size: u64
             _ = std.posix.pwrite(dst.handle, copy_buf[0..n], copied) catch unreachable;
             copied += n;
         }
-
         const trunc_at: u64 = if (file_size == 0) 0 else prng.range_inclusive(u64, 0, file_size);
         std.posix.ftruncate(dst.handle, trunc_at) catch unreachable;
 
-        // Recovery — must not panic on any truncation point. We do
-        // not assert on the recovered pending_count here because the
-        // truncation may sit mid-entry; what we *do* assert is that
-        // PendingIndex.invariants() holds, which is the structural
-        // health check that catches corruption.
-        var pending = Wal.PendingIndex{};
-        var wal_recover = Wal.init(trunc_path, &pending);
-        pending.invariants();
-        wal_recover.deinit();
+        // First recovery — record pending state.
+        var pending_a = Wal.PendingIndex{};
+        var wal_a = Wal.init(trunc_path, &pending_a);
+
+        // (1) Structural invariants.
+        pending_a.invariants();
+
+        // (2) Negative-space bound — truncation can drop entries, not invent them.
+        assert(pending_a.pending_count() <= entries_written);
+
+        // (3) Pending ops fit inside the recovered op space.
+        for (pending_a.entries[0..pending_a.len]) |*e| {
+            assert(e.op <= wal_a.op);
+        }
+        // Snapshot the recovered values before tearing wal_a down — Wal.deinit
+        // poisons the struct (`wal.* = undefined`), so reading `wal_a.op`
+        // after deinit returns 0xAA garbage rather than the real op.
+        const op_a = wal_a.op;
+        const pending_a_snap = pending_a;
+        wal_a.deinit();
+
+        // (4) Determinism — second cold start produces identical pending state.
+        var pending_b = Wal.PendingIndex{};
+        var wal_b = Wal.init(trunc_path, &pending_b);
+        defer wal_b.deinit();
+        assert(wal_b.op == op_a);
+        assert(pending_b.pending_count() == pending_a_snap.pending_count());
+        for (pending_a_snap.entries[0..pending_a_snap.len], pending_b.entries[0..pending_b.len]) |*ea, *eb| {
+            assert(ea.op == eb.op);
+            assert(ea.name_len == eb.name_len);
+            assert(ea.args_len == eb.args_len);
+        }
+
         ok_truncations += 1;
     }
 
-    log.info("Replay crash-restart done: truncations={d} all consistent", .{ok_truncations});
+    log.info("Replay crash-restart done: truncations={d} all equivalent + deterministic", .{ok_truncations});
     assert(ok_truncations == trunc_offsets);
 }

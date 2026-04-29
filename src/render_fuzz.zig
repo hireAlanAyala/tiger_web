@@ -136,6 +136,19 @@ pub fn main(_: std.mem.Allocator, args: FuzzArgs) !void {
             assert(!has_cookie);
         }
 
+        // Header injection — every header value (everything between
+        // a `: ` and the next `\r\n`) must be free of `\r\n` so it
+        // can't terminate the header block early and smuggle attacker
+        // bytes into the body. Class-of-bug TB spends its assertion
+        // budget on; one-line cost, catastrophic-bug payoff. Scan
+        // only the headers blob (everything before the first
+        // \r\n\r\n) — for SSE responses there is no header blob, so
+        // skip the check. (SSE writes through sse.encode_headers /
+        // encode_render_result, which compose well-known constants.)
+        if (!is_datastar) {
+            assert_no_header_injection(wire);
+        }
+
         iterations += 1;
     }
 
@@ -167,6 +180,29 @@ fn random_session_action(prng: *PRNG) message.SessionAction {
 
 fn starts_with(buf: []const u8, prefix: []const u8) bool {
     return std.mem.startsWith(u8, buf, prefix);
+}
+
+/// Walk every header line and assert no value contains `\r` or `\n`
+/// other than the canonical `\r\n` terminator. A bug elsewhere in
+/// render that lets attacker bytes flow into a header value (cookie
+/// most likely) would otherwise terminate the header block early
+/// and inject body content. Asserts on the wire — i.e., the bytes a
+/// real client would receive.
+fn assert_no_header_injection(wire: []const u8) void {
+    const term = std.mem.indexOf(u8, wire, "\r\n\r\n") orelse return;
+    const headers = wire[0..term];
+    var pos: usize = 0;
+    while (pos < headers.len) {
+        const line_end = std.mem.indexOf(u8, headers[pos..], "\r\n") orelse break;
+        const line = headers[pos .. pos + line_end];
+        pos += line_end + 2;
+        // Every line up to `line_end` must be free of CR/LF — they
+        // were the delimiters and shouldn't appear inside.
+        for (line) |b| {
+            assert(b != '\r');
+            assert(b != '\n');
+        }
+    }
 }
 
 /// Find a header value inside the headers blob (everything before the

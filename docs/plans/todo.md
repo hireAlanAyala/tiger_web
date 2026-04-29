@@ -354,6 +354,28 @@ Generalize when a second auth strategy is needed.
 
 ## Backlog
 
+- **Render fuzz: extend to escaping/XSS once user-controlled strings flow into HTML.**
+  Trigger: first feature that interpolates seller-edited or user-submitted
+  text into the render output (product descriptions, reviews, search-result
+  rendering of user queries). Today render emits framework-shaped HTML
+  with no user-controlled content, so the wire-format checks already in
+  `render_fuzz.zig` are sufficient. When the trigger fires, add a mode
+  that runs random adversarial strings (`<script>`, `"><img onerror>`,
+  null bytes, unicode boundary cases) through real handler render
+  functions and asserts no escape gets dropped.
+- **Codec fuzz: incremental/partial-recv mode.** The HTTP parser is
+  documented to handle being called repeatedly with growing input
+  (`.incomplete` → call again with more bytes). `codec_fuzz` only
+  exercises single-shot. Trigger: real partial-recv lands on a hot
+  path, OR a recv-state bug ships. Pattern: TB's `message_buffer`
+  fuzzes both shot modes — match it.
+- **Codec fuzz: handler-aware JSON body generators.** Most adversarial
+  inputs route to `null` (only ~5% reach a typed Message at seed 42).
+  The codec's JSON-to-typed-struct step is unfuzzed under random
+  input. Two TB-shaped options: extend `codec_fuzz` with body
+  generators per Operation, or add per-handler fuzzers. Pick when
+  the body grammar starts mattering — e.g., when a JSON parser bug
+  ships, or when handler bodies grow beyond trivial shapes.
 - Snap testing: `framework/stdx/testing/snaptest.zig` is ported from TB
   but unused outside its own tests. Wiring it into render output (golden
   HTML for canonical operations), the scanner manifest shape, and the

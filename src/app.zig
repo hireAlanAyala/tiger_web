@@ -343,6 +343,27 @@ pub var render_scratch_buf: [http.send_buf_max]u8 = undefined;
 const http_response = @import("framework/http_response.zig");
 const sse = @import("framework/sse.zig");
 
+// Render budget invariants — `encode_response` panics on over-budget
+// html. Panic is the right primitive for a buffer-bounds violation,
+// but the invariant the panic guards is a static property of these
+// three constants and should be checked at compile time so a budget
+// regression fails to build rather than crashing at runtime.
+//
+// Body budget for full-page = send_buf_max - header_reserve.
+// Body budget for SSE       = send_buf_max - sse.headers_max.
+// Both must be strictly positive — otherwise no html is ever
+// representable and every render would panic.
+comptime {
+    assert(http.send_buf_max > http_response.header_reserve);
+    assert(http.send_buf_max > sse.headers_max);
+    // body_max (the inbound parser cap) must fit inside the outbound
+    // body budget — the smallest handler render is at least an echo
+    // of a parsed body, so an inbound request that the parser
+    // accepted must be representable in the response. The full-page
+    // budget is the tighter of the two.
+    assert(http.body_max < http.send_buf_max - http_response.header_reserve);
+}
+
 // commit_and_encode removed — inlined into server.commit_dispatch.
 // The pipeline stages (handle, render, encode) are now driven by the
 // server's stage-based state machine, not a single function call.
