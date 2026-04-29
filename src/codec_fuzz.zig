@@ -102,15 +102,18 @@ pub fn main(allocator: std.mem.Allocator, args: FuzzArgs) !void {
         "Codec fuzz done: iters={d} complete={d} invalid={d} incomplete={d} translated={d}",
         .{ iterations, completes, invalids, incompletes, translates_ok },
     );
-    assert(iterations > 0);
-    // Sanity — at least some inputs should reach .complete and some
-    // should be rejected. If 100% are .invalid, the generator is broken.
-    assert(completes > 0);
-    assert(invalids > 0);
-    // Coverage: at least one accepted request must hit a real route,
-    // otherwise the translate/route side of the boundary is untested
-    // and the fuzzer is silently parsing-only.
-    assert(translates_ok > 0);
+    assert(iterations == events_max);
+    // Generator-coverage asserts — only meaningful at sample sizes
+    // where the statistical properties are stable. At
+    // `--events-max=1` with bad luck a legit run can produce zero
+    // .complete or zero .invalid; gating prevents the fuzzer from
+    // asserting on its own sampling rather than on the code under
+    // test. Threshold matches `fuzz_tests.zig` smoke-mode floor.
+    if (events_max >= 100) {
+        assert(completes > 0);
+        assert(invalids > 0);
+        assert(translates_ok > 0);
+    }
 }
 
 /// Build one fuzz input into `out`. Returns the number of bytes written.

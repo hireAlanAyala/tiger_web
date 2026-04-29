@@ -174,9 +174,13 @@ pub fn main(_: std.mem.Allocator, args: FuzzArgs) !void {
     log.info("Render fuzz done: iterations={d} datastar={d} fullpage={d} cookie={d}", .{
         iterations, datastar_count, fullpage_count, with_cookie,
     });
-    assert(iterations > 0);
-    assert(datastar_count > 0);
-    assert(fullpage_count > 0);
+    assert(iterations == events_max);
+    // Generator-coverage gate — see codec_fuzz for rationale. At
+    // tiny sample sizes a legit run can land entirely on one branch.
+    if (events_max >= 100) {
+        assert(datastar_count > 0);
+        assert(fullpage_count > 0);
+    }
 }
 
 fn random_status(prng: *PRNG) message.Status {

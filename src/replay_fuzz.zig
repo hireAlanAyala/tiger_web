@@ -254,8 +254,16 @@ pub fn main(allocator: std.mem.Allocator, args: FuzzArgs) !void {
     log.info("Replay fuzz done: written={d} replayed={d} pending={d}", .{
         entries_written, entries_replayed, pending_count,
     });
-    assert(entries_written > 0);
-    assert(entries_replayed > 0);
+    // Generator-coverage gate. At tiny sample sizes the loop may run
+    // its full events_max iterations and still produce no entries
+    // (every roll lands on a non-mutation Operation or .root). That's
+    // valid PRNG behavior, not a generator failure — only assert
+    // coverage when the sample size makes coverage statistically
+    // certain.
+    if (events_max >= 100) {
+        assert(entries_written > 0);
+        assert(entries_replayed > 0);
+    }
 
     // Phase 4: Crash-restart equivalence. Phase 1-3 prove a clean
     // WAL round-trips. The contract durability actually rests on is
