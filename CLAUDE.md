@@ -216,10 +216,6 @@ Both handler sets implement the same operations and render the same HTML shapes.
 | `fuzz_tests.zig` | Fuzz test dispatcher — single binary routing to all fuzzers, matches TB's fuzz_tests.zig |
 | `fuzz_lib.zig` | Shared fuzz utilities — `FuzzArgs` struct, `random_enum_weights`, matches TB's testing/fuzz.zig |
 | `fuzz.zig` | State machine fuzzer — bypasses HTTP, calls prefetch/commit directly |
-| `codec_fuzz.zig` | Codec fuzzer — throws random methods/paths/JSON at codec.translate |
-| `render_fuzz.zig` | Render fuzzer — random operations/results through encode_response, asserts framing and keep-alive invariants |
-| `auditor.zig` | Auditor oracle — independent reference model that validates state machine responses (TB pattern) |
-| `storage_fuzz.zig` | Storage equivalence fuzzer — runs SqliteStorage(:memory:) vs Auditor, asserts agreement |
 | `replay.zig` | WAL replay tool — verify, inspect, query, replay operations |
 | `replay_fuzz.zig` | Replay round-trip fuzzer — WAL serialization boundary verification |
 | `state_machine_benchmark.zig` | Pipeline-tier benchmark — per-operation prefetch/commit throughput, regression detector |
