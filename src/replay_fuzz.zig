@@ -17,7 +17,8 @@ const constants = @import("framework/constants.zig");
 const Storage = @import("storage.zig").SqliteStorage;
 const replay = @import("replay.zig");
 const FuzzArgs = @import("fuzz_lib.zig").FuzzArgs;
-const PRNG = @import("stdx").PRNG;
+const stdx = @import("stdx");
+const PRNG = stdx.PRNG;
 
 const Wal = wal_mod.WalType(message.Operation);
 
@@ -40,7 +41,10 @@ pub fn main(allocator: std.mem.Allocator, args: FuzzArgs) !void {
     const events_max = args.events_max orelse 5_000;
     var prng = PRNG.from_seed(seed);
 
-    const wal_path: [:0]const u8 = "/tmp/tiger_replay_fuzz.wal";
+    // Seed-scoped paths — concurrent fuzz processes (and concurrent
+    // CI matrix entries) would otherwise race on a shared /tmp file.
+    var path_buf: [128]u8 = undefined;
+    const wal_path = try std.fmt.bufPrintZ(&path_buf, "/tmp/tiger_replay_fuzz.{x}.wal", .{seed});
     std.fs.cwd().deleteFile(wal_path) catch {};
     defer std.fs.cwd().deleteFile(wal_path) catch {};
 
@@ -50,7 +54,24 @@ pub fn main(allocator: std.mem.Allocator, args: FuzzArgs) !void {
     var entries_written: u64 = 0;
 
     // Track dispatches for generating valid completions/dead entries.
-    var pending_ops: [64]u64 = undefined;
+    //
+    // **Dual purpose, load-bearing for phase 4:** the swap-remove
+    // mutations on `pending_ops` + `pending_count` here are not just
+    // bookkeeping for generating valid completions. They are the
+    // **independent model** that phase 4 asserts WAL recovery
+    // matches at every truncation point. Refactoring this loop
+    // (e.g., consolidating the four-branch if/else into a helper)
+    // weakens phase 4's correctness silently if the model drifts
+    // from the actual append calls. Keep them in lock-step.
+    //
+    // Independence boundary (the property phase 4 actually tests):
+    // *manual swap-remove array on plain u64 ops* vs. *binary-format
+    // parser in `wal.recover_dispatches` rebuilding `PendingIndex`*.
+    // Different code, different data structures. Genuinely catches
+    // mismatches; doesn't catch a bug shared by both (TB has more
+    // independence — workload generator + observer — but their
+    // domain has separate replicas to compare against).
+    var pending_ops: [64]u64 = @splat(0);
     var pending_count: usize = 0;
 
     // Per-entry log — records the byte offset and pending-set snapshot
@@ -144,10 +165,12 @@ pub fn main(allocator: std.mem.Allocator, args: FuzzArgs) !void {
         const fstat = std.posix.fstat(wal.fd) catch unreachable;
         var rec = EntryRecord{
             .end_offset = @intCast(fstat.size),
-            .pending = undefined,
+            .pending = @splat(0),
             .pending_len = @intCast(pending_count),
         };
-        @memcpy(rec.pending[0..pending_count], pending_ops[0..pending_count]);
+        if (pending_count > 0) {
+            stdx.copy_disjoint(.inexact, u64, &rec.pending, pending_ops[0..pending_count]);
+        }
         try entries_log.append(rec);
 
         entries_written += 1;
@@ -228,7 +251,7 @@ pub fn main(allocator: std.mem.Allocator, args: FuzzArgs) !void {
     // journal_checker enforces the equivalent property; we approximate
     // it by truncating the WAL at random offsets and re-running
     // recovery against a stronger ladder of assertions.
-    try crash_restart_equivalence(wal_path, &prng, file_size, entries_log.items);
+    try crash_restart_equivalence(wal_path, &prng, file_size, entries_log.items, seed);
 }
 
 /// Truncate the WAL at random offsets and assert recovery is
@@ -260,9 +283,12 @@ fn crash_restart_equivalence(
     prng: *PRNG,
     file_size: u64,
     entries_log: []const EntryRecord,
+    seed: u64,
 ) !void {
-    const trunc_a_path: [:0]const u8 = "/tmp/tiger_replay_fuzz.crash_a.wal";
-    const trunc_b_path: [:0]const u8 = "/tmp/tiger_replay_fuzz.crash_b.wal";
+    var a_path_buf: [128]u8 = undefined;
+    var b_path_buf: [128]u8 = undefined;
+    const trunc_a_path = try std.fmt.bufPrintZ(&a_path_buf, "/tmp/tiger_replay_fuzz.{x}.crash_a.wal", .{seed});
+    const trunc_b_path = try std.fmt.bufPrintZ(&b_path_buf, "/tmp/tiger_replay_fuzz.{x}.crash_b.wal", .{seed});
     std.fs.cwd().deleteFile(trunc_a_path) catch {};
     std.fs.cwd().deleteFile(trunc_b_path) catch {};
     defer std.fs.cwd().deleteFile(trunc_a_path) catch {};
@@ -319,11 +345,13 @@ const ExpectedPending = struct {
 /// the largest entry whose `end_offset <= trunc_at`. If no entry fits
 /// (e.g., `trunc_at` truncates inside the root), pending is empty.
 fn expected_pending_at(entries_log: []const EntryRecord, trunc_at: u64) ExpectedPending {
-    var result = ExpectedPending{ .ops = undefined, .len = 0 };
+    var result = ExpectedPending{ .ops = @splat(0), .len = 0 };
     for (entries_log) |*rec| {
         if (rec.end_offset > trunc_at) break;
         result.len = rec.pending_len;
-        @memcpy(result.ops[0..rec.pending_len], rec.pending[0..rec.pending_len]);
+        if (rec.pending_len > 0) {
+            stdx.copy_disjoint(.inexact, u64, &result.ops, rec.pending[0..rec.pending_len]);
+        }
     }
     return result;
 }
@@ -331,6 +359,13 @@ fn expected_pending_at(entries_log: []const EntryRecord, trunc_at: u64) Expected
 /// Compare a recovered PendingIndex to the model snapshot as sets —
 /// order may differ because `recover_dispatches` adds entries in WAL
 /// order and `swap-remove` reorders the model in phase 1.
+///
+/// Also lightly validates each recovered entry's payload. Phase 1
+/// always writes name = "fuzz_worker" and args_len ∈ [0, 32]. Any
+/// deviation in the recovered state means the binary parser corrupted
+/// the payload — bug shape that op-only set comparison misses.
+/// (A stronger per-op `(name, args_len)` map is a tracked follow-up;
+/// see todo.md.)
 fn assert_pending_matches_model(pending: *const Wal.PendingIndex, expected: ExpectedPending) void {
     assert(pending.pending_count() == expected.len);
     // Quadratic membership check — n is bounded by max_in_flight (64).
@@ -343,6 +378,11 @@ fn assert_pending_matches_model(pending: *const Wal.PendingIndex, expected: Expe
             }
         }
         assert(found);
+
+        // Payload-shape sanity. Phase 1's generator is the only writer,
+        // so any drift from these constants is parser corruption.
+        assert(std.mem.eql(u8, e.name_slice(), "fuzz_worker"));
+        assert(e.args_len <= 32);
     }
 }
 
@@ -365,5 +405,10 @@ fn copy_truncated(src: [:0]const u8, dst: [:0]const u8, src_size: u64, trunc_at:
         _ = std.posix.pwrite(dst_file.handle, copy_buf[0..n], copied) catch unreachable;
         copied += n;
     }
+    // Pair-assertion: silent short-read would leave dst smaller than
+    // src and the caller's `trunc_at` would operate on the wrong
+    // baseline. Recovery would still pass invariants, just against an
+    // unintended state — the bug would be invisible.
+    assert(copied == src_size);
     std.posix.ftruncate(dst_file.handle, trunc_at) catch unreachable;
 }

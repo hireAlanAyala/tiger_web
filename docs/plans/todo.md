@@ -369,6 +369,16 @@ Generalize when a second auth strategy is needed.
   exercises single-shot. Trigger: real partial-recv lands on a hot
   path, OR a recv-state bug ships. Pattern: TB's `message_buffer`
   fuzzes both shot modes — match it.
+- **Replay fuzz: per-op `(name, args_len)` model match.** Today
+  `assert_pending_matches_model` compares ops as a set + asserts
+  payload-shape sanity (every recovered entry's name == "fuzz_worker"
+  and args_len ≤ 32, since phase 1 is the only writer). A stronger
+  check would build a per-op map in phase 1 of `(op → name, args_len)`
+  and assert each recovered entry matches its specific record. Catches
+  parser bugs that swap fields between dispatches but produce
+  individually-valid shapes. Defer until phase 1 ever generates
+  multiple worker names — currently the constant name limits the
+  per-op map to a one-line entry.
 - **Codec fuzz: handler-aware JSON body generators.** Most adversarial
   inputs route to `null` (only ~5% reach a typed Message at seed 42).
   The codec's JSON-to-typed-struct step is unfuzzed under random
