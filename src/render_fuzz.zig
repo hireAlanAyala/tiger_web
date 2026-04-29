@@ -195,43 +195,78 @@ fn starts_with(buf: []const u8, prefix: []const u8) bool {
     return std.mem.startsWith(u8, buf, prefix);
 }
 
-/// Walk every header line and assert no value contains `\r` or `\n`
-/// other than the canonical `\r\n` terminator. A bug elsewhere in
-/// render that lets attacker bytes flow into a header value (cookie
-/// most likely) would otherwise terminate the header block early
-/// and inject body content. Asserts on the wire — i.e., the bytes a
-/// real client would receive.
+/// Assert the response headers can't be injected into.
+///
+/// Two checks. Both are required; either alone is insufficient.
+///
+/// 1. **No bare `\r` or `\n` inside a line.** A lone CR or LF (not
+///    paired) is invalid per RFC and indicates a value with control
+///    bytes that escaped escaping.
+///
+/// 2. **Every line after the status line has a colon.** This is the
+///    one that catches `\r\n` injection: a value containing `\r\n`
+///    gets split by the line walker into two pieces, the first ending
+///    where the injection started, the second being the trailing
+///    suffix of the original value. The suffix has no colon. Status
+///    line ("HTTP/1.1 200 OK") has no colon either, which is why this
+///    rule starts from line 2.
+///
+/// Implementation note (round-5 fix): the headers blob `wire[0..term]`
+/// excludes the trailing `\r\n` of the terminator, so the LAST header
+/// line has no trailing `\r\n` of its own. An earlier version `orelse
+/// break`'d on `indexOf` returning null, silently skipping that final
+/// line — which is exactly where Set-Cookie lands. Fix: treat the
+/// unterminated tail as the last line.
 fn assert_no_header_injection(wire: []const u8) void {
     const term = std.mem.indexOf(u8, wire, "\r\n\r\n") orelse return;
     const headers = wire[0..term];
     var pos: usize = 0;
+    var line_index: u32 = 0;
     while (pos < headers.len) {
-        const line_end = std.mem.indexOf(u8, headers[pos..], "\r\n") orelse break;
-        const line = headers[pos .. pos + line_end];
-        pos += line_end + 2;
-        // Every line up to `line_end` must be free of CR/LF — they
-        // were the delimiters and shouldn't appear inside.
+        const remaining = headers[pos..];
+        const line_end = std.mem.indexOf(u8, remaining, "\r\n") orelse remaining.len;
+        const line = remaining[0..line_end];
+
         for (line) |b| {
             assert(b != '\r');
             assert(b != '\n');
         }
+        // Status line has no colon ("HTTP/1.1 200 OK"); subsequent
+        // lines always do. A line without a colon past index 0 means
+        // a header value contained `\r\n` and got split.
+        if (line_index > 0) {
+            assert(std.mem.indexOf(u8, line, ":") != null);
+        }
+
+        if (line_end == remaining.len) break;
+        pos += line_end + 2;
+        line_index += 1;
     }
 }
 
 /// Find a header value inside the headers blob (everything before the
 /// `\r\n\r\n` terminator). Case-sensitive — render emits canonical
 /// casing, so a fuzzer that requires the exact spelling is fine.
+///
+/// Same last-line trap as `assert_no_header_injection`: the last
+/// header has no trailing `\r\n` inside the blob, so an `orelse return`
+/// on `indexOf` would skip it. Treat the unterminated tail as a line.
 fn find_header(headers: []const u8, name: []const u8) ?[]const u8 {
     var pos: usize = 0;
     while (pos < headers.len) {
-        const line_end = std.mem.indexOf(u8, headers[pos..], "\r\n") orelse return null;
-        const line = headers[pos .. pos + line_end];
-        pos += line_end + 2;
-        const colon = std.mem.indexOf(u8, line, ":") orelse continue;
-        if (!std.mem.eql(u8, line[0..colon], name)) continue;
-        var val = line[colon + 1 ..];
-        while (val.len > 0 and val[0] == ' ') val = val[1..];
-        return val;
+        const remaining = headers[pos..];
+        const line_end = std.mem.indexOf(u8, remaining, "\r\n") orelse remaining.len;
+        const line = remaining[0..line_end];
+        const advance = if (line_end == remaining.len) remaining.len else line_end + 2;
+
+        if (std.mem.indexOf(u8, line, ":")) |colon| {
+            if (std.mem.eql(u8, line[0..colon], name)) {
+                var val = line[colon + 1 ..];
+                while (val.len > 0 and val[0] == ' ') val = val[1..];
+                return val;
+            }
+        }
+        pos += advance;
     }
     return null;
 }
