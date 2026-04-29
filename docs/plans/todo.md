@@ -354,6 +354,14 @@ Generalize when a second auth strategy is needed.
 
 ## Backlog
 
+- Snap testing: `framework/stdx/testing/snaptest.zig` is ported from TB
+  but unused outside its own tests. Wiring it into render output (golden
+  HTML for canonical operations), the scanner manifest shape, and the
+  Chrome Tracing JSON skeleton would catch accidental shape drift cheaply.
+  Deferred — sim tests cover render via raw byte assertions, and the
+  manifest has a freshness gate. Revisit if either layer starts producing
+  noisy diffs on unrelated edits, or when adding a third generated
+  artifact tips the balance.
 - ensure the server is compatible with http 2/3
 - Component benchmarks: HTTP parser, auth sign+verify, render encoding,
   tracer overhead, frame build/parse, sidecar e2e (µs/op). Add as
