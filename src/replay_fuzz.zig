@@ -23,8 +23,19 @@ const Wal = wal_mod.WalType(message.Operation);
 
 const log = std.log.scoped(.fuzz);
 
+/// Per-entry record captured during phase 1 — the independent model
+/// `crash_restart_equivalence` consumes to derive *expected* pending
+/// state at any truncation point. TB's `journal_checker` pattern:
+/// maintain an in-memory model alongside writes, then assert recovered
+/// state matches the model after a fault. We don't have a live replica
+/// running, so we record per-write and replay the model in phase 4.
+const EntryRecord = struct {
+    end_offset: u64,
+    pending: [64]u64,
+    pending_len: u8,
+};
+
 pub fn main(allocator: std.mem.Allocator, args: FuzzArgs) !void {
-    _ = allocator;
     const seed = args.seed;
     const events_max = args.events_max orelse 5_000;
     var prng = PRNG.from_seed(seed);
@@ -41,6 +52,13 @@ pub fn main(allocator: std.mem.Allocator, args: FuzzArgs) !void {
     // Track dispatches for generating valid completions/dead entries.
     var pending_ops: [64]u64 = undefined;
     var pending_count: usize = 0;
+
+    // Per-entry log — records the byte offset and pending-set snapshot
+    // *after* each append. Phase 4 reads this to compute the expected
+    // pending state at any truncation offset without re-implementing
+    // the WAL parser.
+    var entries_log = std.ArrayList(EntryRecord).init(allocator);
+    defer entries_log.deinit();
 
     for (0..events_max) |i| {
         const op = prng.enum_uniform(message.Operation);
@@ -121,6 +139,17 @@ pub fn main(allocator: std.mem.Allocator, args: FuzzArgs) !void {
             wal.append_writes(op, @intCast(i), write_buf[0..wpos], 1, "", 0, &scratch);
         }
 
+        // Snapshot the file size + pending set after this entry. This
+        // is the "expected after entry N" datapoint phase 4 needs.
+        const fstat = std.posix.fstat(wal.fd) catch unreachable;
+        var rec = EntryRecord{
+            .end_offset = @intCast(fstat.size),
+            .pending = undefined,
+            .pending_len = @intCast(pending_count),
+        };
+        @memcpy(rec.pending[0..pending_count], pending_ops[0..pending_count]);
+        try entries_log.append(rec);
+
         entries_written += 1;
     }
     wal.deinit();
@@ -199,95 +228,142 @@ pub fn main(allocator: std.mem.Allocator, args: FuzzArgs) !void {
     // journal_checker enforces the equivalent property; we approximate
     // it by truncating the WAL at random offsets and re-running
     // recovery against a stronger ladder of assertions.
-    try crash_restart_equivalence(wal_path, &prng, file_size, entries_written);
+    try crash_restart_equivalence(wal_path, &prng, file_size, entries_log.items);
 }
 
 /// Truncate the WAL at random offsets and assert recovery is
-/// well-formed AND deterministic. Each iteration copies the WAL,
-/// truncates, and runs:
+/// well-formed, semantically equivalent to the model, and
+/// deterministic across cold starts.
 ///
-///   1. `pending.invariants()` — structural validity (no duplicate
-///      ops, no entries beyond max_in_flight).
-///   2. Bound check — `pending_count <= entries_written`. The
-///      negative-space pair: truncation can only drop entries, never
-///      invent them. A recovered pending count exceeding what was
-///      ever written would mean the parser fabricated entries from
-///      garbage tail bytes.
-///   3. Op cap — every pending entry's `op` is ≤ the recovered WAL
-///      op counter. Catches "pending references an op the WAL
-///      doesn't know about" — the corruption shape that a stale
-///      mmap or torn write would produce.
-///   4. Determinism — re-init from the same truncated file gives the
-///      same pending state. TB's first-class principle: same input,
-///      same output. A recovery whose output drifts between cold
-///      starts is broken even when each individual run looks fine.
+/// Adopts TB's `journal_checker` pattern: maintain an independent
+/// in-memory model alongside writes; after a fault, recovery state
+/// must equal the model snapshot for whatever entries survived.
+/// Without this, the assertions can only check structural validity
+/// (TB-flagged audit finding 2026-04-29 — "doesn't crash" was the
+/// previous bound, which is positive-space only).
+///
+/// Per truncation we run:
+///
+///   1. `pending.invariants()` — structural validity.
+///   2. **Equivalence to model:** the largest entries_log record whose
+///      `end_offset <= trunc_at` defines the expected pending set
+///      (the prefix that fits before the cut). Recovery must reach
+///      the same pending count and pending ops set.
+///   3. **Cold-start determinism:** copy the source WAL into TWO
+///      separate fresh paths, run init on each independently, assert
+///      they agree. (The previous implementation re-ran init on the
+///      same file — but `Wal.init` mutates the file via tail
+///      truncation, so the second run was already against a recovered
+///      state, not the original truncated state.)
 fn crash_restart_equivalence(
     src_path: [:0]const u8,
     prng: *PRNG,
     file_size: u64,
-    entries_written: u64,
+    entries_log: []const EntryRecord,
 ) !void {
-    const trunc_path: [:0]const u8 = "/tmp/tiger_replay_fuzz.crash.wal";
-    std.fs.cwd().deleteFile(trunc_path) catch {};
-    defer std.fs.cwd().deleteFile(trunc_path) catch {};
+    const trunc_a_path: [:0]const u8 = "/tmp/tiger_replay_fuzz.crash_a.wal";
+    const trunc_b_path: [:0]const u8 = "/tmp/tiger_replay_fuzz.crash_b.wal";
+    std.fs.cwd().deleteFile(trunc_a_path) catch {};
+    std.fs.cwd().deleteFile(trunc_b_path) catch {};
+    defer std.fs.cwd().deleteFile(trunc_a_path) catch {};
+    defer std.fs.cwd().deleteFile(trunc_b_path) catch {};
 
     const trunc_offsets = 16;
     var ok_truncations: u32 = 0;
     for (0..trunc_offsets) |_| {
-        // Copy the WAL bytes 1:1 and truncate at a random point.
-        const src = std.fs.cwd().openFileZ(src_path, .{}) catch unreachable;
-        defer src.close();
-        const dst = std.fs.cwd().createFileZ(trunc_path, .{ .truncate = true }) catch unreachable;
-        defer dst.close();
-
-        var copy_buf: [4096]u8 = undefined;
-        var copied: u64 = 0;
-        while (copied < file_size) {
-            const want: usize = @intCast(@min(copy_buf.len, file_size - copied));
-            const n = std.posix.pread(src.handle, copy_buf[0..want], copied) catch unreachable;
-            if (n == 0) break;
-            _ = std.posix.pwrite(dst.handle, copy_buf[0..n], copied) catch unreachable;
-            copied += n;
-        }
         const trunc_at: u64 = if (file_size == 0) 0 else prng.range_inclusive(u64, 0, file_size);
-        std.posix.ftruncate(dst.handle, trunc_at) catch unreachable;
+        // Two independent copies — each gives `Wal.init` a fresh
+        // truncation to recover from. Required for an honest
+        // determinism comparison; sharing one file would let the
+        // first init's tail truncation contaminate the second.
+        copy_truncated(src_path, trunc_a_path, file_size, trunc_at);
+        copy_truncated(src_path, trunc_b_path, file_size, trunc_at);
 
-        // First recovery — record pending state.
+        // Independent model — derive expected pending from the largest
+        // logged entry that fully fits before `trunc_at`. Entries
+        // straddling the cut are dropped (recovery sees them as
+        // truncated tail and stops).
+        const expected = expected_pending_at(entries_log, trunc_at);
+
+        // First recovery.
         var pending_a = Wal.PendingIndex{};
-        var wal_a = Wal.init(trunc_path, &pending_a);
-
-        // (1) Structural invariants.
+        var wal_a = Wal.init(trunc_a_path, &pending_a);
         pending_a.invariants();
-
-        // (2) Negative-space bound — truncation can drop entries, not invent them.
-        assert(pending_a.pending_count() <= entries_written);
-
-        // (3) Pending ops fit inside the recovered op space.
-        for (pending_a.entries[0..pending_a.len]) |*e| {
-            assert(e.op <= wal_a.op);
-        }
-        // Snapshot the recovered values before tearing wal_a down — Wal.deinit
-        // poisons the struct (`wal.* = undefined`), so reading `wal_a.op`
-        // after deinit returns 0xAA garbage rather than the real op.
+        assert_pending_matches_model(&pending_a, expected);
         const op_a = wal_a.op;
-        const pending_a_snap = pending_a;
         wal_a.deinit();
 
-        // (4) Determinism — second cold start produces identical pending state.
+        // Second recovery — separate fresh-trunc file. Same input,
+        // same output: TB's first-class determinism principle.
         var pending_b = Wal.PendingIndex{};
-        var wal_b = Wal.init(trunc_path, &pending_b);
+        var wal_b = Wal.init(trunc_b_path, &pending_b);
         defer wal_b.deinit();
+        pending_b.invariants();
+        assert_pending_matches_model(&pending_b, expected);
         assert(wal_b.op == op_a);
-        assert(pending_b.pending_count() == pending_a_snap.pending_count());
-        for (pending_a_snap.entries[0..pending_a_snap.len], pending_b.entries[0..pending_b.len]) |*ea, *eb| {
-            assert(ea.op == eb.op);
-            assert(ea.name_len == eb.name_len);
-            assert(ea.args_len == eb.args_len);
-        }
 
         ok_truncations += 1;
     }
 
-    log.info("Replay crash-restart done: truncations={d} all equivalent + deterministic", .{ok_truncations});
+    log.info("Replay crash-restart done: truncations={d} model-equivalent + deterministic", .{ok_truncations});
     assert(ok_truncations == trunc_offsets);
+}
+
+const ExpectedPending = struct {
+    ops: [64]u64,
+    len: u8,
+};
+
+/// Return the model's pending state at the moment `trunc_at` would
+/// land. Walks the entry log forward; the answer is the snapshot from
+/// the largest entry whose `end_offset <= trunc_at`. If no entry fits
+/// (e.g., `trunc_at` truncates inside the root), pending is empty.
+fn expected_pending_at(entries_log: []const EntryRecord, trunc_at: u64) ExpectedPending {
+    var result = ExpectedPending{ .ops = undefined, .len = 0 };
+    for (entries_log) |*rec| {
+        if (rec.end_offset > trunc_at) break;
+        result.len = rec.pending_len;
+        @memcpy(result.ops[0..rec.pending_len], rec.pending[0..rec.pending_len]);
+    }
+    return result;
+}
+
+/// Compare a recovered PendingIndex to the model snapshot as sets —
+/// order may differ because `recover_dispatches` adds entries in WAL
+/// order and `swap-remove` reorders the model in phase 1.
+fn assert_pending_matches_model(pending: *const Wal.PendingIndex, expected: ExpectedPending) void {
+    assert(pending.pending_count() == expected.len);
+    // Quadratic membership check — n is bounded by max_in_flight (64).
+    for (pending.entries[0..pending.len]) |*e| {
+        var found = false;
+        for (expected.ops[0..expected.len]) |op| {
+            if (op == e.op) {
+                found = true;
+                break;
+            }
+        }
+        assert(found);
+    }
+}
+
+/// Copy `[0, src_size)` from `src` into a fresh `dst`, then truncate
+/// `dst` to `trunc_at`. Each call produces an isolated trunc file the
+/// caller can recover against independently.
+fn copy_truncated(src: [:0]const u8, dst: [:0]const u8, src_size: u64, trunc_at: u64) void {
+    std.fs.cwd().deleteFile(dst) catch {};
+    const src_file = std.fs.cwd().openFileZ(src, .{}) catch unreachable;
+    defer src_file.close();
+    const dst_file = std.fs.cwd().createFileZ(dst, .{ .truncate = true }) catch unreachable;
+    defer dst_file.close();
+
+    var copy_buf: [4096]u8 = undefined;
+    var copied: u64 = 0;
+    while (copied < src_size) {
+        const want: usize = @intCast(@min(copy_buf.len, src_size - copied));
+        const n = std.posix.pread(src_file.handle, copy_buf[0..want], copied) catch unreachable;
+        if (n == 0) break;
+        _ = std.posix.pwrite(dst_file.handle, copy_buf[0..n], copied) catch unreachable;
+        copied += n;
+    }
+    std.posix.ftruncate(dst_file.handle, trunc_at) catch unreachable;
 }

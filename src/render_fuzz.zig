@@ -63,7 +63,13 @@ pub fn main(_: std.mem.Allocator, args: FuzzArgs) !void {
         const is_datastar = prng.range_inclusive(u32, 0, 1) == 1;
         const is_authenticated = prng.range_inclusive(u32, 0, 1) == 1;
         const is_new_visitor = prng.range_inclusive(u32, 0, 1) == 1;
-        const user_id: u128 = @as(u128, prng.int(u64)) | (@as(u128, prng.int(u64)) << 64);
+        // user_id == 0 is reserved for "no session" — `format_cookie_header`
+        // asserts non-zero whenever it emits a Set-Cookie. Random u128 is
+        // astronomically unlikely to roll zero, but a fuzzer that *might*
+        // panic on certain seeds is not a fuzzer we trust. Force the low
+        // bit so we never roll into the assertion's negative space.
+        const user_id: u128 =
+            (@as(u128, prng.int(u64)) | (@as(u128, prng.int(u64)) << 64)) | 1;
         for (&key) |*b| b.* = prng.int(u8);
 
         const max_html_len = if (is_datastar)
@@ -140,14 +146,13 @@ pub fn main(_: std.mem.Allocator, args: FuzzArgs) !void {
         // a `: ` and the next `\r\n`) must be free of `\r\n` so it
         // can't terminate the header block early and smuggle attacker
         // bytes into the body. Class-of-bug TB spends its assertion
-        // budget on; one-line cost, catastrophic-bug payoff. Scan
-        // only the headers blob (everything before the first
-        // \r\n\r\n) — for SSE responses there is no header blob, so
-        // skip the check. (SSE writes through sse.encode_headers /
-        // encode_render_result, which compose well-known constants.)
-        if (!is_datastar) {
-            assert_no_header_injection(wire);
-        }
+        // budget on; one-line cost, catastrophic-bug payoff.
+        //
+        // Run on both paths unconditionally — the previous version
+        // skipped SSE on the rationale "encode_headers composes
+        // well-known constants," which is comment-trust. TB
+        // (audit 2026-04-29) wouldn't ship that.
+        assert_no_header_injection(wire);
 
         iterations += 1;
     }
