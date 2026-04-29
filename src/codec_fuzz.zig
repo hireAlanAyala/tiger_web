@@ -107,6 +107,10 @@ pub fn main(allocator: std.mem.Allocator, args: FuzzArgs) !void {
     // should be rejected. If 100% are .invalid, the generator is broken.
     assert(completes > 0);
     assert(invalids > 0);
+    // Coverage: at least one accepted request must hit a real route,
+    // otherwise the translate/route side of the boundary is untested
+    // and the fuzzer is silently parsing-only.
+    assert(translates_ok > 0);
 }
 
 /// Build one fuzz input into `out`. Returns the number of bytes written.

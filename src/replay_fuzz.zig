@@ -10,6 +10,7 @@
 const std = @import("std");
 const assert = std.debug.assert;
 const message = @import("message.zig");
+const constants = @import("framework/constants.zig");
 const wal_mod = @import("framework/wal.zig");
 const Storage = @import("storage.zig").SqliteStorage;
 const replay = @import("replay.zig");
@@ -29,7 +30,7 @@ const log = std.log.scoped(.fuzz);
 /// running, so we record per-write and replay the model in phase 4.
 const EntryRecord = struct {
     end_offset: u64,
-    pending: [64]u64,
+    pending: [constants.max_in_flight_workers]u64,
     pending_len: u8,
 };
 
@@ -76,7 +77,14 @@ pub fn main(allocator: std.mem.Allocator, args: FuzzArgs) !void {
     // mismatches; doesn't catch a bug shared by both (TB has more
     // independence — workload generator + observer — but their
     // domain has separate replicas to compare against).
-    var pending_ops: [64]u64 = @splat(0);
+    // Capacity-matched to recovery: `Wal.PendingIndex` is bounded by
+    // `constants.max_in_flight_workers`, and `pending.add()` silently
+    // returns false once at cap. If phase 1's model is sized larger,
+    // adversarial seeds that produce long dispatch streaks make the
+    // model out-grow recovery's pending state and the equivalence
+    // assertion fails. Sizing model = recovery makes the ceilings
+    // identical by construction.
+    var pending_ops: [constants.max_in_flight_workers]u64 = @splat(0);
     var pending_count: usize = 0;
 
     // Per-entry log — records the byte offset and pending-set snapshot
@@ -112,8 +120,12 @@ pub fn main(allocator: std.mem.Allocator, args: FuzzArgs) !void {
         if (roll < 60) {
             // Normal write entry (no dispatches).
             wal.append_writes(op, @intCast(i), write_buf[0..wpos], 1, "", 0, &scratch);
-        } else if (roll < 75) {
-            // Write entry with a dispatch.
+        } else if (roll < 75 and pending_count < pending_ops.len) {
+            // Write entry with a dispatch — but only if recovery would
+            // also be able to track it. Phase 1 must not append a
+            // dispatch entry that recovery can't represent (PendingIndex
+            // capped at the same value), or the model loses entries the
+            // WAL retains and equivalence breaks.
             var dispatch_buf: [128]u8 = undefined;
             var dpos: usize = 0;
             const name = "fuzz_worker";
@@ -131,11 +143,8 @@ pub fn main(allocator: std.mem.Allocator, args: FuzzArgs) !void {
 
             wal.append_writes(op, @intCast(i), write_buf[0..wpos], 1, dispatch_buf[0..dpos], 1, &scratch);
 
-            // Track this dispatch op for future completions.
-            if (pending_count < pending_ops.len) {
-                pending_ops[pending_count] = wal.op - 1; // op was incremented after append
-                pending_count += 1;
-            }
+            pending_ops[pending_count] = wal.op - 1; // op was incremented after append
+            pending_count += 1;
         } else if (roll < 90 and pending_count > 0) {
             // Completion entry referencing a pending dispatch.
             const idx = prng.range_inclusive(usize, 0, pending_count - 1);
@@ -357,7 +366,7 @@ fn crash_restart_equivalence(
 }
 
 const ExpectedPending = struct {
-    ops: [64]u64,
+    ops: [constants.max_in_flight_workers]u64,
     len: u8,
 };
 

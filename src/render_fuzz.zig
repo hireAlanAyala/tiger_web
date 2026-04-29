@@ -109,6 +109,12 @@ pub fn main(_: std.mem.Allocator, args: FuzzArgs) !void {
             assert(!result.response.keep_alive);
             // Sanity — SSE responses begin with the HTTP status line.
             assert(starts_with(wire, "HTTP/1.1 200 OK"));
+            // Every SSE response must include the header terminator
+            // — otherwise the client never sees a header block end and
+            // assert_no_header_injection silently no-ops (it returns
+            // early when `\r\n\r\n` isn't found, which would let a
+            // missing-terminator render bug ship undetected).
+            assert(std.mem.indexOf(u8, wire, "\r\n\r\n") != null);
             datastar_count += 1;
         } else {
             // Full-page responses must include the header terminator
