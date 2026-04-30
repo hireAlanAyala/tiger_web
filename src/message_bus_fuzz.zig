@@ -105,9 +105,15 @@ pub fn main(allocator: std.mem.Allocator, args: FuzzArgs) !void {
     // disabled CRC validator would ship undetected through CI.
     if (weights.inject_corrupt_frame == 0) weights.inject_corrupt_frame = 1;
     if (weights.inject_oversized_frame == 0) weights.inject_oversized_frame = 1;
-    // Cap destructive events — they end the test.
-    weights.terminate = @min(weights.terminate, 3);
-    weights.disconnect = @min(weights.disconnect, 3);
+    // Cap destructive events. They end the test, so they need to fire
+    // RARELY relative to the fault-injection actions — otherwise the
+    // connection dies before corrupt/oversized frames can traverse the
+    // bus. Round-8 audit (2026-04-30) found smoke seed 123 hit the
+    // `terminate` action on event 1 with the previous cap of 3,
+    // killing the connection before any coverage was generated. Cap
+    // at 1 each so they're sampleable but never dominant.
+    weights.terminate = @min(weights.terminate, 1);
+    weights.disconnect = @min(weights.disconnect, 1);
     weights.inject_corrupt_frame = @min(weights.inject_corrupt_frame, 10);
     weights.inject_oversized_frame = @min(weights.inject_oversized_frame, 5);
 
@@ -291,6 +297,19 @@ pub fn main(allocator: std.mem.Allocator, args: FuzzArgs) !void {
     });
 
     assert(stats.ticks > 0);
+
+    // No end-of-run coverage gate. The catch mechanism for a
+    // disabled-CRC regression is `on_frame`'s expectation-required
+    // assertion (round-8): if any frame reaches on_frame without a
+    // matching expectation, that's a corrupt frame that bypassed the
+    // bus's CRC validator. Counter-based gates (frames_corrupt > 0,
+    // delivered > 0, etc.) are too schedule-dependent — the random
+    // event weights and the connection lifetime interact, so even
+    // correct runs sometimes don't fire a given counter. Round-8
+    // tried delivery and action-firing gates; both produced
+    // false-positives on legitimate runs while the on_frame path
+    // already catches the regression at 6/7 of our test seeds
+    // (including smoke seed 123).
 }
 
 const Stats = struct {

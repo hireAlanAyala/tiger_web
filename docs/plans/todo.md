@@ -369,20 +369,19 @@ Generalize when a second auth strategy is needed.
   exercises single-shot. Trigger: real partial-recv lands on a hot
   path, OR a recv-state bug ships. Pattern: TB's `message_buffer`
   fuzzes both shot modes — match it.
-- **message_bus_fuzz: smoke seed 123 ends connections too quickly to
-  exercise the corruption-rejection path.** Round-8 audit (2026-04-30):
-  with random recv_error_probability up to 2/10, most seeds (including
-  smoke seed 123) terminate the connection within the first few ticks,
-  before `inject_corrupt_frame` actions can deliver bytes. Net result:
-  a fully-disabled CRC validator passes the smoke suite — the corrupt
-  frames are produced but the connection dies before they're processed.
-  Round-8 already floored the `inject_corrupt_frame` weight at 1 and
-  tightened `on_frame` to assert no unexpected frames, but neither fix
-  closes this specific gap. Real fix: either (a) cap recv_error rate
-  lower to keep connections alive, (b) pin a smoke-specific seed
-  known to deliver corruption, or (c) run multiple seeds in smoke and
-  require at least one to record `corrupt > 0 and delivered > 0`.
-  The structural fix (c) matches TB's swarm pattern.
+- **message_bus_fuzz: separate corrupt-frame and oversized-frame
+  injection modes.** Round-8 audit (2026-04-30): even with low error
+  rates and capped destructive actions, the oversized-frame check in
+  the bus (`if (len > frame_max) terminate`) reliably kills connections
+  before corrupt frames can be delivered. This means a regression
+  disabling CRC validation is detected at only 1/9 of test seeds.
+  Real fix is structural: split message_bus_fuzz into two flavors —
+  one that injects only corrupt frames (validates CRC path), one that
+  injects only oversized (validates oversized path). Or: remove
+  inject_oversized_frame from the corrupt-CRC test path.
+  Round-8's foundational fixes still apply: error-rate cap, terminate
+  weight cap, on_frame strengthened to require expectations. The
+  deeper split would close the last 7/9 of the catch rate.
 - **Fuzzer main length refactor.** TIGER_STYLE limits functions to
   ~70 lines; `replay_fuzz.main` is 241 (pre-existing, made longer
   this session) and `render_fuzz.main` is 124 (created in round 1
