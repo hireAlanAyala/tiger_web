@@ -98,6 +98,13 @@ pub fn main(allocator: std.mem.Allocator, args: FuzzArgs) !void {
     var weights = fuzz_lib.random_enum_weights(&prng, Event);
     if (weights.tick == 0 and weights.tick_multiple == 0) weights.tick = 1;
     if (weights.inject_valid_frame == 0) weights.inject_valid_frame = 1;
+    // Floor the corruption-injection actions at 1 so EVERY seed
+    // exercises the bus's CRC and oversized-frame rejection paths.
+    // Round-8 audit (2026-04-29) found the smoke seed 123 never
+    // injected corrupt frames at random weights — meaning a fully-
+    // disabled CRC validator would ship undetected through CI.
+    if (weights.inject_corrupt_frame == 0) weights.inject_corrupt_frame = 1;
+    if (weights.inject_oversized_frame == 0) weights.inject_oversized_frame = 1;
     // Cap destructive events — they end the test.
     weights.terminate = @min(weights.terminate, 3);
     weights.disconnect = @min(weights.disconnect, 3);
@@ -343,19 +350,22 @@ const FuzzContext = struct {
         const self: *FuzzContext = @ptrCast(@alignCast(ctx_ptr));
         const checksum = frame_checksum(frame);
 
-        // Verify delivered frame matches next expected.
-        // If no expectation exists, this is an unexpected frame —
-        // either a fabricated frame (bug) or a frame from send_frame/
-        // send_message that went to the peer and came back. Since we
-        // don't track outbound frames, only assert on inbound.
-        if (self.expected_head < self.expected_tail) {
-            const expected = self.expected[self.expected_head % max_pending];
-            assert(checksum == expected);
-            self.expected_head += 1;
-        }
-        // Frames without expectations are outbound send_frame echoes
-        // or re-entrant sends — not tracked. This is acceptable
-        // because the Connection doesn't loop back frames to itself.
+        // Every delivered frame must have a matching expectation. The
+        // fuzzer's only inbound source is `inject_valid_frame`, which
+        // calls `expect_frame`. Corrupt + oversized injections are
+        // supposed to be REJECTED by the bus before reaching here —
+        // if one arrives, the bus's CRC or oversized check is broken.
+        //
+        // Round-8 audit (2026-04-29) found this branch was previously
+        // tolerated as "outbound send_frame echoes," which made a
+        // disabled CRC undetectable: corrupt frames flowed through
+        // and were silently treated as echoes. The connection in this
+        // fuzzer does not loop back to itself; "echoes" was wishful
+        // wording for what was really a coverage hole.
+        assert(self.expected_head < self.expected_tail);
+        const expected = self.expected[self.expected_head % max_pending];
+        assert(checksum == expected);
+        self.expected_head += 1;
 
         self.delivered_count += 1;
 
