@@ -204,8 +204,15 @@ pub fn main(_: std.mem.Allocator, args: FuzzArgs) !void {
         }
     }
 
-    coverage.assert_full_coverage(op_weights);
-    features.assert_full_coverage(&coverage);
+    // Coverage assertions — only meaningful at sample sizes where the
+    // statistical properties are stable. At `--events-max=10` with bad
+    // luck a legit run can produce zero hits on an operation; gating
+    // prevents the fuzzer from asserting on its own sampling rather
+    // than on the unit under test. Threshold matches smoke-mode floor.
+    if (events_max >= 1000) {
+        coverage.assert_full_coverage(op_weights);
+        features.assert_full_coverage(&coverage);
+    }
 }
 
 // =====================================================================

@@ -387,15 +387,16 @@ Generalize when a second auth strategy is needed.
   CRC regression in the wild ships through smoke despite seed 123
   catching, OR when adding a third fault category (which would make
   the n-way race even harder).
-- **Fuzzer main length refactor.** TIGER_STYLE limits functions to
-  ~70 lines; `replay_fuzz.main` is 241 (pre-existing, made longer
-  this session) and `render_fuzz.main` is 124 (created in round 1
-  over the limit). Natural split for replay: `phase1_write_entries`,
-  `phase2_replay_writes`, `phase3_verify_pending_index`, with shared
-  state in a struct. Render's split: `iteration_full_page`,
-  `iteration_datastar`, helpers `random_status`/`random_session_action`
-  already exist as separate fns. Real refactor; do alongside the
-  next fuzz extension.
+- **Tidy CI gate.** `zig build tidy` ported 1:1 from TigerBeetle but
+  has ~1000 violations across the codebase (long lines, defer
+  blank-line, banned `@memcpy`, `@This()`, dead-code imports). Until
+  cleared, tidy is NOT in the `tiger_unit_tests.zig` aggregator and
+  CI doesn't gate on it. Cleaning it up is the deepest TB-1:1
+  alignment work remaining. Full plan in
+  `benchmark-tracking.md` "tidy.zig codebase cleanup → CI-gating"
+  entry. Path: fix one category at a time, eventually add
+  `_ = @import("tidy.zig");` to the aggregator. Then delete
+  `scripts/style_check.zig` (tidy subsumes it).
 - **Replay fuzz: per-op `(name, args_len)` model match.** Today
   `assert_pending_matches_model` compares ops as a set + asserts
   payload-shape sanity (every recovered entry's name == "fuzz_worker"

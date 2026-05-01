@@ -40,6 +40,13 @@ const PRNG = @import("stdx").PRNG;
 
 const log = std.log.scoped(.fuzz);
 
+const Counters = struct {
+    iterations: u64 = 0,
+    datastar_count: u64 = 0,
+    fullpage_count: u64 = 0,
+    with_cookie: u64 = 0,
+};
+
 pub fn main(_: std.mem.Allocator, args: FuzzArgs) !void {
     const seed = args.seed;
     const events_max = args.events_max orelse 50_000;
@@ -48,139 +55,158 @@ pub fn main(_: std.mem.Allocator, args: FuzzArgs) !void {
     var send_buf: [http.send_buf_max]u8 = undefined;
     var html_buf: [http.send_buf_max]u8 = undefined;
     var key: [auth.key_length]u8 = undefined;
-
-    var iterations: u64 = 0;
-    var datastar_count: u64 = 0;
-    var fullpage_count: u64 = 0;
-    var with_cookie: u64 = 0;
+    var counters: Counters = .{};
 
     for (0..events_max) |_| {
-        // Random everything — Status, SessionAction, identity flags,
-        // datastar bit, key, html. Keep html within the body budget so
-        // we exercise the encode path rather than the panic contract.
-        const status = random_status(&prng);
-        const session_action = random_session_action(&prng);
-        const is_datastar = prng.range_inclusive(u32, 0, 1) == 1;
-        const is_authenticated = prng.range_inclusive(u32, 0, 1) == 1;
-        const is_new_visitor = prng.range_inclusive(u32, 0, 1) == 1;
-        // user_id == 0 is reserved for "no session" — `format_cookie_header`
-        // asserts non-zero whenever it emits a Set-Cookie. Random u128 is
-        // astronomically unlikely to roll zero, but a fuzzer that *might*
-        // panic on certain seeds is not a fuzzer we trust. Force the low
-        // bit so we never roll into the assertion's negative space.
-        const user_id: u128 =
-            (@as(u128, prng.int(u64)) | (@as(u128, prng.int(u64)) << 64)) | 1;
-        for (&key) |*b| b.* = prng.int(u8);
-
-        const max_html_len = if (is_datastar)
-            send_buf.len - sse.headers_max
-        else
-            send_buf.len - http_response.header_reserve;
-        const html_len = prng.range_inclusive(usize, 0, max_html_len);
-        for (html_buf[0..html_len]) |*b| b.* = prng.int(u8);
-
-        const result = app.encode_response(
-            status,
-            html_buf[0..html_len],
-            &send_buf,
-            is_datastar,
-            session_action,
-            user_id,
-            is_authenticated,
-            is_new_visitor,
-            &key,
-        );
-
-        // Status round-trips unchanged.
-        assert(result.status == status);
-
-        // Response fits within the buffer.
-        assert(result.response.len > 0);
-        assert(@as(usize, result.response.offset) + result.response.len <= send_buf.len);
-
-        const wire_start: usize = result.response.offset;
-        const wire_end: usize = wire_start + result.response.len;
-        const wire = send_buf[wire_start..wire_end];
-
-        if (is_datastar) {
-            // SSE writes from offset 0 (Connection: close, no
-            // header reservation needed).
-            assert(result.response.offset == 0);
-            assert(!result.response.keep_alive);
-            // Sanity — SSE responses begin with the HTTP status line.
-            assert(starts_with(wire, "HTTP/1.1 200 OK"));
-            // Every SSE response must include the header terminator
-            // — otherwise the client never sees a header block end and
-            // assert_no_header_injection silently no-ops (it returns
-            // early when `\r\n\r\n` isn't found, which would let a
-            // missing-terminator render bug ship undetected).
-            assert(std.mem.indexOf(u8, wire, "\r\n\r\n") != null);
-            datastar_count += 1;
-        } else {
-            // Full-page responses must include the header terminator
-            // and a Content-Length whose value equals the body bytes
-            // that follow it.
-            assert(starts_with(wire, "HTTP/1.1 200 OK"));
-            const term = std.mem.indexOf(u8, wire, "\r\n\r\n") orelse {
-                @panic("render_fuzz: full-page response missing \\r\\n\\r\\n header terminator");
-            };
-            const body = wire[term + 4 ..];
-            assert(body.len == html_len);
-            // Byte-equality: the body region must contain exactly the
-            // html we passed in, not just bytes-of-the-right-length.
-            // Catches an encoder that writes a same-length-but-wrong
-            // sequence into the body (e.g., reads from the wrong
-            // offset of html_buf).
-            assert(std.mem.eql(u8, body, html_buf[0..html_len]));
-            // Content-Length header must agree with the body length.
-            const cl_value = find_header(wire[0..term], "Content-Length") orelse {
-                @panic("render_fuzz: full-page response missing Content-Length");
-            };
-            const advertised = std.fmt.parseInt(usize, cl_value, 10) catch {
-                @panic("render_fuzz: Content-Length value not a valid integer");
-            };
-            assert(advertised == html_len);
-            fullpage_count += 1;
-        }
-
-        // Set-Cookie appears iff we asked for one (new visitor or
-        // explicit session change).
-        const has_cookie = std.mem.indexOf(u8, wire, "\r\nSet-Cookie: ") != null;
-        const wanted_cookie = is_new_visitor or session_action != .none;
-        // Pair assertion — the response cookie state matches what the
-        // caller asked for.
-        if (wanted_cookie) {
-            assert(has_cookie);
-            with_cookie += 1;
-        } else {
-            assert(!has_cookie);
-        }
-
-        // Header injection — every header value (everything between
-        // a `: ` and the next `\r\n`) must be free of `\r\n` so it
-        // can't terminate the header block early and smuggle attacker
-        // bytes into the body. Class-of-bug TB spends its assertion
-        // budget on; one-line cost, catastrophic-bug payoff.
-        //
-        // Run on both paths unconditionally — the previous version
-        // skipped SSE on the rationale "encode_headers composes
-        // well-known constants," which is comment-trust. TB
-        // (audit 2026-04-29) wouldn't ship that.
-        assert_no_header_injection(wire);
-
-        iterations += 1;
+        iteration(&prng, &send_buf, &html_buf, &key, &counters);
     }
 
     log.info("Render fuzz done: iterations={d} datastar={d} fullpage={d} cookie={d}", .{
-        iterations, datastar_count, fullpage_count, with_cookie,
+        counters.iterations, counters.datastar_count,
+        counters.fullpage_count, counters.with_cookie,
     });
-    assert(iterations == events_max);
+    assert(counters.iterations == events_max);
     // Generator-coverage gate — see codec_fuzz for rationale. At
     // tiny sample sizes a legit run can land entirely on one branch.
     if (events_max >= 100) {
-        assert(datastar_count > 0);
-        assert(fullpage_count > 0);
+        assert(counters.datastar_count > 0);
+        assert(counters.fullpage_count > 0);
     }
+}
+
+const Input = struct {
+    status: message.Status,
+    session_action: message.SessionAction,
+    is_datastar: bool,
+    is_authenticated: bool,
+    is_new_visitor: bool,
+    user_id: u128,
+    html_len: usize,
+};
+
+/// Roll random inputs and fill `key` + `html_buf[0..html_len]` with
+/// random bytes. Centralises the constraints (user_id non-zero,
+/// html_len within the budget for the chosen response type).
+fn generate_input(
+    prng: *PRNG,
+    key: *[auth.key_length]u8,
+    html_buf: []u8,
+    send_buf_len: usize,
+) Input {
+    const is_datastar = prng.range_inclusive(u32, 0, 1) == 1;
+    const max_html_len = if (is_datastar)
+        send_buf_len - sse.headers_max
+    else
+        send_buf_len - http_response.header_reserve;
+    const html_len = prng.range_inclusive(usize, 0, max_html_len);
+    for (html_buf[0..html_len]) |*b| b.* = prng.int(u8);
+    for (key) |*b| b.* = prng.int(u8);
+    return .{
+        .status = random_status(prng),
+        .session_action = random_session_action(prng),
+        .is_datastar = is_datastar,
+        .is_authenticated = prng.range_inclusive(u32, 0, 1) == 1,
+        .is_new_visitor = prng.range_inclusive(u32, 0, 1) == 1,
+        // user_id == 0 is reserved for "no session"; `format_cookie_header`
+        // asserts non-zero. Force low bit so a random u128 never rolls
+        // into the assertion's negative space.
+        .user_id = (@as(u128, prng.int(u64)) | (@as(u128, prng.int(u64)) << 64)) | 1,
+        .html_len = html_len,
+    };
+}
+
+/// One fuzz iteration: generate random inputs within the budget,
+/// dispatch encode_response, run all wire-shape assertions.
+fn iteration(
+    prng: *PRNG,
+    send_buf: *[http.send_buf_max]u8,
+    html_buf: *[http.send_buf_max]u8,
+    key: *[auth.key_length]u8,
+    counters: *Counters,
+) void {
+    const input = generate_input(prng, key, html_buf, send_buf.len);
+
+    const result = app.encode_response(
+        input.status,
+        html_buf[0..input.html_len],
+        send_buf,
+        input.is_datastar,
+        input.session_action,
+        input.user_id,
+        input.is_authenticated,
+        input.is_new_visitor,
+        key,
+    );
+
+    // Status round-trips unchanged.
+    assert(result.status == input.status);
+    // Response fits within the buffer.
+    assert(result.response.len > 0);
+    assert(@as(usize, result.response.offset) + result.response.len <= send_buf.len);
+
+    const wire_start: usize = result.response.offset;
+    const wire_end: usize = wire_start + result.response.len;
+    const wire = send_buf[wire_start..wire_end];
+
+    if (input.is_datastar) {
+        assert_datastar_response(wire, result);
+        counters.datastar_count += 1;
+    } else {
+        assert_full_page_response(wire, html_buf[0..input.html_len], result);
+        counters.fullpage_count += 1;
+    }
+
+    // Cookie pair-assertion: appears iff caller asked for one.
+    const has_cookie = std.mem.indexOf(u8, wire, "\r\nSet-Cookie: ") != null;
+    const wanted_cookie = input.is_new_visitor or input.session_action != .none;
+    if (wanted_cookie) {
+        assert(has_cookie);
+        counters.with_cookie += 1;
+    } else {
+        assert(!has_cookie);
+    }
+
+    // Header injection — runs on both SSE and full-page paths.
+    assert_no_header_injection(wire);
+
+    counters.iterations += 1;
+}
+
+/// Datastar/SSE response wire-shape assertions.
+fn assert_datastar_response(wire: []const u8, result: app.CommitResult) void {
+    // SSE writes from offset 0 (Connection: close, no header reserve).
+    assert(result.response.offset == 0);
+    assert(!result.response.keep_alive);
+    assert(starts_with(wire, "HTTP/1.1 200 OK"));
+    // Header terminator must exist — otherwise the client never sees
+    // a header block end and assert_no_header_injection silently
+    // no-ops (returns early when `\r\n\r\n` isn't found).
+    assert(std.mem.indexOf(u8, wire, "\r\n\r\n") != null);
+}
+
+/// Full-page response wire-shape assertions.
+fn assert_full_page_response(
+    wire: []const u8,
+    expected_body: []const u8,
+    result: app.CommitResult,
+) void {
+    _ = result;
+    assert(starts_with(wire, "HTTP/1.1 200 OK"));
+    const term = std.mem.indexOf(u8, wire, "\r\n\r\n") orelse {
+        @panic("render_fuzz: full-page response missing \\r\\n\\r\\n header terminator");
+    };
+    const body = wire[term + 4 ..];
+    assert(body.len == expected_body.len);
+    // Byte-equality: catches an encoder that writes a same-length-
+    // but-wrong sequence (e.g., reads from the wrong html_buf offset).
+    assert(std.mem.eql(u8, body, expected_body));
+    const cl_value = find_header(wire[0..term], "Content-Length") orelse {
+        @panic("render_fuzz: full-page response missing Content-Length");
+    };
+    const advertised = std.fmt.parseInt(usize, cl_value, 10) catch {
+        @panic("render_fuzz: Content-Length value not a valid integer");
+    };
+    assert(advertised == expected_body.len);
 }
 
 fn random_status(prng: *PRNG) message.Status {

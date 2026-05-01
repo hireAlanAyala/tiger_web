@@ -34,6 +34,11 @@ const EntryRecord = struct {
     pending_len: u8,
 };
 
+const Phase1Result = struct {
+    entries_written: u64,
+    pending_count: usize,
+};
+
 pub fn main(allocator: std.mem.Allocator, args: FuzzArgs) !void {
     const seed = args.seed;
     const events_max = args.events_max orelse 5_000;
@@ -54,128 +59,89 @@ pub fn main(allocator: std.mem.Allocator, args: FuzzArgs) !void {
     std.fs.cwd().deleteFile(wal_path) catch {};
     defer std.fs.cwd().deleteFile(wal_path) catch {};
 
-    // Phase 1: Write random entries to the WAL.
+    // entries_log is the independent model phase 4 consumes; phase 1
+    // populates it, phase 4 reads it. Heap-allocated so phases share.
+    var entries_log = std.ArrayList(EntryRecord).init(allocator);
+    defer entries_log.deinit();
+
+    const phase1 = try phase_1_write_entries(&prng, wal_path, events_max, &entries_log);
+    const phase2 = try phase_2_replay_writes(wal_path);
+    phase_3_verify_pending_index(wal_path, phase1.pending_count);
+
+    log.info("Replay fuzz done: written={d} replayed={d} pending={d}", .{
+        phase1.entries_written, phase2.entries_replayed, phase1.pending_count,
+    });
+    // Generator-coverage gate — at tiny events_max a legit run can
+    // produce no entries (every roll lands on .root or !is_mutation).
+    if (events_max >= 100) {
+        assert(phase1.entries_written > 0);
+        assert(phase2.entries_replayed > 0);
+    }
+
+    try crash_restart_equivalence(wal_path, &prng, phase2.file_size, entries_log.items, seed);
+}
+
+const Phase2Result = struct { file_size: u64, entries_replayed: u64 };
+
+/// Phase 1: write random WAL entries (60% normal / 15% dispatch /
+/// 15% completion / 10% dead). Records each entry's end_offset and
+/// pending-set snapshot in `entries_log` so phase 4 can derive the
+/// expected pending state at any truncation.
+///
+/// **Dual purpose, load-bearing for phase 4:** the swap-remove
+/// mutations on `pending_ops` + `pending_count` are the **independent
+/// model** that phase 4 asserts WAL recovery matches. Refactoring this
+/// loop weakens phase 4's correctness silently if the model drifts
+/// from the actual append calls.
+///
+/// Capacity-matched to recovery: `Wal.PendingIndex` is bounded by
+/// `constants.max_in_flight_workers`, and `pending.add()` returns
+/// false once at cap. Sizing model = recovery makes the ceilings
+/// identical by construction.
+fn phase_1_write_entries(
+    prng: *PRNG,
+    wal_path: [:0]const u8,
+    events_max: usize,
+    entries_log: *std.ArrayList(EntryRecord),
+) !Phase1Result {
     var wal = Wal.init(wal_path, null);
     var scratch: [8192]u8 = undefined;
     var entries_written: u64 = 0;
-
-    // Track dispatches for generating valid completions/dead entries.
-    //
-    // **Dual purpose, load-bearing for phase 4:** the swap-remove
-    // mutations on `pending_ops` + `pending_count` here are not just
-    // bookkeeping for generating valid completions. They are the
-    // **independent model** that phase 4 asserts WAL recovery
-    // matches at every truncation point. Refactoring this loop
-    // (e.g., consolidating the four-branch if/else into a helper)
-    // weakens phase 4's correctness silently if the model drifts
-    // from the actual append calls. Keep them in lock-step.
-    //
-    // Independence boundary (the property phase 4 actually tests):
-    // *manual swap-remove array on plain u64 ops* vs. *binary-format
-    // parser in `wal.recover_dispatches` rebuilding `PendingIndex`*.
-    // Different code, different data structures. Genuinely catches
-    // mismatches; doesn't catch a bug shared by both (TB has more
-    // independence — workload generator + observer — but their
-    // domain has separate replicas to compare against).
-    // Capacity-matched to recovery: `Wal.PendingIndex` is bounded by
-    // `constants.max_in_flight_workers`, and `pending.add()` silently
-    // returns false once at cap. If phase 1's model is sized larger,
-    // adversarial seeds that produce long dispatch streaks make the
-    // model out-grow recovery's pending state and the equivalence
-    // assertion fails. Sizing model = recovery makes the ceilings
-    // identical by construction.
     var pending_ops: [constants.max_in_flight_workers]u64 = @splat(0);
     var pending_count: usize = 0;
-
-    // Per-entry log — records the byte offset and pending-set snapshot
-    // *after* each append. Phase 4 reads this to compute the expected
-    // pending state at any truncation offset without re-implementing
-    // the WAL parser.
-    var entries_log = std.ArrayList(EntryRecord).init(allocator);
-    defer entries_log.deinit();
 
     for (0..events_max) |i| {
         const op = prng.enum_uniform(message.Operation);
         if (op == .root) continue;
         if (!op.is_mutation()) continue;
 
-        // Generate a random write entry.
         var write_buf: [256]u8 = undefined;
-        var wpos: usize = 0;
-        const sql = "INSERT INTO fuzz_t VALUES (?1)";
-        std.mem.writeInt(u16, write_buf[wpos..][0..2], sql.len, .big);
-        wpos += 2;
-        stdx.copy_disjoint(.exact, u8, write_buf[wpos..][0..sql.len], sql);
-        wpos += sql.len;
-        write_buf[wpos] = 1; // 1 param
-        wpos += 1;
-        write_buf[wpos] = 0x01; // integer tag
-        wpos += 1;
-        std.mem.writeInt(i64, write_buf[wpos..][0..8], @intCast(i), .little);
-        wpos += 8;
+        const wpos = build_write_payload(&write_buf, i);
 
-        // Decide entry type: 60% normal, 15% dispatch, 15% completion, 10% dead.
         const roll = prng.range_inclusive(u32, 0, 99);
-
         if (roll < 60) {
-            // Normal write entry (no dispatches).
             wal.append_writes(op, @intCast(i), write_buf[0..wpos], 1, "", 0, &scratch);
         } else if (roll < 75 and pending_count < pending_ops.len) {
-            // Write entry with a dispatch — but only if recovery would
-            // also be able to track it. Phase 1 must not append a
-            // dispatch entry that recovery can't represent (PendingIndex
-            // capped at the same value), or the model loses entries the
-            // WAL retains and equivalence breaks.
+            // Dispatch entry — only if recovery can also represent it
+            // (PendingIndex capped at the same value), or model loses
+            // entries the WAL retains and equivalence breaks.
             var dispatch_buf: [128]u8 = undefined;
-            var dpos: usize = 0;
-            const name = "fuzz_worker";
-            dispatch_buf[dpos] = @intCast(name.len);
-            dpos += 1;
-            stdx.copy_disjoint(.exact, u8, dispatch_buf[dpos..][0..name.len], name);
-            dpos += name.len;
-            const args_len: u16 = prng.range_inclusive(u16, 0, 32);
-            std.mem.writeInt(u16, dispatch_buf[dpos..][0..2], args_len, .big);
-            dpos += 2;
-            for (0..args_len) |_| {
-                dispatch_buf[dpos] = prng.int(u8);
-                dpos += 1;
-            }
-
+            const dpos = build_dispatch_payload(prng, &dispatch_buf);
             wal.append_writes(op, @intCast(i), write_buf[0..wpos], 1, dispatch_buf[0..dpos], 1, &scratch);
-
-            pending_ops[pending_count] = wal.op - 1; // op was incremented after append
+            pending_ops[pending_count] = wal.op - 1;
             pending_count += 1;
         } else if (roll < 90 and pending_count > 0) {
-            // Completion entry referencing a pending dispatch.
             const idx = prng.range_inclusive(usize, 0, pending_count - 1);
-            const dispatch_op = pending_ops[idx];
-
-            wal.append_completion(op, @intCast(i), write_buf[0..wpos], 1, dispatch_op, &scratch);
-
-            // Remove from pending (swap-remove).
-            pending_count -= 1;
-            if (idx < pending_count) {
-                pending_ops[idx] = pending_ops[pending_count];
-            }
+            wal.append_completion(op, @intCast(i), write_buf[0..wpos], 1, pending_ops[idx], &scratch);
+            swap_remove(&pending_ops, &pending_count, idx);
         } else if (pending_count > 0) {
-            // Dead-dispatch entry.
             const idx = prng.range_inclusive(usize, 0, pending_count - 1);
-            const dispatch_op = pending_ops[idx];
-
-            wal.append_dead_dispatch(op, @intCast(i), dispatch_op, &scratch);
-
-            // Remove from pending.
-            pending_count -= 1;
-            if (idx < pending_count) {
-                pending_ops[idx] = pending_ops[pending_count];
-            }
+            wal.append_dead_dispatch(op, @intCast(i), pending_ops[idx], &scratch);
+            swap_remove(&pending_ops, &pending_count, idx);
         } else {
-            // Fallback: normal write.
             wal.append_writes(op, @intCast(i), write_buf[0..wpos], 1, "", 0, &scratch);
         }
 
-        // Snapshot the file size + pending set after this entry. This
-        // is the "expected after entry N" datapoint phase 4 needs.
         const fstat = std.posix.fstat(wal.fd) catch unreachable;
         var rec = EntryRecord{
             .end_offset = @intCast(fstat.size),
@@ -191,10 +157,61 @@ pub fn main(allocator: std.mem.Allocator, args: FuzzArgs) !void {
     }
     wal.deinit();
 
-    // Phase 2: Replay the WAL against a fresh database.
+    return .{ .entries_written = entries_written, .pending_count = pending_count };
+}
+
+/// Build the deterministic SQL-write payload for a phase-1 entry.
+/// Format: u16 sql_len + sql bytes + u8 param_count + u8 type_tag +
+/// i64 value. Returns total bytes written.
+fn build_write_payload(buf: *[256]u8, i: usize) usize {
+    var wpos: usize = 0;
+    const sql = "INSERT INTO fuzz_t VALUES (?1)";
+    std.mem.writeInt(u16, buf[wpos..][0..2], sql.len, .big);
+    wpos += 2;
+    stdx.copy_disjoint(.exact, u8, buf[wpos..][0..sql.len], sql);
+    wpos += sql.len;
+    buf[wpos] = 1;
+    wpos += 1;
+    buf[wpos] = 0x01;
+    wpos += 1;
+    std.mem.writeInt(i64, buf[wpos..][0..8], @intCast(i), .little);
+    wpos += 8;
+    return wpos;
+}
+
+/// Build a dispatch payload: name_len + "fuzz_worker" + args_len +
+/// args_len bytes of random data. Returns total bytes written.
+fn build_dispatch_payload(prng: *PRNG, buf: *[128]u8) usize {
+    var dpos: usize = 0;
+    const name = "fuzz_worker";
+    buf[dpos] = @intCast(name.len);
+    dpos += 1;
+    stdx.copy_disjoint(.exact, u8, buf[dpos..][0..name.len], name);
+    dpos += name.len;
+    const args_len: u16 = prng.range_inclusive(u16, 0, 32);
+    std.mem.writeInt(u16, buf[dpos..][0..2], args_len, .big);
+    dpos += 2;
+    for (0..args_len) |_| {
+        buf[dpos] = prng.int(u8);
+        dpos += 1;
+    }
+    return dpos;
+}
+
+/// Swap-remove from a fixed-capacity array.
+fn swap_remove(ops: []u64, count: *usize, idx: usize) void {
+    count.* -= 1;
+    if (idx < count.*) {
+        ops[idx] = ops[count.*];
+    }
+}
+
+/// Phase 2: replay the WAL against a fresh in-memory SQLite. Returns
+/// the file size (used by phase 4 as the truncation upper bound) and
+/// the count of entries successfully replayed.
+fn phase_2_replay_writes(wal_path: [:0]const u8) !Phase2Result {
     var storage = try Storage.init(":memory:");
     defer storage.deinit();
-
     assert(storage.execute("CREATE TABLE fuzz_t (val INTEGER);", .{}));
 
     const fd = std.posix.open(wal_path, .{ .ACCMODE = .RDONLY }, 0) catch unreachable;
@@ -204,17 +221,15 @@ pub fn main(allocator: std.mem.Allocator, args: FuzzArgs) !void {
     var buf = std.heap.page_allocator.alignedAlloc(u8, @alignOf(wal_mod.EntryHeader), wal_mod.entry_max) catch unreachable;
     defer std.heap.page_allocator.free(buf);
 
-    var offset: u64 = 0;
-    var entries_replayed: u64 = 0;
-
-    // Skip root.
-    {
+    // Skip root entry (header only, no writes).
+    var offset: u64 = blk: {
         var hdr_buf: [@sizeOf(wal_mod.EntryHeader)]u8 align(@alignOf(wal_mod.EntryHeader)) = undefined;
         const n = std.posix.pread(fd, &hdr_buf, 0) catch unreachable;
         assert(n == @sizeOf(wal_mod.EntryHeader));
         const hdr: *const wal_mod.EntryHeader = @ptrCast(@alignCast(&hdr_buf));
-        offset = hdr.entry_len;
-    }
+        break :blk hdr.entry_len;
+    };
+    var entries_replayed: u64 = 0;
 
     while (offset < file_size) {
         var hdr_buf: [@sizeOf(wal_mod.EntryHeader)]u8 align(@alignOf(wal_mod.EntryHeader)) = undefined;
@@ -227,7 +242,6 @@ pub fn main(allocator: std.mem.Allocator, args: FuzzArgs) !void {
         if (hdr.write_count > 0) {
             const full_n = std.posix.pread(fd, buf[0..hdr.entry_len], offset) catch break;
             if (full_n != hdr.entry_len) break;
-
             storage.begin();
             if (replay.execute_entry_writes(&storage, buf[@sizeOf(wal_mod.EntryHeader)..hdr.entry_len], hdr.write_count)) {
                 storage.commit();
@@ -238,42 +252,17 @@ pub fn main(allocator: std.mem.Allocator, args: FuzzArgs) !void {
         }
         offset += hdr.entry_len;
     }
+    return .{ .file_size = file_size, .entries_replayed = entries_replayed };
+}
 
-    // Phase 3: Verify recovery rebuilds the pending index correctly.
-    {
-        var pending = Wal.PendingIndex{};
-        var wal2 = Wal.init(wal_path, &pending);
-        defer wal2.deinit();
-
-        // Pending count should match our local tracking.
-        // (pending_count from phase 1 = dispatches not yet completed/dead)
-        assert(pending.pending_count() == @as(u8, @intCast(pending_count)));
-        pending.invariants();
-    }
-
-    log.info("Replay fuzz done: written={d} replayed={d} pending={d}", .{
-        entries_written, entries_replayed, pending_count,
-    });
-    // Generator-coverage gate. At tiny sample sizes the loop may run
-    // its full events_max iterations and still produce no entries
-    // (every roll lands on a non-mutation Operation or .root). That's
-    // valid PRNG behavior, not a generator failure — only assert
-    // coverage when the sample size makes coverage statistically
-    // certain.
-    if (events_max >= 100) {
-        assert(entries_written > 0);
-        assert(entries_replayed > 0);
-    }
-
-    // Phase 4: Crash-restart equivalence. Phase 1-3 prove a clean
-    // WAL round-trips. The contract durability actually rests on is
-    // "the process can crash at any byte, restart, and recover a
-    // consistent state — deterministically, without losing committed
-    // work or inventing pending work that was never on disk." TB's
-    // journal_checker enforces the equivalent property; we approximate
-    // it by truncating the WAL at random offsets and re-running
-    // recovery against a stronger ladder of assertions.
-    try crash_restart_equivalence(wal_path, &prng, file_size, entries_log.items, seed);
+/// Phase 3: rebuild the pending index via `Wal.init` recovery and
+/// assert the count matches phase 1's manual tracking.
+fn phase_3_verify_pending_index(wal_path: [:0]const u8, expected_pending_count: usize) void {
+    var pending = Wal.PendingIndex{};
+    var wal2 = Wal.init(wal_path, &pending);
+    defer wal2.deinit();
+    assert(pending.pending_count() == @as(u8, @intCast(expected_pending_count)));
+    pending.invariants();
 }
 
 /// Truncate the WAL at random offsets and assert recovery is
