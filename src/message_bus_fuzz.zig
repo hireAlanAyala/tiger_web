@@ -98,13 +98,34 @@ pub fn main(allocator: std.mem.Allocator, args: FuzzArgs) !void {
     var weights = fuzz_lib.random_enum_weights(&prng, Event);
     if (weights.tick == 0 and weights.tick_multiple == 0) weights.tick = 1;
     if (weights.inject_valid_frame == 0) weights.inject_valid_frame = 1;
-    // Floor the corruption-injection actions at 1 so EVERY seed
-    // exercises the bus's CRC and oversized-frame rejection paths.
-    // Round-8 audit (2026-04-29) found the smoke seed 123 never
-    // injected corrupt frames at random weights — meaning a fully-
-    // disabled CRC validator would ship undetected through CI.
-    if (weights.inject_corrupt_frame == 0) weights.inject_corrupt_frame = 1;
-    if (weights.inject_oversized_frame == 0) weights.inject_oversized_frame = 1;
+
+    // Per-run corruption-class selection. The bus terminates on the
+    // FIRST malformed frame in the byte stream — once any rejection
+    // fires, no other rejection path can be exercised in the same run.
+    // To get coverage of both CRC and oversized rejections across the
+    // seed space, each run is dedicated to ONE corruption class
+    // (PRNG-chosen at init): corrupt_only, oversized_only, or mixed.
+    // Across many seeds, every path gets exercised; per seed, the
+    // selected path is reached deterministically. (Round-8 audit,
+    // 2026-04-30: TB-shape replacement for the previous best-effort
+    // weight floors that yielded 2/9 catch rate on a disabled CRC.)
+    const CorruptionClass = enum { corrupt_only, oversized_only, mixed };
+    const corruption_class = prng.enum_uniform(CorruptionClass);
+    switch (corruption_class) {
+        .corrupt_only => {
+            weights.inject_oversized_frame = 0;
+            if (weights.inject_corrupt_frame == 0) weights.inject_corrupt_frame = 1;
+        },
+        .oversized_only => {
+            weights.inject_corrupt_frame = 0;
+            if (weights.inject_oversized_frame == 0) weights.inject_oversized_frame = 1;
+        },
+        .mixed => {
+            if (weights.inject_corrupt_frame == 0) weights.inject_corrupt_frame = 1;
+            if (weights.inject_oversized_frame == 0) weights.inject_oversized_frame = 1;
+        },
+    }
+
     // Cap destructive events. They end the test, so they need to fire
     // RARELY relative to fault-injection actions. Round-8 audit
     // (2026-04-30): previous cap of 3 caused smoke seed 123 to hit
@@ -118,6 +139,7 @@ pub fn main(allocator: std.mem.Allocator, args: FuzzArgs) !void {
 
     // Log swarm parameters for seed reproduction.
     log.info("Fuzz config:", .{});
+    log.info("  corruption_class={s}", .{@tagName(corruption_class)});
     log.info("  recv_partial={d}/{d} send_partial={d}/{d} send_now={d}/{d}", .{
         io.recv_partial_probability.numerator,   io.recv_partial_probability.denominator,
         io.send_partial_probability.numerator,   io.send_partial_probability.denominator,
