@@ -453,6 +453,13 @@ Generalize when a second auth strategy is needed.
   implicitly.
 - **Per-endpoint load shapes.** Default `--ops` mix in the SLA bench
   will need tuning as domain grows.
+- **`parse_seed` for commit-hash seeds.** Port TB's
+  `testing/fuzz.zig:90` shape — accept 40-char hex (git commit
+  hash) and truncate u160→u64. Lets CI pass `$(git rev-parse HEAD)`
+  as the fuzzer seed so failures reproduce from the commit alone.
+  ~10 lines in `src/fuzz_lib.zig`. Trigger: when a CI fuzz failure
+  ships and the seed-from-commit shape would have made the repro
+  one-line. Reference: `docs/plans/snaptest-ci.md` Phase 2.
 - **Sidecar-mode SLA bench.** `tiger-web benchmark` exercises the
   HTTP → native → SQLite path only; the 1-RT SHM sidecar dispatch
   isn't covered at SLA tier. Two shapes: `--sidecar=<cmd>` flag, or

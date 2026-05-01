@@ -1,5 +1,14 @@
 # Plan: Framework-provided fuzzer — `tiger-web fuzz`
 
+**Status (2026-04-30):** unshipped. Distinct from the framework-internal
+boundary fuzzers landed this session (`codec_fuzz`, `render_fuzz`,
+`replay_fuzz`, `message_bus_fuzz`, `worker_dispatch_fuzz`,
+`row_format_fuzz`, `state_machine` `fuzz.zig`) — those exercise
+*framework code* at known seams. This plan is for a **user-facing
+zero-config fuzzer** that drives *annotated handler code* via HTTP
+without the user writing test code. Roadmap-tier "Later" feature
+bundled with `cfo-as-service`.
+
 ## Context
 
 The CFO found 8 bugs on its first 5-minute run. But the fuzzer that

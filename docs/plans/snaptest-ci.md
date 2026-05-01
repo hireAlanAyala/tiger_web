@@ -1,5 +1,14 @@
 # Snapshot testing + CI/CD
 
+**Status (2026-04-30):** CI Phases 1 + 4 shipped (basic workflow +
+cross-language). Phase 3 (extended nightly) is covered differently
+— CFO runs 24/7 swarm-mode rather than nightly cron, see
+`scripts/cfo.zig` + `roadmap.md` "Now: Infrastructure is live".
+Phase 2 (`parse_seed` for commit-hash seeds) is still pending —
+tracked in `todo.md` backlog. Snapshot testing remains unported;
+also tracked in `todo.md` backlog. The TB-utilities reference
+table at the bottom is preserved as a triggered-port lookup.
+
 ## Snapshot testing
 
 ### What TB does
