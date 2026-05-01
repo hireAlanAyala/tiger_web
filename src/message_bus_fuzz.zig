@@ -106,12 +106,11 @@ pub fn main(allocator: std.mem.Allocator, args: FuzzArgs) !void {
     if (weights.inject_corrupt_frame == 0) weights.inject_corrupt_frame = 1;
     if (weights.inject_oversized_frame == 0) weights.inject_oversized_frame = 1;
     // Cap destructive events. They end the test, so they need to fire
-    // RARELY relative to the fault-injection actions — otherwise the
-    // connection dies before corrupt/oversized frames can traverse the
-    // bus. Round-8 audit (2026-04-30) found smoke seed 123 hit the
-    // `terminate` action on event 1 with the previous cap of 3,
-    // killing the connection before any coverage was generated. Cap
-    // at 1 each so they're sampleable but never dominant.
+    // RARELY relative to fault-injection actions. Round-8 audit
+    // (2026-04-30): previous cap of 3 caused smoke seed 123 to hit
+    // `terminate` on event 1, killing the connection before any
+    // coverage was generated. Cap at 1 each — sampleable, never
+    // dominant.
     weights.terminate = @min(weights.terminate, 1);
     weights.disconnect = @min(weights.disconnect, 1);
     weights.inject_corrupt_frame = @min(weights.inject_corrupt_frame, 10);
@@ -163,7 +162,17 @@ pub fn main(allocator: std.mem.Allocator, args: FuzzArgs) !void {
                 _ = build_wire_frame(&frame_buf, payload[0..payload_len]);
 
                 const frame_total = 8 + payload_len;
-                const corrupt_pos = prng.range_inclusive(u32, 0, frame_total - 1);
+                // Length bytes [0..4) are checked separately by the
+                // oversized rejection path; flipping them would test
+                // that path instead of CRC and terminate the
+                // connection before any later corrupt frame reaches
+                // the CRC validator. Restrict to [4, frame_total) so
+                // every corrupt-frame injection deterministically
+                // exercises CRC. (Round-8 audit, 2026-04-30: TB-shape
+                // input-distribution fix replaces an attempted modal
+                // split that would have wrapped the action list in
+                // unnecessary build-time configurability.)
+                const corrupt_pos = prng.range_inclusive(u32, 4, frame_total - 1);
                 frame_buf[corrupt_pos] ^= prng.range_inclusive(u8, 1, 255);
 
                 _ = io.inject_data(pair[1], frame_buf[0..frame_total]);

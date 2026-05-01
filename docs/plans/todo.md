@@ -369,19 +369,24 @@ Generalize when a second auth strategy is needed.
   exercises single-shot. Trigger: real partial-recv lands on a hot
   path, OR a recv-state bug ships. Pattern: TB's `message_buffer`
   fuzzes both shot modes — match it.
-- **message_bus_fuzz: separate corrupt-frame and oversized-frame
-  injection modes.** Round-8 audit (2026-04-30): even with low error
-  rates and capped destructive actions, the oversized-frame check in
-  the bus (`if (len > frame_max) terminate`) reliably kills connections
-  before corrupt frames can be delivered. This means a regression
-  disabling CRC validation is detected at only 1/9 of test seeds.
-  Real fix is structural: split message_bus_fuzz into two flavors —
-  one that injects only corrupt frames (validates CRC path), one that
-  injects only oversized (validates oversized path). Or: remove
-  inject_oversized_frame from the corrupt-CRC test path.
-  Round-8's foundational fixes still apply: error-rate cap, terminate
-  weight cap, on_frame strengthened to require expectations. The
-  deeper split would close the last 7/9 of the catch rate.
+- **message_bus_fuzz: per-run corruption-class selection (TB-shape).**
+  Round-8 audit (2026-04-30) landed three fixes — generator
+  constrained to CRC bytes only, error rate capped at 0..1/100,
+  destructive-action weights capped at 1 — and verified disabled-CRC
+  detection at smoke seed 123. Catch rate at the broader seed set is
+  2/9: most seeds happen to inject `inject_oversized_frame` before
+  `inject_corrupt_frame`, oversized terminates the connection on the
+  length check, corrupt frames queued in the byte stream never
+  process. This is a fundamental property of "first-rejection
+  terminates" — once any malformed frame is rejected, the connection
+  is dead and no other rejection path can be exercised in the same
+  run. Real fix: per-run corruption-class selection (set ONE of
+  inject_corrupt_frame or inject_oversized_frame to weight 0 at init,
+  PRNG-chosen). Each run tests exactly one rejection path; across
+  many seeds both paths get coverage. ~10 lines. Trigger: when a
+  CRC regression in the wild ships through smoke despite seed 123
+  catching, OR when adding a third fault category (which would make
+  the n-way race even harder).
 - **Fuzzer main length refactor.** TIGER_STYLE limits functions to
   ~70 lines; `replay_fuzz.main` is 241 (pre-existing, made longer
   this session) and `render_fuzz.main` is 124 (created in round 1

@@ -60,16 +60,15 @@ pub const FuzzIO = struct {
             .recv_partial_probability = PRNG.ratio(prng.range_inclusive(u64, 2, 8), 10),
             .send_partial_probability = PRNG.ratio(prng.range_inclusive(u64, 2, 8), 10),
             .send_now_success_probability = PRNG.ratio(prng.range_inclusive(u64, 3, 9), 10),
-            // Error probabilities capped LOW so the connection lives
-            // long enough for the other fault categories (corrupt
-            // frames, oversized frames) to traverse the bus. With
-            // recv_error=2/10 (the previous range), median connection
-            // lifetime was ~5 recvs — corrupt-frame actions injected
-            // bytes that died with the connection before reaching
-            // `on_frame`. Per round-8 audit: smoke seed 123 passed
-            // even with CRC fully disabled because the corruption
-            // path was never exercised. Cap at 0..1/100 so the
-            // recv-error path remains testable but doesn't dominate.
+            // Error probabilities tuned so the median connection
+            // lifetime is long enough for fault-injection actions
+            // (corrupt frames, oversized frames) to traverse the bus.
+            // Round-8 audit (2026-04-30): the previous range
+            // (recv 0..2/10) gave median lifetime ~5 recvs — corrupt
+            // injections reliably died with the connection before
+            // reaching the CRC validator. 0..1/100 gives ~100 recvs,
+            // comfortable margin while keeping the recv-error path
+            // sampleable.
             .recv_error_probability = PRNG.ratio(prng.range_inclusive(u64, 0, 1), 100),
             .send_error_probability = PRNG.ratio(prng.range_inclusive(u64, 0, 1), 100),
         };
