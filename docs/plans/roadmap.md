@@ -5,16 +5,13 @@
 CI passes on GitHub Actions. CFO runs 24/7 on local machine, pushing
 seeds to devhubdb. 72 integration tests cover all 24 handlers through
 the full sidecar pipeline. Annotation-driven routing is unified across
-Zig and TypeScript.
+Zig and TypeScript. Boundary fuzzers ship for codec, render, replay
+(crash-restart equivalence), message_bus, worker_dispatch, row_format,
+state_machine — all wired into CFO's roster. Devhub dashboard live at
+`https://hirealanayala.github.io/tiger_web/` with per-commit metrics
++ kcov coverage.
 
 ## Next
-
-### devhub viewer
-Static site to visualize CFO seed data. Copy TB's 3-file pattern
-(index.html, style.css, devhub.js). Deploy to GitHub Pages.
-- Fuzz runs table: seed records with repro commands, failing seeds highlighted
-- Benchmark charts: performance regression detection over time (ApexCharts)
-- Deploy via GitHub Actions on main push
 
 ### devhub setup (`tiger-web setup --github`)
 Automated devhubdb repo creation + PAT configuration. One command from

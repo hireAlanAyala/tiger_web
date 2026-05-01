@@ -1,5 +1,14 @@
 # VOPR-Analog — Design Sketch
 
+**Status (2026-04-30):** post-G.1 reference, not a current blocker.
+G.1 (dashboard) shipped 2026-04-27; the prerequisite for VOPR-analog
+is satisfied. The current testing model — sim tests + CFO-driven
+swarm of boundary fuzzers (codec, render, replay-crash-restart,
+message_bus, worker_dispatch, row_format, state_machine) + mutation
+testing for assertion confidence — is the layered TB-1:1-in-spirit
+investment we made instead. VOPR-analog remains the biggest
+single-shot correctness win available; this doc holds the design.
+
 **Scope of this document:** design sketch only, not build plan. The
 TB-lens audit identified VOPR-analog as the biggest correctness win
 available (see `tb-alignment.md` item 8). Weeks of build energy
@@ -212,14 +221,25 @@ injected bugs being caught reliably — we should demand the same.
 
 ## Why this isn't scheduled yet
 
-Per the TB-lens audit priority: G.1 (dashboard) ships first because
-regression detection is the prerequisite for all subsequent
-correctness work. A VOPR that surfaces failures on week 2 is only
-valuable if week 3 has a dashboard showing "seed 0xdeadbeef was
-new this week." Without that, regressions accumulate invisibly.
+G.1 (dashboard) is the prerequisite for all subsequent correctness
+work — a VOPR that surfaces failures is only valuable when "seed
+0xdeadbeef was new this week" is visible somewhere. G.1 shipped
+2026-04-27, so the prerequisite is satisfied.
 
-After G.1 ships, VOPR-analog is the next thing that matters.
-Before then, this sketch stays a sketch.
+What we built instead, in the interim: a layered testing model —
+sim tests for hand-picked scenarios, CFO-driven boundary fuzzers
+across the wire surface (codec, render, replay-crash-restart,
+message_bus, worker_dispatch), mutation testing for assertion
+confidence. Each layer caught real bugs in the round-1..8 audit
+sequence (2026-04-29..30); the model is TB-1:1 in spirit even
+without exhaustive state-space exploration.
+
+VOPR-analog remains the next single-shot correctness win — what it
+adds beyond the layered model is *global invariants asserted after
+every step* across every reachable scenario. Schedule when the
+layered model's defect rate plateaus or when concurrent-pipeline /
+WAL-truncation / session-rotation interactions surface a class of
+bugs the boundary fuzzers can't reach.
 
 ---
 
