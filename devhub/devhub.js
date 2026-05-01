@@ -1,4 +1,4 @@
-// Code powering "developer dashboard" aka devhub, at <https://hirealanayala.github.io/tiger-web-devhubdb>.
+// Code powering "developer dashboard" aka devhub, at <https://hirealanayala.github.io/tiger_web>.
 //
 // **Ported from TigerBeetle `src/devhub/devhub.js`** at TB commit 58b48aa9d
 // via whole-file `cp` + surgical remove/change pass (Phase G.1). Every
