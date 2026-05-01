@@ -135,8 +135,6 @@ pub const FuzzIO = struct {
 
         if (local.closed or local.shutdown_recv) return @as(i32, 0); // EOF
 
-        if (self.prng.chance(self.recv_error_probability)) return @as(i32, -1);
-
         const peer_fd = local.remote_fd orelse return null; // no peer yet
         const peer = self.get_conn(peer_fd) orelse return @as(i32, 0);
 
@@ -145,6 +143,17 @@ pub const FuzzIO = struct {
             if (peer.closed) return @as(i32, 0); // EOF
             return null; // no data — leave pending
         }
+
+        // Roll for recv_error only AFTER confirming there's data to
+        // read. Earlier this rolled on every recv attempt including
+        // "no data, leave pending" calls, which made the cumulative
+        // error probability vastly higher than the per-real-recv rate
+        // — at 1/100 per attempt with thousands of empty polls, the
+        // connection terminated within tick 1-2, before any
+        // corrupt-frame injection could reach the bus. (Round-9
+        // audit, 2026-04-30: tracked from the fuzz mutation catch-rate
+        // gap to this layer.)
+        if (self.prng.chance(self.recv_error_probability)) return @as(i32, -1);
 
         const max_recv = @min(available, @as(u32, @intCast(buffer.len)));
         const n: u32 = if (self.prng.chance(self.recv_partial_probability))
