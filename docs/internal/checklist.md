@@ -20,6 +20,8 @@ After implementing a feature, walk through these before committing.
 - [ ] New type in bind_param/read_column has a fixed-input round-trip test and is covered by the seeded round-trip fuzzer
 - [ ] Test assertions check the **actual system invariant**, not a proxy for it. Assert on the system's real output contract (response body content, database state, observable side effects) — never on implementation details or assumed protocol behavior that the system doesn't actually use. A test that checks a proxy can pass for months while hiding a real bug, and actively misdirects debugging toward phantom infrastructure issues.
   - Case study: a sim test used HTTP status codes (404 vs 200) to distinguish "delete won" from "update won" in a race. The server always returns 200 — status is in the body. The 404 branch was dead code. The test only passed when the update won the race, and the failure was misdiagnosed as a SimIO multi-connection bug for an entire debugging session. Fix: check `body_contains("Product not found") or body_contains("Updated")` — the actual observable contract.
+- [ ] **New fuzzer registered in CFO.** Adding `foo_fuzz.zig` and wiring it into `src/fuzz_tests.zig` is half the job. The fuzzer also needs an entry in `src/scripts/cfo.zig`'s `Fuzzer` enum AND weights table, or it gets zero continuous-fuzzing coverage and rides on smoke-seed luck alone. Tag names must match `fuzz_tests.zig` exactly — CFO calls `tiger-fuzz {tag_name}` and silently fails dispatch on mismatch.
+- [ ] **Fuzz generator input distribution matches the property under test.** If `inject_X_frame` is meant to test the X rejection path, its input distribution must not cover the Y rejection path by accident (e.g., a "corrupt-frame" generator that flips length-prefix bytes triggers oversized rejection instead of CRC rejection). Constrain the generator's range so every input deterministically reaches the property under test; don't add a second test for Y.
 
 ## Concepts
 - [ ] No intermediate abstraction that just forwards a value without transforming it (exception: capability restriction wrappers like ReadOnlyStorage that subtract methods are structural, not indirection)
@@ -35,6 +37,8 @@ After the checklist passes, do two focused passes:
 - Fixed-input unit tests — prevents regression on known cases
 - Seed unit tests — finds unhandled edge cases when input data is unpredictable
 - Simulation tests — ensures integration across the full stack
+
+**Mutation pass (when shipping a new fuzzer).** Verify the assertions are real, not theatrical: temporarily introduce a synthetic bug in the production code path the fuzzer claims to cover (e.g., disable a CRC check, inject an off-by-one, drop a class of input). Run the fuzzer; confirm it panics AT THE EXPECTED ASSERTION LINE, not at some unrelated check. Revert the mutation. Curated mutation testing only proves the bugs you imagined are caught — see `feedback_mutation_testing_for_assertion_confidence` memory for caveat — but it's the cheapest way to flip "I think the fuzzer covers X" into "I verified the fuzzer covers X for these specific bugs."
 
 ## Audit (periodic)
 
