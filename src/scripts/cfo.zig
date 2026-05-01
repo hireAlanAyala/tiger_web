@@ -67,19 +67,44 @@ pub const CLIArgs = struct {
     concurrency: ?u32 = null,
 };
 
+// CFO fuzzer roster.
+//
+// Names MUST match enum tags in `fuzz_tests.zig` Fuzzers — CFO calls
+// `tiger-fuzz {tag_name}` via `args_exec`. A name listed here that
+// doesn't exist in `fuzz_tests.zig` will fail every CFO iteration
+// trying to run it (silent dispatcher gap).
+//
+// History: a 2026-04-30 audit caught a stale `sidecar` entry that
+// hadn't existed in fuzz_tests.zig in some time, AND four fuzzers
+// (message_bus, worker_dispatch, codec, render) registered in
+// fuzz_tests.zig but absent here — meaning four boundary fuzzers
+// were getting zero continuous-fuzzing coverage. Smoke caught CRC-
+// bypass regressions only by seed luck because the layer that's
+// supposed to provide swarm coverage (CFO) wasn't running them.
+//
+// Weight rationale: state_machine gets the highest share (covers
+// the broadest behavior surface). Other fuzzers get equal weight
+// (each tests one boundary). canary gets weight 1 to keep
+// fault-detection infrastructure exercised.
 const Fuzzer = enum {
     canary,
     state_machine,
     replay,
-    sidecar,
+    message_bus,
     row_format,
+    worker_dispatch,
+    codec,
+    render,
 
     const weights = std.enums.EnumArray(Fuzzer, u32).init(.{
         .canary = 1,
         .state_machine = 4,
         .replay = 2,
-        .sidecar = 2,
+        .message_bus = 2,
         .row_format = 2,
+        .worker_dispatch = 2,
+        .codec = 2,
+        .render = 2,
     });
 
     // All fuzzers go through one binary (tiger-fuzz) via fuzz_tests.zig.
