@@ -429,6 +429,36 @@ Generalize when a second auth strategy is needed.
 - CI benchmark tracking: run `zig build bench` on merge, store JSON,
   week-over-week comparison. TB does this manually — defer until
   automated CI is set up.
+- **Open-loop load generator mode.** Blocking prerequisite for any
+  public performance claim off the dashboard (README, marketing,
+  external comparison). The failure mode is invisible by design;
+  remediation is time-boxed to "before first public claim," not
+  signal-driven. The current single-threaded client loop in
+  `benchmark_load.zig` (H.4 shape) is a prerequisite.
+- **CI observability pipeline (single bundled follow-up).** Three
+  related items land together; separating them produces a stale
+  dependency chain. (1) Split devhub onto its own workflow
+  triggered by `workflow_run: workflows: [CI], types: [completed]`.
+  Unblocks a meaningful `ci_pipeline_duration_s` (the completed-run
+  record carries `updatedAt = end-of-pipeline`). (2) Restore
+  `ci_pipeline_duration_s` to `scripts/devhub.zig` with TB's exact
+  shape (TB:311-332). Currently deferred in-code — see comment at
+  `src/scripts/devhub.zig:68,210,258`. (3) Subscribe to GitHub
+  Actions runner-image deprecation announcements; annotate the
+  dashboard within 24h of any switch so the resulting discontinuity
+  is explicit rather than misread as a regression. ~1.5h total.
+- **`pending_index_benchmark.zig` + `ring_buffer_benchmark.zig` at
+  API boundary.** Add if container-choice stabilizes and we want
+  regression detection. Until then, pipeline-tier bench covers them
+  implicitly.
+- **Per-endpoint load shapes.** Default `--ops` mix in the SLA bench
+  will need tuning as domain grows.
+- **Sidecar-mode SLA bench.** `tiger-web benchmark` exercises the
+  HTTP → native → SQLite path only; the 1-RT SHM sidecar dispatch
+  isn't covered at SLA tier. Two shapes: `--sidecar=<cmd>` flag, or
+  a second bench invocation in `scripts/devhub.zig:run_sla_benchmark`
+  emitting `benchmark_sidecar_*` metrics. Add when sidecar-path
+  performance becomes a dashboard story.
 
 - design a system for deriving docs from the code, and documenting the bible, architecture, and docs separately
 - TS sidecar render: effects array instead of single string
