@@ -218,6 +218,8 @@ Both handler sets implement the same operations and render the same HTML shapes.
 | `fuzz_tests.zig` | Fuzz test dispatcher — single binary routing to all fuzzers, matches TB's fuzz_tests.zig |
 | `fuzz_lib.zig` | Shared fuzz utilities — `FuzzArgs` struct, `random_enum_weights`, matches TB's testing/fuzz.zig |
 | `fuzz.zig` | State machine fuzzer — bypasses HTTP, calls prefetch/commit directly |
+| `codec_fuzz.zig` | HTTP parser + route translator boundary fuzzer — random/mostly-valid/boundary input modes |
+| `render_fuzz.zig` | `encode_response` boundary fuzzer — wire-layout invariants, header injection check |
 | `replay.zig` | WAL replay tool — verify, inspect, query, replay operations |
 | `replay_fuzz.zig` | Replay round-trip fuzzer — WAL serialization boundary verification |
 | `state_machine_benchmark.zig` | Pipeline-tier benchmark — per-operation prefetch/commit throughput, regression detector |
@@ -230,6 +232,20 @@ Both handler sets implement the same operations and render the same HTML shapes.
 | `sidecar_dispatch.zig` | `SidecarDispatchType(Bus)` — SHM 1-RT/2-RT pipeline, parse RESULT, stage machine |
 | `sim_sidecar.zig` | Sidecar simulation — builds CALL/RESULT frames in Zig for sim tests |
 | `wal_test.zig` | WAL integration tests — instantiates WalType with domain types |
+
+### Scripts (`scripts/`) — CI gates, devhub uploader, perf
+
+| File | Role |
+|---|---|
+| `scripts/cfo.zig` | Continuous Fuzzing Orchestrator — picks fuzzers from `Fuzzer` enum + weights, runs continuously, reports seeds. Names MUST match `fuzz_tests.zig` enum tags |
+| `scripts/devhub.zig` | Per-commit metrics + coverage uploader to `tiger-web-devhubdb` Pages site |
+| `scripts/ci.zig` | CI driver — orchestrates `zig build ci -- {test,fuzz,clients}` modes |
+| `scripts/style_check.zig` | Mechanical TIGER_STYLE checks — throwaway markers, 70-line limit, assertion density |
+| `scripts/bench_check.zig` | Benchmark structural-shape lint — runs in `unit-test` |
+| `scripts/bench_calibrate.zig` | Recalibrate budgets in `*_benchmark.zig` from a fresh measurement |
+| `scripts/coverage.zig` | kcov runner — emits `coverage/index.html` consumed by devhub |
+| `scripts/metrics.zig` | Tooling-agnostic counters (assertion density, coverage marks, fuzzer count) for the testing page |
+| `scripts/perf.zig` | `perf record` driver for hot-path profiling |
 
 ## Conventions
 
