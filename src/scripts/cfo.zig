@@ -678,7 +678,7 @@ fn run_fuzzers_prepare_tasks(tasks: *Tasks, shell: *Shell, gh_token: ?[]const u8
         // Only add fuzzers that also exist on the branch we are fuzzing.
         const branch_cfo = try shell.cwd.readFileAlloc(
             shell.arena.allocator(),
-            try shell.fmt("{s}/scripts/cfo.zig", .{working_directory}),
+            try shell.fmt("{s}/src/scripts/cfo.zig", .{working_directory}),
             1 * MiB,
         );
 

@@ -179,7 +179,7 @@ fn print_cfo_totals(shell: *Shell, stdout: anytype) !void {
 }
 
 fn count_fuzzers(shell: *Shell, arena: std.mem.Allocator) u32 {
-    const content = shell.cwd.readFileAlloc(arena, "fuzz_tests.zig", 64 * 1024) catch return 0;
+    const content = shell.cwd.readFileAlloc(arena, "src/fuzz_tests.zig", 64 * 1024) catch return 0;
     var count: u32 = 0;
     var lines = std.mem.splitScalar(u8, content, '\n');
     while (lines.next()) |line| {
@@ -217,11 +217,13 @@ fn categorize(path: []const u8) Category {
         if (std.mem.eql(u8, basename, name)) return .testing;
     }
 
-    // Framework: anything under framework/.
-    if (std.mem.startsWith(u8, path, "./framework/")) return .framework;
+    // Framework: anything under src/framework/.
+    if (std.mem.startsWith(u8, path, "./src/framework/")) return .framework;
 
     // Tooling: scripts, build infrastructure, load testing, adapters.
-    if (std.mem.startsWith(u8, path, "./scripts/")) return .tooling;
+    // Scripts moved to src/ in the 2026-04-29 migration; adapters
+    // stayed at the repo root.
+    if (std.mem.startsWith(u8, path, "./src/scripts/")) return .tooling;
     if (std.mem.startsWith(u8, path, "./adapters/")) return .tooling;
     for (tooling_basenames) |name| {
         if (std.mem.eql(u8, basename, name)) return .tooling;
